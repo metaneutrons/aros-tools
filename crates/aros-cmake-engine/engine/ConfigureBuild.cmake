@@ -431,6 +431,20 @@ function(aros_build_configure)
             "-I${AROS_SDK_INCLUDE_DIR}/aros/stdc")
     endif()
     foreach(_include IN LISTS _parent_includes)
+        if(DEFINED AROS_DEFAULT_POSIXC_INCLUDE AND
+           _include STREQUAL AROS_DEFAULT_POSIXC_INCLUDE)
+            # The parent target graph represents its automatic POSIX include
+            # with a native-target generator expression. This runner writes
+            # a compiler command line rather than a CMake target, so resolve
+            # that exact default at the configure-mode boundary instead.
+            # WirelessManager used to inherit this root from the directory
+            # include list; keep that C-only default concrete and in order.
+            if(CB_MODE STREQUAL "wirelessmanager")
+                list(APPEND _target_flags
+                    "-I${AROS_SDK_INCLUDE_DIR}/aros/posixc")
+            endif()
+            continue()
+        endif()
         if(_include STREQUAL
            "$<$<COMPILE_LANGUAGE:CXX>:${AROS_CROSS_TOOLCHAIN_ROOT}/include/c++/v1>")
             # This configure-style capability compiles C only. The parent

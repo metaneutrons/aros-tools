@@ -278,7 +278,7 @@ fn check_serial_terminal(report: &mut DoctorReport) {
 mod tests {
     use super::{inspect, CheckStatus};
     use crate::board::config::{
-        Board, BoardBackend, BoardConfig, BoardModel, RaspberryPiConfig, Transport,
+        Board, BoardBackend, BoardConfig, BoardId, RaspberryPiConfig, Transport,
     };
 
     #[test]
@@ -289,7 +289,7 @@ mod tests {
             name: "rpi4".to_string(),
             config: BoardConfig {
                 backend: BoardBackend::RaspberryPi,
-                model: BoardModel::Rpi4,
+                model: BoardId::try_from("rpi4".to_owned()).expect("valid catalog ID"),
                 preset: "rpi4-aarch64-debug".to_string(),
                 toolchain_preset: "rpi-aarch64".to_string(),
                 build_target: "rpi-artifacts".to_string(),

@@ -153,9 +153,18 @@ struct ConfModuleOptions(u8);
 
 impl ConfModuleOptions {
     const EXPLICIT_LIB_BASE: u8 = 1 << 0;
+    /// `options autoinit` controls generated client-side initialization code.
     const AUTO_INIT: u8 = 1 << 1;
     const NO_RESIDENT: u8 = 1 << 2;
     const NO_INCLUDES: u8 = 1 << 3;
+    /// `options noautoinit` is the client-side counterpart of AUTO_INIT.
+    const NO_AUTO_INIT: u8 = 1 << 4;
+    /// `options resautoinit` sets RTF_AUTOINIT on the Resident structure.
+    const RESIDENT_AUTO_INIT: u8 = 1 << 5;
+    /// `options selfinit` suppresses the default Resident RTF_AUTOINIT flag.
+    const SELF_INIT: u8 = 1 << 6;
+    /// Tracked separately because it does not suppress Resident RTF_AUTOINIT.
+    const NO_INIT_TABLE: u8 = 1 << 7;
 
     const fn contains(&self, flag: u8) -> bool {
         self.0 & flag != 0
@@ -484,7 +493,7 @@ fn header_guard_name(name: &str) -> String {
         .collect()
 }
 
-/// RESIDENTFLAGS, following the thresholds in writeinclibdefs.c.
+/// RESIDENTFLAGS, following `config.c:821-830` and `writeinclibdefs.c`.
 fn resident_flags(module: &ConfModule) -> String {
     let mut flags: Vec<&str> = Vec::new();
     if module.resident_pri >= 105 {
@@ -494,7 +503,16 @@ fn resident_flags(module: &ConfModule) -> String {
     } else if module.resident_pri < -120 {
         flags.push("RTF_AFTERDOS");
     }
-    if module.options.contains(ConfModuleOptions::AUTO_INIT) {
+    // The reference's default for OPTION_RESAUTOINIT is independent of
+    // OPTION_AUTOINIT / OPTION_NOAUTOINIT: every module except resources and
+    // handlers gets it unless `selfinit` is set. Explicit `resautoinit` also
+    // enables it for resource and handler modules.
+    let resident_autoinit = module
+        .options
+        .contains(ConfModuleOptions::RESIDENT_AUTO_INIT)
+        || (!matches!(module.mod_type.as_str(), "resource" | "handler")
+            && !module.options.contains(ConfModuleOptions::SELF_INIT));
+    if resident_autoinit {
         flags.push("RTF_AUTOINIT");
     }
     if flags.is_empty() {
@@ -704,9 +722,50 @@ fn parse_conf_variant(
                     }
                 }
                 "options" => {
-                    for opt in val.split([',', ' ']) {
+                    for opt in val.split(|ch: char| ch == ',' || ch.is_ascii_whitespace()) {
                         match opt.trim() {
-                            "autoinit" => module.options.insert(ConfModuleOptions::AUTO_INIT),
+                            "autoinit" => {
+                                if module.options.contains(ConfModuleOptions::NO_AUTO_INIT) {
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "option autoinit and noautoinit are incompatible",
+                                    ));
+                                }
+                                module.options.insert(ConfModuleOptions::AUTO_INIT);
+                            }
+                            "noautoinit" => {
+                                if module.options.contains(ConfModuleOptions::AUTO_INIT) {
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "option autoinit and noautoinit are incompatible",
+                                    ));
+                                }
+                                module.options.insert(ConfModuleOptions::NO_AUTO_INIT);
+                            }
+                            "resautoinit" => {
+                                if module.options.contains(ConfModuleOptions::SELF_INIT) {
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "option resautoinit and selfinit are incompatible",
+                                    ));
+                                }
+                                module.options.insert(ConfModuleOptions::RESIDENT_AUTO_INIT);
+                            }
+                            "selfinit" => {
+                                if module
+                                    .options
+                                    .contains(ConfModuleOptions::RESIDENT_AUTO_INIT)
+                                {
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "option resautoinit and selfinit are incompatible",
+                                    ));
+                                }
+                                module.options.insert(ConfModuleOptions::SELF_INIT);
+                            }
+                            "noinittable" => {
+                                module.options.insert(ConfModuleOptions::NO_INIT_TABLE);
+                            }
                             "noresident" => {
                                 module.options.insert(ConfModuleOptions::NO_RESIDENT);
                             }

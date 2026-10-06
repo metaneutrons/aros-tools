@@ -7,8 +7,10 @@ use crate::artifact::{
 use crate::host_compiler::host_platform_key;
 use crate::toolchain_management::ResultFormat;
 use aros_common::target::TargetProfile;
+use aros_common::toolchain_layout::{ToolchainToolLayout, TOOLCHAIN_TOOLS_FILE};
 use aros_common::toolchain_manifest::{
-    ArosToolchainArtifact, ArosToolchainLock, ArosToolchainManifest, AROS_TOOLCHAIN_MANIFEST_FILE,
+    ArosCompilerIdentity, ArosToolchainArtifact, ArosToolchainLock, ArosToolchainManifest,
+    AROS_TOOLCHAIN_MANIFEST_FILE,
 };
 use aros_common::toolchain_tree_inventory;
 use console::{style, Emoji};
@@ -44,20 +46,10 @@ const LIST_SCHEMA: &str = "aros-toolchain-list-v1";
 pub struct ToolchainPaths {
     /// Installation payload root.
     pub root: PathBuf,
-    /// Clang C frontend.
-    pub clang: PathBuf,
-    /// Clang C++ frontend.
-    pub clangxx: PathBuf,
-    /// LLVM linker.
-    pub lld: PathBuf,
-    /// LLVM archive tool.
-    pub llvm_ar: PathBuf,
-    /// Native collector frontend.
-    pub aros_collect: PathBuf,
-    /// Upstream-compatible collector driver.
-    pub collect_aros: PathBuf,
-    /// Upstream-compatible 32-bit collector driver.
-    pub collect_aros32: PathBuf,
+    /// Exact executable roles, resolved only beneath this payload root.
+    /// Legacy LLVM names remain visible as roles; GNU roles come from its
+    /// inventory-bound layout document rather than guessed filenames.
+    pub executable_roles: Vec<(&'static str, PathBuf)>,
 }
 
 /// Provenance class of a resolved cross-toolchain.
@@ -159,18 +151,21 @@ pub fn explicit_local_override(argument: Option<&Path>) -> Option<PathBuf> {
     argument.map(Path::to_path_buf)
 }
 
-/// Derive every required tool path from one payload root.
+/// Derive the retained legacy LLVM tool paths from one payload root.
+/// GNU payloads must instead bind their explicit layout to their manifest.
 pub fn get_toolchain_paths(root: &Path) -> ToolchainPaths {
     let llvm = crate::host_compiler::host_compiler_paths(root);
     ToolchainPaths {
         root: root.into(),
-        clang: llvm.clang,
-        clangxx: llvm.clangxx,
-        lld: llvm.lld,
-        llvm_ar: llvm.llvm_ar,
-        aros_collect: root.join("bin/aros-collect"),
-        collect_aros: root.join("bin/collect-aros"),
-        collect_aros32: root.join("bin/collect-aros32"),
+        executable_roles: vec![
+            ("clang", llvm.clang),
+            ("clang++", llvm.clangxx),
+            ("ld.lld", llvm.lld),
+            ("llvm-ar", llvm.llvm_ar),
+            ("aros-collect", root.join("bin/aros-collect")),
+            ("collect-aros", root.join("bin/collect-aros")),
+            ("collect-aros32", root.join("bin/collect-aros32")),
+        ],
     }
 }
 
@@ -188,7 +183,88 @@ pub fn target_profile(repo_root: &Path, name: &str) -> Result<TargetProfile> {
 
 /// Derive the canonical AROS compiler triple for a target profile.
 pub fn target_triple_for_profile(profile: &TargetProfile) -> String {
-    format!("{}-unknown-aros", profile.arch)
+    if profile
+        .transpiler
+        .as_ref()
+        .is_some_and(|selectors| selectors.toolchain == "gnu")
+    {
+        let cpu = if profile.arch == aros_common::Architecture::Riscv32 {
+            // AROS's GNU CPU spelling is riscv, while the public architecture
+            // selector names its width explicitly as riscv32.
+            "riscv".to_owned()
+        } else {
+            profile.arch.to_string()
+        };
+        format!("{cpu}-aros")
+    } else {
+        format!("{}-unknown-aros", profile.arch)
+    }
+}
+
+/// Bind an artifact to the checkout's explicit compiler-family/ABI selectors.
+/// This checks metadata, not compiler execution or SDK completeness.
+pub fn validate_artifact_profile(
+    profile: &TargetProfile,
+    artifact: &ArosToolchainArtifact,
+) -> Result<()> {
+    // Schema 1 historically permits an omitted llvm_version in a lock
+    // entry. It still selects LLVM, but does not fabricate a version claim.
+    if artifact.compiler.is_none() && artifact.llvm_version.is_none() {
+        return validate_profile_family(profile, "llvm", &artifact.target_triple);
+    }
+    validate_profile_compiler(
+        profile,
+        &artifact
+            .compiler_identity()
+            .map_err(|error| miette::miette!("{error}"))?,
+        &artifact.target_triple,
+    )
+}
+
+fn validate_profile_compiler(
+    profile: &TargetProfile,
+    compiler: &ArosCompilerIdentity,
+    triple: &str,
+) -> Result<()> {
+    validate_profile_family(profile, compiler.family(), triple)?;
+    if let ArosCompilerIdentity::Gnu { target, .. } = compiler {
+        compiler
+            .validate_for_target(triple)
+            .map_err(|error| miette::miette!("{error}"))?;
+        if profile.float_abi.as_deref() != Some(target.abi()) {
+            bail!(
+                "GNU target ABI '{}' does not match the explicit float_abi of preset '{}'",
+                target.abi(),
+                profile.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_profile_family(
+    profile: &TargetProfile,
+    compiler_family: &str,
+    triple: &str,
+) -> Result<()> {
+    let family = profile
+        .transpiler
+        .as_ref()
+        .map_or("llvm", |selectors| selectors.toolchain.as_str());
+    if !matches!(family, "llvm" | "gnu") || family != compiler_family {
+        bail!(
+            "toolchain compiler family does not match preset '{}' ({family})",
+            profile.name
+        );
+    }
+    let expected = target_triple_for_profile(profile);
+    if triple != expected {
+        bail!(
+            "locked target triple '{triple}' does not match preset '{}' ({expected})",
+            profile.name
+        );
+    }
+    Ok(())
 }
 
 /// Resolve one enabled locked archive against the selected checkout's target
@@ -205,18 +281,10 @@ pub fn select_locked_artifact<'a>(
     preset: &str,
 ) -> Result<&'a ArosToolchainArtifact> {
     let profile = target_profile(repo_root, preset)?;
-    let expected_triple = target_triple_for_profile(&profile);
     let artifact = lock.resolve(host, preset).ok_or_else(|| {
         miette::miette!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
     })?;
-    if artifact.target_triple != expected_triple {
-        bail!(
-            "locked target triple '{}' does not match preset '{}' ({})",
-            artifact.target_triple,
-            preset,
-            expected_triple
-        );
-    }
+    validate_artifact_profile(&profile, artifact)?;
     if !artifact.enabled {
         bail!(
             "AROS toolchain {host}/{preset} is locked but disabled: {}",
@@ -281,7 +349,7 @@ pub async fn install(
     let payload = envelope.join("toolchain");
     match fs::symlink_metadata(&envelope) {
         Ok(_) => {
-            verify_locked_install(&payload, &lock, artifact, true).wrap_err_with(|| {
+            let paths = verify_locked_install(&payload, &lock, artifact, true).wrap_err_with(|| {
                 format!(
                     "content-addressed destination '{}' already exists but is invalid; it was not overwritten",
                     envelope.display()
@@ -289,7 +357,7 @@ pub async fn install(
             })?;
             if !force {
                 return Ok(ToolchainInstallOutcome::new(
-                    resolved_locked(&payload, &lock, artifact),
+                    resolved_locked(paths, &lock, artifact),
                     ToolchainInstallDisposition::Reused,
                 ));
             }
@@ -313,7 +381,7 @@ pub async fn install(
                 "{CHECK} Refreshed the verified archive cache; installed toolchain was unchanged"
             );
             return Ok(ToolchainInstallOutcome::new(
-                resolved_locked(&payload, &lock, artifact),
+                resolved_locked(paths, &lock, artifact),
                 ToolchainInstallDisposition::ArchiveRefreshed,
             ));
         }
@@ -344,14 +412,14 @@ pub async fn install(
 
     match fs::symlink_metadata(&envelope) {
         Ok(_) => {
-            verify_locked_install(&payload, &lock, artifact, true).wrap_err_with(|| {
+            let paths = verify_locked_install(&payload, &lock, artifact, true).wrap_err_with(|| {
                 format!(
                     "content-addressed destination '{}' appeared during installation but is invalid; it was not overwritten",
                     envelope.display()
                 )
             })?;
             return Ok(ToolchainInstallOutcome::new(
-                resolved_locked(&payload, &lock, artifact),
+                resolved_locked(paths, &lock, artifact),
                 ToolchainInstallDisposition::Reused,
             ));
         }
@@ -386,10 +454,10 @@ pub async fn install(
     .into_diagnostic()
     .wrap_err("failed to write toolchain completion marker")?;
     commit_staging(&envelope_staging, &envelope)?;
-    verify_locked_install(&payload, &lock, artifact, true)?;
+    let paths = verify_locked_install(&payload, &lock, artifact, true)?;
     aros_common::outputln!("{CHECK} Installed at {}", payload.display());
     Ok(ToolchainInstallOutcome::new(
-        resolved_locked(&payload, &lock, artifact),
+        resolved_locked(paths, &lock, artifact),
         ToolchainInstallDisposition::Published,
     ))
 }
@@ -428,12 +496,10 @@ pub fn path(repo_root: &Path, preset: &str, local: Option<&Path>) -> Result<Reso
     }
     let host = host_platform_key()?;
     let lock = load_lock(repo_root)?;
-    let artifact = lock.resolve(host, preset).ok_or_else(|| {
-        miette::miette!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
-    })?;
+    let artifact = select_locked_artifact(repo_root, &lock, host, preset)?;
     let destination = locked_store_path(&lock, artifact)?;
-    verify_locked_install(&destination, &lock, artifact, true)?;
-    Ok(resolved_locked(&destination, &lock, artifact))
+    let paths = verify_locked_install(&destination, &lock, artifact, true)?;
+    Ok(resolved_locked(paths, &lock, artifact))
 }
 
 /// Fully verify an installed toolchain and smoke-test its executables.
@@ -468,7 +534,7 @@ pub fn list(repo_root: &Path, format: ResultFormat) -> Result<()> {
             let destination = locked_store_path(&lock, artifact)?;
             let (status, verification) = if !artifact.enabled {
                 (ListArtifactStatus::Disabled, ListVerification::Unavailable)
-            } else if verify_locked_install(&destination, &lock, artifact, true).is_ok() {
+            } else if inspect_locked_install(&destination, &lock, artifact, true, false).is_ok() {
                 (ListArtifactStatus::Installed, ListVerification::Verified)
             } else {
                 (
@@ -595,10 +661,16 @@ fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<Resolved
         if actual_files != manifest.files {
             bail!("local toolchain file inventory does not match its manifest");
         }
-        let collectors = validate_manifest_collector_contract(&manifest, None)?;
-        verify_tool_paths(&root, collectors)?;
+        validate_profile_compiler(
+            &profile,
+            &manifest
+                .compiler_identity()
+                .map_err(|error| miette::miette!("{error}"))?,
+            &manifest.target_triple,
+        )?;
+        let paths = verified_manifest_tools(&root, &manifest, None)?;
         return Ok(ResolvedToolchain {
-            paths: get_toolchain_paths(&root),
+            paths,
             target_triple: manifest.target_triple,
             release_id: Some(manifest.release_id),
             source: ToolchainSource::LocalManifest,
@@ -626,7 +698,17 @@ fn verify_locked_install(
     lock: &ArosToolchainLock,
     artifact: &ArosToolchainArtifact,
     require_complete: bool,
-) -> Result<()> {
+) -> Result<ToolchainPaths> {
+    inspect_locked_install(root, lock, artifact, require_complete, true)
+}
+
+fn inspect_locked_install(
+    root: &Path,
+    lock: &ArosToolchainLock,
+    artifact: &ArosToolchainArtifact,
+    require_complete: bool,
+    execute_probes: bool,
+) -> Result<ToolchainPaths> {
     let root_metadata = fs::symlink_metadata(root)
         .into_diagnostic()
         .wrap_err_with(|| format!("toolchain directory '{}' is missing", root.display()))?;
@@ -662,12 +744,14 @@ fn verify_locked_install(
         }
     }
     let manifest = ArosToolchainManifest::load(root).into_diagnostic()?;
-    if manifest.release_id != lock.release_id
+    if manifest.schema != lock.schema
+        || manifest.release_id != lock.release_id
         || manifest.host != artifact.host
         || manifest.target_profile != artifact.target_profile
         || manifest.target_triple != artifact.target_triple
         || manifest.tree_sha256 != artifact.tree_sha256
         || manifest.llvm_version != artifact.llvm_version
+        || manifest.compiler != artifact.compiler
     {
         bail!("embedded toolchain manifest does not match the lock entry");
     }
@@ -687,8 +771,107 @@ fn verify_locked_install(
             bail!("required toolchain path '{required}' is missing");
         }
     }
-    let collectors = validate_manifest_collector_contract(&manifest, Some(artifact))?;
-    verify_tool_paths(root, collectors)
+    if execute_probes {
+        verified_manifest_tools(root, &manifest, Some(artifact))
+    } else {
+        manifest_tool_paths(root, &manifest, Some(artifact))
+    }
+}
+
+fn manifest_tool_paths(
+    root: &Path,
+    manifest: &ArosToolchainManifest,
+    artifact: Option<&ArosToolchainArtifact>,
+) -> Result<ToolchainPaths> {
+    if manifest
+        .compiler_identity()
+        .map_err(|error| miette::miette!("{error}"))?
+        .family()
+        != "gnu"
+    {
+        let collectors = validate_manifest_collector_contract(manifest, artifact)?;
+        require_tool_paths(root, collectors)?;
+        let mut paths = get_toolchain_paths(root);
+        paths
+            .executable_roles
+            .retain(|(role, _)| *role != "collect-aros32" || collectors.collect_aros32);
+        return Ok(paths);
+    }
+    let layout = ToolchainToolLayout::load(root).map_err(|error| miette::miette!("{error}"))?;
+    if !manifest.files.iter().any(|entry| {
+        entry.path == TOOLCHAIN_TOOLS_FILE
+            && entry.kind == "file"
+            && entry.sha256.as_deref() == Some(layout.sha256().as_str())
+    }) {
+        bail!("GNU executable layout bytes do not match the manifest inventory");
+    }
+    layout
+        .validate_binding(
+            &manifest
+                .compiler_identity()
+                .map_err(|error| miette::miette!("{error}"))?,
+            &manifest.target_triple,
+        )
+        .map_err(|error| miette::miette!("{error}"))?;
+    for required in
+        std::iter::once(TOOLCHAIN_TOOLS_FILE).chain(layout.tools().entries().map(|(_, path)| path))
+    {
+        if !manifest.files.iter().any(|entry| entry.path == required) {
+            bail!("GNU manifest omits declared tool path '{required}'");
+        }
+        if artifact
+            .is_some_and(|artifact| !artifact.required_paths.iter().any(|path| path == required))
+        {
+            bail!("GNU lock omits declared tool path '{required}'");
+        }
+    }
+    Ok(ToolchainPaths {
+        root: root.to_path_buf(),
+        executable_roles: layout
+            .resolve_tools(root)
+            .map_err(|error| miette::miette!("{error}"))?,
+    })
+}
+
+fn verified_manifest_tools(
+    root: &Path,
+    manifest: &ArosToolchainManifest,
+    artifact: Option<&ArosToolchainArtifact>,
+) -> Result<ToolchainPaths> {
+    let paths = manifest_tool_paths(root, manifest, artifact)?;
+    if let ArosCompilerIdentity::Gnu { gcc_version, .. } = manifest
+        .compiler_identity()
+        .map_err(|error| miette::miette!("{error}"))?
+    {
+        for role in ["c", "cxx"] {
+            let (_, path) = paths
+                .executable_roles
+                .iter()
+                .find(|(name, _)| *name == role)
+                .ok_or_else(|| miette::miette!("GNU layout omits required driver role '{role}'"))?;
+            for (argument, expected) in [
+                ("-dumpmachine", manifest.target_triple.as_str()),
+                ("-dumpfullversion", gcc_version.as_str()),
+            ] {
+                let observed = crate::observability::capture_stdout_with_timeout(
+                    Command::new(path).arg(argument),
+                    &format!("GNU {role} {argument} at '{}'", path.display()),
+                    TOOLCHAIN_PROBE_TIMEOUT,
+                )?;
+                if observed != expected {
+                    bail!("GNU {role} {argument} returned '{observed}', expected '{expected}'");
+                }
+            }
+        }
+    }
+    smoke_toolchain_tools_with_timeout(
+        &paths,
+        CollectorContract {
+            collect_aros32: true,
+        },
+        TOOLCHAIN_PROBE_TIMEOUT,
+    )?;
+    Ok(paths)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -749,18 +932,10 @@ fn validate_manifest_collector_contract(
 
 fn require_tool_paths(root: &Path, collectors: CollectorContract) -> Result<()> {
     let paths = get_toolchain_paths(root);
-    let mut required = vec![
-        ("clang", &paths.clang),
-        ("clang++", &paths.clangxx),
-        ("ld.lld", &paths.lld),
-        ("llvm-ar", &paths.llvm_ar),
-        ("aros-collect", &paths.aros_collect),
-        ("collect-aros", &paths.collect_aros),
-    ];
-    if collectors.collect_aros32 {
-        required.push(("collect-aros32", &paths.collect_aros32));
-    }
-    for (name, path) in required {
+    for (name, path) in &paths.executable_roles {
+        if *name == "collect-aros32" && !collectors.collect_aros32 {
+            continue;
+        }
         if !command_exists(path) {
             bail!("required tool '{name}' is missing at '{}'", path.display());
         }
@@ -769,12 +944,12 @@ fn require_tool_paths(root: &Path, collectors: CollectorContract) -> Result<()> 
 }
 
 fn resolved_locked(
-    root: &Path,
+    paths: ToolchainPaths,
     lock: &ArosToolchainLock,
     artifact: &ArosToolchainArtifact,
 ) -> ResolvedToolchain {
     ResolvedToolchain {
-        paths: get_toolchain_paths(root),
+        paths,
         target_triple: artifact.target_triple.clone(),
         release_id: Some(lock.release_id.clone()),
         source: ToolchainSource::LockedRelease,
@@ -785,6 +960,13 @@ fn is_legacy_aros_prefix(repo_root: &Path, root: &Path, preset: &str) -> bool {
     let Ok(profile) = target_profile(repo_root, preset) else {
         return false;
     };
+    if profile
+        .transpiler
+        .as_ref()
+        .is_some_and(|selectors| selectors.toolchain != "llvm")
+    {
+        return false;
+    }
     let Ok(entries) = fs::read_dir(root) else {
         return false;
     };
@@ -822,18 +1004,10 @@ fn smoke_toolchain_tools_with_timeout(
     collectors: CollectorContract,
     timeout: Duration,
 ) -> Result<()> {
-    let mut tools = vec![
-        ("clang", &paths.clang),
-        ("clang++", &paths.clangxx),
-        ("ld.lld", &paths.lld),
-        ("llvm-ar", &paths.llvm_ar),
-        ("aros-collect", &paths.aros_collect),
-        ("collect-aros", &paths.collect_aros),
-    ];
-    if collectors.collect_aros32 {
-        tools.push(("collect-aros32", &paths.collect_aros32));
-    }
-    for (name, path) in tools {
+    for (name, path) in &paths.executable_roles {
+        if *name == "collect-aros32" && !collectors.collect_aros32 {
+            continue;
+        }
         crate::observability::capture_stdout_with_timeout(
             Command::new(path).arg("--version"),
             &format!("{name} --version at '{}'", path.display()),
@@ -852,6 +1026,47 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     static ENVIRONMENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(unix)]
+    #[test]
+    fn gnu_layout_reloads_only_the_manifest_bound_raw_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema": "aros-toolchain-tools-v1",
+            "compiler": {
+                "family": "gnu", "gcc_version": "16.2.0", "binutils_version": "2.47",
+                "target": {
+                    "schema": "aros-riscv-target-v1", "isa": "rva22u64", "abi": "lp64d",
+                    "code_model": "medany", "architecture": "rv64i2p1_m2p0_a2p1_f2p2_d2p2_c2p0",
+                    "unaligned_access": false, "atomic_abi": 0, "x3_reg_usage": 0
+                }
+            },
+            "target_triple": "riscv64-aros",
+            "tools": {
+                "c": "bin/driver", "cxx": "bin/driver", "assembler": "bin/driver",
+                "linker": "bin/driver", "archive": "bin/driver", "ranlib": "bin/driver",
+                "strip": "bin/driver", "collector": "bin/driver"
+            }
+        }))
+        .unwrap();
+        write_tool(root.path(), "driver", "#!/bin/sh\nexit 0\n");
+        fs::write(root.path().join(TOOLCHAIN_TOOLS_FILE), &bytes).unwrap();
+        let mut manifest = collector_manifest("fixture-target", false);
+        manifest.schema = 2;
+        manifest.target_triple = "riscv64-aros".into();
+        manifest.llvm_version = None;
+        let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        manifest.compiler = Some(serde_json::from_value(document["compiler"].clone()).unwrap());
+        let (tree, files) = toolchain_tree_inventory(root.path()).unwrap();
+        manifest.tree_sha256 = tree;
+        manifest.files = files;
+        assert!(manifest_tool_paths(root.path(), &manifest, None).is_ok());
+        let mut changed = bytes;
+        changed.push(b'\n');
+        fs::write(root.path().join(TOOLCHAIN_TOOLS_FILE), changed).unwrap();
+        let error = manifest_tool_paths(root.path(), &manifest, None).unwrap_err();
+        assert!(error.to_string().contains("layout bytes do not match"));
+    }
 
     struct ScopedEnvironment {
         name: &'static str,
@@ -918,6 +1133,7 @@ mod tests {
             sha256: "a".repeat(64),
             tree_sha256: "b".repeat(64),
             llvm_version: Some("11.0.0".into()),
+            compiler: None,
             size: None,
             enabled: true,
             disabled_reason: None,
@@ -1052,6 +1268,7 @@ mod tests {
             target_triple: format!("{profile}-unknown-aros"),
             tree_sha256: "b".repeat(64),
             llvm_version: Some("11.0.0".into()),
+            compiler: None,
             recipe_sha256: "c".repeat(64),
             source_lock_sha256: "d".repeat(64),
             profiles_sha256: "e".repeat(64),
@@ -1122,7 +1339,7 @@ mod tests {
     fn required_tool_layout_rejects_one_missing_member() {
         let root = tempfile::tempdir().unwrap();
         let paths = working_tools(root.path());
-        fs::remove_file(paths.lld).unwrap();
+        fs::remove_file(paths.root.join("bin/ld.lld")).unwrap();
         assert!(
             require_tool_paths(root.path(), collector_contract_for_profile("pc-x86_64"))
                 .unwrap_err()
@@ -1136,7 +1353,7 @@ mod tests {
     fn required_collectors_are_never_optional() {
         let root = tempfile::tempdir().unwrap();
         let paths = working_tools(root.path());
-        fs::remove_file(&paths.aros_collect).unwrap();
+        fs::remove_file(paths.root.join("bin/aros-collect")).unwrap();
         let error = verify_tool_paths(root.path(), collector_contract_for_profile("arm-raspi"))
             .unwrap_err();
         assert!(error.to_string().contains("aros-collect"));
@@ -1146,7 +1363,7 @@ mod tests {
             "aros-collect",
             "#!/bin/sh\nprintf '%s\\n' 'fixture 1.0'\n",
         );
-        fs::remove_file(&paths.collect_aros).unwrap();
+        fs::remove_file(paths.root.join("bin/collect-aros")).unwrap();
         let error = verify_tool_paths(root.path(), collector_contract_for_profile("arm-raspi"))
             .unwrap_err();
         assert!(error.to_string().contains("collect-aros"));
@@ -1157,7 +1374,7 @@ mod tests {
     fn collect_aros32_is_required_only_by_its_exact_profile() {
         let root = tempfile::tempdir().unwrap();
         let paths = working_tools(root.path());
-        fs::remove_file(&paths.collect_aros32).unwrap();
+        fs::remove_file(paths.root.join("bin/collect-aros32")).unwrap();
 
         verify_tool_paths(root.path(), collector_contract_for_profile("arm-raspi")).unwrap();
         let error = verify_tool_paths(root.path(), collector_contract_for_profile("pc-x86_64"))
@@ -1201,6 +1418,7 @@ mod tests {
             target_triple: "x86_64-unknown-aros".into(),
             tree_sha256: tree_sha256.clone(),
             llvm_version: Some("11.0.0".into()),
+            compiler: None,
             recipe_sha256: "b".repeat(64),
             source_lock_sha256: "c".repeat(64),
             profiles_sha256: "d".repeat(64),
@@ -1225,6 +1443,7 @@ mod tests {
             sha256: "a".repeat(64),
             tree_sha256,
             llvm_version: manifest.llvm_version.clone(),
+            compiler: manifest.compiler.clone(),
             size: None,
             enabled: true,
             disabled_reason: None,
@@ -1246,6 +1465,7 @@ mod tests {
         fs::write(envelope.join(INSTALL_COMPLETE_FILE), b"complete\n").unwrap();
         verify_locked_install(&payload, &lock, &artifact, true).unwrap();
         assert!(!payload.join(INSTALL_COMPLETE_FILE).exists());
+        assert_schema2_locked_compiler_identity(&payload, &lock, &artifact);
 
         fs::write(envelope.join(INSTALL_COMPLETE_FILE), b"incomplete\n").unwrap();
         assert!(verify_locked_install(&payload, &lock, &artifact, true).is_err());
@@ -1261,5 +1481,46 @@ mod tests {
             symlink(&external, &marker).unwrap();
             assert!(verify_locked_install(&payload, &lock, &artifact, true).is_err());
         }
+    }
+
+    fn assert_schema2_locked_compiler_identity(
+        payload: &Path,
+        legacy_lock: &ArosToolchainLock,
+        legacy_artifact: &ArosToolchainArtifact,
+    ) {
+        let path = payload.join(AROS_TOOLCHAIN_MANIFEST_FILE);
+        let original = fs::read(&path).unwrap();
+        let mut manifest = ArosToolchainManifest::load(payload).unwrap();
+        manifest.schema = aros_common::AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2;
+        manifest.llvm_version = None;
+        manifest.compiler = Some(aros_common::ArosCompilerIdentity::Llvm {
+            version: "11.0.0".into(),
+        });
+        manifest.validate().unwrap();
+        let candidate_bytes = serde_json::to_vec(&manifest).unwrap();
+        fs::write(&path, &candidate_bytes).unwrap();
+        let mut artifact = legacy_artifact.clone();
+        artifact.llvm_version = None;
+        artifact.compiler = manifest.compiler;
+        let mut lock = legacy_lock.clone();
+        lock.schema = aros_common::AROS_TOOLCHAIN_LOCK_SCHEMA_V2;
+        lock.artifacts = vec![artifact.clone()];
+        lock.validate().unwrap();
+        verify_locked_install(payload, &lock, &artifact, true).unwrap();
+
+        // The payload-tree digest excludes the manifest. Compiler metadata
+        // therefore needs its own exact lock binding, not just a tree check.
+        artifact.compiler = Some(aros_common::ArosCompilerIdentity::Llvm {
+            version: "12.0.0".into(),
+        });
+        lock.artifacts = vec![artifact.clone()];
+        lock.validate().unwrap();
+        let error = verify_locked_install(payload, &lock, &artifact, true).unwrap_err();
+        assert!(error.to_string().contains("does not match the lock entry"));
+        assert_eq!(fs::read(&path).unwrap(), candidate_bytes);
+        let error = verify_locked_install(payload, legacy_lock, legacy_artifact, true).unwrap_err();
+        assert!(error.to_string().contains("does not match the lock entry"));
+        assert_eq!(fs::read(&path).unwrap(), candidate_bytes);
+        fs::write(path, original).unwrap();
     }
 }

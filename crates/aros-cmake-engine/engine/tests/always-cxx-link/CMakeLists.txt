@@ -17,6 +17,12 @@ if(TEST_LOCKED_TOOLCHAIN)
         "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/clang/11.0.0/lib/aros/libclang_rt.builtins-x86_64.a")
     set(AROS_CROSS_TOOLCHAIN_CXX_RUNTIME_LIBRARIES
         ${_expected_cxx_runtime_libraries})
+    list(GET _expected_cxx_runtime_libraries 3
+        AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE)
+    get_filename_component(_builtins_dir
+        "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}" DIRECTORY)
+    file(MAKE_DIRECTORY "${_builtins_dir}")
+    file(WRITE "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}" "fixture\n")
     add_custom_target(linklibs-startup)
 elseif(TEST_DEVELOPMENT_LLD)
     # Select a known executable without depending on which LLVM packages the
@@ -30,6 +36,38 @@ else()
     set(AROS_LLD_BIN FALSE)
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../AROS.cmake")
+
+# Header selection comes from compile flags, not a declaration's link policy.
+foreach(_header_target IN ITEMS default-headers standard-headers explicit-headers)
+    add_library("${_header_target}" OBJECT module.c)
+endforeach()
+aros_apply_flags(standard-headers COMPILE_OPTIONS -noposixc)
+aros_apply_flags(explicit-headers COMPILE_OPTIONS -noposixc)
+aros_apply_includes(explicit-headers
+    INCLUDES "${AROS_SDK_INCLUDE_DIR}/aros/posixc")
+# Relative-runtime providers must not reintroduce an implicit POSIX namespace
+# on a consumer whose compile declaration opted out.
+add_library(header-provider INTERFACE)
+set_property(TARGET header-provider PROPERTY AROS_CLIENT_NAMESPACE_INCLUDES
+    "${AROS_SDK_INCLUDE_DIR}/aros/posixc;${AROS_SDK_INCLUDE_DIR}/aros/stdc")
+_aros_bind_link_libraries(default-headers header-provider)
+_aros_bind_link_libraries(standard-headers header-provider)
+foreach(_header_target IN ITEMS default-headers standard-headers explicit-headers)
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/${_header_target}.includes"
+        CONTENT "$<TARGET_GENEX_EVAL:${_header_target},$<TARGET_PROPERTY:${_header_target},INCLUDE_DIRECTORIES>>")
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/${_header_target}.options"
+        CONTENT "$<TARGET_GENEX_EVAL:${_header_target},$<TARGET_PROPERTY:${_header_target},COMPILE_OPTIONS>>")
+endforeach()
+
+if(TEST_UNSUPPORTED_DETACH)
+    aros_add_program(
+        TARGET unsupported-detach
+        MMAKE_ID unsupported-detach
+        DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+        DETACH SOURCES module
+        DRIVER_LINK_OPTIONS "-Wl,-T,${CMAKE_CURRENT_LIST_DIR}/unused.ld")
+    message(FATAL_ERROR "standalone detached declaration was silently accepted")
+endif()
 
 if(TEST_LOCKED_TOOLCHAIN)
     # The fixture uses the host compiler just to prove the custom output rule.
@@ -48,6 +86,10 @@ if(TEST_LOCKED_TOOLCHAIN)
     if(NOT CMAKE_C_LINK_EXECUTABLE MATCHES "${_expected_link_prefix}" OR
        NOT CMAKE_C_LINK_EXECUTABLE MATCHES
             "--sysroot=.*/SYS/Developer" OR
+       NOT CMAKE_C_LINK_EXECUTABLE MATCHES
+            "<LINK_LIBRARIES> \"${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}\"" OR
+       NOT CMAKE_C_CREATE_SHARED_MODULE MATCHES
+            "<LINK_LIBRARIES> \"${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}\"" OR
        NOT CMAKE_CXX_LINK_EXECUTABLE MATCHES "${_expected_link_prefix}" OR
        NOT CMAKE_CXX_LINK_EXECUTABLE MATCHES
             "--sysroot=.*/SYS/Developer" OR
@@ -158,6 +200,120 @@ aros_add_programs(
     MMAKE_ID cxx-programs
     DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
     CXX_SOURCES module)
+aros_add_program(
+    TARGET c-program
+    MMAKE_ID c-program
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    SOURCES module)
+aros_add_program(
+    TARGET no-startup-program
+    MMAKE_ID no-startup-program
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    NO_STARTUP
+    SOURCES module)
+aros_add_programs(
+    TARGET c-programs
+    MMAKE_ID c-programs
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    INSTALL_DIR "${CMAKE_BINARY_DIR}/c-programs"
+    SOURCES module)
+aros_add_programs(
+    TARGET no-startup-programs
+    MMAKE_ID no-startup-programs
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    INSTALL_DIR "${CMAKE_BINARY_DIR}/no-startup-programs"
+    NO_STARTUP
+    SOURCES module)
+
+aros_add_program(
+    TARGET detached-program
+    MMAKE_ID detached-program
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    DETACH
+    SOURCES module)
+aros_add_programs(
+    TARGET detached-programs
+    MMAKE_ID detached-programs
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    INSTALL_DIR "${CMAKE_BINARY_DIR}/detached-programs"
+    DETACH
+    SOURCES module second)
+aros_add_program(
+    TARGET custom-detach-program
+    MMAKE_ID custom-detach-program
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    NO_STARTUP DETACH
+    SOURCES module)
+foreach(_program IN ITEMS detached-program detached-programs-module detached-programs-second)
+    get_target_property(_libraries "${_program}" LINK_LIBRARIES)
+    if(NOT "${AROS_DEVELOPER_LIB_DIR}/detach.o" IN_LIST _libraries)
+        message(FATAL_ERROR "${_program} lost declared detach.o: ${_libraries}")
+    endif()
+    get_target_property(_dependencies "${_program}" MANUALLY_ADDED_DEPENDENCIES)
+    if(NOT "aros-c-detach" IN_LIST _dependencies)
+        message(FATAL_ERROR "${_program} lacks the detach.o producer dependency")
+    endif()
+endforeach()
+foreach(_program IN ITEMS c-program custom-detach-program)
+    get_target_property(_libraries "${_program}" LINK_LIBRARIES)
+    if("${AROS_DEVELOPER_LIB_DIR}/detach.o" IN_LIST _libraries)
+        message(FATAL_ERROR "detach.o leaked to ${_program}")
+    endif()
+endforeach()
+
+# Driver switches belong to the declaration, including every %build_progs
+# member. Use a dotted identity to also reject regex/prefix-based matching.
+aros_add_programs(
+    TARGET static.commands
+    MMAKE_ID static.commands
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    INSTALL_DIR "${CMAKE_BINARY_DIR}/static-commands"
+    NO_STARTUP
+    SOURCES module second)
+aros_add_programs(
+    TARGET staticXcommands
+    MMAKE_ID staticXcommands
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    INSTALL_DIR "${CMAKE_BINARY_DIR}/dynamic-commands"
+    NO_STARTUP
+    SOURCES module second)
+include("${CMAKE_CURRENT_LIST_DIR}/../../DefaultLinkSet.cmake")
+foreach(_runtime IN ITEMS posixc stdcio stdc stdc.static exec)
+    add_library("fixture-${_runtime}" STATIC module.c)
+endforeach()
+aros_set_default_link_set(
+    "posixc|fixture-posixc|nostdc,noposixc|"
+    "stdcio|fixture-stdcio|nostdc|"
+    "stdc|fixture-stdc|nostdc|"
+    "stdc.static|fixture-stdc.static||nostdc"
+    "exec|fixture-exec|nosysbase|")
+file(WRITE "${CMAKE_BINARY_DIR}/generated_targets.spec-switches.txt"
+    "static.commands\tstatic\tnosysbase\nno-startup-program\tstatic\n")
+aros_apply_default_link_set()
+foreach(_program IN ITEMS static.commands-module static.commands-second
+        no-startup-program)
+    get_target_property(_libraries "${_program}" LINK_LIBRARIES)
+    if(NOT "fixture-stdc.static" IN_LIST _libraries)
+        message(FATAL_ERROR "${_program} lost its static runtime: ${_libraries}")
+    endif()
+    foreach(_dynamic IN ITEMS fixture-posixc fixture-stdcio fixture-stdc)
+        if(_dynamic IN_LIST _libraries)
+            message(FATAL_ERROR "${_program} retained ${_dynamic}")
+        endif()
+    endforeach()
+endforeach()
+get_target_property(_static_libraries static.commands-module LINK_LIBRARIES)
+if("fixture-exec" IN_LIST _static_libraries)
+    message(FATAL_ERROR "program group lost nosysbase")
+endif()
+foreach(_program IN ITEMS staticXcommands-module staticXcommands-second
+        c-programs-module)
+    get_target_property(_libraries "${_program}" LINK_LIBRARIES)
+    if(NOT "fixture-stdc" IN_LIST _libraries OR
+       "fixture-stdc.static" IN_LIST _libraries)
+        message(FATAL_ERROR "static flag leaked to ${_program}: ${_libraries}")
+    endif()
+endforeach()
 
 # Cover the shared full-module, custom-module and simple-module paths too.
 aros_add_library(
@@ -185,6 +341,72 @@ aros_add_custom_target(
     MODTYPE hook
     ALWAYS_CXX_LINK
     SOURCES module)
+
+# Build-rule identity must not leak into loader-visible module filenames.
+# The Wanderer parent-class lookup is a real consumer of this contract.
+get_target_property(_hidd_runtime_name hidd-softpipe OUTPUT_NAME)
+if(NOT _hidd_runtime_name STREQUAL "softpipe.hidd")
+    message(FATAL_ERROR "HIDD runtime name must be softpipe.hidd, got ${_hidd_runtime_name}")
+endif()
+aros_add_hidd(TARGET softpipe MMAKE_ID foreign-softpipe
+    DIRECTORY "${AROS_SOURCE_DIR}/arch/m68k-amiga/hidd/parallel"
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/module.c")
+get_target_property(_foreign_hidd_dir foreign-softpipe RUNTIME_OUTPUT_DIRECTORY)
+get_target_property(_foreign_hidd_excluded foreign-softpipe AROS_FOREIGN_ARCH)
+if(NOT _foreign_hidd_excluded OR NOT _foreign_hidd_dir MATCHES "/gen/foreign-modules/")
+    message(FATAL_ERROR "foreign HIDD was not isolated from the native SYS namespace")
+endif()
+if(TEST_DUPLICATE_HIDD)
+    aros_add_hidd(TARGET SoftPipe MMAKE_ID conflicting-hidd
+        DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
+endif()
+foreach(_case IN ITEMS
+        "IconDrawerList|mui|IconDrawerList.mui"
+        "IconImage|mcc|IconImage.mcc"
+        "IconSettings|mcp|IconSettings.mcp"
+        "usb-fixture|usbclass|usb-fixture.class"
+        "bluetooth-fixture|btclass|bluetooth-fixture.class"
+        "console-fixture|handler|console-fixture-handler"
+        "printer-fixture|printer|printer-fixture")
+    string(REPLACE "|" ";" _fields "${_case}")
+    list(GET _fields 0 _public_name)
+    list(GET _fields 1 _modtype)
+    list(GET _fields 2 _expected_name)
+    set(_build_id "build-id-${_public_name}")
+    aros_add_custom_target(TARGET "${_public_name}"
+        MMAKE_ID "${_build_id}" MODTYPE "${_modtype}"
+        DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
+    get_target_property(_actual_name "${_build_id}" OUTPUT_NAME)
+    if(NOT _actual_name STREQUAL _expected_name)
+        message(FATAL_ERROR
+            "${_build_id}: expected runtime name ${_expected_name}, got ${_actual_name}")
+    endif()
+endforeach()
+file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/mui-runtime-path.txt"
+    CONTENT "$<TARGET_FILE:build-id-IconDrawerList>")
+
+# An explicit suffix/directory is a supported namespace distinction, not a
+# reason to substitute an arbitrary build id for the public name.
+aros_add_custom_target(TARGET IconDrawerList
+    MMAKE_ID separate-mui-class MODTYPE mui MODSUFFIX mcc
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
+get_target_property(_separate_name separate-mui-class OUTPUT_NAME)
+if(NOT _separate_name STREQUAL "IconDrawerList.mcc")
+    message(FATAL_ERROR "explicit module suffix was not preserved")
+endif()
+aros_add_custom_target(TARGET IconDrawerList
+    MMAKE_ID separate-mui-directory MODTYPE mui
+    INSTALL_DIR "Classes/Other"
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
+get_target_property(_separate_dir separate-mui-directory RUNTIME_OUTPUT_DIRECTORY)
+if(NOT _separate_dir STREQUAL "${AROS_SYS_DIR}/Classes/Other")
+    message(FATAL_ERROR "explicit module runtime namespace was not preserved")
+endif()
+if(TEST_DUPLICATE_RUNTIME_MODULE)
+    aros_add_custom_target(TARGET icondrawerlist
+        MMAKE_ID conflicting-class MODTYPE mui
+        DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
+endif()
 aros_add_module_simple(
     TARGET simple
     MMAKE_ID simple-module
@@ -192,6 +414,10 @@ aros_add_module_simple(
     MODTYPE library
     ALWAYS_CXX_LINK
     SOURCES module)
+get_target_property(_simple_name simple-module OUTPUT_NAME)
+if(NOT _simple_name STREQUAL "simple.library")
+    message(FATAL_ERROR "simple runtime module lost its loader-visible name: ${_simple_name}")
+endif()
 
 function(_assert_linker_language target expected)
     get_target_property(_actual "${target}" LINKER_LANGUAGE)
@@ -224,6 +450,29 @@ foreach(_target IN ITEMS
     _assert_linker_language("${_target}" CXX)
 endforeach()
 _assert_linker_language(hidd-c-default C)
+
+if(NOT TARGET aros-c-startup OR NOT TARGET aros-c-startup-objects)
+    message(FATAL_ERROR "AROS program startup producer targets are missing")
+endif()
+get_target_property(_c_startup_sources aros-c-startup-objects SOURCES)
+if(NOT "${_c_startup_sources}" MATCHES "compiler/startup/startup[.]c")
+    message(FATAL_ERROR "AROS program startup uses the wrong source: ${_c_startup_sources}")
+endif()
+foreach(_program IN ITEMS c-program cxx-program c-programs-module)
+    _assert_manual_dependency("${_program}" aros-c-startup TRUE)
+    get_target_property(_program_libraries "${_program}" LINK_LIBRARIES)
+    if(NOT "${_aros_c_startup_output}" IN_LIST _program_libraries)
+        message(FATAL_ERROR "${_program} did not link explicit startup.o")
+    endif()
+endforeach()
+foreach(_no_startup IN ITEMS hidd-c-default no-startup-program
+        no-startup-programs-module)
+    _assert_manual_dependency("${_no_startup}" aros-c-startup FALSE)
+    get_target_property(_libraries "${_no_startup}" LINK_LIBRARIES)
+    if("${_aros_c_startup_output}" IN_LIST _libraries)
+        message(FATAL_ERROR "${_no_startup} unexpectedly links startup.o")
+    endif()
+endforeach()
 
 if(TEST_LOCKED_TOOLCHAIN)
     if(NOT TARGET aros-cxx-startup OR

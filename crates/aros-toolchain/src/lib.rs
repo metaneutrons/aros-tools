@@ -23,11 +23,17 @@ mod filesystem;
 mod inspection;
 pub mod metamake_fetch;
 pub mod native_declaration;
+mod native_family;
+#[cfg(unix)]
+mod native_gnu_collector;
 #[cfg(unix)]
 mod native_lifecycle;
+mod native_make;
 pub mod package;
 #[cfg(unix)]
 pub mod package_extract;
+mod package_identity;
+mod package_layout;
 pub mod package_verify;
 pub mod plan;
 pub mod preflight;

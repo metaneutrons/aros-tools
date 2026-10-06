@@ -147,6 +147,41 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros board sd write` | Preview or explicitly write a verified image with an exact opaque token |
 | `aros board console` | Launch or preview an external serial terminal; no UART driver is embedded |
 
+## Composed image artifacts (experimental)
+
+| Command | Effect |
+| --- | --- |
+| `aros image build` | Plan a reviewed FAT32 or BIOS ISO profile; compose into a new artifact directory with `--apply` |
+| `aros image receipt` | Measure CMake-produced files and complete trees against a clean source checkout and installed toolchain |
+| `aros image inspect` | Read back a composed image from `--artifact DIR` and show measured facts |
+| `aros image verify` | Check the artifact inventory, SHA256SUMS, image filesystem, embedded files and boot metadata |
+
+These commands work without an AROS checkout and accept `--format human|json`.
+`build` requires `--profile ID --build-root DIR --receipt FILE --output DIR`.
+It selects an exact ID from the built-in reviewed registry and requires a
+versioned CMake or legacy build receipt. Where the profile declares external
+inputs, pass each reviewed lock as `--lock ID=FILE` and each local file as
+`--external LOCK_ID:FILE_ID=PATH`. The planner verifies the locks and remeasures
+every input. A bound v2/v3 CMake receipt additionally requires `--source-root DIR`
+and `--toolchain-root DIR`: the CLI rechecks the clean Git commit/tree, release
+manifest and complete installed toolchain inventory before publication. A v1
+receipt remains supported but has no source/toolchain binding and cannot be
+upgraded by merely passing these flags. `--apply` composes and independently
+verifies a new artifact. The manifest distinguishes these origin states;
+neither is an authenticated attestation or a successful board boot. No image
+command writes a device. ISO composition uses `xorriso` and requires it on the
+host. The `pc-bios-iso` profile requires a bound receipt for the complete SYS
+tree, including empty directories, plus explicit bootstrap and GRUB inputs.
+The composer checks capacity, file placement and the El Torito entry; image
+verification alone does not prove a guest boot. For the native PC path,
+`aros build --preset pc-x86_64 --target boot-iso` builds the SYS/GRUB dependency
+graph, emits a v3 tree receipt and uses this composer. See the
+[AROS-NX workflow](/aros-tools/workflows/aros-nx/) for prerequisites and outputs.
+Image verification and guest readiness are separate checks. The native PC BIOS
+path has a [fresh-build and QEMU qualification](https://github.com/metaneutrons/aros-tools/blob/main/docs/qualifications/bm3-pc-bios.md);
+this does not qualify physical-board media or UEFI.
+`aros board sd image` retains its existing v1 bundle behavior.
+
 ## Source and repository
 
 | Command | Checkout | Behavior |
@@ -547,6 +582,16 @@ for ASM, so assembly remains a direct deterministic invocation.
 `--evidence DIR` selects the root for a new private evidence directory.
 The implementation runs `qemu-system-x86_64` and expects PC bootstrap/kernel
 paths. A different preset does not select an ARM or RISC-V emulator.
+
+`--iso FILE` instead boots an existing PC x86-64 ISO through BIOS/GRUB under
+QEMU TCG. It does not build the image and cannot be combined with `--packages`
+or `--module`. The evidence records its canonical path and SHA-256.
+`--require-llvmpipe-jit` requires `--iso` and the opt-in development probe:
+renderer identity, a named non-null LLVM MCJIT shader address, passing shader
+pixel readback, successful probe return and ELF unloading, and no classified
+guest fault. The CLI stops QEMU after proof
+or a definitive failure; deadline expiry fails the strict test. See the
+[native PC graphics workflow](/aros-tools/contributing/development/#exercise-the-native-pc-llvmpipe-path).
 
 Golden commands take repeatable `--preset NAME` options. Run them from the
 AROS repository root after configuring the selected builds; they consume

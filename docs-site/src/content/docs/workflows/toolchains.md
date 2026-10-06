@@ -34,8 +34,11 @@ reports only observed host/compiler/cache state. `aros-toolchain-list-v1`
 reports only the current host's lock entries. Its `status` describes whether an
 artifact is disabled, available from the lock, or installed locally; its
 separate `verification` field says whether that local state is unavailable,
-metadata-only, or fully verified. Both commands are inspection only: they do
-not fetch, install, or execute a compiler.
+metadata-only, or integrity-verified against the lock, manifest and declared
+executable layout. `verified` here does not mean compiler/runtime compatibility
+has been tested. Both commands are inspection only: they do not fetch, install,
+or execute a compiler. Use `aros toolchain verify --preset <preset>` to run the
+bounded executable identity probes as well.
 
 ## Install a released cross-toolchain
 
@@ -55,6 +58,22 @@ usable lock entry stops the operation. It does not skip unsupported entries.
 
 `--force` refreshes the archive cache; it does not authorize overwriting an
 installed tree.
+
+### GNU development candidates
+
+Development builds can install or verify GNU schema-2 candidates with an
+inventory-bound `toolchain-tools.json`. The selected checkout must declare
+`transpiler.toolchain = "gnu"` and the matching ABI in `float_abi`. Executable
+roles come from that document, not LLVM filenames or `PATH`. Frontend target
+and GCC-version probes must match the manifest.
+
+Executable-layout v1 declares eight core tools. Layout v2 also declares exact
+`nm` and `objcopy` paths; both formats remain readable. Utility selection does
+not supply a compiler runtime or a Developer sysroot.
+
+No GNU/RISC-V compiler distribution is published yet. These installation
+checks do not qualify target runtimes, host relocation, an AROS build or a
+board. Native GNU production remains separate work.
 
 ## Prepare archive bytes separately
 
@@ -155,10 +174,11 @@ checkout. Start from an explicit, absolute TOML release lock:
     aros toolchain select --release-lock /absolute/path/to/release.lock.toml \
       --store /absolute/path/to/store
 
-The preview validates a coherent v1 lock: its HTTPS release base URL must bind
-the declared release ID, every checkout target profile must be covered by the
-same host matrix, and each target triple must match the checkout contract. It
-then reports the old and new lock identities plus an apply token. Commit only
+The preview validates a coherent schema-1 or schema-2 lock: its HTTPS release
+base URL must bind the declared release ID, every checkout target profile must be covered by the
+same host matrix, and each compiler family, target triple and declared GNU ABI
+must match the checkout contract. It then reports the old and new lock
+identities plus an apply token. Commit only
 that exact plan:
 
     aros toolchain select --release-lock /absolute/path/to/release.lock.toml \

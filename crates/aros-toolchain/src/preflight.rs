@@ -91,13 +91,39 @@ pub fn inspect(profile: &Profile) -> Result<HostPreflight, ContractError> {
     } else {
         "make"
     };
-    tools.push(probe(make)?);
+    let make = probe(make)?;
+    if profile.family() == crate::source_lock::CompilerFamily::Gnu {
+        require_gnu_make(&make.version)?;
+    }
+    tools.push(make);
+    if profile.family() == crate::source_lock::CompilerFamily::Gnu {
+        for name in ["bison", "flex", "patch", "pkg-config", "ninja"] {
+            tools.push(probe(name)?);
+        }
+    }
     Ok(HostPreflight {
         host,
         profile: profile.name().to_owned(),
         capabilities: profile.capabilities().to_vec(),
         tools,
     })
+}
+
+fn require_gnu_make(version: &str) -> Result<(), ContractError> {
+    // The selected source's generated Make rules use GNU Make's $(file ...),
+    // introduced in 4.0. Apple's 3.81 can start, but cannot execute that graph.
+    let supported = version.strip_prefix("GNU Make ").is_some_and(|version| {
+        let mut parts = version.split('.');
+        let major = parts.next().and_then(|value| value.parse::<u32>().ok());
+        let minor = parts.next().and_then(|value| value.parse::<u32>().ok());
+        matches!((major, minor), (Some(major), Some(_)) if major >= 4)
+    });
+    if !supported {
+        return Err(ContractError::prerequisite(
+            "native GNU toolchain production requires GNU Make 4.0 or newer; select gmake on macOS",
+        ));
+    }
+    Ok(())
 }
 
 fn probe(name: &'static str) -> Result<HostTool, ContractError> {
@@ -191,8 +217,24 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{inspect, probe_selected};
+    use super::{inspect, probe_selected, require_gnu_make};
     use crate::profiles::Profiles;
+
+    #[test]
+    fn gnu_make_gate_accepts_file_function_versions_and_rejects_legacy_or_unknown() {
+        for version in ["GNU Make 4.0", "GNU Make 4.4.1", "GNU Make 5.0"] {
+            require_gnu_make(version).unwrap();
+        }
+        for version in [
+            "GNU Make 3.81",
+            "BSD make 4.4",
+            "GNU Make 4",
+            "GNU Make 4.bad",
+            "GNU Make nope",
+        ] {
+            assert!(require_gnu_make(version).is_err(), "{version}");
+        }
+    }
 
     #[test]
     fn observes_the_supported_host_tools_without_running_a_build() {

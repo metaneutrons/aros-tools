@@ -7,23 +7,28 @@
 //! one exact, already-verified source-lock archive in the explicit cache.
 
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aros_common::Sha256Digest;
 use aros_fetch::engine::cache::snapshot_verified_cache_payload;
+use aros_fetch::engine::cache::VerifiedCachePayload;
 use fs2::FileExt;
 use rustix::fs::{self as rfs, Mode, OFlags};
 
-use crate::filesystem::open_directory;
-use crate::source_lock::SourceLock;
+use crate::filesystem::{open_directory, DIRECTORY};
+use crate::source_lock::{CompilerFamily, SourceLock};
 use crate::{source_usage, ContractError};
 
 const LEDGER_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const LEDGER_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_LEDGER_BYTES: u64 = 1024 * 1024;
+const MAX_GNU_CACHE_NAMESPACE_COMPONENTS: usize = 16;
 
 /// Parsed source-owned `%fetch` arguments, retained without shell evaluation.
 #[derive(Debug, Clone)]
@@ -38,20 +43,46 @@ impl MetaMakeFetchInvocation {
     /// Parse only the source-selection fields relevant to the offline bridge.
     ///
     /// Unknown arguments remain opaque and are preserved for the selected
-    /// upstream script. Shell metacharacters are not interpreted here or by
-    /// this library.
+    /// upstream script, except transport-policy overrides: offline fetching
+    /// and checksum validation are mandatory at this boundary. Shell
+    /// metacharacters are not interpreted here or by this library.
     ///
     /// # Errors
     ///
     /// Returns AX0302 when archive selection, suffixes or the declared cache
     /// location is absent, ambiguous or unsafe.
     pub fn parse(arguments: &[OsString]) -> Result<Self, ContractError> {
+        Self::parse_inner(arguments, false)
+    }
+
+    /// Parse the selected family's source request without admitting an
+    /// upstream format fallback. GNU lists are narrowed by [`Self::resolve`]
+    /// to one exact lock-selected archive before any source helper runs.
+    ///
+    /// # Errors
+    /// Returns AX0302 for unsafe, repeated or unbounded source selectors.
+    pub fn parse_for_lock(
+        arguments: &[OsString],
+        lock: &SourceLock,
+    ) -> Result<Self, ContractError> {
+        Self::parse_inner(arguments, lock.family() == CompilerFamily::Gnu)
+    }
+
+    fn parse_inner(arguments: &[OsString], allow_gnu_list: bool) -> Result<Self, ContractError> {
         let mut archive = None;
         let mut suffixes = None;
         let mut location = None;
         let mut index = 0;
         while index < arguments.len() {
             let argument = os_text(&arguments[index])?;
+            if matches!(argument, "--offline" | "--require-checksums")
+                || argument.starts_with("--offline=")
+                || argument.starts_with("--require-checksums=")
+            {
+                return Err(ContractError::source_use(
+                    "MetaMake fetch request cannot override mandatory offline/checksum policy",
+                ));
+            }
             match argument {
                 "-a" => {
                     let value = next_value(arguments, &mut index, "archive")?;
@@ -110,13 +141,10 @@ impl MetaMakeFetchInvocation {
                 "MetaMake fetch request has no candidate or repeats a candidate",
             ));
         }
-        // The current qualified LLVM recipe names one `tar.xz` archive for
-        // every `%fetch` target.  Accepting a fallback list would let the
-        // unchanged upstream helper choose an unvalidated cache entry before
-        // it reaches the one lock-selected candidate.  Expand the lock and
-        // this bridge together if an upstream recipe genuinely needs a
-        // multi-format source declaration.
-        if candidates.len() != 1 {
+        // Legacy/LLVM callers retain the single-format contract. GNU source
+        // rules declare format lists, but no list reaches the upstream helper:
+        // resolve proves a unique lock match and rewrites -s to that suffix.
+        if candidates.len() > 16 || (!allow_gnu_list && candidates.len() != 1) {
             return Err(ContractError::source_use(
                 "MetaMake fetch request must select exactly one locked archive candidate",
             ));
@@ -131,9 +159,12 @@ impl MetaMakeFetchInvocation {
 
     /// Resolve exactly one lock-selected source archive in the verified cache.
     ///
-    /// The source-owned location must exactly equal `cache_root` after normal
-    /// filesystem canonicalization. No network fallback, source execution or
-    /// cache mutation is possible on this path.
+    /// LLVM requires the source-owned location to exactly equal `cache_root`
+    /// after normal filesystem canonicalization. GNU may name a bounded
+    /// descendant namespace for its source-owned `.fetched` stamp; after the
+    /// flat-cache payload is verified, this method creates only that empty
+    /// directory namespace and rewrites the helper's `-l` argument to the
+    /// verified flat cache root. It does not copy payloads or use the network.
     ///
     /// # Errors
     ///
@@ -155,16 +186,21 @@ impl MetaMakeFetchInvocation {
         let location = self.location.as_ref().ok_or_else(|| {
             ContractError::source_use("MetaMake fetch request has no explicit cache location")
         })?;
-        let location = location.canonicalize().map_err(|_| {
-            ContractError::source_use(
-                "MetaMake fetch request cache location cannot be canonicalized",
-            )
-        })?;
-        if location != cache {
-            return Err(ContractError::source_use(
-                "MetaMake fetch request selects a cache outside the verified source cache",
-            ));
-        }
+        let gnu_namespace = if lock.family() == CompilerFamily::Gnu {
+            Some(gnu_cache_namespace(location, cache_root, &cache)?)
+        } else {
+            let canonical_location = location.canonicalize().map_err(|_| {
+                ContractError::source_use(
+                    "MetaMake fetch request cache location cannot be canonicalized",
+                )
+            })?;
+            if canonical_location != cache {
+                return Err(ContractError::source_use(
+                    "MetaMake fetch request selects a cache outside the verified source cache",
+                ));
+            }
+            None
+        };
         let selected = lock
             .sources()
             .filter(|payload| {
@@ -194,21 +230,159 @@ impl MetaMakeFetchInvocation {
                 "MetaMake fetch selected source archive changed during verification",
             )
         })?;
+        if let Some(namespace) = &gnu_namespace {
+            ensure_gnu_cache_namespace(&cache, namespace)?;
+        }
+        let mut arguments = self.arguments.clone();
+        if gnu_namespace.is_some() {
+            let index = arguments
+                .iter()
+                .position(|value| value == "-l")
+                .ok_or_else(|| {
+                    ContractError::source_use("GNU cache namespace has no location argument")
+                })?;
+            arguments[index + 1] = cache.into_os_string();
+        }
+        if self.candidates.len() > 1 {
+            if lock.family() != CompilerFamily::Gnu {
+                return Err(ContractError::source_use(
+                    "only GNU lock-bound requests admit a format list",
+                ));
+            }
+            let suffix = payload
+                .filename()
+                .strip_prefix(&format!("{}.", self.archive))
+                .ok_or_else(|| {
+                    ContractError::source_use("locked archive differs from the requested basename")
+                })?;
+            let index = arguments
+                .iter()
+                .position(|value| value == "-s")
+                .ok_or_else(|| {
+                    ContractError::source_use("GNU format list has no suffix argument")
+                })?;
+            arguments[index + 1] = suffix.into();
+        }
         Ok(ResolvedMetaMakeSource {
-            arguments: self.arguments.clone(),
+            arguments,
             archive: self.archive.clone(),
             filename: payload.filename().to_owned(),
+            snapshot: Arc::new(snapshot),
         })
     }
 }
 
+fn gnu_cache_namespace(
+    location: &Path,
+    cache_root: &Path,
+    canonical_cache: &Path,
+) -> Result<Vec<PathBuf>, ContractError> {
+    let relative = if location == cache_root || location == canonical_cache {
+        Path::new("")
+    } else if let Ok(relative) = location.strip_prefix(cache_root) {
+        relative
+    } else if let Ok(relative) = location.strip_prefix(canonical_cache) {
+        relative
+    } else {
+        return Err(ContractError::source_use(
+            "GNU MetaMake fetch location is outside the verified flat source cache",
+        ));
+    };
+
+    let mut components = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(name) => components.push(PathBuf::from(name)),
+            _ => {
+                return Err(ContractError::source_use(
+                    "GNU MetaMake fetch namespace contains a non-normal path component",
+                ));
+            }
+        }
+        if components.len() > MAX_GNU_CACHE_NAMESPACE_COMPONENTS {
+            return Err(ContractError::source_use(
+                "GNU MetaMake fetch namespace exceeds the 16-component limit",
+            ));
+        }
+    }
+    Ok(components)
+}
+
+fn ensure_gnu_cache_namespace(
+    canonical_cache: &Path,
+    components: &[PathBuf],
+) -> Result<(), ContractError> {
+    let mut current = open_directory(canonical_cache).map_err(|_| {
+        ContractError::source_use("verified GNU source cache is not a real directory")
+    })?;
+
+    // Validate every existing ancestor before creating anything. Once a
+    // component is absent, descendants cannot already exist beneath it.
+    let mut first_missing = components.len();
+    for (index, component) in components.iter().enumerate() {
+        match rfs::openat(&current, component, DIRECTORY, Mode::empty()) {
+            Ok(directory) => current = File::from(directory),
+            Err(rustix::io::Errno::NOENT) => {
+                first_missing = index;
+                break;
+            }
+            Err(_) => {
+                return Err(ContractError::source_use(
+                    "GNU MetaMake fetch namespace has a symlink or non-directory ancestor",
+                ));
+            }
+        }
+    }
+
+    for component in components.iter().skip(first_missing) {
+        match rfs::mkdirat(&current, component, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(_) => {
+                return Err(ContractError::source_use(
+                    "cannot create GNU MetaMake fetch stamp namespace",
+                ));
+            }
+        }
+        current = File::from(
+            rfs::openat(&current, component, DIRECTORY, Mode::empty()).map_err(|_| {
+                ContractError::source_use(
+                    "GNU MetaMake fetch namespace has a symlink or non-directory ancestor",
+                )
+            })?,
+        );
+    }
+    Ok(())
+}
+
 /// One exact source selection authorized for the unchanged upstream script.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ResolvedMetaMakeSource {
     arguments: Vec<OsString>,
     archive: String,
     filename: String,
+    snapshot: Arc<VerifiedCachePayload>,
 }
+
+impl fmt::Debug for ResolvedMetaMakeSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedMetaMakeSource")
+            .field("arguments", &self.arguments)
+            .field("archive", &self.archive)
+            .field("filename", &self.filename)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ResolvedMetaMakeSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.arguments == other.arguments
+            && self.archive == other.archive
+            && self.filename == other.filename
+    }
+}
+
+impl Eq for ResolvedMetaMakeSource {}
 
 impl ResolvedMetaMakeSource {
     /// Original arguments for the selected upstream `fetch.sh` invocation.
@@ -227,6 +401,38 @@ impl ResolvedMetaMakeSource {
     #[must_use]
     pub fn filename(&self) -> &str {
         &self.filename
+    }
+
+    /// Path to the private verified snapshot, not the mutable flat cache entry.
+    #[must_use]
+    pub fn snapshot_path(&self) -> &Path {
+        self.snapshot.path()
+    }
+
+    /// SHA-256 digest measured and verified for the retained private snapshot.
+    #[must_use]
+    pub fn sha256(&self) -> &Sha256Digest {
+        self.snapshot.sha256()
+    }
+
+    /// Byte size measured and verified for the retained private snapshot.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.snapshot.size()
+    }
+
+    /// Revalidate both the source cache entry and retained snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0302 if the selected cache entry or private snapshot changed
+    /// after source selection.
+    pub fn revalidate(&self) -> Result<(), ContractError> {
+        self.snapshot.revalidate().map_err(|_| {
+            ContractError::source_use(
+                "MetaMake fetch selected source archive changed after verification",
+            )
+        })
     }
 }
 
@@ -438,7 +644,7 @@ fn lock_ledger(file: &File) -> Result<(), ContractError> {
             Err(_) => {
                 return Err(ContractError::source_use(
                     "timed out waiting for exclusive source-use ledger access",
-                ))
+                ));
             }
         }
     }
@@ -472,12 +678,15 @@ fn record_locked(file: &mut File, filename: &str) -> Result<(), ContractError> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
 
     use aros_common::{sha256_bytes, DiagnosticCode};
     use serde_json::json;
 
-    use super::{MetaMakeFetchInvocation, SourceUseLedger};
+    use super::{MetaMakeFetchInvocation, SourceUseLedger, MAX_GNU_CACHE_NAMESPACE_COMPONENTS};
     use crate::source_lock::SourceLock;
 
     fn lock(bytes: &[u8]) -> SourceLock {
@@ -495,6 +704,63 @@ mod tests {
             }]
         });
         SourceLock::parse(&serde_json::to_vec(&document).unwrap()).unwrap()
+    }
+
+    fn gnu_lock_document(bytes: &[u8], filename: &str) -> serde_json::Value {
+        let mut document: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../tests/fixtures/gnu-source-lock-v3.json"))
+                .unwrap();
+        document["sources"][0]["filename"] = json!(filename);
+        document["sources"][0]["url"] = json!(format!("https://example.invalid/{filename}"));
+        document["sources"][0]["sha256"] = json!(sha256_bytes(bytes));
+        document["sources"][0]["size"] = json!(bytes.len());
+        document
+    }
+
+    fn gnu_lock(bytes: &[u8], filename: &str) -> SourceLock {
+        SourceLock::parse(&serde_json::to_vec(&gnu_lock_document(bytes, filename)).unwrap())
+            .unwrap()
+    }
+
+    fn gnu_invocation(location: &Path, lock: &SourceLock) -> MetaMakeFetchInvocation {
+        let arguments = [
+            OsString::from("-D"),
+            OsString::from("destination"),
+            OsString::from("-a"),
+            OsString::from("payload"),
+            OsString::from("-s"),
+            OsString::from("tar.gz tar.xz"),
+            OsString::from("-P"),
+            OsString::from("patch.diff"),
+            OsString::from("-l"),
+            location.as_os_str().to_owned(),
+        ];
+        MetaMakeFetchInvocation::parse_for_lock(&arguments, lock).unwrap()
+    }
+
+    #[test]
+    fn transport_policy_cannot_be_overridden_by_opaque_arguments() {
+        let mut arguments = vec!["-a".into(), "payload".into(), "-l".into(), "cache".into()];
+        assert!(MetaMakeFetchInvocation::parse(&arguments).is_ok());
+        for policy in [
+            "--offline=false",
+            "--offline",
+            "--require-checksums=false",
+            "--require-checksums",
+        ] {
+            arguments.push(policy.into());
+            let error = MetaMakeFetchInvocation::parse(&arguments).unwrap_err();
+            assert_eq!(
+                error.diagnostics().diagnostics[0].code,
+                DiagnosticCode::ProducerSourceUse
+            );
+            assert!(error
+                .to_string()
+                .contains("mandatory offline/checksum policy"));
+            let gnu = gnu_lock(b"payload", "gcc.tar.xz");
+            assert!(MetaMakeFetchInvocation::parse_for_lock(&arguments, &gnu).is_err());
+            arguments.pop();
+        }
     }
 
     #[test]
@@ -584,6 +850,215 @@ mod tests {
             cache.into_os_string(),
         ])
         .unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code,
+            DiagnosticCode::ProducerSourceUse
+        );
+    }
+
+    #[test]
+    fn gnu_format_lists_are_narrowed_to_one_verified_lock_payload() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = temporary.path().canonicalize().unwrap();
+        let bytes = b"selected GNU source";
+        let mut document: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../tests/fixtures/gnu-source-lock-v3.json"))
+                .unwrap();
+        document["sources"][0]["sha256"] = json!(sha256_bytes(bytes));
+        document["sources"][0]["size"] = json!(bytes.len());
+        let selected = SourceLock::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        fs::write(cache.join("gcc.tar.xz"), bytes).unwrap();
+        // An earlier unverified local format must not win upstream's search.
+        fs::write(cache.join("gcc.tar.gz"), b"not the selected archive").unwrap();
+        let arguments = [
+            "-a".into(),
+            "gcc".into(),
+            "-s".into(),
+            "tar.gz tar.xz tar.bz2".into(),
+            "-l".into(),
+            cache.clone().into_os_string(),
+        ];
+        let invocation = MetaMakeFetchInvocation::parse_for_lock(&arguments, &selected).unwrap();
+        let resolved = invocation.resolve(&selected, &cache).unwrap();
+        assert_eq!(resolved.filename(), "gcc.tar.xz");
+        assert_eq!(resolved.arguments()[3], "tar.xz");
+        assert_eq!(resolved.arguments()[..3], arguments[..3]);
+        assert_eq!(resolved.arguments()[4..], arguments[4..]);
+        assert_eq!(
+            fs::read(cache.join("gcc.tar.gz")).unwrap(),
+            b"not the selected archive"
+        );
+
+        fs::write(cache.join("gcc.tar.xz"), b"corrupt").unwrap();
+        assert!(invocation.resolve(&selected, &cache).is_err());
+        assert!(MetaMakeFetchInvocation::parse_for_lock(&arguments, &lock(bytes)).is_err());
+
+        let mut second = document["sources"][0].clone();
+        second["component"] = json!("gcc-format-alternative");
+        second["filename"] = json!("gcc.tar.gz");
+        document["sources"].as_array_mut().unwrap().push(second);
+        let ambiguous = SourceLock::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(invocation.resolve(&ambiguous, &cache).is_err());
+    }
+
+    #[test]
+    fn gnu_cache_location_is_normalized_after_flat_payload_verification() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let canonical_cache = cache.canonicalize().unwrap();
+        let bytes = b"generic locked source payload";
+        let source_lock = gnu_lock(bytes, "payload.tar.xz");
+        fs::write(cache.join("payload.tar.xz"), bytes).unwrap();
+
+        for location in [
+            cache.clone(),
+            canonical_cache.clone(),
+            cache.join("stamps/gnu"),
+        ] {
+            let invocation = gnu_invocation(&location, &source_lock);
+            let resolved = invocation.resolve(&source_lock, &cache).unwrap();
+            assert_eq!(resolved.filename(), "payload.tar.xz");
+            assert_eq!(resolved.arguments()[0], "-D");
+            assert_eq!(resolved.arguments()[1], "destination");
+            assert_eq!(resolved.arguments()[2], "-a");
+            assert_eq!(resolved.arguments()[3], "payload");
+            assert_eq!(resolved.arguments()[4], "-s");
+            assert_eq!(resolved.arguments()[5], "tar.xz");
+            assert_eq!(resolved.arguments()[6], "-P");
+            assert_eq!(resolved.arguments()[7], "patch.diff");
+            assert_eq!(resolved.arguments()[8], "-l");
+            assert_eq!(resolved.arguments()[9], canonical_cache.as_os_str());
+        }
+
+        let namespace = cache.join("stamps/gnu");
+        assert!(namespace.is_dir());
+        assert!(!namespace.join("payload.tar.xz").exists());
+    }
+
+    #[test]
+    fn invalid_gnu_payload_hash_does_not_create_stamp_namespace() {
+        let bytes = b"generic locked source payload";
+        let filename = "payload.tar.xz";
+
+        let corrupt_temporary = tempfile::tempdir().unwrap();
+        let corrupt_cache = corrupt_temporary.path().join("cache");
+        fs::create_dir(&corrupt_cache).unwrap();
+        fs::write(corrupt_cache.join(filename), b"corrupt payload").unwrap();
+        let valid_lock = gnu_lock(bytes, filename);
+        let corrupt_path = corrupt_cache.join("stamp-a/one/two");
+        let corrupt_invocation = gnu_invocation(&corrupt_path, &valid_lock);
+        assert!(corrupt_invocation
+            .resolve(&valid_lock, &corrupt_cache)
+            .is_err());
+        assert!(!corrupt_cache.join("stamp-a").exists());
+
+        let digest_temporary = tempfile::tempdir().unwrap();
+        let digest_cache = digest_temporary.path().join("cache");
+        fs::create_dir(&digest_cache).unwrap();
+        fs::write(digest_cache.join(filename), bytes).unwrap();
+        let mut wrong_digest = gnu_lock_document(bytes, filename);
+        wrong_digest["sources"][0]["sha256"] =
+            json!("0000000000000000000000000000000000000000000000000000000000000000");
+        let wrong_digest_lock =
+            SourceLock::parse(&serde_json::to_vec(&wrong_digest).unwrap()).unwrap();
+        let wrong_digest_path = digest_cache.join("stamp-b/one/two");
+        let wrong_digest_invocation = gnu_invocation(&wrong_digest_path, &wrong_digest_lock);
+        assert!(wrong_digest_invocation
+            .resolve(&wrong_digest_lock, &digest_cache)
+            .is_err());
+        assert!(!digest_cache.join("stamp-b").exists());
+    }
+
+    #[test]
+    fn rejects_unsafe_gnu_stamp_namespaces_without_following_links() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        let outside = temporary.path().join("outside");
+        let inside_target = cache.join("real-inside");
+        fs::create_dir(&cache).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::create_dir(&inside_target).unwrap();
+        fs::write(
+            cache.join("payload.tar.xz"),
+            b"generic locked source payload",
+        )
+        .unwrap();
+        fs::write(cache.join("regular-file"), b"not a directory").unwrap();
+        symlink(&inside_target, cache.join("linked-inside")).unwrap();
+        symlink(&outside, cache.join("linked-outside")).unwrap();
+
+        let bytes = b"generic locked source payload";
+        let source_lock = gnu_lock(bytes, "payload.tar.xz");
+        let mut too_deep = cache.clone();
+        for index in 0..=MAX_GNU_CACHE_NAMESPACE_COMPONENTS {
+            too_deep.push(format!("component-{index}"));
+        }
+        let unsafe_locations = [
+            outside.join("external-stamp"),
+            cache.join("../outside/traversal-stamp"),
+            cache.join("linked-inside/new-stamp"),
+            cache.join("linked-outside/new-stamp"),
+            cache.join("regular-file/new-stamp"),
+            too_deep,
+        ];
+        for location in unsafe_locations {
+            let invocation = gnu_invocation(&location, &source_lock);
+            assert!(
+                invocation.resolve(&source_lock, &cache).is_err(),
+                "accepted unsafe GNU namespace {}",
+                location.display()
+            );
+        }
+        assert!(!cache.join("../outside/traversal-stamp").exists());
+        assert!(!cache.join("linked-inside/new-stamp").exists());
+        assert!(!cache.join("linked-outside/new-stamp").exists());
+        assert!(!cache.join("regular-file/new-stamp").exists());
+        assert!(!cache.join("component-0").exists());
+    }
+
+    #[test]
+    fn llvm_rejects_nested_cache_location_without_creating_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let bytes = b"locked LLVM source\n";
+        fs::write(cache.join("llvm-11.0.0.src.tar.xz"), bytes).unwrap();
+        let nested = cache.join("nested/stamp");
+        let invocation = MetaMakeFetchInvocation::parse(&[
+            "-a".into(),
+            "llvm-11.0.0.src".into(),
+            "-s".into(),
+            "tar.xz".into(),
+            "-l".into(),
+            nested.into_os_string(),
+        ])
+        .unwrap();
+
+        assert!(invocation.resolve(&lock(bytes), &cache).is_err());
+        assert!(!cache.join("nested").exists());
+    }
+
+    #[test]
+    fn resolved_source_retains_and_revalidates_private_snapshot() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let bytes = b"generic locked source payload";
+        let source_lock = gnu_lock(bytes, "payload.tar.xz");
+        let cache_payload = cache.join("payload.tar.xz");
+        fs::write(&cache_payload, bytes).unwrap();
+        let invocation = gnu_invocation(&cache, &source_lock);
+        let resolved = invocation.resolve(&source_lock, &cache).unwrap();
+
+        assert_eq!(resolved.size(), bytes.len() as u64);
+        assert_eq!(resolved.sha256(), &sha256_bytes(bytes));
+        assert_eq!(fs::read(resolved.snapshot_path()).unwrap(), bytes);
+        resolved.revalidate().unwrap();
+
+        fs::write(cache_payload, b"changed after resolve").unwrap();
+        assert_eq!(fs::read(resolved.snapshot_path()).unwrap(), bytes);
+        let error = resolved.revalidate().unwrap_err();
         assert_eq!(
             error.diagnostics().diagnostics[0].code,
             DiagnosticCode::ProducerSourceUse

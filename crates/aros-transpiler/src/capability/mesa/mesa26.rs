@@ -11,11 +11,169 @@ use crate::parser::TargetContext;
 use crate::sources::EvaluatedSources;
 use std::path::Path;
 
+mod archive;
+
 pub(crate) const SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-26.0.0";
 pub(crate) const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0";
 pub(crate) const GLAPI_DIR: &str = "workbench/libs/mesa/libglapi";
 pub(crate) const GLAPI_MMAKE: &str = "mesa3d-linklib-glapi";
 pub(crate) const PRIVATE_LIBDIR: &str = "${AROS_BUILD_DIR}/gen/lib/mesa26.0.0";
+const LLVM11_INCLUDE: &str = "${AROS_BUILD_DIR}/gen/external-install/llvm11/include";
+
+const LLVMPPIPE_SOURCE_NAMES: &[&str] = &[
+    "lp_bld_alpha",
+    "lp_bld_blend_aos",
+    "lp_bld_blend",
+    "lp_bld_blend_logicop",
+    "lp_bld_depth",
+    "lp_bld_interp",
+    "lp_clear",
+    "lp_context",
+    "lp_cs_tpool",
+    "lp_draw_arrays",
+    "lp_fence",
+    "lp_flush",
+    "lp_jit",
+    "lp_linear",
+    "lp_linear_fastpath",
+    "lp_linear_interp",
+    "lp_linear_sampler",
+    "lp_memory",
+    "lp_perf",
+    "lp_query",
+    "lp_rast",
+    "lp_rast_debug",
+    "lp_rast_linear",
+    "lp_rast_linear_fallback",
+    "lp_rast_rect",
+    "lp_rast_tri",
+    "lp_scene",
+    "lp_scene_queue",
+    "lp_screen",
+    "lp_setup",
+    "lp_setup_analysis",
+    "lp_setup_line",
+    "lp_setup_point",
+    "lp_setup_rect",
+    "lp_setup_tri",
+    "lp_setup_vbuf",
+    "lp_state_blend",
+    "lp_state_clip",
+    "lp_state_derived",
+    "lp_state_cs",
+    "lp_state_fs",
+    "lp_state_fs_analysis",
+    "lp_state_fs_fastpath",
+    "lp_state_fs_linear",
+    "lp_state_fs_linear_llvm",
+    "lp_state_gs",
+    "lp_state_rasterizer",
+    "lp_state_sampler",
+    "lp_state_setup",
+    "lp_state_so",
+    "lp_state_surface",
+    "lp_state_tess",
+    "lp_state_vertex",
+    "lp_state_vs",
+    "lp_surface",
+    "lp_tex_sample",
+    "lp_texture",
+    "lp_texture_handle",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mesa26Target {
+    MesaSse41,
+    GalliumHidd,
+    GalliumLibrary,
+    EglLibrary,
+    V3dHidd,
+    Vc4LinkLibrary,
+    Vc4Hidd,
+    V3dLinkLibrary,
+    MesaGlLibrary,
+    CompilerLibrary,
+    GalliumAuxLibrary,
+    MesaCoreLibrary,
+    MesaUtilLibrary,
+    MesaDevUtilLibrary,
+    GalliumVmLibrary,
+    GalliumDrawLlvmLibrary,
+    GalliumTessLibrary,
+    LlvmPipeLibrary,
+    LlvmPipeHidd,
+}
+
+/// Return a Mesa 26 capability identity only for an exact source-directory /
+/// MetaMake pair. These functions parse every source declaration in a target
+/// graph; profile support must not be checked for unrelated declarations.
+fn target_identity(relative_dir: &Path, mmake: &str) -> Option<Mesa26Target> {
+    match (relative_dir.to_str()?, mmake) {
+        ("workbench/libs/mesa/libmesa", "mesa3d-linklib-mesa-sse41") => {
+            Some(Mesa26Target::MesaSse41)
+        }
+        ("workbench/hidds/gallium", "hidd-gallium") => Some(Mesa26Target::GalliumHidd),
+        ("workbench/libs/gallium", "workbench-libs-gallium") => Some(Mesa26Target::GalliumLibrary),
+        ("workbench/libs/egl", "workbench-libs-egl") => Some(Mesa26Target::EglLibrary),
+        (super::V3D_RELATIVE_DIR, "hidd-v3d") => Some(Mesa26Target::V3dHidd),
+        ("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium", "linklibs-gallium_vc4") => {
+            Some(Mesa26Target::Vc4LinkLibrary)
+        }
+        ("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium", "hidd-vc4gallium") => {
+            Some(Mesa26Target::Vc4Hidd)
+        }
+        (super::V3D_RELATIVE_DIR, "linklibs-gallium_v3d") => Some(Mesa26Target::V3dLinkLibrary),
+        ("workbench/libs/mesa", "mesa3dgl-library") => Some(Mesa26Target::MesaGlLibrary),
+        ("workbench/libs/mesa/libcompiler", "mesa3d-linklib-compiler") => {
+            Some(Mesa26Target::CompilerLibrary)
+        }
+        ("workbench/libs/mesa/libgalliumaux", "mesa3d-linklib-galliumauxiliary") => {
+            Some(Mesa26Target::GalliumAuxLibrary)
+        }
+        ("workbench/libs/mesa/libmesa", "mesa3d-linklib-mesa") => {
+            Some(Mesa26Target::MesaCoreLibrary)
+        }
+        ("workbench/libs/mesa/libmesautil", "mesa3d-linklib-mesautil") => {
+            Some(Mesa26Target::MesaUtilLibrary)
+        }
+        ("workbench/libs/mesa/libmesautil", "mesa3d-linklib-mesadevutil") => {
+            Some(Mesa26Target::MesaDevUtilLibrary)
+        }
+        ("workbench/libs/mesa/libgalliumvm", "mesa3d-linklib-galliumvm") => {
+            Some(Mesa26Target::GalliumVmLibrary)
+        }
+        ("workbench/libs/mesa/libgalliumaux", "mesa3d-linklib-galliumdrawllvm") => {
+            Some(Mesa26Target::GalliumDrawLlvmLibrary)
+        }
+        ("workbench/libs/mesa/libgalliumaux", "mesa3d-linklib-galliumtess") => {
+            Some(Mesa26Target::GalliumTessLibrary)
+        }
+        ("workbench/libs/mesa/libllvmpipe", "mesa3d-linklib-llvmpipe") => {
+            Some(Mesa26Target::LlvmPipeLibrary)
+        }
+        ("workbench/hidds/llvmpipe", "hidd-llvmpipe") => Some(Mesa26Target::LlvmPipeHidd),
+        _ => None,
+    }
+}
+
+const fn has_archive_sources(target: Mesa26Target) -> bool {
+    matches!(
+        target,
+        Mesa26Target::MesaSse41
+            | Mesa26Target::EglLibrary
+            | Mesa26Target::Vc4LinkLibrary
+            | Mesa26Target::V3dLinkLibrary
+            | Mesa26Target::CompilerLibrary
+            | Mesa26Target::GalliumAuxLibrary
+            | Mesa26Target::MesaCoreLibrary
+            | Mesa26Target::MesaUtilLibrary
+            | Mesa26Target::MesaDevUtilLibrary
+            | Mesa26Target::GalliumVmLibrary
+            | Mesa26Target::GalliumDrawLlvmLibrary
+            | Mesa26Target::GalliumTessLibrary
+            | Mesa26Target::LlvmPipeLibrary
+    )
+}
 
 fn common_defines(profile: &str) -> Vec<String> {
     let mut defines = [
@@ -59,6 +217,89 @@ fn common_includes() -> Vec<String> {
     .into_iter()
     .map(str::to_owned)
     .collect()
+}
+
+fn llvm_compile_contract(profile: &str, identity: Mesa26Target) -> CompileContract {
+    let mut defines = common_defines(profile);
+    defines.extend(
+        [
+            "DRAW_LLVM_AVAILABLE=1",
+            "LLVM_AVAILABLE",
+            "HAVE_LLVM=0x0b00",
+            "MESA_LLVM_VERSION_STRING=\"11.0.0\"",
+            "GALLIVM_USE_ORCJIT=0",
+            "LLVM_IS_SHARED=0",
+            "PACKAGE_VERSION=\"26.0.0\"",
+            "__AROS__",
+        ]
+        .map(str::to_owned),
+    );
+    if identity == Mesa26Target::LlvmPipeLibrary {
+        defines.push("GALLIUM_LLVMPIPE".to_owned());
+    }
+    defines.push("NDEBUG".to_owned());
+
+    let mut includes = common_includes();
+    includes.extend(
+        [
+            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/nir",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/nir",
+            LLVM11_INCLUDE,
+        ]
+        .map(str::to_owned),
+    );
+    match identity {
+        Mesa26Target::GalliumVmLibrary => includes.extend(
+            ["${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/gallivm"].map(str::to_owned),
+        ),
+        Mesa26Target::GalliumDrawLlvmLibrary | Mesa26Target::GalliumTessLibrary => includes.extend(
+            [
+                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/util",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/indices",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/gallium/auxiliary",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/gallium/auxiliary/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/gallium/auxiliary/indices",
+            ]
+            .map(str::to_owned),
+        ),
+        Mesa26Target::LlvmPipeLibrary => includes.extend(
+            [
+                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/util",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/indices",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/mesa/main",
+            ]
+            .map(str::to_owned),
+        ),
+        Mesa26Target::LlvmPipeHidd => includes.extend(
+            [
+                "${AROS_SOURCE_DIR}/workbench/hidds/llvmpipe",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/drivers",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util/format",
+            ]
+            .map(str::to_owned),
+        ),
+        _ => {}
+    }
+
+    CompileContract {
+        defines,
+        undefines: Vec::new(),
+        includes,
+        options: vec![
+            "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
+            "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>".to_owned(),
+            "-fno-strict-aliasing".to_owned(),
+        ],
+    }
 }
 
 pub(crate) fn profile(target: Option<&TargetContext>) -> Result<Option<&'static str>, String> {
@@ -132,12 +373,66 @@ pub(crate) fn glapi_sources(
     }))
 }
 
+pub(crate) fn runtime_module_name(
+    root: &Path,
+    relative_dir: &Path,
+    mmake: &str,
+    raw_name: &str,
+    target: Option<&TargetContext>,
+) -> Result<Option<String>, String> {
+    if relative_dir != Path::new("workbench/libs/mesa")
+        || mmake != "mesa3dgl-library"
+        || profile(target)?.is_none()
+    {
+        return Ok(None);
+    }
+    require_file_fingerprint(
+        root,
+        "workbench/libs/mesa/mesa.cfg",
+        fingerprint("mesa26-config")?,
+        "Mesa 26 runtime module identity",
+    )?;
+    if raw_name != "mesa3dgl$(MESAGLBUILD)" {
+        return Err(format!("unexpected Mesa 26 runtime modname: {raw_name}"));
+    }
+    // The reviewed recipe derives MESAGLBUILD as major-minor, not the full
+    // archive version or an unresolved Make-variable token.
+    Ok(Some("mesa3dgl26-0".to_owned()))
+}
+
 pub(crate) fn module_sources(
     root: &Path,
     relative_dir: &Path,
     mmake: &str,
     target: Option<&TargetContext>,
 ) -> Result<Option<EvaluatedSources>, String> {
+    if relative_dir == Path::new("workbench/hidds/llvmpipe") && mmake == "hidd-llvmpipe" {
+        if profile(target)?.is_none() {
+            return Ok(None);
+        }
+        require_file_fingerprint(
+            root,
+            "workbench/hidds/llvmpipe/mmakefile.src",
+            fingerprint("mesa26-llvmpipe-hidd-recipe")?,
+            "Mesa 26 llvmpipe HIDD source closure",
+        )?;
+        require_file_fingerprint(
+            root,
+            "workbench/libs/mesa/mesa.cfg",
+            fingerprint("mesa26-config")?,
+            "Mesa 26 llvmpipe HIDD configuration",
+        )?;
+        return Ok(Some(EvaluatedSources {
+            c: [
+                "${AROS_SOURCE_DIR}/workbench/hidds/llvmpipe/llvmpipe_init".to_owned(),
+                "${AROS_SOURCE_DIR}/workbench/hidds/llvmpipe/llvmpipe_galliumclass".to_owned(),
+                "${AROS_SOURCE_DIR}/workbench/libs/mesa/emul_arosc".to_owned(),
+            ]
+            .to_vec(),
+            declared: true,
+            ..EvaluatedSources::default()
+        }));
+    }
     if relative_dir == Path::new("workbench/libs/egl") && mmake == "workbench-libs-egl" {
         archive_sources(root, relative_dir, mmake, target)
     } else {
@@ -151,351 +446,7 @@ pub(crate) fn archive_sources(
     mmake: &str,
     target: Option<&TargetContext>,
 ) -> Result<Option<EvaluatedSources>, String> {
-    if let Some(sources) = glapi_sources(root, relative_dir, mmake, target)? {
-        return Ok(Some(sources));
-    }
-    let Some(profile) = profile(target)? else {
-        return Ok(None);
-    };
-    if relative_dir == Path::new("workbench/libs/egl") && mmake == "workbench-libs-egl" {
-        require_file_fingerprint(
-            root,
-            "workbench/libs/egl/mmakefile.src",
-            fingerprint("mesa26-egl-recipe")?,
-            "Mesa 26 EGL source closure",
-        )?;
-        require_file_fingerprint(
-            root,
-            "workbench/libs/mesa/mesa.cfg",
-            fingerprint("mesa26-config")?,
-            "Mesa 26 EGL configuration",
-        )?;
-        let mut sources = [
-            "eglapi",
-            "eglarray",
-            "eglconfig",
-            "eglconfigdebug",
-            "eglcontext",
-            "eglcurrent",
-            "egldevice",
-            "egldisplay",
-            "eglglobals",
-            "eglimage",
-            "egllog",
-            "eglsurface",
-            "eglsync",
-        ]
-        .map(|stem| format!("{SOURCE_ROOT}/src/egl/main/{stem}"))
-        .to_vec();
-        sources.extend(
-            ["egl_arosmesa", "emul_arosc", "tls"]
-                .map(|stem| format!("${{AROS_SOURCE_DIR}}/workbench/libs/egl/{stem}")),
-        );
-        return Ok(Some(EvaluatedSources {
-            c: sources,
-            declared: true,
-            ..EvaluatedSources::default()
-        }));
-    }
-    if relative_dir == Path::new(super::V3D_RELATIVE_DIR) && profile != "aarch64" {
-        return Ok(None);
-    }
-    if relative_dir == Path::new("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium")
-        && profile == "x86_64"
-    {
-        return Ok(None);
-    }
-    if relative_dir == Path::new("workbench/libs/mesa/libmesa")
-        && mmake == "mesa3d-linklib-mesa-sse41"
-    {
-        require_file_fingerprint(
-            root,
-            "workbench/libs/mesa/libmesa/mmakefile.src",
-            fingerprint("mesa26-core-recipe")?,
-            "Mesa 26 empty SSE4.1 compatibility archive",
-        )?;
-        require_file_fingerprint(
-            root,
-            "workbench/libs/mesa/mesa.cfg",
-            fingerprint("mesa26-config")?,
-            "Mesa 26 empty SSE4.1 compatibility archive",
-        )?;
-        return Ok(Some(EvaluatedSources {
-            declared: true,
-            ..EvaluatedSources::default()
-        }));
-    }
-    let family = match (relative_dir.to_str(), mmake) {
-        (Some("workbench/libs/mesa/libcompiler"), "mesa3d-linklib-compiler") => "compiler",
-        (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa") => "core",
-        (Some("workbench/libs/mesa/libgalliumaux"), "mesa3d-linklib-galliumauxiliary") => {
-            "galliumaux"
-        }
-        (
-            Some("workbench/libs/mesa/libmesautil"),
-            "mesa3d-linklib-mesautil" | "mesa3d-linklib-mesadevutil",
-        ) => "util",
-        (Some(super::V3D_RELATIVE_DIR), "linklibs-gallium_v3d") if profile == "aarch64" => "v3d",
-        (Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"), "linklibs-gallium_vc4")
-            if profile == "arm" || profile == "aarch64" =>
-        {
-            "vc4"
-        }
-        _ => return Ok(None),
-    };
-    let (recipe, manifest, recipe_pin, manifest_pin) = match family {
-        "compiler" => (
-            "workbench/libs/mesa/libcompiler/mmakefile.src",
-            "workbench/libs/mesa/libcompiler/compiler-26.0.0.sources",
-            "mesa26-compiler-recipe",
-            "mesa26-compiler-manifest",
-        ),
-        "core" => (
-            "workbench/libs/mesa/libmesa/mmakefile.src",
-            "workbench/libs/mesa/libmesa/mesa-26.0.0.sources",
-            "mesa26-core-recipe",
-            "mesa26-core-manifest",
-        ),
-        "galliumaux" => (
-            "workbench/libs/mesa/libgalliumaux/mmakefile.src",
-            "workbench/libs/mesa/libgalliumaux/galliumaux-26.0.0.sources",
-            "mesa26-galliumaux-recipe",
-            "mesa26-galliumaux-manifest",
-        ),
-        "util" => (
-            "workbench/libs/mesa/libmesautil/mmakefile.src",
-            "workbench/libs/mesa/libmesautil/mesautil-26.0.0.sources",
-            "mesa26-util-recipe",
-            "mesa26-util-manifest",
-        ),
-        "v3d" => (
-            "arch/arm-native/soc/broadcom/2708/hidd/v3d/mmakefile.src",
-            "arch/arm-native/soc/broadcom/2708/hidd/v3d/v3d-26.0.0.sources",
-            "mesa26-v3d-recipe",
-            "mesa26-v3d-manifest",
-        ),
-        "vc4" => (
-            "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/mmakefile.src",
-            "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-26.0.0.sources",
-            "mesa26-vc4-recipe",
-            "mesa26-vc4-manifest",
-        ),
-        _ => unreachable!("closed family selection"),
-    };
-    if family == "v3d" {
-        // Upstream added v3d_dt to the HIDD, not to the closed Mesa archive.
-        // Both reviewed recipes expand to the same archive and generator jobs.
-        require_file_fingerprint_one_of(
-            root,
-            recipe,
-            &[
-                fingerprint(recipe_pin)?,
-                fingerprint("mesa26-v3d-recipe-device-tree")?,
-            ],
-            family,
-        )?;
-    } else {
-        require_file_fingerprint(root, recipe, fingerprint(recipe_pin)?, family)?;
-    }
-    require_file_fingerprint(root, manifest, fingerprint(manifest_pin)?, family)?;
-    require_file_fingerprint(
-        root,
-        "workbench/libs/mesa/mesa.cfg",
-        fingerprint("mesa26-config")?,
-        family,
-    )?;
-    let mut sources = EvaluatedSources {
-        declared: true,
-        ..EvaluatedSources::default()
-    };
-    match family {
-        "core" => {
-            sources.c = inventory_stems(
-                root,
-                manifest,
-                "MESA26_CORE_STATIC_C_SOURCES",
-                ".c",
-                &format!("{SOURCE_ROOT}/src/mesa"),
-            )?;
-            sources.c.extend(inventory_stems(
-                root,
-                manifest,
-                "MESA26_CORE_GENERATED_C_SOURCES",
-                ".c",
-                &format!("{BUILD_ROOT}/src/mesa"),
-            )?);
-            sources.c.push(
-                "${AROS_SOURCE_DIR}/workbench/libs/mesa/libmesa/mesa_sse_minmax_fallback"
-                    .to_owned(),
-            );
-            sources.cxx = inventory_stems(
-                root,
-                manifest,
-                "MESA26_CORE_STATIC_CXX_SOURCES",
-                ".cpp",
-                &format!("{SOURCE_ROOT}/src/mesa"),
-            )?;
-        }
-        "util" => {
-            sources.c = inventory_stems(
-                root,
-                manifest,
-                "MESA26_UTIL_STATIC_C_SOURCES",
-                ".c",
-                &format!("{SOURCE_ROOT}/src/util"),
-            )?;
-            if profile == "aarch64" {
-                sources.c.extend(inventory_stems(
-                    root,
-                    manifest,
-                    "MESA26_UTIL_ARM64_C_SOURCES",
-                    ".c",
-                    &format!("{SOURCE_ROOT}/src/util"),
-                )?);
-            }
-            sources.c.extend(inventory_stems(
-                root,
-                manifest,
-                "MESA26_UTIL_C11_C_SOURCES",
-                ".c",
-                &format!("{SOURCE_ROOT}/src"),
-            )?);
-            sources.c.extend(inventory_stems(
-                root,
-                manifest,
-                "MESA26_UTIL_GENERATED_C_SOURCES",
-                ".c",
-                &format!("{BUILD_ROOT}/src/util"),
-            )?);
-            sources.c.extend(inventory_stems(
-                root,
-                manifest,
-                "MESA26_UTIL_AROS_FALLBACK_C_SOURCES",
-                ".c",
-                "${AROS_SOURCE_DIR}",
-            )?);
-            sources.cxx = inventory_stems(
-                root,
-                manifest,
-                "MESA26_UTIL_STATIC_CXX_SOURCES",
-                ".cpp",
-                &format!("{SOURCE_ROOT}/src/util"),
-            )?;
-        }
-        "compiler" => {
-            for variable in [
-                "MESA26_COMPILER_NIR_GENERATED_C_SOURCES",
-                "MESA26_COMPILER_GLSL_GENERATED_C_SOURCES",
-                "MESA26_COMPILER_SPIRV_GENERATED_C_SOURCES",
-            ] {
-                sources.c.extend(inventory_stems(
-                    root,
-                    manifest,
-                    variable,
-                    ".c",
-                    &format!("{BUILD_ROOT}/src/compiler"),
-                )?);
-            }
-            for variable in [
-                "MESA26_COMPILER_GLSL_C_SOURCES",
-                "MESA26_COMPILER_NIR_C_SOURCES",
-                "MESA26_COMPILER_SPIRV_C_SOURCES",
-            ] {
-                sources.c.extend(inventory_stems(
-                    root,
-                    manifest,
-                    variable,
-                    ".c",
-                    &format!("{SOURCE_ROOT}/src/compiler"),
-                )?);
-            }
-            sources.c.extend(inventory_stems(
-                root,
-                manifest,
-                "MESA26_COMPILER_GLCPP_GENERATED_C_SOURCES",
-                ".c",
-                &format!("{BUILD_ROOT}/src/compiler"),
-            )?);
-            for variable in [
-                "MESA26_COMPILER_GLCPP_C_SOURCES",
-                "MESA26_COMPILER_CORE_C_SOURCES",
-            ] {
-                sources.c.extend(inventory_stems(
-                    root,
-                    manifest,
-                    variable,
-                    ".c",
-                    &format!("{SOURCE_ROOT}/src/compiler"),
-                )?);
-            }
-            sources.cxx = inventory_stems(
-                root,
-                manifest,
-                "MESA26_COMPILER_GLSL_GENERATED_CXX_SOURCES",
-                ".cpp",
-                &format!("{BUILD_ROOT}/src/compiler"),
-            )?;
-            sources.cxx.extend(inventory_stems(
-                root,
-                manifest,
-                "MESA26_COMPILER_GLSL_CXX_SOURCES",
-                ".cpp",
-                &format!("{SOURCE_ROOT}/src/compiler"),
-            )?);
-        }
-        "galliumaux" => {
-            sources.c = inventory_stems(
-                root,
-                manifest,
-                "MESA26_GALLIUMAUX_STATIC_C_SOURCES",
-                ".c",
-                &format!("{SOURCE_ROOT}/src/gallium/auxiliary"),
-            )?;
-            sources.c.extend(inventory_stems(
-                root,
-                manifest,
-                "MESA26_GALLIUMAUX_GENERATED_C_SOURCES",
-                ".c",
-                &format!("{BUILD_ROOT}/src/gallium/auxiliary"),
-            )?);
-        }
-        "v3d" => {
-            for (variable, base) in [
-                (
-                    "MESA26_V3D_DRIVER_C_SOURCES",
-                    format!("{SOURCE_ROOT}/src/gallium/drivers/v3d"),
-                ),
-                (
-                    "MESA26_V3D_COMPILER_C_SOURCES",
-                    format!("{SOURCE_ROOT}/src/broadcom/compiler"),
-                ),
-                (
-                    "MESA26_V3D_BROADCOM_C_SOURCES",
-                    format!("{SOURCE_ROOT}/src/broadcom"),
-                ),
-                (
-                    "MESA26_V3D_GENERATED_C_SOURCES",
-                    super::V3D_AROS_BUILD_DIR.to_owned(),
-                ),
-            ] {
-                sources
-                    .c
-                    .extend(inventory_stems(root, manifest, variable, ".c", &base)?);
-            }
-        }
-        "vc4" => {
-            sources.c = inventory_stems(
-                root,
-                manifest,
-                "MESA26_VC4_DRIVER_C_SOURCES",
-                ".c",
-                &format!("{SOURCE_ROOT}/src/gallium/drivers/vc4"),
-            )?;
-            sources.c.push("${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4_tiling_lt_neon".to_owned());
-        }
-        _ => unreachable!("closed family selection"),
-    }
-    Ok(Some(sources))
+    archive::archive_sources(root, relative_dir, mmake, target)
 }
 
 pub(crate) fn glapi_compile_contract(
@@ -541,15 +492,30 @@ pub(crate) fn compile_contract(
     if let Some(contract) = glapi_compile_contract(relative_dir, mmake, target)? {
         return Ok(Some(contract));
     }
+    let Some(identity) = target_identity(relative_dir, mmake) else {
+        return Ok(None);
+    };
     let Some(profile) = profile(target)? else {
         return Ok(None);
     };
-    if relative_dir == Path::new(super::V3D_RELATIVE_DIR) && profile != "aarch64" {
+    if matches!(
+        identity,
+        Mesa26Target::GalliumVmLibrary
+            | Mesa26Target::GalliumDrawLlvmLibrary
+            | Mesa26Target::GalliumTessLibrary
+            | Mesa26Target::LlvmPipeLibrary
+            | Mesa26Target::LlvmPipeHidd
+    ) {
+        return Ok(Some(llvm_compile_contract(profile, identity)));
+    }
+    if matches!(
+        identity,
+        Mesa26Target::V3dHidd | Mesa26Target::V3dLinkLibrary
+    ) && profile != "aarch64"
+    {
         return Ok(None);
     }
-    if relative_dir == Path::new("workbench/libs/mesa/libmesa")
-        && mmake == "mesa3d-linklib-mesa-sse41"
-    {
+    if identity == Mesa26Target::MesaSse41 {
         let mut defines = common_defines(profile);
         defines.push("NDEBUG".to_owned());
         return Ok(Some(CompileContract {
@@ -566,8 +532,8 @@ pub(crate) fn compile_contract(
         "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>".to_owned(),
         "-fno-strict-aliasing".to_owned(),
     ];
-    match (relative_dir.to_str(), mmake) {
-        (Some("workbench/hidds/gallium"), "hidd-gallium") => {
+    match identity {
+        Mesa26Target::GalliumHidd => {
             includes.extend(
                 [
                     "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
@@ -577,10 +543,10 @@ pub(crate) fn compile_contract(
                 .map(str::to_owned),
             );
         }
-        (Some("workbench/libs/gallium"), "workbench-libs-gallium") => {
+        Mesa26Target::GalliumLibrary => {
             includes.push("${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include".to_owned());
         }
-        (Some("workbench/libs/egl"), "workbench-libs-egl") => {
+        Mesa26Target::EglLibrary => {
             defines.extend(
                 [
                     "FEATURE_GL=1",
@@ -601,7 +567,7 @@ pub(crate) fn compile_contract(
                 .map(str::to_owned),
             );
         }
-        (Some(super::V3D_RELATIVE_DIR), "hidd-v3d") if profile == "aarch64" => {
+        Mesa26Target::V3dHidd if profile == "aarch64" => {
             defines.extend(["GCA_CONSUMER_MODULE", "AROS_MESA26_V3D=1"].map(str::to_owned));
             includes.extend(
                 [
@@ -620,10 +586,9 @@ pub(crate) fn compile_contract(
                 .map(str::to_owned),
             );
         }
-        (
-            Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
-            "linklibs-gallium_vc4" | "hidd-vc4gallium",
-        ) if profile == "arm" || profile == "aarch64" => {
+        Mesa26Target::Vc4LinkLibrary | Mesa26Target::Vc4Hidd
+            if profile == "arm" || profile == "aarch64" =>
+        {
             defines.extend(
                 [
                     "GALLIUM_VC4",
@@ -651,7 +616,7 @@ pub(crate) fn compile_contract(
                 "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/include",
             ].map(str::to_owned));
         }
-        (Some(super::V3D_RELATIVE_DIR), "linklibs-gallium_v3d") => {
+        Mesa26Target::V3dLinkLibrary => {
             defines.extend(
                 [
                     "USE_V3D_SIMULATOR=0",
@@ -695,7 +660,7 @@ pub(crate) fn compile_contract(
                     .to_owned(),
             ]);
         }
-        (Some("workbench/libs/mesa"), "mesa3dgl-library") => {
+        Mesa26Target::MesaGlLibrary => {
             includes.extend(
                 [
                     "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa",
@@ -716,7 +681,7 @@ pub(crate) fn compile_contract(
                 );
             }
         }
-        (Some("workbench/libs/mesa/libcompiler"), "mesa3d-linklib-compiler") => {
+        Mesa26Target::CompilerLibrary => {
             includes.extend(
                 [
                     "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa",
@@ -738,7 +703,7 @@ pub(crate) fn compile_contract(
             );
             options.push("$<$<COMPILE_LANGUAGE:CXX>:-I${AROS_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned());
         }
-        (Some("workbench/libs/mesa/libgalliumaux"), "mesa3d-linklib-galliumauxiliary") => {
+        Mesa26Target::GalliumAuxLibrary => {
             includes.extend([
                 "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
                 "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src",
@@ -755,7 +720,7 @@ pub(crate) fn compile_contract(
                 "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/nir",
             ].map(str::to_owned));
         }
-        (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa") => {
+        Mesa26Target::MesaCoreLibrary => {
             defines.extend([
                 "PACKAGE_VERSION=\"26.0.0\"".to_owned(),
                 "PACKAGE_BUGREPORT=\"https://bugs.freedesktop.org/enter_bug.cgi?product=Mesa\""
@@ -782,10 +747,7 @@ pub(crate) fn compile_contract(
             );
             options.push("$<$<COMPILE_LANGUAGE:CXX>:-I${AROS_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned());
         }
-        (
-            Some("workbench/libs/mesa/libmesautil"),
-            "mesa3d-linklib-mesautil" | "mesa3d-linklib-mesadevutil",
-        ) => {
+        Mesa26Target::MesaUtilLibrary | Mesa26Target::MesaDevUtilLibrary => {
             defines.extend(
                 [
                     "BLAKE3_NO_SSE2",
@@ -799,7 +761,7 @@ pub(crate) fn compile_contract(
                 ]
                 .map(str::to_owned),
             );
-            if mmake == "mesa3d-linklib-mesadevutil" {
+            if identity == Mesa26Target::MesaDevUtilLibrary {
                 defines.push("EMBEDDED_DEVICE".to_owned());
             }
             includes.extend(
@@ -817,7 +779,15 @@ pub(crate) fn compile_contract(
                 .map(str::to_owned),
             );
         }
-        _ => return Ok(None),
+        Mesa26Target::MesaSse41
+        | Mesa26Target::V3dHidd
+        | Mesa26Target::Vc4LinkLibrary
+        | Mesa26Target::Vc4Hidd
+        | Mesa26Target::GalliumVmLibrary
+        | Mesa26Target::GalliumDrawLlvmLibrary
+        | Mesa26Target::GalliumTessLibrary
+        | Mesa26Target::LlvmPipeLibrary
+        | Mesa26Target::LlvmPipeHidd => return Ok(None),
     }
     defines.push("NDEBUG".to_owned());
     Ok(Some(CompileContract {
@@ -1007,13 +977,13 @@ pub(crate) fn parse_mesautil(
     fetches: &[FetchDecl],
 ) -> Result<Option<PythonOutputsDecl>, String> {
     const DIR: &str = "workbench/libs/mesa/libmesautil";
-    const CONSUMERS: [&str; 2] = ["mesa3d-linklib-mesautil", "mesa3d-linklib-mesadevutil"];
+    const UTIL_TARGETS: [&str; 2] = ["mesa3d-linklib-mesautil", "mesa3d-linklib-mesadevutil"];
     if relative_dir != Path::new(DIR) || profile(target)?.is_none() {
         return Ok(None);
     }
     verify_mesa_fetch(fetches)?;
     let pyyaml = verified_pyyaml_package(fetches)?;
-    for mmake in CONSUMERS {
+    for mmake in UTIL_TARGETS {
         let matches = targets
             .iter()
             .filter(|candidate| candidate.mmake_name == mmake)
@@ -1102,7 +1072,15 @@ pub(crate) fn parse_mesautil(
         local_patch_files: vec![
             "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.0.0-aros.diff".to_owned(),
         ],
-        consumers: CONSUMERS.map(str::to_owned).to_vec(),
+        // The compiler's glsl_types source includes u_format_gen.h through
+        // util/format/u_format.h. It is declared in a different mmakefile, so
+        // validate this reference against the complete selected graph rather
+        // than requiring it among this file's audited utility declarations.
+        consumers: UTIL_TARGETS
+            .into_iter()
+            .chain(["mesa3d-linklib-compiler"])
+            .map(str::to_owned)
+            .collect(),
         dir_path: relative_dir.to_path_buf(),
     }))
 }

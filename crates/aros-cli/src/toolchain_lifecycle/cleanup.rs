@@ -1447,7 +1447,7 @@ mod tests {
         removal_journal_path, BuildLeaseReceipt, LifecycleOperation, RemovalJournal, LEASE_SCHEMA,
         REMOVAL_SCHEMA,
     };
-    use crate::toolchain::{ResolvedToolchain, ToolchainPaths, ToolchainSource};
+    use crate::toolchain::{get_toolchain_paths, ResolvedToolchain, ToolchainSource};
     use aros_common::{
         sha256_bytes, toolchain_tree_inventory, AdvisoryFileLock, ArosToolchainArtifact,
         ArosToolchainLock, ArosToolchainManifest, AROS_TOOLCHAIN_MANIFEST_FILE,
@@ -1474,6 +1474,7 @@ mod tests {
             target_triple: "x86_64-unknown-aros".into(),
             tree_sha256: tree_sha256.clone(),
             llvm_version: Some("11.0.0".into()),
+            compiler: None,
             recipe_sha256: "b".repeat(64),
             source_lock_sha256: "c".repeat(64),
             profiles_sha256: "d".repeat(64),
@@ -1511,16 +1512,7 @@ mod tests {
     fn resolved_locked(root: &Path, release_id: &str) -> ResolvedToolchain {
         let root = root.to_path_buf();
         ResolvedToolchain {
-            paths: ToolchainPaths {
-                clang: root.join("bin/clang"),
-                clangxx: root.join("bin/clang++"),
-                lld: root.join("bin/ld.lld"),
-                llvm_ar: root.join("bin/llvm-ar"),
-                aros_collect: root.join("bin/aros-collect"),
-                collect_aros: root.join("bin/collect-aros"),
-                collect_aros32: root.join("bin/collect-aros32"),
-                root,
-            },
+            paths: get_toolchain_paths(&root),
             target_triple: "x86_64-unknown-aros".to_owned(),
             release_id: Some(release_id.to_owned()),
             source: ToolchainSource::LockedRelease,
@@ -1738,6 +1730,7 @@ mod tests {
                 sha256: "a".repeat(64),
                 tree_sha256: "b".repeat(64),
                 llvm_version: Some("11.0.0".to_owned()),
+                compiler: None,
                 size: Some(1),
                 enabled: true,
                 disabled_reason: None,

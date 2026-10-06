@@ -4,7 +4,7 @@
 //! handler here owns the validation and orchestration for one command family.
 
 use super::{
-    artifact, board, boot, build, cache, golden, host_compiler, observability, repo, source,
+    artifact, board, boot, build, cache, golden, host_compiler, image, observability, repo, source,
     toolchain, BoardCommand, BoardProfileSelection, BuildCompilerCache, BuildToolsCommand,
     CacheArchivesCommand, CacheCargoCommand, CacheCommand, CacheCompilerBackend,
     CacheCompilerCommand, CacheGenmfCommand, CacheSourcesCommand, Commands, GoldenAction,
@@ -73,6 +73,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             toolchain_command(required_repo(repo_root)?, command).await
         }
         Commands::Board { command } => board_command(command, repo_root).await,
+        Commands::Image { command } => image::run(command),
         Commands::Source { command } => source_command(command, repo_root),
         Commands::Install { source_bin, prefix } => install_suite(source_bin, prefix),
         Commands::Build {
@@ -126,16 +127,22 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             timeout,
             packages,
             modules,
+            iso,
+            require_llvmpipe_jit,
             evidence,
             memory,
         } => test(
             required_repo(repo_root)?,
-            &preset,
-            timeout,
-            packages,
-            modules,
-            evidence,
-            memory,
+            TestOptions {
+                preset,
+                timeout,
+                packages,
+                modules,
+                iso,
+                require_llvmpipe_jit,
+                evidence,
+                memory,
+            },
         ),
         Commands::Cache { command } => cache_command(command).await,
         Commands::Golden { action } => golden_command(action, required_repo(repo_root)?),
@@ -544,7 +551,7 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
         } => crate::board::initialize_template(
             config.as_deref(),
             &profile,
-            model.into(),
+            model,
             transport.map(Into::into),
             apply,
         ),
@@ -715,17 +722,37 @@ fn clean(repo_root: &Path, preset: Option<String>, all: bool, dry_run: bool) -> 
     Ok(())
 }
 
-fn test(
-    repo_root: &Path,
-    preset: &str,
+struct TestOptions {
+    preset: String,
     timeout: u64,
     packages: bool,
     modules: Vec<PathBuf>,
+    iso: Option<PathBuf>,
+    require_llvmpipe_jit: bool,
     evidence: Option<PathBuf>,
     memory: u32,
-) -> Result<()> {
-    let build_dir = build::build_dir(repo_root, preset)?;
-    if !build_dir.is_dir() {
+}
+
+fn test(repo_root: &Path, options: TestOptions) -> Result<()> {
+    let TestOptions {
+        preset,
+        timeout,
+        packages,
+        modules,
+        iso,
+        require_llvmpipe_jit,
+        evidence,
+        memory,
+    } = options;
+    validate_test_mode(
+        &preset,
+        packages,
+        &modules,
+        iso.is_some(),
+        require_llvmpipe_jit,
+    )?;
+    let build_dir = build::build_dir(repo_root, &preset)?;
+    if iso.is_none() && !build_dir.is_dir() {
         miette::bail!(
             "no build directory at {} -- configure and build the preset first",
             build_dir.display()
@@ -772,16 +799,31 @@ fn test(
     let request = boot::BootRequest {
         build_dir,
         modules: module_list,
+        iso_image: iso,
+        require_llvmpipe_jit,
         seconds: timeout,
         evidence,
         memory_mb: memory,
     };
-    aros_common::outputln!(
-        "Booting [{}] with {} multiboot module(s) for {}s...",
-        style(&preset).yellow().bold(),
-        request.modules.len() + 1,
-        timeout
-    );
+    if request.iso_image.is_some() {
+        aros_common::outputln!(
+            "Booting [{}] from ISO{} for {}s...",
+            style(&preset).yellow().bold(),
+            if require_llvmpipe_jit {
+                " with required llvmpipe LLVM 11 JIT proof"
+            } else {
+                ""
+            },
+            timeout
+        );
+    } else {
+        aros_common::outputln!(
+            "Booting [{}] with {} multiboot module(s) for {}s...",
+            style(&preset).yellow().bold(),
+            request.modules.len() + 1,
+            timeout
+        );
+    }
 
     let mut report = boot::check(&request)?;
     for dir in missing_packages {
@@ -791,16 +833,42 @@ fn test(
     }
     aros_common::output!("{}", boot::render(&report));
     if report.is_success() {
-        aros_common::outputln!(
-            "{CHECK} {}the boot reached a positive milestone without a failure or exception.",
-            style("PASS: ").green().bold()
-        );
+        if request.require_llvmpipe_jit {
+            aros_common::outputln!(
+                "{CHECK} {}the ISO boot produced the required llvmpipe LLVM 11 JIT proof without a classified guest failure or exception.",
+                style("PASS: ").green().bold()
+            );
+        } else {
+            aros_common::outputln!(
+                "{CHECK} {}the boot reached a positive milestone without a failure or exception.",
+                style("PASS: ").green().bold()
+            );
+        }
         Ok(())
     } else {
         miette::bail!(
             "the boot did not come up clean; every finding above is read from the retained logs, not inferred"
         );
     }
+}
+
+fn validate_test_mode(
+    preset: &str,
+    packages: bool,
+    modules: &[PathBuf],
+    has_iso: bool,
+    require_llvmpipe_jit: bool,
+) -> Result<()> {
+    if require_llvmpipe_jit && !has_iso {
+        miette::bail!("--require-llvmpipe-jit requires --iso PATH");
+    }
+    if has_iso && (packages || !modules.is_empty()) {
+        miette::bail!("--iso cannot be combined with --packages or --module");
+    }
+    if (has_iso || require_llvmpipe_jit) && preset != "pc-x86_64" {
+        miette::bail!("ISO boot and llvmpipe JIT proof are supported only for preset pc-x86_64");
+    }
+    Ok(())
 }
 
 fn golden_command(action: GoldenAction, repo_root: &Path) -> Result<()> {
@@ -1206,21 +1274,71 @@ fn load_board(selection: &BoardProfileSelection) -> Result<board::config::Board>
 
 #[cfg(test)]
 mod tests {
-    use super::test;
+    use super::{test, validate_test_mode, TestOptions};
+    use std::path::PathBuf;
 
     #[test]
     fn boot_test_rejects_a_preset_path_before_reading_a_build_tree() {
         let checkout = tempfile::tempdir().expect("temporary checkout");
         let error = test(
             checkout.path(),
-            "../outside",
-            1,
-            false,
-            Vec::new(),
-            None,
-            64,
+            TestOptions {
+                preset: "../outside".to_owned(),
+                timeout: 1,
+                packages: false,
+                modules: Vec::new(),
+                iso: None,
+                require_llvmpipe_jit: false,
+                evidence: None,
+                memory: 64,
+            },
         )
         .expect_err("preset path must fail before build-tree access");
         assert!(error.to_string().contains("Invalid CMake preset"));
+    }
+
+    #[test]
+    fn iso_and_jit_modes_are_limited_to_pc_x86_64() {
+        let checkout = tempfile::tempdir().unwrap();
+        let error = test(
+            checkout.path(),
+            TestOptions {
+                preset: "rpi-aarch64".to_owned(),
+                timeout: 1,
+                packages: false,
+                modules: Vec::new(),
+                iso: Some(PathBuf::from("boot.iso")),
+                require_llvmpipe_jit: false,
+                evidence: None,
+                memory: 64,
+            },
+        )
+        .expect_err("unsupported preset must be rejected before accessing a build tree or ISO");
+        assert!(error.to_string().contains("only for preset pc-x86_64"));
+
+        assert!(validate_test_mode("pc-x86_64", false, &[], true, true).is_ok());
+        assert!(validate_test_mode("rpi-aarch64", false, &[], true, true).is_err());
+    }
+
+    #[test]
+    fn direct_mode_keeps_the_existing_multiboot_module_policy() {
+        assert!(validate_test_mode(
+            "rpi-aarch64",
+            true,
+            &[PathBuf::from("package.pkg")],
+            false,
+            false,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn iso_mode_rejects_module_inputs_and_jit_without_an_iso() {
+        assert!(validate_test_mode("pc-x86_64", true, &[], true, false).is_err());
+        assert!(
+            validate_test_mode("pc-x86_64", false, &[PathBuf::from("module")], true, false,)
+                .is_err()
+        );
+        assert!(validate_test_mode("pc-x86_64", false, &[], false, true).is_err());
     }
 }

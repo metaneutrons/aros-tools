@@ -50,6 +50,12 @@ declarations; it does not fill them in.
 uses the engine embedded in the tools, even if the source checkout contains
 another CMake directory.
 
+The default build follows MetaMake's `AROS` dependency closure. A source tree
+may declare alternative modules with the same runtime name: only the selected
+provider writes that SYS path. Unselected alternatives remain explicit targets
+with private outputs under `gen/manual-modules/`. Two selected providers for
+one runtime path are a configuration error, not a last-writer-wins choice.
+
 ## Check a PC boot
 
 Install `qemu-system-x86_64` first, then run:
@@ -69,21 +75,34 @@ for physical targets.
 
 ## Create a BIOS-bootable PC ISO
 
-After building the `pc-x86_64` system tree, install `mkisofs` (or
-`genisoimage`) and run:
+Install `xorriso` and run from a clean AROS checkout:
 
 ```sh
-aros build --preset pc-x86_64 --target boot-iso
+CMAKE_BUILD_PARALLEL_LEVEL=4 AROS_LLVMPIPE_RUNTIME_PROBE=0 \
+  aros build --preset pc-x86_64 --target boot-iso --jobs 4 --compiler-cache off
 ```
 
-The image is `build/pc-x86_64/aros-x86_64-pc.iso`. This target verifies that
-the existing bootstrap and kernel modules are present, stages GRUB, and checks
-the El Torito boot catalog before replacing the image. It does not rebuild
-existing AROS packages or qualify an AROS desktop boot. The current image is
-BIOS-bootable; UEFI boot is not claimed.
+The `boot-iso` target depends on the native `AROS` SYS producer and the
+audited GRUB host assets. It stages their output, verifies the required
+bootstrap and kernel modules, records the complete staged tree in
+`build/pc-x86_64/media-build-receipt.json`, and verifies the El Torito catalog
+before publishing `build/pc-x86_64/aros-x86_64-pc.iso`. A successful build
+does not establish that the ISO boots. UEFI boot is not claimed.
 
-`aros test` is a separate direct-kernel check. To inspect the ISO's video path,
-boot the image as a CD in QEMU with an emulated VGA device.
+Test the generated ISO through BIOS/GRUB rather than the direct-kernel loader:
+
+```sh
+aros test --preset pc-x86_64 --iso build/pc-x86_64/aros-x86_64-pc.iso \
+  --timeout 45 --memory 1024 --evidence build/pc-x86_64/iso-check
+```
+
+The CLI boots a verified, read-only ISO snapshot and retains its digest and
+serial/exception logs. ISO mode rejects `--packages` and
+`--module`; without `--iso`, `aros test` remains the direct-kernel check.
+The fresh native build and QEMU user-mode boot were qualified on macOS ARM64;
+see the [exact inputs and ISO evidence](https://github.com/metaneutrons/aros-tools/blob/main/docs/qualifications/bm3-pc-bios.md).
+For the separate experimental GLSL/JIT proof, see
+[native llvmpipe development](/aros-tools/contributing/development/#exercise-the-native-pc-llvmpipe-path).
 
 ## Rebuild or synchronize
 

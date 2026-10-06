@@ -22,10 +22,16 @@ macro_rules! outputln {
 }
 
 pub mod arch;
+pub mod board_registry;
 pub mod diagnostic;
 pub mod digest;
 pub mod elf;
 pub mod error;
+pub mod media_input_lock;
+pub mod media_plan;
+pub mod media_profile;
+pub mod media_receipt;
+pub mod media_tree;
 pub mod observability;
 pub mod pins;
 pub mod process;
@@ -34,6 +40,7 @@ pub mod target;
 pub mod text;
 pub mod toolchain;
 pub mod toolchain_inventory;
+pub mod toolchain_layout;
 pub mod toolchain_manifest;
 
 pub use arch::Architecture;
@@ -80,7 +87,8 @@ pub use toolchain_inventory::{
     toolchain_tree_inventory_excluding, ToolchainInventoryError,
 };
 pub use toolchain_manifest::{
-    parse_credential_free_https_url, ArosToolchainArtifact, ArosToolchainLock,
-    ArosToolchainManifest, ArosToolchainManifestEntry, AROS_TOOLCHAIN_MANIFEST_FILE,
-    AROS_TOOLCHAIN_MANIFEST_SCHEMA,
+    parse_credential_free_https_url, validate_gnu_compiler_versions, ArosCompilerIdentity,
+    ArosToolchainArtifact, ArosToolchainLock, ArosToolchainManifest, ArosToolchainManifestEntry,
+    AROS_TOOLCHAIN_LOCK_SCHEMA, AROS_TOOLCHAIN_LOCK_SCHEMA_V2, AROS_TOOLCHAIN_MANIFEST_FILE,
+    AROS_TOOLCHAIN_MANIFEST_SCHEMA, AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2,
 };

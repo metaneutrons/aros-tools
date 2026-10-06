@@ -35,6 +35,20 @@ directory. The AROS source is an input to that engine, not its installation
 location. `--engine-dir` is the explicit development override. A nearby or
 checkout-owned engine is not selected automatically.
 
+Architecture-source overrides retain declaration-local compile flags and
+`incextra` paths from MetaMake. An explicit `incextra` is searched first for
+quoted headers of that declaration's sources; it does not change angle-bracket
+lookup or unrelated sources. Ordinary quote paths remain specific to each
+consuming target, including when targets share a source file. Unresolvable or
+conflicting explicit paths fail instead of silently using the default.
+
+Python-generated outputs declare their compile consumers explicitly. Consumers
+may live in a different MetaMake file: the transpiler validates their references
+against the complete parsed graph. CMake then checks the actual compile targets
+for the selected profile and binds the consumers after target creation. Missing
+or noncompiling consumers fail instead of silently losing the dependency. The
+engine does not scan arbitrary source headers to infer these ordering contracts.
+
 ## Process and publication boundaries
 
 `aros` resolves the complete installed tool suite from one directory, then

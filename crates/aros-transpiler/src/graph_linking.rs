@@ -39,15 +39,26 @@ impl DependencyGraph {
     pub fn resolve_use_libs(&mut self) -> Vec<String> {
         // A sourceful module may request relative libraries from its .conf
         // even though the `%build_module` invocation has no `uselibs=` text.
-        // Enable only those full-module providers required by an already
-        // enabled declaration (z1 is the first production case), and only
+        // Consumer requirements are independent of client-archive production:
+        // datatypes and devices may also declare `rellib` in their config.
+        // Enable only those full-module providers required by a declaration, and only
         // when every explicit linklib input was modelled exactly.
         let required_relative: std::collections::HashSet<String> = self
             .targets
             .values()
-            .filter_map(|target| target.genmodule_linklibs.as_ref())
-            .filter(|metadata| metadata.enabled)
-            .flat_map(|metadata| metadata.relative_libraries.iter().cloned())
+            .flat_map(|target| {
+                target
+                    .config_relative_libraries
+                    .iter()
+                    .chain(
+                        target
+                            .genmodule_linklibs
+                            .iter()
+                            .filter(|metadata| metadata.enabled)
+                            .flat_map(|metadata| metadata.relative_libraries.iter()),
+                    )
+                    .cloned()
+            })
             .collect();
         for target in self.targets.values_mut() {
             if target.module_type != ModuleType::Library
@@ -151,6 +162,12 @@ impl DependencyGraph {
         for (mmake, target) in &self.targets {
             let mut ids = Vec::new();
             let mut requested = target.use_libs.clone();
+            requested.extend(
+                target
+                    .config_relative_libraries
+                    .iter()
+                    .map(|name| format!("{name}_rel")),
+            );
             if let Some(metadata) = target
                 .genmodule_linklibs
                 .as_ref()

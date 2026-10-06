@@ -16,6 +16,7 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt as _};
 
+use aros_common::toolchain_layout::TOOLCHAIN_TOOLS_FILE;
 use aros_common::{
     finish_sha256, open_regular_file_nofollow, payload_casefold_path_key, sha256_reader,
     toolchain_inventory_sha256, ArosToolchainManifest, ArosToolchainManifestEntry, Sha256Digest,
@@ -25,9 +26,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use xz2::read::XzDecoder;
 
-use crate::package::{canonical_asset_name, spdx_bytes, validate_link_target};
+use crate::package::{spdx_bytes, validate_link_target};
 use crate::profiles::Profile;
-use crate::source_lock::SourceLock;
+use crate::source_lock::{CompilerFamily, SourceLock};
 use crate::{ContractError, Recipe};
 
 const ARCHIVE_ROOT: &str = "toolchain";
@@ -36,6 +37,7 @@ const MAX_ARCHIVE_ENTRIES: u64 = 500_000;
 const MAX_EXPANDED_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_XZ_DECODER_MEMORY: u64 = 512 * 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_TOOLCHAIN_TOOLS_BYTES: u64 = 16 * 1024;
 const SCAN_BUFFER_BYTES: usize = 128 * 1024;
 
 /// Closed expected identity for one package-set read-back verification.
@@ -105,11 +107,8 @@ impl PackageAssetPaths {
 /// or an inconsistent manifest, checksum, or SPDX document.
 pub fn verify(request: &PackageVerificationRequest) -> Result<VerifiedPackage, ContractError> {
     validate_request(request)?;
-    let asset = canonical_asset_name(
-        request.source_lock.version(),
-        &request.host,
-        request.profile.name(),
-    )?;
+    let asset =
+        crate::package_identity::asset_name(&request.source_lock, &request.profile, &request.host)?;
     let paths = PackageAssetPaths::for_asset(&request.package_dir, &asset);
     let expected_members = [
         asset.clone(),
@@ -157,7 +156,9 @@ fn verify_members_validated(
     let manifest: ArosToolchainManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|_| ContractError::verification("external package manifest is not valid JSON"))?;
     manifest.validate().map_err(|_| {
-        ContractError::verification("external package manifest violates the v1 contract")
+        ContractError::verification(
+            "external package manifest violates its compiler-family contract",
+        )
     })?;
     verify_manifest_identity(&manifest, request)?;
     let expected_sbom = spdx_bytes(&request.source_lock, &manifest)?;
@@ -180,6 +181,23 @@ fn verify_members_validated(
             "package archive payload inventory does not match its manifest",
         ));
     }
+    if request.source_lock.family() == CompilerFamily::Gnu {
+        let compiler = manifest.compiler.as_ref().ok_or_else(|| {
+            ContractError::verification("GNU package manifest omits its compiler identity")
+        })?;
+        let toolchain_tools = archive_result.toolchain_tools.as_deref().ok_or_else(|| {
+            ContractError::verification("GNU package archive omits its toolchain tools contract")
+        })?;
+        crate::package_layout::validate_archive(
+            toolchain_tools,
+            compiler,
+            &manifest.target_triple,
+            &archive_result.entries,
+        )
+        .map_err(|error| {
+            ContractError::verification(format!("GNU package tool layout is invalid: {error}"))
+        })?;
+    }
     Ok(VerifiedPackage {
         manifest,
         archive_sha256,
@@ -188,6 +206,14 @@ fn verify_members_validated(
 }
 
 fn validate_request(request: &PackageVerificationRequest) -> Result<(), ContractError> {
+    crate::package_identity::compiler_identity(&request.source_lock, &request.profile)
+        .map_err(|error| ContractError::verification(error.to_string()))?;
+    crate::package_identity::require_gnu_recipe_binding(
+        &request.recipe,
+        &request.source_lock,
+        &request.profile,
+    )
+    .map_err(|error| ContractError::verification(error.to_string()))?;
     if !request.package_dir.is_absolute() {
         return Err(ContractError::verification(
             "package verification directory must be absolute",
@@ -307,7 +333,6 @@ fn verify_manifest_identity(
         &request.host,
         request.profile.name(),
         request.profile.target_triple(),
-        request.source_lock.version(),
         request.recipe.sha256().as_str(),
         request.recipe.source_lock_sha256().as_str(),
         request.recipe.profiles_sha256().as_str(),
@@ -321,7 +346,6 @@ fn verify_manifest_identity(
         &manifest.host,
         manifest.target_profile.as_str(),
         manifest.target_triple.as_str(),
-        manifest.llvm_version.as_deref().unwrap_or_default(),
         manifest.recipe_sha256.as_str(),
         manifest.source_lock_sha256.as_str(),
         manifest.profiles_sha256.as_str(),
@@ -330,7 +354,17 @@ fn verify_manifest_identity(
         manifest.tools_commit.as_str(),
         manifest.source_date_epoch,
     );
+    let expected_schema = if request.source_lock.family() == CompilerFamily::Gnu {
+        aros_common::AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2
+    } else {
+        aros_common::AROS_TOOLCHAIN_MANIFEST_SCHEMA
+    };
     if actual != expected
+        || manifest.schema != expected_schema
+        || manifest
+            .compiler_identity()
+            .map_err(ContractError::verification)?
+            != crate::package_identity::compiler_identity(&request.source_lock, &request.profile)?
         || manifest.capabilities != request.profile.capabilities()
         || manifest.build_environment != request.build_environment
     {
@@ -345,6 +379,7 @@ struct ArchiveTree {
     embedded_manifest: Vec<u8>,
     entries: Vec<ArosToolchainManifestEntry>,
     tree_sha256: String,
+    toolchain_tools: Option<Vec<u8>>,
 }
 
 fn verify_archive_tree(
@@ -391,6 +426,7 @@ fn scan_archive<C: ArchiveConsumer>(
     let mut seen = BTreeSet::new();
     let mut previous = None;
     let mut embedded_manifest = None;
+    let mut toolchain_tools = None;
     let mut budget = ArchiveBudget::default();
     for (index, entry) in archive
         .entries()
@@ -492,8 +528,30 @@ fn scan_archive<C: ArchiveConsumer>(
                         ContractError::verification("package tar entry has an invalid mode")
                     })?;
                     let mode = if mode & 0o111 == 0 { "0644" } else { "0755" };
-                    let sha256 =
-                        consumer.regular(&relative, mode, &mut entry, size, forbidden_prefixes)?;
+                    let sha256 = if matches!(
+                        manifest.compiler,
+                        Some(aros_common::ArosCompilerIdentity::Gnu { .. })
+                    ) && relative == Path::new(TOOLCHAIN_TOOLS_FILE)
+                    {
+                        if size > MAX_TOOLCHAIN_TOOLS_BYTES || toolchain_tools.is_some() {
+                            return Err(ContractError::verification(
+                                "package tar toolchain tools contract is duplicated or too large",
+                            ));
+                        }
+                        let bytes = read_exact_entry(&mut entry, size)?;
+                        let mut cursor = io::Cursor::new(bytes.as_slice());
+                        let sha256 = consumer.regular(
+                            &relative,
+                            mode,
+                            &mut cursor,
+                            size,
+                            forbidden_prefixes,
+                        )?;
+                        toolchain_tools = Some(bytes);
+                        sha256
+                    } else {
+                        consumer.regular(&relative, mode, &mut entry, size, forbidden_prefixes)?
+                    };
                     entries.push(ArosToolchainManifestEntry {
                         path: relative_text,
                         mode: mode.into(),
@@ -522,6 +580,7 @@ fn scan_archive<C: ArchiveConsumer>(
         embedded_manifest,
         entries,
         tree_sha256,
+        toolchain_tools,
     })
 }
 

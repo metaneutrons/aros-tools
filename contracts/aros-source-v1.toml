@@ -8,3 +8,9 @@ commit = "15230bef9d23e12cd9d4cca62253c4b62276e8ff"
 repository = "metaneutrons/aros-toolchains"
 commit = "f35ecea2918c8c8314bf6878b4401af6ae45132d"
 workflow = ".github/workflows/toolchain-release.yml"
+
+# Current tools integration input. The producer above deliberately retains the
+# source identity of its independently qualified toolchain release.
+[integration]
+repository = "metaneutrons/AROS-NX"
+commit = "0cae0b0116b6246b2175c3b8b97719a81f40dcfd"

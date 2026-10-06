@@ -1244,19 +1244,23 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
             "{cpu}: {:#?}",
             parsed.skipped_copy_includes
         );
-        assert_eq!(parsed.fetches.len(), 3, "{cpu}");
+        assert_eq!(parsed.fetches.len(), 4, "{cpu}");
         let fetch = parsed
             .fetches
             .iter()
             .find(|fetch| fetch.name == "mesa3d-fetch")
             .unwrap();
         assert_eq!(fetch.name, "mesa3d-fetch");
-        assert_eq!(fetch.archive, "mesa-20.0.8");
-        assert_eq!(fetch.suffixes, "tar.xz tar.gz");
+        assert_eq!(fetch.archive, "mesa-26.0.0");
+        assert_eq!(fetch.suffixes, "tar.xz");
+        assert_eq!(
+            fetch.checksums,
+            "mesa-26.0.0.tar.xz=sha256:2a44e98e64d5c36cec64633de2d0ec7eff64703ee25b35364ba8fcaa84f33f72"
+        );
         assert_eq!(fetch.destination, "${AROS_PORTS_DIR}/mesa");
         assert_eq!(fetch.location, "${AROS_PORTS_SOURCE_DIR}");
-        assert!(fetch.origins.ends_with("older-versions/20.x"));
-        assert_eq!(fetch.patches, "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1");
+        assert!(fetch.origins.ends_with("older-versions/26.x"));
+        assert_eq!(fetch.patches, "mesa-26.0.0-aros.diff:mesa-26.0.0:-p1");
         for (name, archive, origin) in [
                 (
                     "mesa3d-mako-fetch",
@@ -1282,7 +1286,22 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
                 assert_eq!(package.patches, "::");
             }
 
-        assert_eq!(parsed.copy_includes.len(), 4, "{cpu}");
+        let pyyaml = parsed
+            .fetches
+            .iter()
+            .find(|fetch| fetch.name == "mesa3d-pyyaml-fetch")
+            .unwrap();
+        assert_eq!(pyyaml.archive, "pyyaml-6.0.3");
+        assert_eq!(pyyaml.suffixes, "tar.gz");
+        assert_eq!(
+            pyyaml.checksums,
+            "pyyaml-6.0.3.tar.gz=sha256:d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f"
+        );
+        assert_eq!(pyyaml.destination, "${AROS_PORTS_DIR}/mesa-python");
+        assert_eq!(pyyaml.location, "${AROS_PORTS_SOURCE_DIR}");
+        assert_eq!(pyyaml.patches, "::");
+
+        assert_eq!(parsed.copy_includes.len(), 5, "{cpu}");
         assert!(parsed
             .copy_includes
             .iter()
@@ -1309,16 +1328,33 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
             ["vulkan.h", "vulkan_core.h", "vk_icd.h", "vk_platform.h"]
         );
         assert_eq!(
+            headers["vk_video"],
+            [
+                "vulkan_video_codecs_common.h",
+                "vulkan_video_codec_h264std.h",
+                "vulkan_video_codec_h264std_decode.h",
+                "vulkan_video_codec_h264std_encode.h",
+                "vulkan_video_codec_h265std.h",
+                "vulkan_video_codec_h265std_decode.h",
+                "vulkan_video_codec_h265std_encode.h",
+                "vulkan_video_codec_av1std.h",
+                "vulkan_video_codec_av1std_decode.h",
+                "vulkan_video_codec_av1std_encode.h",
+                "vulkan_video_codec_vp9std.h",
+                "vulkan_video_codec_vp9std_decode.h"
+            ]
+        );
+        assert_eq!(
             parsed
                 .copy_includes
                 .iter()
                 .map(|copy| copy.patterns.len())
                 .sum::<usize>(),
-            12
+            24
         );
         assert!(parsed.copy_includes.iter().all(|copy| copy
             .source_dir
-            .starts_with("${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/")));
+            .starts_with("${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include/")));
     }
 }
 
@@ -2299,7 +2335,7 @@ fn relative_zlib_dependencies_have_exact_full_module_archive_inputs() {
     let root = root();
     let dirs = dirs();
     for (relative, mmake, source_count, object_count) in [
-        ("compiler/crt/posixc/mmakefile.src", "compiler-posixc", 8, 1),
+        ("compiler/crt/posixc/mmakefile.src", "compiler-posixc", 9, 1),
         ("compiler/crt/stdc/mmakefile.src", "compiler-stdc", 9, 13),
     ] {
         let parsed = super::parse_mmakefile_with_dirs_and_context(
@@ -2612,6 +2648,39 @@ fn every_library_module_materialises_its_client_archive() {
 }
 
 #[test]
+fn explicit_noincludes_config_preserves_the_library_getlibbase_archive() {
+    let tree = TempTree::new();
+    let module = tree.0.join("rom/thing");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("thing.c"), "").unwrap();
+    fs::write(
+        module.join("private.conf"),
+        "##begin config\nbasename Private\noptions noincludes, nostubs, noautoinit\n##end config\n",
+    )
+    .unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=kernel-thing modname=thing modtype=library conffile=private.conf files=thing\n",
+    )
+    .unwrap();
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &target_context("x86_64", "pc", ""),
+    )
+    .unwrap();
+    assert!(
+        parsed.targets[0]
+            .genmodule_linklibs
+            .as_ref()
+            .unwrap()
+            .enabled
+    );
+}
+
+#[test]
 fn non_library_module_needing_a_client_archive_is_reported() {
     let tree = TempTree::new();
     let module = tree.0.join("rom/clock");
@@ -2643,6 +2712,138 @@ fn non_library_module_needing_a_client_archive_is_reported() {
     assert!(parsed.targets[0].genmodule_linklibs.is_none());
     assert_eq!(parsed.skipped_client_archives.len(), 1, "{parsed:#?}");
     assert!(parsed.skipped_client_archives[0].contains("libclock.a"));
+}
+
+#[test]
+fn non_library_module_preserves_rellibs_from_explicit_config_and_override() {
+    let tree = TempTree::new();
+    let module = tree.0.join("workbench/classes/datatypes/png");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("pngclass.c"), "").unwrap();
+    fs::write(
+        module.join("pngdt.conf"),
+        "##begin config\nbasename PNGDT\nrellib png\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        module.join("pngdt.override"),
+        "##begin config\nrellib z1\n##end config\n",
+    )
+    .unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=workbench-datatypes-png modname=png modtype=datatype \
+         conffile=pngdt.conf confoverride=pngdt.override files=pngclass\n",
+    )
+    .unwrap();
+
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &target_context("x86_64", "pc", ""),
+    )
+    .unwrap();
+    let target = parsed
+        .targets
+        .iter()
+        .find(|target| target.mmake_name == "workbench-datatypes-png")
+        .expect("datatype module");
+
+    assert_eq!(
+        target.config_relative_libraries,
+        ["png", "z1"],
+        "the effective config includes both conffile and confoverride"
+    );
+    assert_eq!(
+        target.config_file.as_deref(),
+        Some("${AROS_SOURCE_DIR}/workbench/classes/datatypes/png/pngdt.conf")
+    );
+    assert_eq!(
+        target.config_override_file.as_deref(),
+        Some("${AROS_SOURCE_DIR}/workbench/classes/datatypes/png/pngdt.override")
+    );
+    assert!(target.genmodule_linklibs.is_none());
+    assert!(parsed.skipped_client_archives.is_empty(), "{parsed:#?}");
+}
+
+#[test]
+fn default_module_configs_merge_rellibs_from_confoverride() {
+    let tree = TempTree::new();
+    let datatype_dir = tree.0.join("workbench/classes/datatypes/png");
+    let library_dir = tree.0.join("workbench/libs/png");
+    fs::create_dir_all(&datatype_dir).unwrap();
+    fs::create_dir_all(&library_dir).unwrap();
+
+    fs::write(datatype_dir.join("pngclass.c"), "").unwrap();
+    fs::write(
+        datatype_dir.join("png.conf"),
+        "##begin config\nbasename PNGDT\nrellib png\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        datatype_dir.join("png.override"),
+        "##begin config\nrellib z1\n##end config\n",
+    )
+    .unwrap();
+    let datatype_mmake = datatype_dir.join("mmakefile.src");
+    fs::write(
+        &datatype_mmake,
+        "%build_module mmake=workbench-datatypes-png modname=png modtype=datatype \
+         confoverride=png.override files=pngclass\n",
+    )
+    .unwrap();
+
+    fs::write(library_dir.join("png.c"), "").unwrap();
+    fs::write(
+        library_dir.join("png.conf"),
+        "##begin config\nbasename Png\noptions rellinklib\nrellib posixc\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        library_dir.join("png.override"),
+        "##begin config\nrellib stdc\n##end config\n",
+    )
+    .unwrap();
+    let library_mmake = library_dir.join("mmakefile.src");
+    fs::write(
+        &library_mmake,
+        "%build_module mmake=workbench-libs-png modname=png modtype=library \
+         confoverride=png.override files=png\n",
+    )
+    .unwrap();
+
+    let dirs = DirVars::load(&tree.0);
+    let context = target_context("x86_64", "pc", "");
+    let datatype =
+        super::parse_mmakefile_with_dirs_and_context(&datatype_mmake, &tree.0, &dirs, &context)
+            .unwrap();
+    let datatype = datatype
+        .targets
+        .into_iter()
+        .find(|target| target.mmake_name == "workbench-datatypes-png")
+        .expect("datatype module using default png.conf");
+    assert_eq!(datatype.config_file, None);
+    assert_eq!(datatype.config_relative_libraries, ["png", "z1"]);
+    assert!(datatype.genmodule_linklibs.is_none());
+
+    let library =
+        super::parse_mmakefile_with_dirs_and_context(&library_mmake, &tree.0, &dirs, &context)
+            .unwrap();
+    let library = library
+        .targets
+        .into_iter()
+        .find(|target| target.mmake_name == "workbench-libs-png")
+        .expect("library module using default png.conf");
+    assert_eq!(library.config_file, None);
+    assert_eq!(library.config_relative_libraries, ["posixc", "stdc"]);
+    let metadata = library
+        .genmodule_linklibs
+        .as_ref()
+        .expect("library client-link metadata");
+    assert!(metadata.enabled && metadata.has_relative && metadata.inputs_exact);
+    assert_eq!(metadata.relative_libraries, ["posixc", "stdc"]);
 }
 
 #[test]
@@ -2758,7 +2959,7 @@ fn module_suffix_override_is_separate_from_declared_type() {
 }
 
 #[test]
-fn real_tree_retains_exactly_four_abi_skeletons_and_zero_source_version() {
+fn real_tree_retains_exactly_three_abi_skeletons_and_zero_source_version() {
     let root = root();
     let dirs = dirs();
     let skip_dirs = ["build", "target", ".git"];
@@ -2780,7 +2981,7 @@ fn real_tree_retains_exactly_four_abi_skeletons_and_zero_source_version() {
                 .count()
         })
         .sum::<usize>();
-    assert_eq!(abi_invocations, 4);
+    assert_eq!(abi_invocations, 3);
 
     let abi_files = [
         (
@@ -2792,11 +2993,6 @@ fn real_tree_retains_exactly_four_abi_skeletons_and_zero_source_version() {
             "rom/usb/classes/mmakefile.src",
             "kernel-usb-usbclass",
             "usbclass",
-        ),
-        (
-            "rom/usb/classes/arosx/include/mmakefile.src",
-            "kernel-usb-classes-arosx-library",
-            "arosx",
         ),
         (
             "workbench/libs/dxtn/mmakefile.src",
@@ -2839,6 +3035,27 @@ fn real_tree_retains_exactly_four_abi_skeletons_and_zero_source_version() {
                 .as_str()
             ));
     }
+
+    let arosx = super::parse_mmakefile_with_dirs(
+        &root.join("rom/usb/classes/arosx/mmakefile.src"),
+        &root,
+        &dirs,
+    )
+    .unwrap();
+    let arosx_class = arosx
+        .targets
+        .iter()
+        .find(|target| target.mmake_name == "kernel-usb-classes-arosx")
+        .expect("arosx.class must remain a sourceful USB class");
+    assert_eq!(arosx_class.target_name, "arosx");
+    assert_eq!(arosx_class.module_type, ModuleType::Custom);
+    assert_eq!(arosx_class.declared_mod_type.as_deref(), Some("usbclass"));
+    assert_eq!(arosx_class.mod_suffix.as_deref(), Some("class"));
+    assert!(!arosx_class.genmodule_only);
+    assert!(!arosx_class.source_files.is_empty());
+    assert!(!root
+        .join("rom/usb/classes/arosx/include/mmakefile.src")
+        .exists());
 
     let parsed = super::parse_mmakefile_with_dirs(
         &root.join("workbench/libs/version/mmakefile.src"),
@@ -2974,11 +3191,11 @@ fn real_tree_module_output_metadata_has_expected_coverage() {
     }
 
     assert!(output_errors.is_empty(), "{output_errors:#?}");
-    assert_eq!(install_dirs.len(), 61);
+    assert_eq!(install_dirs.len(), 64);
     assert!(install_dirs.iter().any(|(mmake, directory)| {
         mmake == "workbench-devs-networks-bcmgenet" && directory == "Devs/Networks"
     }));
-    assert_eq!(suffixes.len(), 48);
+    assert_eq!(suffixes.len(), 49);
     for expected in [
         "kernel-bluetooth-classes-btserial",
         "kernel-bluetooth-classes-btpan",
@@ -2995,7 +3212,7 @@ fn real_tree_module_output_metadata_has_expected_coverage() {
                     && directory == "${AROS_BUILD_DIR}/SYS/Developer/Debug/Tests/Library/Libs"
             })
             .count(),
-        4
+        5
     );
     assert_eq!(
         install_dirs

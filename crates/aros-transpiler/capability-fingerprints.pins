@@ -1,8 +1,9 @@
 # Exact capability fingerprints
 #
-# These are not package or download pins. The transpiler has no embedded
-# checksum for Mesa, Mako, MarkupSafe, CUnit, libaom, or any other fetched
-# archive. Ordinary repository files and local patches are tracked directly.
+# These are recipe/inventory fingerprints, not package or download pins.
+# Ordinary repository fetch declarations and local patches remain tracked
+# inputs. The closed Target-LLVM capability separately binds its audited
+# LLVM 11 archive checksum; that source identity is not a recipe fingerprint.
 #
 # A fingerprint is allowed here only when the transpiler expands an opaque
 # legacy recipe or a versioned source inventory into a hard-coded executable
@@ -58,3 +59,13 @@ mesa26-v3d-recipe-device-tree = 40d2c7eb95513fa214b4aa393881337b04e9f0eb5adc4fcb
 mesa26-v3d-manifest = 70d630491d5504f450633e9cc31532a9e54e524fb7ca4286377b5f711f2e821a
 mesa26-vc4-recipe = 0be62fd0125ffd144ede01d53b0c611cd5185ff8b866b2d77c13829f6aae1f54
 mesa26-vc4-manifest = e90bf4e7f7ffc73ab6aa1bfc464c6b8bdd47ace229146a6dd77870c381c17dec
+
+# Mesa 26's target LLVM lane expands a versioned Gallivm inventory, a recipe
+# source list, and the local HIDD recipe into closed archive/module sources.
+mesa26-gallivm-recipe = 3a6d383b548f0702783c181c2f8e7b999f48e8c2ff36db9e494073715bd2add4
+mesa26-gallivm-manifest = cebea7414b4ee5da97c20007fbb8e867b96b2ca615b1cc8226bd060b75f40e50
+mesa26-llvmpipe-recipe = 69e33ce5cd26222b774f8193b818f7a49034e959731ee45587f4d39239e14daf
+mesa26-llvmpipe-hidd-recipe = 6b20993b095bd65868aa27fd036aece5734b8eeb684c04e6980238d9b3ae3bb4
+
+# LLVM 11's target build recipe is expanded into a fixed external provider.
+llvm11-target-recipe = d5ea6a24e95c19997b841659ff4c943f6a3ed13f6e7e7569b662597f65ac4b80

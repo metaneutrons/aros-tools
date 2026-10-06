@@ -3,11 +3,137 @@ use crate::parser::TargetContext;
 use std::fs;
 use std::path::Path;
 
+#[test]
+fn util_consumer_contract_is_absent_outside_mesa26() {
+    let profile = TargetContext {
+        mesa_version: Some("20.0.8".to_owned()),
+        ..TargetContext::default()
+    };
+    for target in [None, Some(&profile)] {
+        // Neither fetched source nor local util targets are required when
+        // this capability is inactive. No compiler-consumer obligation leaks
+        // into the Mesa 20 or unselected context.
+        let output = super::parse_mesautil(
+            Path::new("unused-source-root"),
+            Path::new("workbench/libs/mesa/libmesautil"),
+            target,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(output.is_none());
+    }
+}
+
+#[test]
+fn runtime_identity_rejects_changed_source_module_names() {
+    let root = mesa26_source_root();
+    let profile = TargetContext {
+        cpu: Some("x86_64".to_owned()),
+        platform: Some("pc".to_owned()),
+        toolchain: Some("llvm".to_owned()),
+        cpu32: Some("i386".to_owned()),
+        use_mmu: Some("1".to_owned()),
+        float_abi: Some(String::new()),
+        mesa_version: Some("26.0.0".to_owned()),
+        ..TargetContext::default()
+    };
+    assert_eq!(
+        super::runtime_module_name(
+            &root,
+            Path::new("workbench/libs/mesa"),
+            "mesa3dgl-library",
+            "mesa3dgl$(MESAGLBUILD)",
+            Some(&profile),
+        )
+        .unwrap()
+        .as_deref(),
+        Some("mesa3dgl26-0")
+    );
+    for raw_name in ["different$(MESAGLBUILD)", "mesa3dgl$(MESAGLVERSION)"] {
+        assert!(super::runtime_module_name(
+            &root,
+            Path::new("workbench/libs/mesa"),
+            "mesa3dgl-library",
+            raw_name,
+            Some(&profile),
+        )
+        .unwrap_err()
+        .contains("unexpected Mesa 26 runtime modname"));
+    }
+}
+
 fn mesa26_source_root() -> std::path::PathBuf {
     let configured = std::env::var_os("AROS_TEST_MESA26_SOURCE_ROOT")
         .or_else(|| std::env::var_os("AROS_TEST_SOURCE_ROOT"))
         .expect("AROS_TEST_MESA26_SOURCE_ROOT must name the Mesa 26 checkout");
     std::path::PathBuf::from(configured)
+}
+
+fn opensbi_riscv64_mesa26_profile() -> TargetContext {
+    TargetContext {
+        cpu: Some("riscv64".to_owned()),
+        platform: Some("opensbi".to_owned()),
+        toolchain: Some("llvm".to_owned()),
+        cpu32: Some(String::new()),
+        use_mmu: Some("1".to_owned()),
+        float_abi: Some(String::new()),
+        mesa_version: Some("26.0.0".to_owned()),
+        ..TargetContext::default()
+    }
+}
+
+#[test]
+fn mesa26_profile_validation_is_scoped_to_exact_capability_targets() {
+    let profile = opensbi_riscv64_mesa26_profile();
+    let stdc_dir = Path::new("compiler/crt/stdc");
+
+    assert!(
+        compile_contract(stdc_dir, "compiler-stdcio", Some(&profile))
+            .unwrap()
+            .is_none()
+    );
+    assert!(archive_sources(
+        Path::new("unused-source-root"),
+        stdc_dir,
+        "compiler-stdcio",
+        Some(&profile)
+    )
+    .unwrap()
+    .is_none());
+
+    let gallium_dir = Path::new("workbench/libs/gallium");
+    assert!(
+        compile_contract(gallium_dir, "not-the-gallium-target", Some(&profile))
+            .unwrap()
+            .is_none()
+    );
+    assert!(archive_sources(
+        Path::new("unused-source-root"),
+        gallium_dir,
+        "not-the-gallium-target",
+        Some(&profile)
+    )
+    .unwrap()
+    .is_none());
+
+    let compile_error = compile_contract(gallium_dir, "workbench-libs-gallium", Some(&profile))
+        .err()
+        .expect("recognized Mesa compile contract rejects unsupported RISC-V");
+    assert!(compile_error.contains(
+        "Mesa 26.0.0 capability does not support target profile cpu=riscv64 platform=opensbi"
+    ));
+
+    let archive_error = archive_sources(
+        Path::new("unused-source-root"),
+        Path::new("workbench/libs/mesa/libcompiler"),
+        "mesa3d-linklib-compiler",
+        Some(&profile),
+    )
+    .expect_err("recognized Mesa archive capability rejects unsupported RISC-V");
+    assert!(archive_error.contains(
+        "Mesa 26.0.0 capability does not support target profile cpu=riscv64 platform=opensbi"
+    ));
 }
 
 #[test]
@@ -120,6 +246,26 @@ fn v3d_archive_admits_only_the_reviewed_device_tree_recipe() {
     let baseline = archive_sources(&root, relative, "linklibs-gallium_v3d", Some(&profile))
         .unwrap()
         .expect("reviewed Mesa 26 V3D archive");
+    let compile = compile_contract(relative, "linklibs-gallium_v3d", Some(&profile))
+        .unwrap()
+        .expect("Mesa 26 V3D link-library compile contract");
+    assert!(compile.defines.contains(&"AROS_MESA26_V3D=1".to_owned()));
+
+    let x86_64 = TargetContext {
+        cpu: Some("x86_64".to_owned()),
+        platform: Some("pc".to_owned()),
+        toolchain: Some("llvm".to_owned()),
+        cpu32: Some("i386".to_owned()),
+        use_mmu: Some("1".to_owned()),
+        float_abi: Some(String::new()),
+        mesa_version: Some("26.0.0".to_owned()),
+        ..TargetContext::default()
+    };
+    assert!(
+        compile_contract(relative, "linklibs-gallium_v3d", Some(&x86_64))
+            .unwrap()
+            .is_none()
+    );
 
     let temporary = tempfile::tempdir().unwrap();
     for path in [

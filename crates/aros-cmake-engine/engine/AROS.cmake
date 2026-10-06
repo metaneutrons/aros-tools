@@ -8,6 +8,7 @@ endif()
 # Modern Multi-Platform Build System for AROS
 
 include(CMakeParseArguments)
+include("${CMAKE_CURRENT_LIST_DIR}/QuoteIncludes.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/Executable.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/GenmoduleManifest.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/GenmoduleTargets.cmake")
@@ -18,6 +19,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/TransitiveHeaderBindings.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SourceInventory.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/LibdefsAudit.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/DefaultBuildClosure.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/RuntimeModuleOutputs.cmake")
 # aros_add_program calls aros_standalone_link_wanted, so the module that
 # defines it belongs here rather than only in the top-level CMakeLists: a
 # fixture that includes AROS.cmake on its own got "Unknown CMake command"
@@ -133,6 +135,48 @@ file(MAKE_DIRECTORY
 
 # Bootstrap SDK Includes
 aros_bootstrap_sdk_includes()
+
+# %rule_link_prog supplies startup.o by default. It is an explicit object,
+# not a linker default: aros-collect calls ld.lld directly. Without it a
+# program such as Compositor starts at its first unrelated .text function.
+set(_aros_c_startup_source "${AROS_SOURCE_DIR}/compiler/startup/startup.c")
+if(NOT EXISTS "${_aros_c_startup_source}")
+    message(FATAL_ERROR "AROS program startup source is missing: ${_aros_c_startup_source}")
+endif()
+set(_aros_c_startup_output "${AROS_DEVELOPER_LIB_DIR}/startup.o")
+add_library(aros-c-startup-objects OBJECT EXCLUDE_FROM_ALL
+    "${_aros_c_startup_source}")
+set_target_properties(aros-c-startup-objects PROPERTIES
+    POSITION_INDEPENDENT_CODE OFF)
+add_custom_command(
+    OUTPUT "${_aros_c_startup_output}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "$<TARGET_OBJECTS:aros-c-startup-objects>"
+        "${_aros_c_startup_output}"
+    DEPENDS "$<TARGET_OBJECTS:aros-c-startup-objects>"
+    COMMENT "Publishing startup.o for AROS programs"
+    COMMAND_EXPAND_LISTS
+    VERBATIM)
+add_custom_target(aros-c-startup DEPENDS "${_aros_c_startup_output}")
+add_dependencies(aros-c-startup aros-c-startup-objects)
+set(AROS_C_STARTUP_TARGET "aros-c-startup")
+
+# The native driver adds detach.o for a declared detached program. Keep this
+# separate from startup.o: ordinary programs and usestartup=no must not inherit
+# its process hand-off behaviour.
+set(_aros_c_detach_output "${AROS_DEVELOPER_LIB_DIR}/detach.o")
+add_library(aros-c-detach-objects OBJECT EXCLUDE_FROM_ALL
+    "${AROS_SOURCE_DIR}/compiler/startup/detach.c")
+set_target_properties(aros-c-detach-objects PROPERTIES POSITION_INDEPENDENT_CODE OFF)
+add_custom_command(
+    OUTPUT "${_aros_c_detach_output}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "$<TARGET_OBJECTS:aros-c-detach-objects>" "${_aros_c_detach_output}"
+    DEPENDS "$<TARGET_OBJECTS:aros-c-detach-objects>"
+    COMMENT "Publishing detach.o for detached AROS programs"
+    COMMAND_EXPAND_LISTS VERBATIM)
+add_custom_target(aros-c-detach DEPENDS "${_aros_c_detach_output}")
+add_dependencies(aros-c-detach aros-c-detach-objects)
 
 # AROS' normal clang++ driver adds this object to C++ links.  Locked CMake
 # consumers deliberately use the prefix-owned ld.lld directly, so the
@@ -298,10 +342,24 @@ if(AROS_LLD_BIN)
     endif()
     set(_aros_link "\"${AROS_COLLECT_BIN}\" --ld \"${AROS_LLD_BIN}\" --")
 
+    set(_aros_c_builtins_link_arg "")
+    if(AROS_CROSS_TOOLCHAIN_ROOT)
+        if(NOT IS_ABSOLUTE "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}" OR
+           NOT EXISTS "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}" OR
+           IS_DIRECTORY "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}")
+            message(FATAL_ERROR
+                "Locked AROS C links require the validated prefix compiler-rt archive")
+        endif()
+        # MetaMake adds TARGET_C_LIBS to target-module links. Clang emits
+        # compiler-rt calls from ordinary C too; aros-collect invokes ld.lld
+        # directly, so no compiler driver supplies this archive implicitly.
+        set(_aros_c_builtins_link_arg
+            " \"${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}\"")
+    endif()
     set(CMAKE_C_LINK_EXECUTABLE
-        "${_aros_link} -r --sysroot=\"${AROS_TARGET_SYSROOT}\" <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
+        "${_aros_link} -r --sysroot=\"${AROS_TARGET_SYSROOT}\" <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>${_aros_c_builtins_link_arg}")
     set(CMAKE_C_CREATE_SHARED_MODULE
-        "${_aros_link} -r --sysroot=\"${AROS_TARGET_SYSROOT}\" <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
+        "${_aros_link} -r --sysroot=\"${AROS_TARGET_SYSROOT}\" <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>${_aros_c_builtins_link_arg}")
     if(AROS_CROSS_TOOLCHAIN_ROOT)
         if(NOT AROS_CROSS_TOOLCHAIN_CXX_RUNTIME_LIBRARIES)
             message(FATAL_ERROR
@@ -409,8 +467,8 @@ add_compile_options(
 # The generated trees come first. The target compiler's legacy specs search
 # the POSIX and standard-C namespaces before the shared SDK root. LLVM is a
 # bare driver here and has no installed AROS specs, so repeat that order for
-# every target rather than only the handful of genmodule callers which used to
-# carry it locally. Otherwise <errno.h> and <stdlib.h> resolve to the smaller
+# every target unless its compile declaration disables POSIX headers. Otherwise
+# <errno.h> and <stdlib.h> resolve to the smaller
 # C99 namespace and POSIX declarations such as ESRCH, EMFILE and random() are
 # silently lost. Keep these as ordinary includes: a later -isystem path would
 # still lose to the shared SDK's -I path in the compiler's search order.
@@ -421,9 +479,11 @@ add_compile_options(
 # compiler/include ahead of the SDK inverted that, and the hand-written
 # clib/input_protos.h -- which predates genmodule and still declares
 # PeekQualifier through AROS_LP0 -- shadowed the generated one.
+set(AROS_DEFAULT_POSIXC_INCLUDE
+    "$<$<NOT:$<BOOL:$<TARGET_PROPERTY:AROS_NO_POSIXC_HEADERS>>>:${CMAKE_BINARY_DIR}/SDK/include/aros/posixc>")
 include_directories(
     "${CMAKE_BINARY_DIR}/GENINCDIR"
-    "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc"
+    "${AROS_DEFAULT_POSIXC_INCLUDE}"
     "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc"
     "${CMAKE_BINARY_DIR}/SDK/include"
     "${AROS_SOURCE_DIR}/compiler/include"
@@ -592,30 +652,41 @@ function(aros_copy_includes)
     else()
         set(SRC_ABS "${AROS_SOURCE_DIR}/${CI_SOURCE}")
     endif()
-    if(NOT IS_DIRECTORY "${SRC_ABS}")
-        # A cache-empty fetched port cannot be globbed at configure time.  An
-        # explicit file list has known output names even though its port has
-        # not been fetched yet.  Bind those outputs to their MetaMake owner
-        # below, ordered after the fetch which owns the source path.
-        set(_fetch_owner "")
-        set(_fetch_owner_len -1)
-        get_property(_fetch_targets GLOBAL PROPERTY AROS_FETCH_TARGETS)
-        foreach(_fetch IN LISTS _fetch_targets)
-            if(NOT TARGET "${_fetch}")
-                continue()
-            endif()
-            get_property(_fetch_dest TARGET "${_fetch}" PROPERTY AROS_FETCH_DESTINATION)
-            if(NOT _fetch_dest)
-                continue()
-            endif()
-            string(LENGTH "${_fetch_dest}" _fetch_len)
-            string(FIND "${SRC_ABS}" "${_fetch_dest}/" _fetch_prefix)
-            if(("${SRC_ABS}" STREQUAL "${_fetch_dest}" OR _fetch_prefix EQUAL 0)
-               AND _fetch_len GREATER _fetch_owner_len)
-                set(_fetch_owner "${_fetch}")
-                set(_fetch_owner_len "${_fetch_len}")
-            endif()
-        endforeach()
+    # A fetched destination may already exist before its completion stamp:
+    # another configure step can create an empty parent, and an interrupted
+    # fetch can leave a partial tree.  Directory existence alone must never
+    # turn an unfinished port into configure-time header inputs.
+    set(_fetch_owner "")
+    set(_fetch_owner_len -1)
+    get_property(_fetch_targets GLOBAL PROPERTY AROS_FETCH_TARGETS)
+    foreach(_fetch IN LISTS _fetch_targets)
+        if(NOT TARGET "${_fetch}")
+            continue()
+        endif()
+        get_property(_fetch_dest TARGET "${_fetch}" PROPERTY AROS_FETCH_DESTINATION)
+        if(NOT _fetch_dest)
+            continue()
+        endif()
+        string(LENGTH "${_fetch_dest}" _fetch_len)
+        string(FIND "${SRC_ABS}" "${_fetch_dest}/" _fetch_prefix)
+        if(("${SRC_ABS}" STREQUAL "${_fetch_dest}" OR _fetch_prefix EQUAL 0)
+           AND _fetch_len GREATER _fetch_owner_len)
+            set(_fetch_owner "${_fetch}")
+            set(_fetch_owner_len "${_fetch_len}")
+        endif()
+    endforeach()
+    set(_fetch_incomplete FALSE)
+    if(_fetch_owner)
+        get_property(_fetch_stamp TARGET "${_fetch_owner}" PROPERTY
+            AROS_FETCH_COMPLETION_STAMP)
+        if(NOT _fetch_stamp OR NOT EXISTS "${_fetch_stamp}")
+            set(_fetch_incomplete TRUE)
+        endif()
+    endif()
+    if(NOT IS_DIRECTORY "${SRC_ABS}" OR _fetch_incomplete)
+        # A cache-empty or incomplete fetched port cannot be globbed at
+        # configure time. An explicit file list has stable output names;
+        # bind those outputs to their MetaMake owner after the fetch.
 
         set(_unsupported "")
         if(NOT CI_NAME)
@@ -1035,7 +1106,7 @@ function(_aros_add_genmodule_quote_dirs target)
         endif()
     endforeach()
     if(_quotes)
-        target_compile_options("${target}" BEFORE PRIVATE ${_quotes})
+        aros_add_quote_options("${target}" BEFORE ${_quotes})
     endif()
 endfunction()
 
@@ -1572,9 +1643,11 @@ function(aros_apply_includes target_name)
         ${GENERIC_DIRS} ${FALLBACK_DIRS})
     if(QUOTE_DIRS)
         list(REMOVE_DUPLICATES QUOTE_DIRS)
+        set(_quote_options "")
         foreach(d IN LISTS QUOTE_DIRS)
-            target_compile_options(${target_name} PRIVATE "-iquote${d}")
+            list(APPEND _quote_options "-iquote${d}")
         endforeach()
+        aros_add_quote_options(${target_name} ${_quote_options})
     endif()
 endfunction()
 
@@ -1628,9 +1701,21 @@ function(aros_apply_flags target_name)
             list(APPEND _arch_opts "${value}")
         endif()
     endforeach()
-    if(_arch_opts)
-        list(REMOVE_DUPLICATES _arch_opts)
-        target_compile_options(${target_name} PRIVATE ${_arch_opts})
+    # Header namespace switches must not be inferred from link-only flags.
+    # Resolve them per compile target; the automatic POSIX include expressions
+    # evaluate after all target properties and dependencies are known. Explicit
+    # source-declared include paths remain explicit, as in the native driver.
+    list(REMOVE_DUPLICATES _arch_opts)
+    set(_compiler_opts "")
+    foreach(_option IN LISTS _arch_opts FL_COMPILE_OPTIONS)
+        if(_option STREQUAL "-noposixc")
+            set_property(TARGET "${target_name}" PROPERTY AROS_NO_POSIXC_HEADERS TRUE)
+        else()
+            list(APPEND _compiler_opts "${_option}")
+        endif()
+    endforeach()
+    if(_compiler_opts)
+        target_compile_options(${target_name} PRIVATE ${_compiler_opts})
     endif()
 
     if(FL_DEFINES)
@@ -1639,9 +1724,6 @@ function(aros_apply_flags target_name)
     foreach(u IN LISTS FL_UNDEFINES)
         target_compile_options(${target_name} PRIVATE "-U${u}")
     endforeach()
-    if(FL_COMPILE_OPTIONS)
-        target_compile_options(${target_name} PRIVATE ${FL_COMPILE_OPTIONS})
-    endif()
 endfunction()
 
 # Bind one complete MetaMake library list after all currently available target
@@ -1666,8 +1748,18 @@ function(_aros_bind_link_libraries target_name)
             if(_namespace_includes AND
                NOT _namespace_includes STREQUAL
                    "_namespace_includes-NOTFOUND")
-                list(APPEND _client_namespace_includes
-                    ${_namespace_includes})
+                foreach(_namespace_include IN LISTS _namespace_includes)
+                    if(_namespace_include STREQUAL
+                       "${AROS_SDK_INCLUDE_DIR}/aros/posixc")
+                        # A provider's relative-runtime prototype namespace is
+                        # implicit on its consumer, unlike source INCLUDES.
+                        list(APPEND _client_namespace_includes
+                            "${AROS_DEFAULT_POSIXC_INCLUDE}")
+                    else()
+                        list(APPEND _client_namespace_includes
+                            "${_namespace_include}")
+                    endif()
+                endforeach()
             endif()
         endif()
     endforeach()
@@ -1838,7 +1930,7 @@ function(aros_add_target_dependency target_name dependency)
                 get_target_property(_attached "${_consumer}"
                     AROS_GENERATED_DEPENDENCY_INCLUDE_DIRS)
                 if(NOT "${_generated_include}" IN_LIST _attached)
-                    target_compile_options("${_consumer}" BEFORE PRIVATE
+                    aros_add_quote_options("${_consumer}" BEFORE
                         "-iquote${_generated_include}")
                     set_property(TARGET "${_consumer}" APPEND PROPERTY
                         AROS_GENERATED_DEPENDENCY_INCLUDE_DIRS
@@ -1866,6 +1958,40 @@ function(aros_bind_cxx_startup_target target_name)
             "Locked AROS C++ consumer has no cxx-startup producer target")
     endif()
     aros_add_target_dependency("${target_name}" "${AROS_CXX_STARTUP_TARGET}")
+endfunction()
+
+function(aros_bind_c_startup_target target_name)
+    if(NOT TARGET "${target_name}" OR
+       NOT TARGET "${AROS_C_STARTUP_TARGET}")
+        message(FATAL_ERROR
+            "AROS program startup requires aggregate ${target_name} and a producer")
+    endif()
+    foreach(_include_target IN ITEMS compiler-stdc-includes
+            compiler-posixc-includes kernel-task-includes kernel-dos-includes)
+        if(NOT TARGET "${_include_target}")
+            message(FATAL_ERROR
+                "AROS program startup requires generated headers from ${_include_target}")
+        endif()
+        aros_add_target_dependency(aros-c-startup-objects "${_include_target}")
+        aros_add_target_dependency(aros-c-detach-objects "${_include_target}")
+    endforeach()
+    aros_add_target_dependency("${target_name}" "${AROS_C_STARTUP_TARGET}")
+endfunction()
+
+function(aros_attach_program_startup target_name no_startup)
+    if(no_startup)
+        return()
+    endif()
+    if(NOT TARGET "${target_name}" OR
+       NOT TARGET "${AROS_C_STARTUP_TARGET}")
+        message(FATAL_ERROR "${target_name}: AROS program startup producer is missing")
+    endif()
+    add_dependencies("${target_name}" "${AROS_C_STARTUP_TARGET}")
+    target_link_libraries("${target_name}" PRIVATE "${_aros_c_startup_output}")
+    if(ARGN)
+        add_dependencies("${target_name}" aros-c-detach)
+        target_link_libraries("${target_name}" PRIVATE "${_aros_c_detach_output}")
+    endif()
 endfunction()
 
 # A fetched source named without its suffix cannot be a Ninja source node: the
@@ -2512,6 +2638,11 @@ endfunction()
 #     LIBRARY_PRODUCTS <installed-archives...>
 #     [HEADER_PRODUCTS <installed-headers...>]
 #     [AUXILIARY_PRODUCTS <installed-metadata...>]
+#     [BUILD_TARGETS <closed-upstream-targets...>]
+#     [INSTALL_COMPONENTS <closed-header-components...>]
+#     [HOST_TOOLS <cmake-key=tool@LLVM-version...>]
+#     [COMPILE_DEFINES <target-definitions...>]
+#     [LIBRARY_GROUP]
 #     PUBLIC_INCLUDE_DIRS <installed-include-dirs...>)
 #
 # Materialises the deliberately small, audited subset of
@@ -2519,12 +2650,15 @@ endfunction()
 # options and installed products; this helper independently validates every
 # path and produces one output-tracked configure/build/install rule. It is not
 # an escape hatch for arbitrary configure commands.
+# Component builds stage only declared archives from the private lib directory.
+# Host tools must run from the verified toolchain; they never come from a target
+# output tree. External consumers share the generated public SDK header barrier.
 function(aros_build_external_cmake)
     set(oneValueArgs MMAKE_ID SOURCE_DIR BINARY_DIR INSTALL_PREFIX
         FETCH_TARGET PROVIDED_LIBRARY)
     set(multiValueArgs OPTIONS LIBRARY_PRODUCTS HEADER_PRODUCTS
-        AUXILIARY_PRODUCTS PUBLIC_INCLUDE_DIRS)
-    cmake_parse_arguments(PARSE_ARGV 0 EC "" "${oneValueArgs}" "${multiValueArgs}")
+        AUXILIARY_PRODUCTS PUBLIC_INCLUDE_DIRS BUILD_TARGETS INSTALL_COMPONENTS HOST_TOOLS COMPILE_DEFINES)
+    cmake_parse_arguments(PARSE_ARGV 0 EC "LIBRARY_GROUP" "${oneValueArgs}" "${multiValueArgs}")
 
     if(EC_UNPARSED_ARGUMENTS OR EC_KEYWORDS_MISSING_VALUES)
         message(FATAL_ERROR
@@ -2673,11 +2807,22 @@ function(aros_build_external_cmake)
     set(_expected_archive
         "${_prefix}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}${EC_PROVIDED_LIBRARY}${CMAKE_STATIC_LIBRARY_SUFFIX}")
     cmake_path(NORMAL_PATH _expected_archive)
-    if(NOT _library_count EQUAL 1 OR
-       NOT _expected_archive IN_LIST _library_products)
+    if(NOT EC_LIBRARY_GROUP AND (NOT _library_count EQUAL 1 OR
+       NOT _expected_archive IN_LIST _library_products))
         message(FATAL_ERROR
             "${EC_MMAKE_ID}: provided library must install exactly ${_expected_archive}")
     endif()
+    if(EC_LIBRARY_GROUP AND NOT EC_BUILD_TARGETS)
+        message(FATAL_ERROR "${EC_MMAKE_ID}: component library group requires explicit build targets")
+    endif()
+    if(EC_BUILD_TARGETS AND NOT EC_INSTALL_COMPONENTS)
+        message(FATAL_ERROR "${EC_MMAKE_ID}: selective build requires explicit install components")
+    endif()
+    foreach(_component IN LISTS EC_BUILD_TARGETS EC_INSTALL_COMPONENTS)
+        if(NOT _component MATCHES "^[A-Za-z0-9_.+-]+$")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: invalid external build/install component ${_component}")
+        endif()
+    endforeach()
     foreach(_product IN LISTS _products)
         string(SHA256 _product_key "${_product}")
         get_property(_previous_owner GLOBAL PROPERTY
@@ -2689,8 +2834,13 @@ function(aros_build_external_cmake)
         set_property(GLOBAL PROPERTY
             "AROS_EXTERNAL_PRODUCT_OWNER_${_product_key}" "${EC_MMAKE_ID}")
     endforeach()
-    _aros_claim_linklib_archive(
-        "${EC_MMAKE_ID}" "${_prefix}/lib" "${EC_PROVIDED_LIBRARY}")
+    foreach(_library IN LISTS _library_products)
+        cmake_path(GET _library FILENAME _archive_name)
+        if(NOT _archive_name MATCHES "^lib([A-Za-z0-9_.+-]+)\\.a$")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: component is not a static archive: ${_library}")
+        endif()
+        _aros_claim_linklib_archive("${EC_MMAKE_ID}" "${_prefix}/lib" "${CMAKE_MATCH_1}")
+    endforeach()
 
     set(_public_include_dirs "")
     foreach(_raw_include IN LISTS EC_PUBLIC_INCLUDE_DIRS)
@@ -2714,7 +2864,7 @@ function(aros_build_external_cmake)
         string(FIND "${_option}" ";" _semicolon)
         string(FIND "${_option}" "\n" _newline)
         if(NOT _semicolon EQUAL -1 OR NOT _newline EQUAL -1 OR
-           NOT _option MATCHES "^(-D[A-Za-z_][A-Za-z0-9_]*(:[A-Za-z]+)?=[A-Za-z0-9_.+:/=-]+|-Wno-error=dev)$")
+           NOT _option MATCHES "^(-D[A-Za-z_][A-Za-z0-9_]*(:[A-Za-z]+)?=[A-Za-z0-9_.+:/=-]*|-Wno-error=dev)$")
             message(FATAL_ERROR
                 "${EC_MMAKE_ID}: unsafe external CMake option '${_option}'")
         endif()
@@ -2732,6 +2882,12 @@ function(aros_build_external_cmake)
     get_directory_property(_parent_definitions COMPILE_DEFINITIONS)
     get_directory_property(_parent_includes INCLUDE_DIRECTORIES)
     set(_target_flags "")
+    foreach(_define IN LISTS EC_COMPILE_DEFINES)
+        if(NOT _define MATCHES "^[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_.+-]+)?$")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: invalid external compile definition ${_define}")
+        endif()
+        list(APPEND _target_flags "-D${_define}")
+    endforeach()
     foreach(_option IN LISTS _parent_options)
         if(_option STREQUAL "$<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>")
             # Reapplied to the nested C++ flags below together with the
@@ -2757,6 +2913,11 @@ function(aros_build_external_cmake)
     list(APPEND _external_includes ${_parent_includes})
     list(REMOVE_DUPLICATES _external_includes)
     foreach(_include IN LISTS _external_includes)
+        if(_include STREQUAL AROS_DEFAULT_POSIXC_INCLUDE)
+            # A nested configure build receives the concrete namespace above,
+            # not a native-target generator expression from its parent.
+            continue()
+        endif()
         if(_include STREQUAL
            "$<$<COMPILE_LANGUAGE:CXX>:${AROS_CROSS_TOOLCHAIN_ROOT}/include/c++/v1>")
             # The nested build receives this language-specific root below.
@@ -2813,7 +2974,7 @@ function(aros_build_external_cmake)
         "-DCMAKE_SYSTEM_NAME=AROS"
         "-DCMAKE_SYSTEM_VERSION=1"
         "-DCMAKE_SYSTEM_PROCESSOR=${AROS_TARGET_CPU}"
-        "-DCMAKE_MODULE_PATH=${_aros_source_root}/config/cmake"
+        "-DCMAKE_MODULE_PATH=${AROS_SOURCE_DIR}/config/cmake"
         "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"
         "-DBUILD_SHARED_LIBS=OFF"
         "-DCMAKE_INSTALL_PREFIX=${_prefix}"
@@ -2825,6 +2986,38 @@ function(aros_build_external_cmake)
         "-DCMAKE_C_FLAGS=${_C_flags}"
         "-DCMAKE_CXX_FLAGS=${_CXX_flags}"
         "-DCMAKE_ASM_FLAGS=${_ASM_flags}")
+    set(_host_inputs "")
+    set(_host_keys "")
+    foreach(_binding IN LISTS EC_HOST_TOOLS)
+        if(NOT _binding MATCHES "^([A-Z][A-Z0-9_]+)=([A-Za-z0-9_.+-]+)@([0-9]+\\.[0-9]+\\.[0-9]+)$")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: invalid host-tool binding '${_binding}'")
+        endif()
+        set(_key "${CMAKE_MATCH_1}")
+        set(_tool "${CMAKE_MATCH_2}")
+        set(_version "${CMAKE_MATCH_3}")
+        if(_key IN_LIST _host_keys)
+            message(FATAL_ERROR "${EC_MMAKE_ID}: duplicate host-tool binding ${_key}")
+        endif()
+        list(APPEND _host_keys "${_key}")
+        set(_executable "${AROS_CROSS_TOOLCHAIN_ROOT}/bin/${_tool}")
+        if(NOT AROS_CROSS_TOOLCHAIN_ROOT OR NOT EXISTS "${_executable}" OR IS_DIRECTORY "${_executable}")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: missing verified cross-toolchain host tool ${_tool}")
+        endif()
+        execute_process(COMMAND "${_executable}" --version
+            TIMEOUT 10 RESULT_VARIABLE _result OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr)
+        string(REPLACE "." "\\." _version_pattern "${_version}")
+        if(NOT _result EQUAL 0 OR
+           NOT "${_stdout}\n${_stderr}" MATCHES "LLVM version ${_version_pattern}([ \t\r\n]|$)")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: ${_tool} is not runnable host LLVM ${_version}: ${_stdout}${_stderr}")
+        endif()
+        foreach(_option IN LISTS EC_OPTIONS)
+            if(_option MATCHES "^-D${_key}(:|=)")
+                message(FATAL_ERROR "${EC_MMAKE_ID}: option overrides verified host-tool binding ${_key}")
+            endif()
+        endforeach()
+        list(APPEND _forced_options "-D${_key}=${_executable}")
+        list(APPEND _host_inputs "${_executable}")
+    endforeach()
     # Pass the frontend policy, not CMake's derived launcher variables. CMake
     # implements compiler launchers for C/C++ only; each nested build must
     # apply the same explicit policy through CompilerCache.cmake.
@@ -2838,7 +3031,41 @@ function(aros_build_external_cmake)
         endif()
     endif()
 
+    # Nested CMake depfiles are not visible to the parent Ninja graph. Check
+    # the complete staged public SDK at build time (after generated headers),
+    # including additions/deletions, and change this shared byproduct only
+    # when its contents change. Reconfiguring alone must not rebuild LLVM.
+    set(_sdk_contract "${CMAKE_BINARY_DIR}/gen/external-cmake/sdk.contract")
+    if(NOT TARGET aros-external-sdk-contract)
+        add_custom_target(aros-external-sdk-contract
+            COMMAND "${CMAKE_COMMAND}"
+                "-DSDK_ROOT=${AROS_SDK_INCLUDE_DIR}"
+                "-DGEN_ROOT=${AROS_GENINC_DIR}"
+                "-DOUTPUT=${_sdk_contract}"
+                -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ExternalSdkContract.cmake"
+            BYPRODUCTS "${_sdk_contract}"
+            COMMENT "Checking external producer SDK contract"
+            VERBATIM)
+        set_property(TARGET aros-external-sdk-contract PROPERTY
+            AROS_EXTERNAL_SDK_CHECK TRUE)
+    endif()
     set(_stamp "${_binary}/.aros-${EC_MMAKE_ID}-installed")
+    set(_build_command "${CMAKE_COMMAND}" --build "${_binary}")
+    set(_install_commands "")
+    if(EC_BUILD_TARGETS)
+        list(APPEND _build_command --target ${EC_BUILD_TARGETS})
+        foreach(_component IN LISTS EC_INSTALL_COMPONENTS)
+            list(APPEND _install_commands COMMAND "${CMAKE_COMMAND}" --install "${_binary}" --component "${_component}")
+        endforeach()
+        list(APPEND _install_commands COMMAND "${CMAKE_COMMAND}" -E make_directory "${_prefix}/lib")
+        foreach(_library IN LISTS _library_products)
+            cmake_path(GET _library FILENAME _archive_name)
+            list(APPEND _install_commands COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${_binary}/lib/${_archive_name}" "${_library}")
+        endforeach()
+    else()
+        list(APPEND _install_commands COMMAND "${CMAKE_COMMAND}" --install "${_binary}")
+    endif()
     add_custom_command(
         OUTPUT "${_stamp}" ${_products}
         # The rule runs only when an input/contract changed or a product is
@@ -2850,14 +3077,19 @@ function(aros_build_external_cmake)
             -G "${CMAKE_GENERATOR}"
             ${EC_OPTIONS}
             ${_forced_options}
-        COMMAND "${CMAKE_COMMAND}" --build "${_binary}"
-        COMMAND "${CMAKE_COMMAND}" --install "${_binary}"
+        COMMAND ${_build_command}
+        # CMake's ordinary install freshness check compares size/timestamps,
+        # not bytes. A fast equal-sized ABI rebuild can otherwise leave the
+        # old installed archive in place. Remove only declared build products
+        # after a successful build, before installing their replacements.
+        COMMAND "${CMAKE_COMMAND}" -E rm -f ${_products}
+        ${_install_commands}
         COMMAND "${CMAKE_COMMAND}"
             "-DMANIFEST=${_products_manifest}"
             -P "${_output_verifier}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"
         DEPENDS "${_fetch_stamp}" "${_output_verifier}"
-            "${_products_manifest}"
+            "${_products_manifest}" "${_sdk_contract}" ${_host_inputs}
         COMMENT "Building external CMake target ${EC_MMAKE_ID}"
         VERBATIM
         COMMAND_EXPAND_LISTS)
@@ -2866,7 +3098,34 @@ function(aros_build_external_cmake)
 
     add_library("${_interface_target}" INTERFACE)
     add_dependencies("${_interface_target}" "${EC_MMAKE_ID}")
-    target_link_libraries("${_interface_target}" INTERFACE "${_expected_archive}")
+    if(EC_LIBRARY_GROUP)
+        if(CMAKE_VERSION VERSION_LESS 3.24)
+            message(FATAL_ERROR "${EC_MMAKE_ID}: external archive groups require CMake 3.24 or newer")
+        endif()
+        # Collector availability alone does not select its link rule. Without
+        # LLD the compiler driver still owns links and needs forwarded flags.
+        if(AROS_LLD_BIN)
+            set(_group_start "--start-group")
+            set(_group_end "--end-group")
+        else()
+            set(_group_start "-Wl,--start-group")
+            set(_group_end "-Wl,--end-group")
+        endif()
+        # Bare repeated end markers in transitive INTERFACE_LINK_LIBRARIES
+        # are de-duplicated by CMake. A second group then nests in the first
+        # and LLD rejects it. Model this as a real group so CMake owns both
+        # boundaries. Cache variables make the feature visible at the end of
+        # the directory scope, when link generator expressions are evaluated.
+        set(CMAKE_LINK_GROUP_USING_aros_rescan "${_group_start};${_group_end}"
+            CACHE INTERNAL "AROS collector/driver rescan group" FORCE)
+        set(CMAKE_LINK_GROUP_USING_aros_rescan_SUPPORTED TRUE
+            CACHE INTERNAL "AROS rescan group support" FORCE)
+        list(JOIN _library_products "," _group_libraries)
+        target_link_libraries("${_interface_target}" INTERFACE
+            "$<LINK_GROUP:aros_rescan,${_group_libraries}>")
+    else()
+        target_link_libraries("${_interface_target}" INTERFACE "${_expected_archive}")
+    endif()
     target_include_directories("${_interface_target}" INTERFACE
         ${_public_include_dirs})
     set_property(TARGET "${EC_MMAKE_ID}" PROPERTY
@@ -3288,7 +3547,18 @@ function(_aros_apply_arch_source_options tag dir name path)
         list(GET _parts 2 _file)
         list(GET _parts 3 _option)
         if(_tag STREQUAL tag AND _dir STREQUAL dir AND _file STREQUAL name)
-            list(APPEND _options "${_option}")
+            if(_option MATCHES "^-iquote(.+)$")
+                set(_quote "${CMAKE_MATCH_1}")
+                get_source_file_property(_previous "${path}" AROS_ARCH_QUOTE_INCLUDE)
+                if(_previous AND NOT _previous STREQUAL "NOTFOUND" AND
+                   NOT _previous STREQUAL _quote)
+                    message(FATAL_ERROR "Conflicting architecture quote paths for ${path}")
+                endif()
+                set_source_files_properties("${path}" PROPERTIES
+                    AROS_ARCH_QUOTE_INCLUDE "${_quote}")
+            else()
+                list(APPEND _options "${_option}")
+            endif()
         endif()
     endforeach()
     if(NOT _options)
@@ -3496,7 +3766,10 @@ function(_aros_attach_genmodule_public_includes)
             continue()
         endif()
         get_target_property(_type "${_target}" TYPE)
-        if(_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$")
+        get_target_property(_external_interface "${_target}" AROS_EXTERNAL_INTERFACE_TARGET)
+        get_target_property(_sdk_check "${_target}" AROS_EXTERNAL_SDK_CHECK)
+        if(_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$" OR
+           _external_interface OR _sdk_check)
             add_dependencies("${_target}" aros-genmodule-public-includes)
         endif()
     endforeach()
@@ -3519,8 +3792,9 @@ endfunction()
 #     TARGET <module-name> MMAKE_ID <target-id> DIRECTORY <source-dir>
 #     MODTYPE <type> [MODSUFFIX <suffix>] [ABI])
 #
-# Runs the reference tools/genmodule against one exact .conf.  All generation is
-# declaration-private first.  Public headers are then copied into the three
+# Runs the reference tools/genmodule against the declaration's exact .conf and
+# optional confoverride. All generation is declaration-private first. Public
+# headers are then copied into the three
 # include roots the CMake build and the system image expose.  Keeping the
 # private root is essential for duplicate config stems: the global Rust scan is
 # intentionally broad and currently lets rom/usb/classes/arosx/arosx.conf race
@@ -3548,6 +3822,15 @@ set(AROS_GENMODULE_MODTYPES
 function(aros_set_module_config mmake config)
     string(MAKE_C_IDENTIFIER "${mmake}" _key)
     set_property(GLOBAL PROPERTY "AROS_MODULE_CONFIG_${_key}" "${config}")
+endfunction()
+
+# aros_set_module_config_override(<mmake-id> <override-path>)
+#
+# MetaMake's `confoverride=` is passed to the reference genmodule as `-o`.
+# It may change the allocated library base type, so omitting it is unsafe.
+function(aros_set_module_config_override mmake override)
+    string(MAKE_C_IDENTIFIER "${mmake}" _key)
+    set_property(GLOBAL PROPERTY "AROS_MODULE_CONFIG_OVERRIDE_${_key}" "${override}")
 endfunction()
 
 # _aros_module_config(<out-var> <mmake-id> <directory> <target>)
@@ -3592,6 +3875,13 @@ function(_aros_generate_module_support out_prefix)
     if(NOT EXISTS "${_conf}")
         message(FATAL_ERROR "${GM_MMAKE_ID}: missing genmodule config ${_conf}")
     endif()
+    string(MAKE_C_IDENTIFIER "${GM_MMAKE_ID}" _override_key)
+    get_property(_override GLOBAL PROPERTY
+        "AROS_MODULE_CONFIG_OVERRIDE_${_override_key}")
+    if(_override AND NOT EXISTS "${_override}")
+        message(FATAL_ERROR
+            "${GM_MMAKE_ID}: missing genmodule config override ${_override}")
+    endif()
 
     file(RELATIVE_PATH _module_rel "${AROS_SOURCE_DIR}" "${_module_dir}")
     if(_module_rel MATCHES "^\\.\\." OR IS_ABSOLUTE "${_module_rel}")
@@ -3605,9 +3895,28 @@ function(_aros_generate_module_support out_prefix)
     set(_fd_dir "${_root}/fd")
 
     set(_opts -c "${_conf}")
+    if(_override)
+        list(APPEND _opts -o "${_override}")
+    endif()
+    set(_config_inputs "${_conf}")
+    if(_override)
+        list(APPEND _config_inputs "${_override}")
+    endif()
     if(GM_MODSUFFIX)
         list(APPEND _opts -s "${GM_MODSUFFIX}")
     endif()
+
+    set(_manifest_override_args "")
+    if(_override)
+        list(APPEND _manifest_override_args CONFIG_OVERRIDE "${_override}")
+    endif()
+    aros_genmodule_writefiles_manifest(_manifest
+        CONFIG "${_conf}"
+        ${_manifest_override_args}
+        MODULE "${GM_TARGET}"
+        MODTYPE "${GM_MODTYPE}"
+        GEN_DIR "${_gen_dir}"
+        STUB_DIR "${_stub_dir}")
 
     set(_include_rel
         "clib/${GM_TARGET}_protos.h"
@@ -3652,7 +3961,7 @@ function(_aros_generate_module_support out_prefix)
     # scan; publishing 265 more modules into the same three roots would put
     # same-named headers into a race whose winner is parse order.
     set(_includes_target "")
-    if(NOT GM_SOURCES_ONLY)
+    if(NOT GM_SOURCES_ONLY AND _manifest_HAS_INCLUDES)
         # BootstrapSDK's broad configure-time scan may just have written one of
         # these paths from a same-named, non-ABI config.  Remove only the outputs
         # this exact declaration owns; Ninja will now require the rule below and
@@ -3665,13 +3974,20 @@ function(_aros_generate_module_support out_prefix)
             COMMAND "${AROS_HOST_GENMODULE}" ${_opts} -d "${_include_dir}"
                 writeincludes "${GM_TARGET}" "${GM_MODTYPE}"
             ${_publish_commands}
-            DEPENDS "${AROS_HOST_GENMODULE}" "${_conf}"
+            DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs}
             COMMENT "Generating exact ${GM_TARGET}.${GM_MODTYPE} ABI headers"
             VERBATIM)
         set(_includes_target "${GM_MMAKE_ID}-includes-generated")
         add_custom_target("${_includes_target}" DEPENDS ${_published_headers})
     else()
         set(_published_headers "")
+        if(NOT GM_SOURCES_ONLY)
+            # MetaMake still exposes its includes phony for noincludes
+            # libraries. Their getlibbase archive remains a real producer;
+            # only headers and FD are deliberately absent.
+            set(_includes_target "${GM_MMAKE_ID}-includes-generated")
+            add_custom_target("${_includes_target}")
+        endif()
     endif()
 
     set(_libdefs "${_gen_dir}/${GM_TARGET}_libdefs.h")
@@ -3680,7 +3996,7 @@ function(_aros_generate_module_support out_prefix)
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${_gen_dir}"
         COMMAND "${AROS_HOST_GENMODULE}" ${_opts} -d "${_gen_dir}"
             writelibdefs "${GM_TARGET}" "${GM_MODTYPE}"
-        DEPENDS "${AROS_HOST_GENMODULE}" "${_conf}"
+        DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs}
         COMMENT "Generating exact ${GM_TARGET}.${GM_MODTYPE} libdefs"
         VERBATIM)
     # Only an existing Rust header with the same module name can shadow this
@@ -3710,12 +4026,6 @@ function(_aros_generate_module_support out_prefix)
     set(_start "${_gen_dir}/${GM_TARGET}_start.c")
     set(_end "${_gen_dir}/${GM_TARGET}_end.c")
     set(_entrypoints "${_gen_dir}/${GM_TARGET}${GM_MODTYPE}.entrypoints")
-    aros_genmodule_writefiles_manifest(_manifest
-        CONFIG "${_conf}"
-        MODULE "${GM_TARGET}"
-        MODTYPE "${GM_MODTYPE}"
-        GEN_DIR "${_gen_dir}"
-        STUB_DIR "${_stub_dir}")
     set(_normal_linklib_sources
         ${_manifest_NORMAL_STUBS}
         ${_manifest_NORMAL_AUTOINIT}
@@ -3733,7 +4043,7 @@ function(_aros_generate_module_support out_prefix)
         COMMAND "${AROS_HOST_GENMODULE}" ${_opts}
             -d "${_gen_dir}" -l "${_stub_dir}"
             writefiles "${GM_TARGET}" "${GM_MODTYPE}"
-        DEPENDS "${AROS_HOST_GENMODULE}" "${_conf}" "${_libdefs}"
+        DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs} "${_libdefs}"
         COMMENT "Generating ${GM_TARGET}.${GM_MODTYPE} module support sources"
         VERBATIM)
 
@@ -3767,7 +4077,7 @@ function(_aros_generate_module_support out_prefix)
             endif()
         endforeach()
     endif()
-    if(GM_ABI AND _has_exported_functions)
+    if(GM_ABI AND _has_exported_functions AND _manifest_HAS_INCLUDES)
         set(_private_fd "${_fd_dir}/${GM_TARGET}_lib.fd")
         set(_fd "${AROS_DEVELOPER_FD_DIR}/${GM_TARGET}_lib.fd")
         file(REMOVE "${_fd}")
@@ -3779,7 +4089,7 @@ function(_aros_generate_module_support out_prefix)
                 writefd "${GM_TARGET}" "${GM_MODTYPE}"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "${_private_fd}" "${_fd}"
-            DEPENDS "${AROS_HOST_GENMODULE}" "${_conf}"
+            DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs}
             COMMENT "Generating ${GM_TARGET}.${GM_MODTYPE} FD"
             VERBATIM)
         set(_fd_target "${GM_MMAKE_ID}-fd-generated")
@@ -4108,7 +4418,7 @@ function(aros_add_module_abi)
         LINKER_LANGUAGE C)
     target_include_directories("${ARG_MMAKE_ID}-linklib" BEFORE PRIVATE
         "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-        "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+        "${AROS_DEFAULT_POSIXC_INCLUDE}"
         "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
     _aros_add_genmodule_quote_dirs("${ARG_MMAKE_ID}-linklib"
         "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
@@ -4198,7 +4508,7 @@ function(aros_add_library)
             LINKER_LANGUAGE C)
         target_include_directories("${ARG_MMAKE_ID}-linklib" BEFORE PRIVATE
             "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-            "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+            "${AROS_DEFAULT_POSIXC_INCLUDE}"
             "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
         _aros_add_genmodule_quote_dirs("${ARG_MMAKE_ID}-linklib"
             "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
@@ -4245,13 +4555,15 @@ function(aros_add_library)
             __AROS_MODNAME__=${ARG_TARGET})
         target_include_directories("${ARG_MMAKE_ID}" BEFORE PRIVATE
             "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-            "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+            "${AROS_DEFAULT_POSIXC_INCLUDE}"
             "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
         _aros_add_genmodule_quote_dirs("${ARG_MMAKE_ID}"
             "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
         set_target_properties("${ARG_MMAKE_ID}" PROPERTIES
             OUTPUT_NAME "${_output_name}"
             RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+        aros_register_runtime_module_output("${ARG_MMAKE_ID}"
+            "${_install_dir}" "${_output_name}")
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -4333,7 +4645,7 @@ function(aros_add_library)
             target_include_directories(
                 "${ARG_MMAKE_ID}-linklib-objects" BEFORE PRIVATE
                 "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-                "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+                "${AROS_DEFAULT_POSIXC_INCLUDE}"
                 "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
             _aros_add_genmodule_quote_dirs(
                 "${ARG_MMAKE_ID}-linklib-objects"
@@ -4457,7 +4769,7 @@ function(aros_add_library)
             endif()
             target_include_directories("${_client_target}" BEFORE PRIVATE
                 "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-                "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+                "${AROS_DEFAULT_POSIXC_INCLUDE}"
                 "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
             _aros_add_genmodule_quote_dirs("${_client_target}"
                 "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
@@ -4569,7 +4881,7 @@ function(aros_add_library)
         endif()
         _aros_module_install_dir(_install_dir
             "${_default_install_dir}" "${ARG_INSTALL_DIR}")
-        if(_has_genmodule)
+        if(_has_genmodule OR _scaffold_GENMODFILES_TARGET)
             set(_module_base_name "${ARG_TARGET}")
         else()
             set(_module_base_name "${ARG_MMAKE_ID}")
@@ -4589,13 +4901,15 @@ function(aros_add_library)
         set_target_properties(${ARG_MMAKE_ID} PROPERTIES
             OUTPUT_NAME "${_output_name}"
             RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+        aros_register_runtime_module_output("${ARG_MMAKE_ID}"
+            "${_install_dir}" "${_output_name}")
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
         if(_has_genmodule)
             target_include_directories(${ARG_MMAKE_ID} BEFORE PRIVATE
                 "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-                "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+                "${AROS_DEFAULT_POSIXC_INCLUDE}"
                 "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
             _aros_add_genmodule_quote_dirs(${ARG_MMAKE_ID}
                 "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
@@ -4737,6 +5051,8 @@ function(aros_add_device)
         set_target_properties(${ARG_MMAKE_ID} PROPERTIES
             OUTPUT_NAME "${_output_name}"
             RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+        aros_register_runtime_module_output("${ARG_MMAKE_ID}"
+            "${_install_dir}" "${_output_name}")
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -4827,6 +5143,8 @@ function(aros_add_resource)
         set_target_properties(${ARG_MMAKE_ID} PROPERTIES
             OUTPUT_NAME "${_output_name}"
             RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+        aros_register_runtime_module_output("${ARG_MMAKE_ID}"
+            "${_install_dir}" "${_output_name}")
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -4917,8 +5235,17 @@ function(aros_add_hidd)
         aros_place_module_scaffolding(RESOLVED_SOURCES "${_scaffold_sources}")
         _aros_module_install_dir(_install_dir
             "${AROS_DRIVERS_DIR}" "${ARG_INSTALL_DIR}")
-        _aros_module_output_name(_output_name "${ARG_MMAKE_ID}"
+        # The build-rule id is not the loader-visible module name. Gallium
+        # opens `<fallback>.hidd`, using the source declaration's TARGET.
+        _aros_module_output_name(_output_name "${ARG_TARGET}"
             "hidd" "${ARG_MODSUFFIX}")
+        aros_arch_path_matches(_hidd_native_arch "${ARG_DIRECTORY}")
+        if(NOT _hidd_native_arch)
+            # Keeping an excluded foreign target addressable must not give
+            # it a second Ninja rule for a native loader-visible SYS file.
+            string(SHA256 _foreign_owner "${ARG_MMAKE_ID}")
+            set(_install_dir "${CMAKE_BINARY_DIR}/gen/foreign-modules/${_foreign_owner}")
+        endif()
         add_executable(${ARG_MMAKE_ID} ${RESOLVED_SOURCES})
         aros_attach_module_scaffolding("${ARG_MMAKE_ID}" _scaffold
             "${ARG_DIRECTORY}" "${ARG_TARGET}")
@@ -4930,6 +5257,7 @@ function(aros_add_hidd)
         set_target_properties(${ARG_MMAKE_ID} PROPERTIES
             OUTPUT_NAME "${_output_name}"
             RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+        aros_register_runtime_module_output("${ARG_MMAKE_ID}" "${_install_dir}" "${_output_name}")
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -5307,7 +5635,7 @@ function(aros_add_linklib)
             # ordering for these generated client sources explicitly.
             target_include_directories(${ARG_MMAKE_ID} BEFORE PRIVATE
                 ${_genmodule_include_dirs}
-                "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+                "${AROS_DEFAULT_POSIXC_INCLUDE}"
                 "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
             _aros_add_genmodule_quote_dirs(${ARG_MMAKE_ID}
                 ${_genmodule_include_dirs})
@@ -5335,7 +5663,7 @@ endfunction()
 
 # Macro: aros_add_program
 function(aros_add_program)
-    set(options ALWAYS_CXX_LINK)
+    set(options ALWAYS_CXX_LINK NO_STARTUP DETACH)
     set(oneValueArgs TARGET MMAKE_ID DIRECTORY INSTALL_DIR)
     set(multiValueArgs SOURCES CXX_SOURCES OBJC_SOURCES ASM_SOURCES
         LIBS USELIBS INCLUDES ARCH_INCLUDES
@@ -5383,6 +5711,10 @@ function(aros_add_program)
     # cmake/StandaloneLink.cmake.
     aros_standalone_link_wanted(_standalone ${ARG_DRIVER_LINK_OPTIONS})
     if(RESOLVED_SOURCES AND _standalone)
+        if(ARG_DETACH AND NOT ARG_NO_STARTUP)
+            message(FATAL_ERROR
+                "${ARG_MMAKE_ID}: detached startup is not supported for standalone links")
+        endif()
         aros_program_output_dir(_prog_outdir "${ARG_DIRECTORY}"
             "${ARG_INSTALL_DIR}")
         set(_objects "${ARG_MMAKE_ID}-objs")
@@ -5443,6 +5775,7 @@ function(aros_add_program)
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
+        aros_attach_program_startup("${ARG_MMAKE_ID}" "${ARG_NO_STARTUP}" "${ARG_DETACH}")
         aros_gate_arch(${ARG_MMAKE_ID} "${ARG_DIRECTORY}")
         aros_apply_includes(${ARG_MMAKE_ID}
             MODULE_DIR "${ARG_DIRECTORY}"
@@ -5525,8 +5858,8 @@ function(aros_add_custom_target)
 
     # genmodule maps usbclass and btclass to the runtime suffix `.class` even
     # when no explicit modsuffix was supplied. Other full modules default to
-    # their modtype. The mmake id remains the basename until the known duplicate
-    # modname outputs can be represented without generating duplicate rules.
+    # their modtype. MMAKE_ID identifies the build rule, not the public module:
+    # loaders such as MUI resolve the declared module name at runtime.
     if(ARG_MODTYPE STREQUAL "usbclass" OR ARG_MODTYPE STREQUAL "btclass")
         set(_default_modsuffix "class")
     elseif(ARG_MODTYPE STREQUAL "printer")
@@ -5534,7 +5867,7 @@ function(aros_add_custom_target)
     else()
         set(_default_modsuffix "${ARG_MODTYPE}")
     endif()
-    _aros_module_output_name(_outname "${ARG_MMAKE_ID}"
+    _aros_module_output_name(_outname "${ARG_TARGET}"
         "${_default_modsuffix}" "${ARG_MODSUFFIX}")
 
     aros_resolve_source_lanes(RESOLVED_SOURCES "${ARG_DIRECTORY}"
@@ -5565,6 +5898,9 @@ function(aros_add_custom_target)
     if(NOT RESOLVED_SOURCES)
         return()
     endif()
+    # Do not hide ambiguous declarations behind build-id filenames. AROS's
+    # runtime namespace is case-insensitive, even on a case-sensitive host.
+    # Distinct install directories or suffixes are valid disambiguators.
     aros_module_scaffolding(_scaffold_sources _scaffold
         MODTYPE "${ARG_MODTYPE}"
         TARGET "${ARG_TARGET}"
@@ -5584,6 +5920,7 @@ function(aros_add_custom_target)
     set_target_properties(${ARG_MMAKE_ID} PROPERTIES
         OUTPUT_NAME "${_outname}"
         RUNTIME_OUTPUT_DIRECTORY "${_moddir}")
+    aros_register_runtime_module_output("${ARG_MMAKE_ID}" "${_moddir}" "${_outname}")
     _aros_set_module_linker_language("${ARG_MMAKE_ID}"
         "${ARG_ALWAYS_CXX_LINK}"
         CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -5781,9 +6118,13 @@ function(aros_make_package)
         BYPRODUCTS ${STAGED_FILES}
         COMMAND ${CMAKE_COMMAND} -E make_directory "${OUT_DIR}"
         ${STAGE_COMMANDS}
-        COMMAND "${AROS_ROMTOOL_BIN}" pkg create --basename
-                -o "${ARG_OUTPUT}" ${STAGED_FILES}
+        COMMAND "${CMAKE_COMMAND}"
+                "-DPACKAGE_OUTPUT=${ARG_OUTPUT}"
+                "-DPACKAGE_ROMTOOL=${AROS_ROMTOOL_BIN}"
+                -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/BuildPackage.cmake"
+                -- ${STAGED_FILES}
         DEPENDS ${PRESENT}
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/BuildPackage.cmake"
         COMMENT "📦 Packing kickstart package ${ARG_NAME}"
         VERBATIM
         COMMAND_EXPAND_LISTS
@@ -5854,12 +6195,13 @@ endfunction()
 # unique, with the plain stem as the output name. A phony target under the mmake
 # id ties them together, which is what the historic build's metatarget does.
 function(aros_add_programs)
+    set(options NO_STARTUP DETACH)
     set(oneValueArgs TARGET MMAKE_ID DIRECTORY INSTALL_DIR)
     set(multiValueArgs SOURCES CXX_SOURCES OBJC_SOURCES ASM_SOURCES
         LIBS USELIBS INCLUDES ARCH_INCLUDES
         DEFINES UNDEFINES COMPILE_OPTIONS ARCH_SOURCES
         ARCH_DEFINES ARCH_COMPILE_OPTIONS LINK_OPTIONS)
-    cmake_parse_arguments(ARG "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     if((NOT ARG_SOURCES AND NOT ARG_CXX_SOURCES AND
         NOT ARG_OBJC_SOURCES AND NOT ARG_ASM_SOURCES AND
@@ -5906,7 +6248,8 @@ function(aros_add_programs)
             "${ARG_INSTALL_DIR}")
         set_target_properties(${_tgt} PROPERTIES
             OUTPUT_NAME "${_stem}"
-            RUNTIME_OUTPUT_DIRECTORY "${_outdir}")
+            RUNTIME_OUTPUT_DIRECTORY "${_outdir}"
+            AROS_LINK_DECLARATION_ID "${ARG_MMAKE_ID}")
         if(_language STREQUAL "CXX")
             set(_member_cxx_sources "${src}")
         else()
@@ -5914,6 +6257,7 @@ function(aros_add_programs)
         endif()
         _aros_set_module_linker_language("${_tgt}" ""
             CXX_SOURCES ${_member_cxx_sources})
+        aros_attach_program_startup("${_tgt}" "${ARG_NO_STARTUP}" "${ARG_DETACH}")
         aros_gate_arch(${_tgt} "${ARG_DIRECTORY}")
         aros_apply_includes(${_tgt}
             MODULE_DIR "${ARG_DIRECTORY}"
@@ -6054,18 +6398,24 @@ function(aros_add_module_simple)
     # shell whose implementation lives in the Mesa port.
     _aros_module_install_dir(_install_dir
         "${_default_install_dir}" "${ARG_INSTALL_DIR}")
-    _aros_module_output_name(_output_name "${ARG_MMAKE_ID}"
+    # %build_module_simple publishes the declared module name. The graph id
+    # is private: callers of OpenLibrary("gl.library") cannot open an artifact
+    # named after workbench-libs-gl.
+    _aros_module_output_name(_output_name "${ARG_TARGET}"
         "${_default_modsuffix}" "${ARG_MODSUFFIX}")
-
+    aros_arch_path_matches(_simple_native_arch "${ARG_DIRECTORY}")
+    if(NOT _simple_native_arch)
+        string(SHA256 _foreign_owner "${ARG_MMAKE_ID}")
+        set(_install_dir "${CMAKE_BINARY_DIR}/gen/foreign-modules/${_foreign_owner}")
+    endif()
     add_executable(${ARG_MMAKE_ID} ${RESOLVED_SOURCES})
     target_compile_definitions(${ARG_MMAKE_ID} PRIVATE
         __AROS_MODNAME__=${ARG_TARGET}
     )
     set_target_properties(${ARG_MMAKE_ID} PROPERTIES
-        # Named after the mmake id, as every other module builder here does;
-        # known duplicate modnames would otherwise produce duplicate rules.
         OUTPUT_NAME "${_output_name}"
         RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+    aros_register_runtime_module_output("${ARG_MMAKE_ID}" "${_install_dir}" "${_output_name}")
     _aros_set_module_linker_language("${ARG_MMAKE_ID}"
         "${ARG_ALWAYS_CXX_LINK}"
         CXX_SOURCES ${ARG_CXX_SOURCES})

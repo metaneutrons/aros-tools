@@ -9,7 +9,12 @@ use std::time::Duration;
 #[cfg(test)]
 use std::time::SystemTime;
 
-use crate::genmf_cache::{materialize, GenmfCacheGenerationLease, GenmfCacheRequest};
+use crate::genmf_cache::{
+    materialize, GenmfCacheError, GenmfCacheGenerationLease, GenmfCacheMaterialization,
+    GenmfCacheRequest,
+};
+#[cfg(test)]
+use crate::genmf_cache::{materialize_selected, GenmfCacheSelection};
 #[cfg(test)]
 use aros_common::read_source;
 use aros_common::CancellationToken;
@@ -55,7 +60,37 @@ pub fn expand_all(root: &Path, cache: &Path, refresh: bool, timeout: Duration) -
         python,
         timeout,
     };
-    let result = match materialize(&request, refresh, &CancellationToken::default()) {
+    adapt_materialization(
+        materialize(&request, refresh, &CancellationToken::default()),
+        timeout,
+    )
+}
+
+/// Adapt a preselected expansion into verifier results without another
+/// interpreter probe. Tests use this after selecting with a separate setup
+/// budget, so the measured deadline belongs to the generator invocation.
+#[cfg(test)]
+pub fn expand_all_with_selection(
+    request: &GenmfCacheRequest,
+    selection: GenmfCacheSelection,
+    refresh: bool,
+) -> ExpansionResult {
+    adapt_materialization(
+        Ok(materialize_selected(
+            request,
+            selection,
+            refresh,
+            &CancellationToken::default(),
+        )),
+        request.timeout,
+    )
+}
+
+fn adapt_materialization(
+    result: Result<GenmfCacheMaterialization, GenmfCacheError>,
+    timeout: Duration,
+) -> ExpansionResult {
+    let result = match result {
         Ok(result) => result,
         Err(error) => {
             return ExpansionResult {

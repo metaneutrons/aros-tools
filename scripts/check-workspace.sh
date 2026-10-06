@@ -170,7 +170,7 @@ run_docs() {
     (
         cd docs-site
         npm ci --ignore-scripts
-        npm audit --audit-level=high
+        python3 ../scripts/check-docs-audit.py
         npm run test:release-status
         npm run build
         python3 ../scripts/check-doc-links.py \
@@ -192,7 +192,8 @@ import sys
 import tomllib
 
 with open(sys.argv[1], 'rb') as stream:
-    commit = tomllib.load(stream)['source']['commit']
+    contract = tomllib.load(stream)
+    commit = contract.get('integration', contract['source'])['commit']
 if re.fullmatch(r'[0-9a-f]{40}', commit) is None:
     raise SystemExit('error: source contract contains a malformed commit identity')
 print(commit)
@@ -266,7 +267,9 @@ PY
         printf '%s\n' 'error: Mesa 20 regression source must be clean with exact initialized submodules' >&2
         return 1
     fi
-    local -x AROS_TEST_SOURCE_ROOT="$legacy_root"
+    # The current integration source is the default oracle. Only tests which
+    # explicitly select AROS_TEST_MESA20_SOURCE_ROOT use the historical tree.
+    local -x AROS_TEST_SOURCE_ROOT="$source_root"
     cargo test --workspace --all-features --locked \
         --exclude aros-common --exclude aros-toolchain --exclude aros-cli
     run_lock_binaries_serially

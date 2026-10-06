@@ -61,6 +61,13 @@ pub const CLI_CONTRACT_SECTIONS: &[(&str, &str)] = &[
         )),
     ),
     (
+        "image",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs-site/src/content/docs/reference/cli-contract/image.md"
+        )),
+    ),
+    (
         "info",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

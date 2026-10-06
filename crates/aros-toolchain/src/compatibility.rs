@@ -24,15 +24,14 @@ use aros_common::{
 use serde::{Deserialize, Serialize};
 
 use crate::filesystem::open_directory;
-use crate::package_extract::{
-    checked_absent_root, verify_and_extract, ExtractedPackage, PackageExtractionRequest,
-};
-use crate::package_verify::PackageVerificationRequest;
 use crate::ContractError;
 
+#[cfg(test)]
+mod deadline_tests;
 mod environment;
 mod execution;
 mod host_tools;
+mod relocation;
 mod standalone;
 pub use environment::{CompatibilityEnvironment, CompatibilityHostToolReport};
 pub use execution::{
@@ -44,6 +43,7 @@ pub use host_tools::{
     HostToolClosure, HostToolClosureRequest, HostToolIdentity,
     REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
 };
+pub use relocation::{extract_two_roots, TwoRootRelocation, TwoRootRelocationRequest};
 pub use standalone::{
     verify_standalone_outputs, StandaloneArtifactIdentity, StandaloneOutputReport,
     StandaloneOutputRequest, StandaloneTargetArtifacts, StandaloneTargetReport,
@@ -116,92 +116,6 @@ pub struct CompatibilityPreparation {
     pub engine_sha256: Sha256Digest,
     /// Every required helper, keyed by its fixed executable name.
     pub helpers: BTreeMap<String, HelperIdentity>,
-}
-
-/// Inputs for the two independent roots required by a relocation probe.
-///
-/// Both roots read the same complete package contract independently. The
-/// operation creates no work, source, engine, helper, tag or release material.
-#[derive(Debug, Clone)]
-pub struct TwoRootRelocationRequest {
-    /// Exact complete package set that every root must reverify.
-    pub verification: PackageVerificationRequest,
-    /// First absent destination root.
-    pub first_root: PathBuf,
-    /// Second absent destination root.
-    pub second_root: PathBuf,
-}
-
-/// Two independently reverified extracted payload roots.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TwoRootRelocation {
-    /// First retained payload root.
-    pub first: ExtractedPackage,
-    /// Second retained payload root.
-    pub second: ExtractedPackage,
-}
-
-/// Materialize two independent roots from one complete native package set.
-///
-/// The two destination identities are checked before either one is created.
-/// Each extraction independently revalidates the complete four-member package
-/// set, remeasures the selected archive and re-inventories its payload. The
-/// operation refuses an overlap with each other or the package directory, an
-/// existing destination, or a changed package. If either extraction begins and
-/// later fails, all already-created roots remain available for diagnosis; it
-/// never removes or adopts material.
-///
-/// # Errors
-///
-/// Returns AX0602 for an unsafe package or extraction root. It has no process,
-/// network, cache, source-tree, tag or publication authority.
-pub fn extract_two_roots(
-    request: &TwoRootRelocationRequest,
-) -> Result<TwoRootRelocation, ContractError> {
-    let first_root = checked_absent_root(&request.first_root)?;
-    let second_root = checked_absent_root(&request.second_root)?;
-    if first_root == second_root {
-        return Err(ContractError::verification(
-            "compatibility relocation roots must have distinct output identities",
-        ));
-    }
-    let package_directory = checked_verified_package_directory(&request.verification.package_dir)?;
-    if first_root.starts_with(&package_directory) || second_root.starts_with(&package_directory) {
-        return Err(ContractError::verification(
-            "compatibility relocation root cannot be created inside the verified package directory",
-        ));
-    }
-    let first = verify_and_extract(&PackageExtractionRequest {
-        verification: request.verification.clone(),
-        output_root: first_root,
-    })?;
-    let second = verify_and_extract(&PackageExtractionRequest {
-        verification: request.verification.clone(),
-        output_root: second_root,
-    })?;
-    if first.verified != second.verified {
-        return Err(ContractError::verification(
-            "compatibility relocation roots were not extracted from one measured package identity",
-        ));
-    }
-    Ok(TwoRootRelocation { first, second })
-}
-
-fn checked_verified_package_directory(path: &Path) -> Result<PathBuf, ContractError> {
-    if !path.is_absolute() {
-        return Err(ContractError::verification(
-            "verified package directory must be an absolute directory",
-        ));
-    }
-    let canonical = path.canonicalize().map_err(|_| {
-        ContractError::verification("verified package directory cannot be canonicalized")
-    })?;
-    open_directory(&canonical).map_err(|_| {
-        ContractError::verification(
-            "verified package directory does not resolve to a real directory without symlink ancestors",
-        )
-    })?;
-    Ok(canonical)
 }
 
 /// Prepare a fresh tools-owned engine and resolve every required helper.
@@ -1386,6 +1300,7 @@ mod tests {
         object[6] = 1;
         object[7] = os_abi;
         object[8] = AROS_ABI_VERSION;
+        write_u32(&mut object, 0x14, 1);
         write_u64(&mut object, 0x28, section_offset as u64);
         write_u16(&mut object, 0x34, 64);
         write_u16(&mut object, 0x3a, section_size as u16);
@@ -1602,7 +1517,9 @@ mod tests {
             prepare(&failing_request).unwrap(),
             CompatibilityPhase::StandaloneCxx,
             script(failing_root.path(), "batch-success", "printf first"),
-            Duration::from_secs(1),
+            // This fixture tests exit-status/log retention, not scheduling
+            // speed. The separate deadline fixture below exercises timeouts.
+            Duration::from_secs(10),
         );
         failing.commands.push(CompatibilityCommand {
             program: script(
@@ -1614,6 +1531,13 @@ mod tests {
         });
         let error = run_probe(&failing, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&error);
+        let diagnostics = error.diagnostics();
+        let context = diagnostics.diagnostics[0]
+            .context
+            .as_ref()
+            .expect("failed command identity");
+        assert_eq!(context.exit_code, Some(7));
+        assert_eq!(context.tool.as_deref(), Some("standalone-cxx-2"));
         assert!(failing
             .reports_root
             .join("standalone-cxx.1.stdout.log")
@@ -1636,29 +1560,92 @@ mod tests {
         let error = run_probe(&stale_retry, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&error);
 
-        let deadline_root = tempfile::tempdir().unwrap();
-        let deadline_request = request(deadline_root.path());
-        let mut deadline = probe_request(
-            deadline_root.path(),
-            prepare(&deadline_request).unwrap(),
-            CompatibilityPhase::StandaloneC,
-            script(
+        // Each short command fits individually, but their combined runtime
+        // exceeds two seconds. Resetting the budget per command must fail this test.
+        for first_delay in ["1", "30"] {
+            let deadline_root = tempfile::tempdir().unwrap();
+            let deadline_request = request(deadline_root.path());
+            let mut deadline = probe_request(
                 deadline_root.path(),
-                "deadline-first",
-                "exec /bin/sleep 0.5",
-            ),
-            Duration::from_secs(2),
-        );
-        deadline.commands.push(CompatibilityCommand {
-            program: script(deadline_root.path(), "deadline-second", "exec /bin/sleep 2"),
-            arguments: Vec::new(),
-        });
-        let error = run_probe(&deadline, &CancellationToken::default()).unwrap_err();
-        assert_compatibility(&error);
-        assert!(deadline
-            .reports_root
-            .join("standalone-c.2.stdout.log")
-            .is_file());
+                prepare(&deadline_request).unwrap(),
+                CompatibilityPhase::StandaloneC,
+                script(
+                    deadline_root.path(),
+                    "deadline-first",
+                    &format!("exec /bin/sleep {first_delay}"),
+                ),
+                Duration::from_secs(2),
+            );
+            deadline.commands.push(CompatibilityCommand {
+                program: script(
+                    deadline_root.path(),
+                    "deadline-second",
+                    "exec /bin/sleep 1.5",
+                ),
+                arguments: Vec::new(),
+            });
+            let error = run_probe(&deadline, &CancellationToken::default()).unwrap_err();
+            assert_compatibility(&error);
+            let diagnostics = error.diagnostics();
+            let diagnostic = &diagnostics.diagnostics[0];
+            if let Some(tool) = diagnostic
+                .context
+                .as_ref()
+                .and_then(|context| context.tool.as_deref())
+            {
+                let index = match tool {
+                    "standalone-c-1" => 1,
+                    "standalone-c-2" => 2,
+                    _ => panic!("unexpected deadline command: {tool}"),
+                };
+                assert_eq!(diagnostic.context.as_ref().unwrap().timed_out, Some(true));
+                // The whole-phase deadline can expire before command two is
+                // launched. Assert retention only for processes that started.
+                for started in 1..=index {
+                    for stream in ["stdout", "stderr"] {
+                        assert!(deadline
+                            .reports_root
+                            .join(format!("standalone-c.{started}.{stream}.log"))
+                            .is_file());
+                    }
+                }
+                if index == 1 {
+                    for stream in ["stdout", "stderr"] {
+                        assert!(!deadline
+                            .reports_root
+                            .join(format!("standalone-c.2.{stream}.log"))
+                            .exists());
+                    }
+                }
+            } else {
+                assert!(diagnostic
+                    .message
+                    .contains("exhausted its explicit deadline before starting the next command"));
+                // Expiry during preparation must not invent command-two logs.
+                for stream in ["stdout", "stderr"] {
+                    assert!(!deadline
+                        .reports_root
+                        .join(format!("standalone-c.2.{stream}.log"))
+                        .exists());
+                }
+                // Command one may not have started either. If it did, retain
+                // both streams instead of requiring logs for an unstarted job.
+                assert_eq!(
+                    deadline
+                        .reports_root
+                        .join("standalone-c.1.stdout.log")
+                        .is_file(),
+                    deadline
+                        .reports_root
+                        .join("standalone-c.1.stderr.log")
+                        .is_file(),
+                );
+            }
+            assert!(!deadline
+                .reports_root
+                .join("standalone-c.report.json")
+                .exists());
+        }
 
         let changed_root = tempfile::tempdir().unwrap();
         let changed_request = request(changed_root.path());

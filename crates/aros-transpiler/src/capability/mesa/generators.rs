@@ -543,14 +543,14 @@ mod tests {
         collect_mmakefile_fetches_with_context, parse_mmakefile_with_dirs_and_context_and_fetches,
     };
     use crate::testing::{dirs, root, target_context};
-    use aros_common::read_source;
     use std::path::Path;
 
     #[test]
-    fn glapi_python_capability_rejects_recipe_source_fetch_and_profile_drift() {
+    fn glapi_python_capability_rejects_current_source_fetch_and_profile_drift() {
         let root = root();
         let relative_dir = Path::new("workbench/libs/mesa/libglapi");
-        let profile = target_context("x86_64", "pc", "");
+        let mut profile = target_context("x86_64", "pc", "");
+        profile.mesa_version = Some("26.0.0".to_owned());
         let central_fetches = collect_mmakefile_fetches_with_context(
             &root.join("workbench/libs/mesa/mmakefile.src"),
             &root,
@@ -565,22 +565,24 @@ mod tests {
             &central_fetches,
         )
         .unwrap();
-        let content = read_source(&root.join(relative_dir).join("mmakefile.src")).unwrap();
-        let parse = |content: &str,
-                     targets: &[crate::ast::TargetDefinition],
+        assert_eq!(
+            parse_glapi(
+                relative_dir,
+                Some(&profile),
+                "",
+                &parsed.targets,
+                &central_fetches
+            )
+            .unwrap()
+            .unwrap()
+            .owner,
+            "mesa3d-linklib-glapi-generate"
+        );
+        let parse = |targets: &[crate::ast::TargetDefinition],
                      fetches: &[crate::fetch::FetchDecl],
                      profile: &TargetContext| {
-            parse_glapi(relative_dir, Some(profile), content, targets, fetches).unwrap_err()
+            parse_glapi(relative_dir, Some(profile), "", targets, fetches).unwrap_err()
         };
-
-        let changed_content = content.replace("gl_table.py", "unreviewed_table.py");
-        assert!(parse(
-            &changed_content,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("unsupported upstream recipe drift"));
 
         let mut changed_targets = parsed.targets.clone();
         let glapi = changed_targets
@@ -588,33 +590,31 @@ mod tests {
             .find(|target| target.mmake_name == "mesa3d-linklib-glapi")
             .unwrap();
         glapi.source_files.pop();
-        assert!(
-            parse(&content, &changed_targets, &central_fetches, &profile)
-                .contains("source, flag, include or output contract")
-        );
+        assert!(parse(&changed_targets, &central_fetches, &profile)
+            .contains("audited archive, flags or output"));
 
         let mut changed_fetches = central_fetches.clone();
-        changed_fetches[0].patches = "mesa-20.0.8-unreviewed.diff:mesa-20.0.8:-p1".to_owned();
-        assert!(parse(&content, &parsed.targets, &changed_fetches, &profile)
-            .contains("fetch declaration differs"));
-        assert!(parse(&content, &parsed.targets, &[], &profile).contains("exactly one"));
+        let mesa_fetch = changed_fetches
+            .iter_mut()
+            .find(|fetch| fetch.name == "mesa3d-fetch")
+            .unwrap();
+        mesa_fetch.patches = "mesa-26.0.0-unreviewed.diff:mesa-26.0.0:-p1".to_owned();
+        assert!(parse(&parsed.targets, &changed_fetches, &profile)
+            .contains("audited source/patch contract"));
+        assert!(parse(&parsed.targets, &[], &profile).contains("one central mesa3d-fetch"));
 
         let mut changed_profile = profile;
         changed_profile.toolchain = Some("gnu".to_owned());
-        assert!(parse(
-            &content,
-            &parsed.targets,
-            &central_fetches,
-            &changed_profile
-        )
-        .contains("does not support target profile"));
+        assert!(parse(&parsed.targets, &central_fetches, &changed_profile)
+            .contains("does not support target profile"));
     }
 
     #[test]
-    fn mesautil_python_capability_rejects_recipe_source_fetch_and_profile_drift() {
+    fn mesautil_python_capability_rejects_current_source_fetch_and_profile_drift() {
         let root = root();
         let relative_dir = Path::new("workbench/libs/mesa/libmesautil");
-        let profile = target_context("x86_64", "pc", "");
+        let mut profile = target_context("x86_64", "pc", "");
+        profile.mesa_version = Some("26.0.0".to_owned());
         let mut central_fetches = collect_mmakefile_fetches_with_context(
             &root.join("workbench/libs/mesa/mmakefile.src"),
             &root,
@@ -637,31 +637,25 @@ mod tests {
             &central_fetches,
         )
         .unwrap();
-        let content = read_source(&root.join(relative_dir).join("mmakefile.src")).unwrap();
-        let parse = |content: &str,
-                     targets: &[crate::ast::TargetDefinition],
-                     fetches: &[crate::fetch::FetchDecl],
-                     profile: &TargetContext| {
+        assert_eq!(
             parse_mesautil(
                 &root,
                 relative_dir,
-                Some(profile),
-                content,
-                targets,
-                fetches,
+                Some(&profile),
+                "",
+                &parsed.targets,
+                &central_fetches
             )
-            .unwrap_err()
+            .unwrap()
+            .unwrap()
+            .owner,
+            "mesa3d-linklib-mesautil-generated"
+        );
+        let parse = |targets: &[crate::ast::TargetDefinition],
+                     fetches: &[crate::fetch::FetchDecl],
+                     profile: &TargetContext| {
+            parse_mesautil(&root, relative_dir, Some(profile), "", targets, fetches).unwrap_err()
         };
-
-        let changed_content =
-            content.replace("$(Q)$(PYTHON)  $^ > $@", "$(Q)python-unreviewed $^ > $@");
-        assert!(parse(
-            &changed_content,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("unsupported upstream recipe drift"));
 
         let mut changed_targets = parsed.targets.clone();
         let mesautil = changed_targets
@@ -669,38 +663,31 @@ mod tests {
             .find(|target| target.mmake_name == "mesa3d-linklib-mesautil")
             .unwrap();
         mesautil.source_files.pop();
-        assert!(
-            parse(&content, &changed_targets, &central_fetches, &profile)
-                .contains("source, flag, include or output contract")
-        );
+        assert!(parse(&changed_targets, &central_fetches, &profile)
+            .contains("audited source, flags or output"));
 
         let mut changed_targets = parsed.targets.clone();
         let mesadevutil = changed_targets
             .iter_mut()
             .find(|target| target.mmake_name == "mesa3d-linklib-mesadevutil")
             .unwrap();
-        mesadevutil
-            .defines
-            .retain(|define| define != "EMBEDDED_DEVICE");
-        assert!(
-            parse(&content, &changed_targets, &central_fetches, &profile)
-                .contains("source, flag, include or output contract")
-        );
+        mesadevutil.defines.pop().expect("reviewed defines");
+        assert!(parse(&changed_targets, &central_fetches, &profile)
+            .contains("audited source, flags or output"));
 
         let mut changed_fetches = central_fetches.clone();
-        changed_fetches[0].patches = "mesa-20.0.8-unreviewed.diff:mesa-20.0.8:-p1".to_owned();
-        assert!(parse(&content, &parsed.targets, &changed_fetches, &profile)
-            .contains("fetch declaration differs"));
-        assert!(parse(&content, &parsed.targets, &[], &profile).contains("exactly one"));
+        let mesa_fetch = changed_fetches
+            .iter_mut()
+            .find(|fetch| fetch.name == "mesa3d-fetch")
+            .unwrap();
+        mesa_fetch.patches = "mesa-26.0.0-unreviewed.diff:mesa-26.0.0:-p1".to_owned();
+        assert!(parse(&parsed.targets, &changed_fetches, &profile)
+            .contains("audited source/patch contract"));
+        assert!(parse(&parsed.targets, &[], &profile).contains("one central mesa3d-fetch"));
 
         let mut changed_profile = profile;
         changed_profile.toolchain = Some("gnu".to_owned());
-        assert!(parse(
-            &content,
-            &parsed.targets,
-            &central_fetches,
-            &changed_profile
-        )
-        .contains("does not support target profile"));
+        assert!(parse(&parsed.targets, &central_fetches, &changed_profile)
+            .contains("does not support target profile"));
     }
 }

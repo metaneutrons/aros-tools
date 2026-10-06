@@ -313,7 +313,12 @@ fn read_release_lock(path: &Path, label: &str) -> Result<MeasuredReleaseLock> {
         .wrap_err_with(|| format!("{label} '{}' is not a valid TOML lock", path.display()))?;
     lock.validate()
         .map_err(|message| miette::miette!("{message}"))
-        .wrap_err_with(|| format!("{label} '{}' violates the v1 lock contract", path.display()))?;
+        .wrap_err_with(|| {
+            format!(
+                "{label} '{}' violates the toolchain lock contract",
+                path.display()
+            )
+        })?;
     Ok(MeasuredReleaseLock {
         path_text,
         identity,
@@ -372,6 +377,11 @@ fn validate_candidate_for_project(repo_root: &Path, lock: &ArosToolchainLock) ->
                 expected_triple
             ));
         }
+        let profile = profiles
+            .iter()
+            .find(|profile| profile.name == artifact.target_profile)
+            .ok_or_else(|| miette::miette!("candidate profile disappeared during validation"))?;
+        toolchain::validate_artifact_profile(profile, artifact)?;
         if artifact.enabled {
             let resolved = lock
                 .asset_url(artifact)
@@ -563,6 +573,7 @@ mod tests {
                 sha256: "a".repeat(64),
                 tree_sha256: "b".repeat(64),
                 llvm_version: Some("11.0.0".into()),
+                compiler: None,
                 size: Some(1),
                 enabled: true,
                 disabled_reason: None,
@@ -757,6 +768,7 @@ mod tests {
             sha256: "c".repeat(64),
             tree_sha256: "d".repeat(64),
             llvm_version: Some("11.0.0".into()),
+            compiler: None,
             size: Some(1),
             enabled: true,
             disabled_reason: None,

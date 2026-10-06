@@ -18,6 +18,10 @@ actionlint, ShellCheck, `jq`, GnuPG (`gpg` and `gpgv`), `dpkg-deb`, `gzip`,
 `tar`, `ar`, curl and a SHA-256 implementation as well. The quality gate checks
 these prerequisites before starting an expensive build; versions live in
 `contracts/development-runtimes-v1.toml`, not in this prose.
+Native GNU lifecycle fixtures also require GNU Make 4.0 or newer, bison, flex,
+patch and pkg-config. On macOS, Homebrew's `make` formula provides `gmake`;
+Apple's Make 3.81 is rejected. CI installs these test prerequisites explicitly
+rather than relying on a particular runner image.
 Source-contract tests need the immutable AROS-NX revision named in
 `contracts/aros-source-v1.toml`; do not substitute a moving branch or infer a
 neighboring checkout.
@@ -111,28 +115,48 @@ evidence.
 `AROS_TEST_SOURCE_ROOT` enables the otherwise skipped real
 `aros source init` → `aros source sync` → `aros-transpiler` integration case.
 The configured source is read-only input: the test creates and removes only its
-own temporary checkout. Workspace tests normally find all six required real
+own temporary checkout. The real sync regression proves rejection without branch
+mutation for the full Mesa 26/RISC-V manifest, then a successful fast-forward
+with an explicitly reduced three-profile test fixture. It does not qualify
+whole-source synchronization of the current four-profile NX manifest.
+Workspace tests normally find all six required real
 build-tool executables in the Cargo target directory; set
 `AROS_TEST_TOOLS_DIR` explicitly when testing prebuilt binaries from another
 directory.
-The current source must match `contracts/aros-source-v1.toml`.
+The current source must match `[integration]` in `contracts/aros-source-v1.toml`
+(or `[source]` in an older contract without that table). The `[source]` and
+`[producer]` pins remain the paired identities of the qualified toolchain
+producer; advancing development integration does not retarget that release.
 `AROS_TEST_MESA26_SOURCE_ROOT` selects that same current tree for Mesa 26
 capability probes. The separate `AROS_TEST_MESA20_SOURCE_ROOT` must be the
 clean, recursively initialized AROS-NX checkout at
 `cb6974f1c3de43c6f1168d69039af7c32e56153c`. The source-coupled Rust
-suite uses that historical baseline for its Mesa 20 and other version-bound
-regressions; the dedicated Mesa 26 probes use the current source. CI checks
-out and validates both trees. The current source's complete product graph is
-qualified separately by the AROS-NX product matrix.
+suite uses the current source by default. Only the Mesa 20 patch/inventory and
+Mesa 20 Nouveau Gallium regression tests explicitly use the historical oracle;
+whole-tree inventories, CLI source workflows and Mesa 26 probes use the current
+source. CI checks out and validates both trees. The current source's complete
+product graph is qualified separately by the AROS-NX product matrix.
 
 Build the documentation with the checked-in JavaScript lockfile:
 
 ```sh
 cd docs-site
 npm ci --ignore-scripts
-npm audit --audit-level=high
+python3 ../scripts/check-docs-audit.py
 npm run build
 ```
+
+The documentation audit still rejects high and critical vulnerabilities. The
+only temporary exception is the public advisory
+[GHSA-ch52-4w7c-c8xp](https://github.com/advisories/GHSA-ch52-4w7c-c8xp),
+approved by the maintainer for the pinned, static documentation build through
+10 October 2026 (22:00 UTC). Its exact dependency chain, lockfile identities,
+configuration hashes and expiry are recorded in
+`contracts/docs-audit-exception-v1.json`. The gate runs a fresh npm audit and
+rejects additional advisories, changed dependencies or configuration, malformed
+reports and use after expiry. This is not an exemption for SSR, an application
+runtime or another repository. Replace the affected dependency when a verified
+fix is available, then remove the exception; do not extend it implicitly.
 
 ## Design rules
 
@@ -175,6 +199,12 @@ capabilities must not be documented as already shipped.
   interfaces from implemented and qualified behavior.
 - [CMake engine migration](docs/cmake-engine-migration.md): implemented
   ownership changes, measured evidence and the remaining source boundary.
+- [Boot media initiative plan](docs/boot-media-plan.md): portable media
+  profiles, native build closure, image composition and platform-specific
+  qualification gates.
+- [Declarative boards and RISC-V integration](docs/riscv-board-integration-plan.md):
+  board-registry migration, RV32/P4 and RV64 compiler contracts, native P4
+  artifacts and the dependency on BM5's Titan hardware acceptance.
 
 ## Commits and pull requests
 

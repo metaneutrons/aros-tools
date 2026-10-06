@@ -68,11 +68,12 @@ Source: [target schema and defaults](https://github.com/metaneutrons/aros-tools/
 
 ## Tools-owned source contract
 
-`contracts/aros-source-v1.toml` pins the AROS-NX source revision used by the
-complete workspace test and the exact `aros-toolchains` producer commit that
-selected it. CI checks both files rather than duplicating a hash in workflow
-YAML. This contract affects development qualification; it does not force an
-end user to rename or relocate an AROS checkout.
+`contracts/aros-source-v1.toml` pins development integration under `[integration]`.
+Its separate `[source]` and `[producer]` tables preserve the matching source and
+producer identities of the qualified toolchain. CI verifies both relationships;
+updating integration does not change a released toolchain. The historical Mesa
+20 test oracle is separate from current-source tests. None of these development
+pins requires users to rename or relocate their AROS checkout.
 
 ## Local board profiles
 
@@ -191,10 +192,11 @@ it never rewrites or overrides any of these backend-owned variables.
 The following names are explicitly test-internal, are not supported user
 configuration, and may be compiled out or inert in release builds:
 
-- `AROS_TEST_MESA20_SOURCE_ROOT`, `AROS_TEST_MESA26_SOURCE_ROOT`, `AROS_TEST_SOURCE_ROOT`, `AROS_TEST_TOOLS_DIR`
+- `AROS_TEST_MESA20_SOURCE_ROOT`, `AROS_TEST_MESA26_SOURCE_ROOT`, `AROS_TEST_PC_SYS_ROOT`, `AROS_TEST_SOURCE_ROOT`, `AROS_TEST_TOOLS_DIR`
 - `AROS_PUBLICATION_TEST_FAIL_AT`, `AROS_PUBLICATION_TEST_FAIL_PATH`, `AROS_PUBLICATION_TEST_PAUSE_AT`, `AROS_PUBLICATION_TEST_PAUSE_MS`, `AROS_PUBLICATION_TEST_CRASH_AT`
 - `AROS_FETCH_TEST_LOG_FAIL_AT`, `AROS_FETCH_TEST_PAUSE_AT`, `AROS_FETCH_TEST_PAUSE_MS`
 - `AROS_CARGO_VENDOR_CREDENTIAL_TEST_CHILD`
+- `AROS_HOST_GENMODULE` selects a classic host genmodule executable for differential tests.
 - `AROS_TEST_LOG_FAIL_EVENT`
 - `AROS_GUARD_TEST_BUSY`, `AROS_GUARD_TEST_PATH`
 - `AROS_PROCESS_TEST_ESCAPE_PID`, `AROS_PROCESS_TEST_ESCAPE_STYLE`

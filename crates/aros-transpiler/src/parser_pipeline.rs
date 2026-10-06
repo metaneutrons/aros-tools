@@ -3,27 +3,29 @@
 use super::{
     all_sources_are_fetch_owned, apply_mesa_compile_contract, capability_diagnostic,
     collect_arch_decls, collect_arch_sources, collect_copy_includes_with_scope,
-    collect_fetches_with_scope_and_context, collect_flags, collect_flags_at,
-    collect_flexcat_source_rules, collect_ilbm_sources, collect_includes, collect_includes_at,
-    collect_make_opts, collect_vars, collect_vars_impl, collect_vars_impl_with_forward_locals,
-    collector_forward_local_prelude, copy_directories, current_profile, declaration_flags_at,
-    declaration_global_link_options, declaration_owned_port_scope, evaluate_linklib_list,
-    evaluate_macro_sources, evaluate_macro_sources_with_files, evaluate_make_expr, evaluate_name,
+    collect_fetches_with_scope_and_context, collect_flags, collect_flexcat_source_rules,
+    collect_ilbm_sources, collect_includes, collect_includes_at, collect_make_opts, collect_vars,
+    collect_vars_impl, collect_vars_impl_with_forward_locals, collector_forward_local_prelude,
+    copy_directories, current_profile, declaration_flags_at, declaration_global_link_options,
+    declaration_owned_port_scope, evaluate_linklib_list, evaluate_macro_sources,
+    evaluate_macro_sources_with_files, evaluate_make_expr, evaluate_name,
     evaluate_output_directory, expand_file_list, expected_ahi_profile_exclusion,
     expected_grub_profile_exclusion, external_cmake, generators, implicit_module_meta_rules,
     inline_collector_make_includes, inline_local_make_includes, is_explicit_genmodule_only,
-    join_continuations, join_mm_continuations, literal_defines, macro_arg,
-    map_linklib_object_sources, merge_named_link_flags, read_genmodule_linklib_config, read_source,
-    record_partial_source_lists, remaining_linklib_sources, render_meta_token,
+    join_continuations, literal_defines, macro_arg, map_linklib_object_sources,
+    merge_named_link_flags, read_genmodule_linklib_config, read_genmodule_linklib_config_files,
+    read_source, record_partial_source_lists, remaining_linklib_sources, render_meta_token,
     resolve_generated_linklib_sources, resolve_module_suffix, resolve_module_target_dir,
-    resolve_yes_argument, safe_build_tree_output_directory, sanitize_ident,
+    resolve_no_argument, resolve_yes_argument, safe_build_tree_output_directory, sanitize_ident,
     select_target_invocations, sse41, wildcard_c_sources, Diagnostic, EvaluatedSources, FetchDecl,
     GenmoduleConfigFacts, GenmoduleLinklibs, HashSet, LocalMakeFragmentPolicy,
     LocalMakeIncludeLimits, MakeExprContext, MetaTargetRule, ModuleType, ParsedMmakefile, Path,
-    Regex, Result, TargetContext, TargetDefinition, META_RULE_RE, PRIVATE_LIBDIR,
+    Regex, Result, TargetContext, TargetDefinition, PRIVATE_LIBDIR,
 };
-use crate::capability::mesa::mesa20;
 use crate::capability::mesa::mesa26;
+
+#[path = "parser_pipeline/post_processing.rs"]
+mod post_processing;
 
 #[expect(
     clippy::too_many_lines,
@@ -61,8 +63,20 @@ pub(super) fn parse_mmakefile_impl(
         || collect_vars(&collector_input),
         |target| collect_vars_impl(&collector_input, Some(target)).0,
     );
-    let (fetches, skipped_fetches) =
+    let (mut fetches, mut skipped_fetches) =
         collect_fetches_with_scope_and_context(&content, &rel_dir, &collector_scope, target);
+    let llvm_capability =
+        crate::capability::llvm::admit(root, &rel_dir, target).map_err(|message| {
+            aros_common::ArosError::Configuration {
+                file: relative_path.display().to_string(),
+                message,
+            }
+        })?;
+    if let Some((fetch, _)) = &llvm_capability {
+        fetches.clear();
+        fetches.push(fetch.clone());
+        skipped_fetches.clear();
+    }
     let mut ownership_fetches = known_fetches.to_vec();
     ownership_fetches.extend(fetches.iter().cloned());
 
@@ -167,22 +181,7 @@ pub(super) fn parse_mmakefile_impl(
     // numbers drift with every continuation and every inlined fragment, so the
     // positional flag lookup below would read some other declaration's flags.
     let (mut arch_sources, skipped_arch_sources) = collect_arch_sources(&joined, &rel_dir, target);
-    // A %build_archspecific file contributes to a target defined elsewhere, so
-    // its own USER_INCLUDES and flags have to travel with the declaration.
-    //
-    // Read at the declaration's own line, not file-wide. One mmakefile can hold
-    // several declarations with different flags:
-    // arch/i386-all/hidd/gfx sets `USER_CFLAGS :=` before the baseline lane,
-    // `$(HIDDGFX_SSE_CFLAGS)` before the SSE lane and `$(HIDDGFX_AVX_CFLAGS)`
-    // before the AVX one. The file-wide value is whichever assignment happens to
-    // win, and with it rgbconv_avx.c cannot compile at all.
-    for d in &mut arch_sources {
-        let at = collect_includes_at(&joined, &scope, d.line, &rel_dir);
-        let flags = collect_flags_at(&scope, d.line);
-        d.include_dirs = at.dirs;
-        d.defines = flags.defines;
-        d.compile_options = flags.compile_options;
-    }
+    crate::arch_sources::bind_declaration_context(&mut arch_sources, &joined, &scope, &rel_dir)?;
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
     // transpiler itself stays target-agnostic.
@@ -303,10 +302,18 @@ pub(super) fn parse_mmakefile_impl(
         copy_directory_line_states,
     );
     let mut external_cmake = Vec::new();
+    if let Some((_, declaration)) = &llvm_capability {
+        external_cmake.push(declaration.clone());
+    }
     for invocation in invocations
         .iter()
         .filter(|invocation| invocation.name == "build_with_cmake")
     {
+        if llvm_capability.is_some()
+            && macro_arg(&invocation.args, "mmake").as_deref() == Some("workbench-libs-llvm")
+        {
+            continue;
+        }
         let expression_context =
             MakeExprContext::new(&scope, dirs, invocation.line, root, &rel_dir);
         match external_cmake::parse(
@@ -486,7 +493,19 @@ pub(super) fn parse_mmakefile_impl(
             ));
             continue;
         }
-        let mod_name = sanitize_ident(&mod_raw);
+        let mod_name =
+            match mesa26::runtime_module_name(root, &rel_dir, &mmake_name, &mod_raw, target) {
+                Ok(Some(name)) => name,
+                Ok(None) => sanitize_ident(&mod_raw),
+                Err(reason) => {
+                    capability_errors.push(capability_diagnostic(
+                        &relative_path,
+                        Some(inv.line + 1),
+                        format!("Mesa runtime identity: {reason}"),
+                    ));
+                    continue;
+                }
+            };
         let mod_type_owned = macro_arg(&inv.args, "modtype").unwrap_or_default();
         let mod_type_str = mod_type_owned.as_str();
         let rest = inv.args.as_str();
@@ -696,6 +715,44 @@ pub(super) fn parse_mmakefile_impl(
                 }
             }
         });
+        let config_override_arg = macro_arg(&inv.args, "confoverride");
+        let config_override_file = config_override_arg.as_ref().and_then(|raw| {
+            let raw = raw.trim().trim_matches('"');
+            match evaluate_make_expr(raw, &expression_context) {
+                Ok(value) => {
+                    let value = value.trim().trim_matches('"').to_owned();
+                    if value.is_empty() || value.contains(char::is_whitespace) {
+                        skipped_programs.push(format!(
+                            "{}: %{} mmake={mmake_raw} confoverride={raw} is not one path",
+                            rel_dir.display(),
+                            inv.name
+                        ));
+                        None
+                    } else if value.starts_with("${") || value.starts_with('/') {
+                        Some(value)
+                    } else {
+                        Some(format!(
+                            "${{AROS_SOURCE_DIR}}/{}/{value}",
+                            rel_dir.display()
+                        ))
+                    }
+                }
+                Err(error) => {
+                    skipped_programs.push(format!(
+                        "{}: %{} mmake={mmake_raw} confoverride={raw} cannot be \
+                         evaluated: {error}",
+                        rel_dir.display(),
+                        inv.name
+                    ));
+                    None
+                }
+            }
+        });
+        // An invalid override must not silently produce a module with the
+        // wrong allocated base type or resident priority.
+        if config_override_arg.is_some() && config_override_file.is_none() {
+            continue;
+        }
 
         // Upstream creates the client archive when `<mod>_LINKLIB` is
         // non-empty, and make.tmpl derives that from the file set, not from
@@ -722,8 +779,30 @@ pub(super) fn parse_mmakefile_impl(
         // the rest: the base is defined by AROS_LIBSET in <mod>_autoinit.c
         // (compiler/include/aros/symbolsets.h:118), and that object lives in
         // exactly this archive.
+        let source_path = |value: &str| {
+            value
+                .strip_prefix("${AROS_SOURCE_DIR}/")
+                .map(|relative| root.join(relative))
+                .or_else(|| {
+                    Path::new(value)
+                        .is_absolute()
+                        .then(|| Path::new(value).to_path_buf())
+                })
+        };
+        let config_path = config_file.as_deref().and_then(source_path);
+        let override_path = config_override_file.as_deref().and_then(source_path);
+        let config_facts = config_path.map_or_else(
+            || read_genmodule_linklib_config(parent_dir, &mod_name, override_path.as_deref()),
+            |config_path| {
+                read_genmodule_linklib_config_files(&config_path, override_path.as_deref())
+            },
+        );
+        let config_relative_libraries = config_facts
+            .as_ref()
+            .map(|facts| facts.relative_libraries.clone())
+            .unwrap_or_default();
         if module_type != ModuleType::Library {
-            if let Some(facts) = read_genmodule_linklib_config(parent_dir, &mod_name) {
+            if let Some(facts) = config_facts.as_ref() {
                 if facts.forces_client_archive {
                     skipped_client_archives.push(format!(
                         "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} modtype={mod_type_owned}: \
@@ -738,7 +817,7 @@ pub(super) fn parse_mmakefile_impl(
             }
         }
         let genmodule_linklibs = if module_type == ModuleType::Library {
-            read_genmodule_linklib_config(parent_dir, &mod_name).map(
+            config_facts.map(
                 |GenmoduleConfigFacts {
                      has_relative,
                      relative_libraries,
@@ -849,6 +928,8 @@ pub(super) fn parse_mmakefile_impl(
             source_files: sources.c,
             cxx_source_files: sources.cxx,
             always_cxx_link,
+            no_startup: false,
+            detach: false,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,
@@ -861,7 +942,9 @@ pub(super) fn parse_mmakefile_impl(
             mod_suffix,
             linklib_name,
             config_file,
+            config_override_file,
             genmodule_linklibs,
+            config_relative_libraries,
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
             linklib_output_dir: None,
@@ -995,6 +1078,29 @@ pub(super) fn parse_mmakefile_impl(
                     continue;
                 }
             };
+        let no_startup = match resolve_no_argument(&inv.args, "usestartup", &scope, dirs, inv.line)
+        {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %build_prog mmake={mmake_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1
+                ));
+                continue;
+            }
+        };
+        let detach = match resolve_yes_argument(&inv.args, "detach", &scope, dirs, inv.line) {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %build_prog mmake={mmake_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1
+                ));
+                continue;
+            }
+        };
         let target_dir = match evaluate_output_directory(&inv.args, &expression_context) {
             Ok(directory) => directory,
             Err(reason) => {
@@ -1016,6 +1122,8 @@ pub(super) fn parse_mmakefile_impl(
             source_files: sources.c,
             cxx_source_files: sources.cxx,
             always_cxx_link,
+            no_startup,
+            detach,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,
@@ -1028,7 +1136,9 @@ pub(super) fn parse_mmakefile_impl(
             mod_suffix: None,
             linklib_name: None,
             config_file: None,
+            config_override_file: None,
             genmodule_linklibs: None,
+            config_relative_libraries: Vec::new(),
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
             linklib_output_dir: None,
@@ -1464,6 +1574,38 @@ pub(super) fn parse_mmakefile_impl(
             None
         };
         let is_program_group = matches!(module_type, ModuleType::ProgramGroup);
+        let no_startup = if is_program_group {
+            match resolve_no_argument(&inv.args, "usestartup", &scope, dirs, inv.line) {
+                Ok(value) => value,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            false
+        };
+        let detach = if is_program_group {
+            match resolve_yes_argument(&inv.args, "detach", &scope, dirs, inv.line) {
+                Ok(value) => value,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            false
+        };
         let target_dir = if is_simple_module {
             match resolve_module_target_dir(
                 &inv.args,
@@ -1579,6 +1721,8 @@ pub(super) fn parse_mmakefile_impl(
             source_files: sources.c,
             cxx_source_files: sources.cxx,
             always_cxx_link,
+            no_startup,
+            detach,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,
@@ -1591,7 +1735,9 @@ pub(super) fn parse_mmakefile_impl(
             mod_suffix,
             linklib_name: None,
             config_file: None,
+            config_override_file: None,
             genmodule_linklibs: None,
+            config_relative_libraries: Vec::new(),
             canonical_linklib_output,
             canonical_linklib_eligible,
             linklib_output_dir,
@@ -1717,130 +1863,18 @@ pub(super) fn parse_mmakefile_impl(
         }
     }
 
-    let mut python_outputs = Vec::new();
-    match generators::parse_glapi(&rel_dir, target, &content, &targets, &ownership_fetches) {
-        Ok(Some(declaration)) => python_outputs.push(declaration),
-        Ok(None) => {}
-        Err(reason) => {
-            capability_errors.push(capability_diagnostic(
-                &relative_path,
-                None,
-                format!("Mesa glapi generator no longer matches its closed capability: {reason}"),
-            ));
-            skipped_programs.push(format!(
-                "{}: Mesa glapi Python generator skipped: {reason}",
-                rel_dir.display()
-            ));
-        }
-    }
-    match generators::parse_mesautil(
-        root,
-        &rel_dir,
-        target,
-        &content,
-        &targets,
-        &ownership_fetches,
-    ) {
-        Ok(Some(declaration)) => python_outputs.push(declaration),
-        Ok(None) => {}
-        Err(reason) => {
-            capability_errors.push(capability_diagnostic(
-                &relative_path,
-                None,
-                format!("Mesa utility generator no longer matches its closed capability: {reason}"),
-            ));
-            skipped_programs.push(format!(
-                "{}: Mesa utility Python generator skipped: {reason}",
-                rel_dir.display()
-            ));
-        }
-    }
-    let mesa20_required_target = match rel_dir.to_str() {
-        Some("workbench/libs/mesa/libcompiler") => Some("mesa3d-linklib-compiler"),
-        Some("workbench/libs/mesa/libgalliumaux") => Some("mesa3d-linklib-galliumauxiliary"),
-        Some("workbench/libs/mesa/libmesa") => Some("mesa3d-linklib-mesa"),
-        Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium")
-            if current_profile(target).ok() != Some("x86_64") =>
-        {
-            Some("linklibs-gallium_vc4")
-        }
-        _ => None,
-    };
-    let mesa26 = target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0");
-    let remaining = if mesa26 {
-        match rel_dir.to_str() {
-            Some("workbench/libs/mesa/libcompiler") => {
-                mesa26::parse_compiler(root, &rel_dir, target, &targets, &ownership_fetches)
-            }
-            Some("workbench/libs/mesa/libgalliumaux") => {
-                mesa26::parse_galliumaux(root, &rel_dir, target, &targets, &ownership_fetches)
-            }
-            Some("workbench/libs/mesa/libmesa") => {
-                mesa26::parse_core(root, &rel_dir, target, &targets, &ownership_fetches)
-            }
-            _ => Ok(None),
-        }
-    } else {
-        mesa20::parse_remaining(
+    let python_outputs =
+        post_processing::collect_python_outputs(post_processing::PythonOutputContext {
             root,
-            &rel_dir,
+            rel_dir: &rel_dir,
+            relative_path: &relative_path,
             target,
-            &content,
-            &targets,
-            &ownership_fetches,
-        )
-    };
-    match remaining {
-        Ok(Some(declaration)) => python_outputs.push(declaration),
-        Ok(None) => {}
-        Err(reason) => {
-            if let Some(mmake) = mesa20_required_target {
-                // Source admission and every generator product form one
-                // capability. A partial archive with missing generated
-                // translation units is never an executable fallback.
-                targets.retain(|candidate| candidate.mmake_name != mmake);
-            }
-            capability_errors.push(capability_diagnostic(
-                &relative_path,
-                None,
-                format!("Mesa archive/generator no longer matches its closed capability: {reason}"),
-            ));
-            skipped_programs.push(format!(
-                "{}: Mesa archive/generator capability skipped: {reason}",
-                rel_dir.display()
-            ));
-        }
-    }
-    let v3d = if mesa26 {
-        mesa26::parse_v3d(root, &rel_dir, target, &targets, &ownership_fetches)
-            .map(|declaration| declaration.into_iter().collect())
-    } else {
-        mesa20::parse_v3d(
-            root,
-            &rel_dir,
-            target,
-            &content,
-            &targets,
-            &ownership_fetches,
-        )
-    };
-    match v3d {
-        Ok(declarations) => python_outputs.extend(declarations),
-        Err(reason) => {
-            targets.retain(|candidate| candidate.mmake_name != "linklibs-gallium_v3d");
-            capability_errors.push(capability_diagnostic(
-                &relative_path,
-                None,
-                format!(
-                    "Mesa 20.0.8 V3D archive/generators no longer match their closed capability: {reason}"
-                ),
-            ));
-            skipped_programs.push(format!(
-                "{}: Mesa 20.0.8 V3D archive/generator capability skipped: {reason}",
-                rel_dir.display()
-            ));
-        }
-    }
+            content: &content,
+            targets: &mut targets,
+            ownership_fetches: &ownership_fetches,
+            capability_errors: &mut capability_errors,
+            skipped_programs: &mut skipped_programs,
+        });
 
     // Paired FlexCat recipes are normal Make rules rather than a MetaMake
     // macro.  Parse them after all concrete source lists are known, so the
@@ -1848,36 +1882,14 @@ pub(super) fn parse_mmakefile_impl(
     let flexcat_scan = collect_flexcat_source_rules(&content, root, &rel_dir, &scope, dirs);
     let ilbm_scan = collect_ilbm_sources(&content, root, &rel_dir, &scope, dirs);
 
-    // 3. Extract #MM and #MM- meta-target rules
-    let mm_content = join_mm_continuations(&content);
-    for cap in META_RULE_RE.captures_iter(&mm_content) {
-        let raw_meta = &cap[1];
-        let Some(meta_name) = render_meta_token(raw_meta) else {
-            skipped_meta_rules.push(format!(
-                "{}: #MM target {raw_meta} contains an unmapped Make variable",
-                rel_dir.display()
-            ));
-            continue;
-        };
-        let deps_str = &cap[2];
-        let mut deps = Vec::new();
-        for raw_dep in deps_str.split_whitespace() {
-            match render_meta_token(raw_dep) {
-                Some(dep) => deps.push(dep),
-                None => skipped_meta_rules.push(format!(
-                    "{}: #MM {raw_meta} dependency {raw_dep} contains an unmapped Make variable",
-                    rel_dir.display()
-                )),
-            }
-        }
-
-        if !deps.is_empty() {
-            meta_rules.push(MetaTargetRule {
-                name: meta_name,
-                dependencies: deps,
-            });
-        }
-    }
+    post_processing::collect_meta_rules_and_apply_llvm(
+        &content,
+        &rel_dir,
+        target,
+        &mut targets,
+        &mut meta_rules,
+        &mut skipped_meta_rules,
+    );
 
     // %rule_link_binary needs the file's targets, to check an explicit mmake=,
     // and the %build_archspecific object roots, which is how the reference
@@ -1909,38 +1921,10 @@ pub(super) fn parse_mmakefile_impl(
         &arch_object_roots,
     );
 
-    // A pattern recipe is a template, not a literal missing output. When a
-    // closed Python-output capability instantiates concrete products matching
-    // that template (V3D's version wrappers are the current case), keep the
-    // template out of the residual generated-file report.
-    let capability_outputs = python_outputs
-        .iter()
-        .flat_map(|declaration| {
-            declaration.jobs.iter().map(|job| {
-                format!(
-                    "{}/{}",
-                    declaration.build_root.trim_end_matches('/'),
-                    job.output.trim_start_matches('/')
-                )
-                .replace("${AROS_BUILD_DIR}", "${CMAKE_BINARY_DIR}")
-            })
-        })
-        .collect::<Vec<_>>();
-    copy_scan.generated_files.retain(|report| {
-        let Some((target, _)) = report.split_once(" <- ") else {
-            return true;
-        };
-        let target = target.replace("${AROS_BUILD_DIR}", "${CMAKE_BINARY_DIR}");
-        let Some((prefix, suffix)) = target.split_once('%') else {
-            return true;
-        };
-        !capability_outputs.iter().any(|output| {
-            output
-                .strip_prefix(prefix)
-                .and_then(|rest| rest.strip_suffix(suffix))
-                .is_some()
-        })
-    });
+    post_processing::filter_generated_file_templates(
+        &mut copy_scan.generated_files,
+        &python_outputs,
+    );
 
     Ok(ParsedMmakefile {
         capability_errors,

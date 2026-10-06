@@ -1,0 +1,23 @@
+# Schema fixture only: firmware locking and physical boot are not qualified.
+format_version = 1
+id = "rpi5-native-sd-fixture"
+target_preset = "rpi-aarch64"
+model = "rpi5"
+transport = "native-sd"
+medium = "mbr-fat32"
+boot_protocol = "pi-firmware"
+label = "Pi 5 native SD schema fixture"
+
+[layout]
+kind = "mbr-fat32"
+start_lba = 2048
+size_bytes = 67108864
+label = "AROSBOOT"
+
+[[required_files]]
+role = "aros-image"
+destination = "aros-aarch64-raspi.img"
+
+[[required_files]]
+role = "bsp-package"
+destination = "aros-aarch64-bsp.rom"

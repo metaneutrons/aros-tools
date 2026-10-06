@@ -2,7 +2,7 @@
 
 #![warn(missing_docs)]
 
-use aros_board::config::{BoardModel, Transport};
+use aros_board::config::{BoardId, Transport};
 use aros_common::{
     effective_log_level, render_diagnostics, requested_diagnostic_format, Diagnostic,
     DiagnosticCode, DiagnosticContext, DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat,
@@ -28,6 +28,7 @@ mod cache;
 /// Parser model for resource-oriented cache commands.
 pub mod cache_command;
 mod cache_diagnostics;
+mod cli_board_registry;
 mod cli_contract;
 /// Source-derived renderer for reviewed CLI-contract snapshots.
 #[cfg(test)]
@@ -38,6 +39,7 @@ mod commands;
 mod completion_model;
 mod golden;
 mod host_compiler;
+mod image;
 mod observability;
 mod repo;
 mod source;
@@ -56,6 +58,7 @@ use cache_command::{
     CacheCommand, CacheCompilerBackend, CacheCompilerCommand, CacheGenmfCommand,
     CacheGenmfSelector, CacheSourceSelector, CacheSourcesCommand, ManagedCompilerBackend,
 };
+use cli_board_registry::{embedded_board_registry, BoardIdValueParser};
 use cli_contract::{
     parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
     GoldenAction,
@@ -147,6 +150,12 @@ enum Commands {
     Board {
         #[command(subcommand)]
         command: BoardCommand,
+    },
+
+    /// Plan, compose, inspect or verify a boot-media artifact
+    Image {
+        #[command(subcommand)]
+        command: image::ImageCommand,
     },
 
     /// Create and configure an AROS source checkout
@@ -251,12 +260,20 @@ enum Commands {
         timeout: u64,
 
         /// Also pass every built package as a multiboot module
-        #[arg(long)]
+        #[arg(long, conflicts_with = "iso")]
         packages: bool,
 
         /// Pass this file as a multiboot module; repeatable
-        #[arg(long = "module")]
+        #[arg(long = "module", conflicts_with = "iso")]
         modules: Vec<PathBuf>,
+
+        /// Boot this existing ISO directly from the virtual CD-ROM
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["packages", "modules"])]
+        iso: Option<PathBuf>,
+
+        /// Require the serial proof from the LLVM 11 llvmpipe GLSL/JIT probe
+        #[arg(long, requires = "iso")]
+        require_llvmpipe_jit: bool,
 
         /// Root below which each invocation keeps one private evidence directory
         #[arg(long)]
@@ -432,29 +449,6 @@ enum BuildToolsCommand {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum BoardInitModel {
-    #[value(name = "rpi3")]
-    Rpi3,
-    #[value(name = "rpi4")]
-    Rpi4,
-    #[value(name = "rpi5")]
-    Rpi5,
-    #[value(name = "milk-v-titan")]
-    MilkVTitan,
-}
-
-impl From<BoardInitModel> for BoardModel {
-    fn from(value: BoardInitModel) -> Self {
-        match value {
-            BoardInitModel::Rpi3 => Self::Rpi3,
-            BoardInitModel::Rpi4 => Self::Rpi4,
-            BoardInitModel::Rpi5 => Self::Rpi5,
-            BoardInitModel::MilkVTitan => Self::MilkVTitan,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum BoardInitTransport {
     #[value(name = "native-tftp")]
     NativeTftp,
@@ -483,8 +477,8 @@ enum BoardCommand {
         profile: String,
 
         /// Required physical hardware model for the generated profile
-        #[arg(long, value_enum)]
-        model: BoardInitModel,
+        #[arg(long, value_parser = BoardIdValueParser)]
+        model: BoardId,
 
         /// Reviewed boot transport; defaults to the model's conservative transport
         #[arg(long, value_enum)]
@@ -828,6 +822,18 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 ),
             }
         }
+        Commands::Image { command } => (
+            DiagnosticCode::CliMediaSafety,
+            DiagnosticStage::MediaSafety,
+            match command {
+                image::ImageCommand::Receipt(_) => "image.receipt",
+                image::ImageCommand::Build(_) => "image.build",
+                image::ImageCommand::Inspect(_) => "image.inspect",
+                image::ImageCommand::Verify(_) => "image.verify",
+            },
+            None,
+            "check the reviewed profile, receipt and locked inputs, or inspect the artifact read-back failure",
+        ),
         Commands::Board { command } => match command {
             BoardCommand::Build { board, .. } => (
                 DiagnosticCode::CliBuild,
@@ -1011,6 +1017,21 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
 async fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     let requested_format = requested_diagnostic_format(&arguments, "AROS_DIAGNOSTIC_FORMAT");
+    if let Err(error) = embedded_board_registry() {
+        render_diagnostics(
+            &DiagnosticSet::single(
+                Diagnostic::error(
+                    DiagnosticCode::CliConfiguration,
+                    DiagnosticStage::Configuration,
+                    format!("the embedded board catalog is invalid: {error}"),
+                )
+                .with_hint("repair profiles/boards/registry-v1.toml and rebuild the aros command"),
+            ),
+            requested_format,
+            observability::POLICY,
+        );
+        return ExitCode::FAILURE;
+    }
     let matches = match Cli::command().try_get_matches_from(arguments) {
         Ok(matches) => matches,
         Err(error)
@@ -1261,8 +1282,8 @@ mod tests {
             table_cell,
         },
         cli_contract_sections::CLI_CONTRACT_SECTIONS,
-        command_boundary, BoardCommand, BoardInitModel, BoardInitTransport, BoardModel, Cli,
-        Commands, Parser,
+        command_boundary, embedded_board_registry, BoardCommand, BoardInitTransport, Cli, Commands,
+        Parser,
     };
     use clap::{error::ErrorKind, CommandFactory};
 
@@ -1334,6 +1355,30 @@ mod tests {
             ),
             (&["aros", "board", "scan"], "board.scan"),
             (&["aros", "board", "sd", "scan"], "board.sd.scan"),
+            (
+                &["aros", "image", "verify", "--artifact", "/tmp/media"],
+                "image.verify",
+            ),
+            (
+                &[
+                    "aros",
+                    "image",
+                    "build",
+                    "--profile",
+                    "rpi4-uboot-usb-ecm",
+                    "--build-root",
+                    "/tmp/build",
+                    "--receipt",
+                    "/tmp/receipt.json",
+                    "--output",
+                    "/tmp/media",
+                ],
+                "image.build",
+            ),
+            (
+                &["aros", "image", "inspect", "--artifact", "/tmp/media"],
+                "image.inspect",
+            ),
             (&["aros", "golden", "capture"], "golden.capture"),
             (&["aros", "source", "init", "/tmp/AROS"], "source.init"),
         ];
@@ -1394,6 +1439,26 @@ mod tests {
             RepositoryRequirement::Global
         );
         assert_eq!(
+            requirement(&["aros", "image", "verify", "--artifact", "/tmp/media"]),
+            RepositoryRequirement::Global
+        );
+        assert_eq!(
+            requirement(&[
+                "aros",
+                "image",
+                "build",
+                "--profile",
+                "rpi4-uboot-usb-ecm",
+                "--build-root",
+                "/tmp/build",
+                "--receipt",
+                "/tmp/receipt.json",
+                "--output",
+                "/tmp/media",
+            ]),
+            RepositoryRequirement::Global
+        );
+        assert_eq!(
             requirement(&["aros", "toolchain", "inventory"]),
             RepositoryRequirement::Global
         );
@@ -1409,6 +1474,50 @@ mod tests {
             requirement(&["aros", "source", "sync"]),
             RepositoryRequirement::Required
         );
+    }
+
+    #[test]
+    fn image_build_requires_explicit_inputs_and_apply_is_mutually_exclusive_with_dry_run() {
+        assert_eq!(
+            parse_error(&["aros", "image", "build"]),
+            ErrorKind::MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_error(&[
+                "aros",
+                "image",
+                "build",
+                "--profile",
+                "rpi4-uboot-usb-ecm",
+                "--build-root",
+                "/tmp/build",
+                "--receipt",
+                "/tmp/receipt.json",
+                "--output",
+                "/tmp/media",
+                "--apply",
+                "--dry-run",
+            ]),
+            ErrorKind::ArgumentConflict
+        );
+        Cli::try_parse_from([
+            "aros",
+            "image",
+            "build",
+            "--profile",
+            "rpi4-uboot-usb-ecm",
+            "--build-root",
+            "/tmp/build",
+            "--receipt",
+            "/tmp/receipt.json",
+            "--output",
+            "/tmp/media",
+            "--lock",
+            "firmware=/tmp/lock.toml",
+            "--external",
+            "firmware:blob=/tmp/firmware.bin",
+        ])
+        .expect("valid explicit image build");
     }
 
     fn parse_error(arguments: &[&str]) -> ErrorKind {
@@ -1622,6 +1731,41 @@ mod tests {
     }
 
     #[test]
+    fn iso_boot_flags_require_iso_and_conflict_with_multiboot_modules() {
+        assert_eq!(
+            parse_error(&["aros", "test", "--require-llvmpipe-jit"]),
+            ErrorKind::MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_error(&["aros", "test", "--iso", "/tmp/boot.iso", "--packages"]),
+            ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            parse_error(&[
+                "aros",
+                "test",
+                "--iso",
+                "/tmp/boot.iso",
+                "--module",
+                "/tmp/module",
+            ]),
+            ErrorKind::ArgumentConflict
+        );
+        assert!(Cli::try_parse_from([
+            "aros",
+            "test",
+            "--iso",
+            "/tmp/boot.iso",
+            "--require-llvmpipe-jit",
+        ])
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(["aros", "test", "--packages", "--module", "/tmp/extra.pkg",])
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn board_init_requires_a_typed_model_and_never_inferrs_one_from_the_profile_label() {
         assert_eq!(
             parse_error(&["aros", "board", "init", "--profile", "pi5-usb"]),
@@ -1630,6 +1774,18 @@ mod tests {
         assert_eq!(
             parse_error(&["aros", "board", "init", "--board", "pi5-usb", "--model", "rpi5",]),
             ErrorKind::UnknownArgument
+        );
+        assert_eq!(
+            parse_error(&[
+                "aros",
+                "board",
+                "init",
+                "--profile",
+                "future",
+                "--model",
+                "future-board",
+            ]),
+            ErrorKind::InvalidValue
         );
 
         let parsed = Cli::try_parse_from([
@@ -1657,7 +1813,7 @@ mod tests {
             panic!("expected board init command");
         };
         assert_eq!(profile, "pi5-usb");
-        assert_eq!(model, BoardInitModel::Rpi3);
+        assert_eq!(model.as_str(), "rpi3");
         assert_eq!(transport, Some(BoardInitTransport::NativeTftp));
         assert!(Cli::try_parse_from([
             "aros",
@@ -1674,13 +1830,9 @@ mod tests {
 
     #[test]
     fn board_init_model_contract_covers_each_reviewed_default_transport() {
-        let defaults = [
-            ("rpi3", BoardModel::Rpi3, "native-tftp"),
-            ("rpi4", BoardModel::Rpi4, "native-tftp"),
-            ("rpi5", BoardModel::Rpi5, "native-tftp"),
-            ("milk-v-titan", BoardModel::MilkVTitan, "uefi-esp"),
-        ];
-        for (model_argument, expected_model, expected_transport) in defaults {
+        let registry = embedded_board_registry().expect("embedded board catalog is valid");
+        for contract in registry.boards() {
+            let model_argument = contract.id().as_str();
             let parsed = Cli::try_parse_from([
                 "aros",
                 "board",
@@ -1700,11 +1852,46 @@ mod tests {
             else {
                 panic!("expected board init command");
             };
-            let model: BoardModel = model.into();
-            assert_eq!(model, expected_model);
+            assert_eq!(model.as_str(), model_argument);
             assert_eq!(transport, None);
-            assert_eq!(model.default_transport().to_string(), expected_transport);
+            let template = crate::board::config::prepare_template(
+                Some(std::path::Path::new("boards.toml")),
+                "deliberately-unrelated-label",
+                model,
+                None,
+            )
+            .expect("catalog model has an implemented default transport");
+            assert_eq!(
+                template.transport().to_string(),
+                contract.default_transport()
+            );
         }
+    }
+
+    #[test]
+    fn board_model_possible_values_come_from_the_embedded_registry() {
+        let mut command = Cli::command();
+        command.build();
+        let mut values = command
+            .find_subcommand("board")
+            .expect("board command")
+            .find_subcommand("init")
+            .expect("board init command")
+            .get_arguments()
+            .find(|argument| argument.get_id() == "model")
+            .expect("model argument")
+            .get_possible_values()
+            .into_iter()
+            .map(|value| value.get_name().to_owned())
+            .collect::<Vec<_>>();
+        let registry = embedded_board_registry().expect("embedded board catalog is valid");
+        let mut catalog_values = registry
+            .boards()
+            .map(|contract| contract.id().as_str().to_owned())
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        catalog_values.sort_unstable();
+        assert_eq!(values, catalog_values);
     }
 
     #[test]

@@ -1,21 +1,32 @@
 include_guard(GLOBAL)
+include("${CMAKE_CURRENT_LIST_DIR}/Executable.cmake")
 
-# Compose a BIOS-bootable PC ISO from the audited GRUB El Torito image. The
-# default AROS build stays unchanged; this is an explicit distribution target.
+# Compose a BIOS-bootable PC ISO from the complete native AROS SYS producer
+# and audited GRUB El Torito assets. The default build stays unchanged; this
+# is an explicit distribution target.
 function(aros_add_pc_boot_iso)
     if(NOT AROS_TARGET_CPU STREQUAL "x86_64" OR
        NOT AROS_TARGET_PLATFORM STREQUAL "pc" OR
-       NOT TARGET aros-grub2-iso-assets)
-        message(FATAL_ERROR "boot-iso requires audited x86_64-pc GRUB2 assets")
+       NOT TARGET aros-grub2-iso-assets OR NOT TARGET AROS)
+        message(FATAL_ERROR
+            "boot-iso requires the native AROS SYS target and audited x86_64-pc GRUB2 assets")
     endif()
     if(TARGET boot-iso)
         message(FATAL_ERROR "boot-iso is already declared")
     endif()
-    find_program(AROS_MKISOFS_BIN NAMES mkisofs genisoimage
+    find_program(AROS_XORRISO_BIN NAMES xorriso
         HINTS "/opt/homebrew/bin" "/usr/bin" "/usr/local/bin")
-    if(NOT AROS_MKISOFS_BIN)
-        message(STATUS "boot-iso unavailable: install mkisofs or genisoimage")
+    if(NOT AROS_XORRISO_BIN)
+        message(STATUS "boot-iso unavailable: install xorriso")
         return()
+    endif()
+    if(NOT AROS_MEDIA_CLI_BIN)
+        set(AROS_MEDIA_CLI_BIN "${AROS_RUST_TOOLS_DIR}/aros" CACHE FILEPATH
+            "aros executable used to record verified media inputs")
+    endif()
+    aros_path_is_executable("${AROS_MEDIA_CLI_BIN}" _media_cli_available)
+    if(NOT _media_cli_available)
+        message(FATAL_ERROR "boot-iso requires the aros media receipt executable")
     endif()
 
     set(_modules_file "${AROS_SOURCE_DIR}/arch/x86_64-pc/boot/modules.default")
@@ -49,6 +60,15 @@ function(aros_add_pc_boot_iso)
         message(FATAL_ERROR "boot-iso requires the kernel ELF as its first module")
     endif()
     set(_startup_source "${AROS_SOURCE_DIR}/workbench/s/Startup-Sequence")
+    set(_probe_startup "")
+    if(AROS_LLVMPIPE_RUNTIME_PROBE)
+        if(NOT TARGET tools-test-llvmpipe-jit OR
+           NOT TARGET tools-test-llvmpipe-jit-runner)
+            message(FATAL_ERROR "boot-iso runtime probe has no native guest producer")
+        endif()
+        set(_probe_startup "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/tests/runtime/llvmpipe-jit-startup")
+    endif()
+    set(_bootstrap "${CMAKE_BINARY_DIR}/SYS/boot/pc/bootstrap")
     set(_grub_config "${CMAKE_BINARY_DIR}/gen/boot-iso/grub.cfg")
     set(_stage_dir "${CMAKE_BINARY_DIR}/gen/boot-iso/stage")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/gen/boot-iso")
@@ -67,29 +87,43 @@ function(aros_add_pc_boot_iso)
         "}\n")
     file(WRITE "${_grub_config}" "${_grub_content}")
 
-    set(_iso_temp "${AROS_BOOT_ISO}.tmp")
     add_custom_target(boot-iso
         COMMAND "${CMAKE_COMMAND}"
             "-DSYS_DIR=${CMAKE_BINARY_DIR}/SYS"
             "-DSTAGE_DIR=${_stage_dir}"
             "-DCONFIG_SOURCE=${_grub_config}"
             "-DSTARTUP_SOURCE=${_startup_source}"
+            "-DLLVMPIPE_PROBE_STARTUP=${_probe_startup}"
+            "-DCPU_SIGNATURE=${AROS_TARGET_CPU}"
+            "-DGRUB2_STAMP=${CMAKE_BINARY_DIR}/gen/grub2-iso-assets/x86_64/.grub2-iso-assets.stamp"
+            "-DGRUB2_PRIVATE_IMAGE=${CMAKE_BINARY_DIR}/gen/grub2-iso-assets/x86_64/pc/grub2_eltorito"
             -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PreparePcBootIso.cmake"
-        COMMAND "${CMAKE_COMMAND}" -E rm -f "${_iso_temp}"
-        COMMAND "${AROS_MKISOFS_BIN}" -o "${_iso_temp}"
-            -b boot/grub/i386-pc/grub2_eltorito
-            -c boot/grub/boot.catalog
-            -no-emul-boot -boot-load-size 4 -boot-info-table
-            -allow-leading-dots -iso-level 4
-            -V "AROS Live CD" -p "The AROS Dev Team" -l -J -r
-            "${_stage_dir}"
-        COMMAND "${CMAKE_COMMAND}" "-DISO_PATH=${_iso_temp}"
-            -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/VerifyPcBootIso.cmake"
-        COMMAND "${CMAKE_COMMAND}" -E rename "${_iso_temp}" "${AROS_BOOT_ISO}"
-        DEPENDS "${_modules_file}" "${_startup_source}" "${_grub_config}"
+        COMMAND "${AROS_MEDIA_CLI_BIN}" image receipt
+            --profile pc-bios-iso
+            --build-root "${CMAKE_BINARY_DIR}"
+            --source-root "${AROS_SOURCE_DIR}"
+            --toolchain-root "${AROS_CROSS_TOOLCHAIN_ROOT}"
+            --file "bootstrap=gen/boot-iso/stage/boot/pc/bootstrap"
+            --file "grub-boot-image=gen/boot-iso/stage/boot/grub/i386-pc/grub2_eltorito"
+            --tree "sys-tree=gen/boot-iso/stage"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMEDIA_CLI=${AROS_MEDIA_CLI_BIN}"
+            "-DBUILD_ROOT=${CMAKE_BINARY_DIR}"
+            "-DSOURCE_ROOT=${AROS_SOURCE_DIR}"
+            "-DTOOLCHAIN_ROOT=${AROS_CROSS_TOOLCHAIN_ROOT}"
+            "-DISO_PATH=${AROS_BOOT_ISO}"
+            -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ComposePcBootIso.cmake"
+        # AROS is not a complete producer of the bootstrap or every package
+        # named by modules.default. Bind the exact generated outputs as file
+        # dependencies instead of relying on its historically partial root.
+        DEPENDS "${_bootstrap}" ${_module_inputs}
+            "${_modules_file}" "${_startup_source}" "${_grub_config}" ${_probe_startup}
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PreparePcBootIso.cmake"
-            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/VerifyPcBootIso.cmake"
-        COMMENT "Packaging existing AROS SYS tree as BIOS-bootable PC ISO -> ${AROS_BOOT_ISO}"
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ComposePcBootIso.cmake"
+        COMMENT "Packaging native AROS SYS tree as BIOS-bootable PC ISO -> ${AROS_BOOT_ISO}"
         VERBATIM)
-    add_dependencies(boot-iso aros-grub2-iso-assets)
+    add_dependencies(boot-iso AROS aros-grub2-iso-assets)
+    if(AROS_LLVMPIPE_RUNTIME_PROBE)
+        add_dependencies(boot-iso tools-test-llvmpipe-jit-runner)
+    endif()
 endfunction()

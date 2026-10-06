@@ -16,6 +16,12 @@ use aros_common::{Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage
 use crate::observability::{failure, CollectorFailure, CollectorResult, LogLevel, Logger};
 use crate::{extra, libreq, sets};
 
+#[cfg(test)]
+mod driver_output_tests;
+mod driver_tools;
+
+use driver_tools::{resolve_driver_tools, validate_emulation, TOOL_MANIFEST_NAME};
+
 const DRIVER_NAMES: &[&str] = &["collect-aros", "collect-aros32"];
 const RESPONSE_DEPTH_LIMIT: usize = 8;
 
@@ -47,6 +53,7 @@ struct EngineRequest {
     name: String,
     linker: PathBuf,
     strip: Option<PathBuf>,
+    emulation: Option<String>,
     args: Vec<OsString>,
     output: PathBuf,
     sysroot: Option<PathBuf>,
@@ -58,12 +65,27 @@ struct EngineRequest {
     frontend: Frontend,
 }
 
+#[derive(Debug)]
+struct UserEmulation {
+    start: usize,
+    end: usize,
+    value: String,
+}
+
 #[must_use]
 pub fn is_driver_invocation(argument_zero: Option<&OsStr>) -> bool {
     argument_zero
         .and_then(|argument| Path::new(argument).file_stem())
         .and_then(OsStr::to_str)
-        .is_some_and(|name| DRIVER_NAMES.contains(&name))
+        .is_some_and(is_driver_name)
+}
+
+fn is_driver_name(name: &str) -> bool {
+    DRIVER_NAMES.contains(&name) || name.ends_with("-collect-aros")
+}
+
+fn is_legacy_driver_name(name: &str) -> bool {
+    DRIVER_NAMES.contains(&name)
 }
 
 pub fn run_entry(
@@ -101,6 +123,7 @@ pub fn run_entry(
             "{name}: AROS linker collector\n\
              usage: {name} [collector observability options] \
              [linker arguments including --sysroot=DIR and -o FILE]\n\
+             configured GNU drivers default to a.out when -o is omitted\n\
              observability:\n  \
              --diagnostic-format human|json\n  \
              --log-level off|error|warn|info|debug|trace\n  \
@@ -125,6 +148,14 @@ pub fn run_entry(
             DiagnosticContext::default(),
         )
     })?;
+    let executable = fs::canonicalize(&executable).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorToolResolution,
+            DiagnosticStage::ToolResolution,
+            format!("cannot resolve the running collector executable: {error}"),
+            DiagnosticContext::default(),
+        )
+    })?;
     let bin = executable.parent().ok_or_else(|| {
         failure(
             DiagnosticCode::CollectorToolResolution,
@@ -133,28 +164,56 @@ pub fn run_entry(
             DiagnosticContext::default(),
         )
     })?;
-    let linker = require_sibling(bin, "ld.lld").map_err(|error| {
-        failure(
-            DiagnosticCode::CollectorToolResolution,
-            DiagnosticStage::ToolResolution,
-            format!("{error:#}"),
-            DiagnosticContext {
-                tool: Some(bin.join("ld.lld").display().to_string()),
-                ..DiagnosticContext::default()
-            },
+    let invocation_filename = executable
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| {
+            failure(
+                DiagnosticCode::CollectorToolResolution,
+                DiagnosticStage::ToolResolution,
+                "the collector executable filename is not valid UTF-8",
+                DiagnosticContext::default(),
+            )
+        })?;
+    let invocation_stem = executable
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| {
+            failure(
+                DiagnosticCode::CollectorToolResolution,
+                DiagnosticStage::ToolResolution,
+                "the collector executable name is not valid UTF-8",
+                DiagnosticContext::default(),
+            )
+        })?;
+    if raw.is_empty()
+        && is_legacy_driver_name(&name)
+        && (is_legacy_driver_name(invocation_stem) || invocation_stem == "aros-collect")
+        && matches!(
+            fs::symlink_metadata(bin.join(TOOL_MANIFEST_NAME)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
         )
-    })?;
-    let strip = require_sibling(bin, "llvm-strip").map_err(|error| {
-        failure(
-            DiagnosticCode::CollectorToolResolution,
-            DiagnosticStage::ToolResolution,
-            format!("{error:#}"),
-            DiagnosticContext {
-                tool: Some(bin.join("llvm-strip").display().to_string()),
-                ..DiagnosticContext::default()
-            },
-        )
-    })?;
+    {
+        return Err(failure(
+            DiagnosticCode::CollectorInvocation,
+            DiagnosticStage::Invocation,
+            "no linker command line was given",
+            DiagnosticContext::default(),
+        ));
+    }
+    let tools = resolve_driver_tools(bin, invocation_filename, invocation_stem, &name).map_err(
+        |error| {
+            failure(
+                DiagnosticCode::CollectorToolResolution,
+                DiagnosticStage::ToolResolution,
+                format!("{error:#}"),
+                DiagnosticContext {
+                    tool: Some(bin.join(TOOL_MANIFEST_NAME).display().to_string()),
+                    ..DiagnosticContext::default()
+                },
+            )
+        },
+    )?;
     let args = expand_response_files(&raw, 0).map_err(|error| {
         failure(
             DiagnosticCode::CollectorResponseFile,
@@ -163,7 +222,16 @@ pub fn run_entry(
             DiagnosticContext::default(),
         )
     })?;
-    let request = parse(name, linker, strip, args).map_err(|error| {
+    let request = parse_configured(
+        name,
+        tools.linker,
+        tools.strip,
+        tools.emulation,
+        tools.driver_emulation.as_deref(),
+        tools.default_output.as_deref(),
+        args,
+    )
+    .map_err(|error| {
         failure(
             DiagnosticCode::CollectorInvocation,
             DiagnosticStage::Invocation,
@@ -195,6 +263,7 @@ pub fn run_direct(
         name: "aros-collect".into(),
         linker,
         strip: None,
+        emulation: None,
         args,
         output,
         sysroot: None,
@@ -208,23 +277,59 @@ pub fn run_direct(
     run(&request, logger, diagnostics)
 }
 
-fn require_sibling(bin: &Path, name: &str) -> Result<PathBuf> {
-    let path = bin.join(name);
-    if !path.is_file() {
-        bail!(
-            "required sibling tool {} is missing; the released collector never searches PATH or COMPILER_PATH",
-            path.display()
-        );
-    }
-    Ok(path)
-}
-
+#[cfg(test)]
 fn parse(
     name: String,
     linker: PathBuf,
     strip: PathBuf,
+    emulation: Option<String>,
+    args: Vec<OsString>,
+) -> Result<EngineRequest> {
+    parse_configured(name, linker, strip, emulation, None, None, args)
+}
+
+fn parse_configured(
+    name: String,
+    linker: PathBuf,
+    strip: PathBuf,
+    emulation: Option<String>,
+    driver_emulation: Option<&str>,
+    default_output: Option<&Path>,
     mut args: Vec<OsString>,
 ) -> Result<EngineRequest> {
+    if let Some(emulation) = &emulation {
+        validate_emulation(emulation)?;
+        if let Some(driver_emulation) = driver_emulation {
+            validate_emulation(driver_emulation)?;
+        }
+        let found = collect_user_emulations(&args)?;
+        if found.iter().any(|selection| {
+            selection.value != *emulation
+                && driver_emulation.is_none_or(|driver| selection.value != driver)
+        }) {
+            bail!(
+                "conflicting emulation: linker command line selects a value outside the configured linker and driver values"
+            );
+        }
+        let mut normalized = Vec::with_capacity(args.len() + 2);
+        let mut selections = found.into_iter().peekable();
+        let mut index = 0;
+        while index < args.len() {
+            if selections
+                .peek()
+                .is_some_and(|selection| selection.start == index)
+            {
+                index = selections.next().expect("peeked selection").end;
+            } else {
+                normalized.push(args[index].clone());
+                index += 1;
+            }
+        }
+        normalized.splice(0..0, [OsString::from("-m"), OsString::from(emulation)]);
+        args = normalized;
+    } else if driver_emulation.is_some() {
+        bail!("driver_emulation requires a configured linker emulation");
+    }
     let mut output = None;
     let mut sysroot = None;
     let mut mode = LinkMode::Final;
@@ -233,15 +338,33 @@ fn parse(
     let mut index = 0;
     while index < args.len() {
         let text = args[index].to_string_lossy();
-        if text == "-o" {
-            output = Some(PathBuf::from(
-                args.get(index + 1)
-                    .context("linker command line ends after -o")?,
-            ));
+        if text == "--" {
+            break;
+        }
+        if text == "-o" || text == "--output" {
+            if output.is_some() {
+                bail!("linker command line specifies output more than once");
+            }
+            let value = args
+                .get(index + 1)
+                .with_context(|| format!("linker command line ends after {text}"))?;
+            if value.is_empty() {
+                bail!("{text} must not be empty");
+            }
+            output = Some(PathBuf::from(value));
             index += 2;
             continue;
         }
-        if let Some(value) = text.strip_prefix("-o").filter(|value| !value.is_empty()) {
+        if let Some(value) = text
+            .strip_prefix("--output=")
+            .or_else(|| text.strip_prefix("-o").filter(|value| !value.is_empty()))
+        {
+            if output.is_some() {
+                bail!("linker command line specifies output more than once");
+            }
+            if value.is_empty() {
+                bail!("--output must not be empty");
+            }
             output = Some(PathBuf::from(value));
         } else if text == "--sysroot" {
             sysroot = Some(PathBuf::from(
@@ -268,17 +391,45 @@ fn parse(
             args[index] = OsString::from("-r");
         } else if text.starts_with("--ld-path") || text.starts_with("-Wl,--ld-path") {
             bail!(
-                "the released collector does not permit a linker override; it requires its sibling ld.lld"
+                "the collector does not permit a linker override; it requires its configured sibling linker"
             );
+        } else if text == "-m" || text == "--emulation" {
+            // Configured emulation selections have already been normalized at
+            // the start of the argument list. Unconfigured legacy invocations
+            // still pass their user's selection through to the linker.
+            args.get(index + 1)
+                .with_context(|| format!("linker command line ends after {text}"))?;
+            index += 2;
+            continue;
+        } else if text.starts_with("--emulation=") {
+            // See the separated spelling above; this option has no collector
+            // interpretation beyond emulation validation.
+        } else if takes_separate_value(&text) {
+            args.get(index + 1)
+                .with_context(|| format!("linker command line ends after {text}"))?;
+            index += 2;
+            continue;
         }
         index += 1;
     }
 
-    let output = output.context("linker command line has no -o FILE")?;
+    let output = if let Some(output) = output {
+        output
+    } else {
+        let output = default_output.context("linker command line has no -o FILE")?;
+        // Normalize GNU ld's standard default before the operand boundary.
+        // Every pass must still use an explicit adjacent staging path.
+        args.splice(
+            index..index,
+            [OsString::from("-o"), output.as_os_str().to_owned()],
+        );
+        output.to_path_buf()
+    };
     Ok(EngineRequest {
         name,
         linker,
         strip: Some(strip),
+        emulation,
         args,
         output,
         sysroot,
@@ -289,6 +440,331 @@ fn parse(
         keep_script: None,
         frontend: Frontend::Driver,
     })
+}
+
+fn collect_user_emulations(args: &[OsString]) -> Result<Vec<UserEmulation>> {
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let text = args[index].to_string_lossy();
+        if text == "--" {
+            break;
+        }
+        if takes_separate_value(&text) {
+            if index + 1 >= args.len() {
+                bail!("linker command line ends after value-taking option '{text}'");
+            }
+            index += 2;
+            continue;
+        }
+        if has_attached_value(&text) {
+            index += 1;
+            continue;
+        }
+        if text == "-m" || text == "--emulation" {
+            let value = args
+                .get(index + 1)
+                .context("linker command line ends after an emulation option")?
+                .to_str()
+                .context("linker emulation is not valid UTF-8")?;
+            validate_emulation(value)?;
+            found.push(UserEmulation {
+                start: index,
+                end: index + 2,
+                value: value.to_owned(),
+            });
+            index += 2;
+            continue;
+        }
+        if let Some(value) = text.strip_prefix("--emulation=") {
+            validate_emulation(value)?;
+            found.push(UserEmulation {
+                start: index,
+                end: index + 1,
+                value: value.to_owned(),
+            });
+        } else if text.starts_with("--emu") {
+            bail!("unsupported abbreviated or malformed linker emulation option '{text}'");
+        } else if let Some(value) = text.strip_prefix("-m") {
+            validate_emulation(value)
+                .with_context(|| format!("malformed attached linker emulation option '{text}'"))?;
+            found.push(UserEmulation {
+                start: index,
+                end: index + 1,
+                value: value.to_owned(),
+            });
+        } else if text.starts_with('-')
+            && !is_known_flag(&text)
+            && args.get(index + 1).is_some_and(|next| {
+                next.to_string_lossy().starts_with("-m")
+                    || next.to_string_lossy().starts_with("--emu")
+            })
+        {
+            bail!(
+                "ambiguous linker option '{text}' precedes a possible emulation operand; refusing to normalize it"
+            );
+        }
+        index += 1;
+    }
+    Ok(found)
+}
+
+fn takes_separate_value(option: &str) -> bool {
+    matches!(
+        option,
+        "-a" | "-A"
+            | "--architecture"
+            | "-b"
+            | "--format"
+            | "-c"
+            | "--mri-script"
+            | "--dependency-file"
+            | "-e"
+            | "--entry"
+            | "-f"
+            | "--auxiliary"
+            | "-F"
+            | "--filter"
+            | "-G"
+            | "--gpsize"
+            | "-h"
+            | "-soname"
+            | "-I"
+            | "--dynamic-linker"
+            | "-l"
+            | "--library"
+            | "-L"
+            | "--library-path"
+            | "--sysroot"
+            | "-o"
+            | "--output"
+            | "-O"
+            | "-plugin"
+            | "--plugin"
+            | "-plugin-opt"
+            | "-R"
+            | "--just-symbols"
+            | "-rpath"
+            | "-rpath-link"
+            | "-T"
+            | "--script"
+            | "--default-script"
+            | "-dT"
+            | "--oformat"
+            | "-u"
+            | "--undefined"
+            | "--require-defined"
+            | "-y"
+            | "--trace-symbol"
+            | "-Y"
+            | "-assert"
+            | "--defsym"
+            | "-fini"
+            | "-init"
+            | "--dynamic-list"
+            | "--export-dynamic-symbol"
+            | "--export-dynamic-symbol-list"
+            | "-Map"
+            | "--Map"
+            | "--section-ordering-file"
+            | "--retain-symbols-file"
+            | "--image-base"
+            | "--section-start"
+            | "-Tbss"
+            | "-Tdata"
+            | "-Ttext"
+            | "-Ttext-segment"
+            | "-Trodata-segment"
+            | "-Tldata-segment"
+            | "-P"
+            | "--depaudit"
+            | "--audit"
+            | "-z"
+            | "--sort-section"
+            | "--spare-dynamic-tags"
+            | "--error-handling-script"
+            | "--version-script"
+            | "--exclude-libs"
+            | "--unresolved-symbols"
+            | "--out-implib"
+            | "--remap-inputs-file"
+            | "--remap-inputs"
+            | "--orphan-handling"
+            | "--task-link"
+            | "--wrap"
+            | "--ignore-unresolved-symbol"
+            | "--version-exports-section"
+    )
+}
+
+fn has_attached_value(option: &str) -> bool {
+    if option.starts_with("--") {
+        return option.contains('=') && !option.starts_with("--emu");
+    }
+    [
+        "-o", "-L", "-l", "-T", "-A", "-b", "-e", "-F", "-G", "-h", "-I", "-R", "-u", "-y", "-Y",
+        "-a", "-c", "-f", "-dT", "-Map",
+    ]
+    .iter()
+    .any(|prefix| option.starts_with(prefix) && option.len() > prefix.len())
+}
+
+fn is_known_flag(option: &str) -> bool {
+    matches!(
+        option,
+        "-r" | "--relocatable"
+            | "-i"
+            | "-Ur"
+            | "-d"
+            | "-dc"
+            | "-dp"
+            | "-E"
+            | "--export-dynamic"
+            | "--no-export-dynamic"
+            | "--force-group-allocation"
+            | "--enable-non-contiguous-regions"
+            | "--enable-non-contiguous-regions-warnings"
+            | "--disable-linker-version"
+            | "--enable-linker-version"
+            | "-EB"
+            | "-EL"
+            | "--no-dynamic-linker"
+            | "-M"
+            | "--print-map"
+            | "--plugin-save-temps"
+            | "-flto"
+            | "--map-whole-files"
+            | "--no-map-whole-files"
+            | "-Qy"
+            | "-shared"
+            | "--shared"
+            | "-Bshareable"
+            | "-Bdynamic"
+            | "-Bstatic"
+            | "-dn"
+            | "-dy"
+            | "-call_shared"
+            | "-non_shared"
+            | "-static"
+            | "-pie"
+            | "-no-pie"
+            | "-n"
+            | "-N"
+            | "--nmagic"
+            | "--omagic"
+            | "-q"
+            | "--emit-relocs"
+            | "-s"
+            | "-S"
+            | "--strip-all"
+            | "--strip-debug"
+            | "--strip-discarded"
+            | "--no-strip-discarded"
+            | "-x"
+            | "--discard-all"
+            | "-X"
+            | "--discard-locals"
+            | "-g"
+            | "-t"
+            | "--trace"
+            | "-v"
+            | "--version"
+            | "-V"
+            | "--verbose"
+            | "--fatal-warnings"
+            | "--no-fatal-warnings"
+            | "--no-warnings"
+            | "-w"
+            | "--warn-common"
+            | "--no-warn-common"
+            | "--warn-once"
+            | "--warn-section-align"
+            | "--no-undefined"
+            | "--as-needed"
+            | "--no-as-needed"
+            | "--whole-archive"
+            | "--no-whole-archive"
+            | "--start-group"
+            | "--end-group"
+            | "--start-lib"
+            | "--end-lib"
+            | "--accept-unknown-input-arch"
+            | "--no-accept-unknown-input-arch"
+            | "--gc-sections"
+            | "--no-gc-sections"
+            | "--print-gc-sections"
+            | "--no-print-gc-sections"
+            | "--build-id"
+            | "--no-build-id"
+            | "--allow-shlib-undefined"
+            | "--no-allow-shlib-undefined"
+            | "--undefined-version"
+            | "--no-undefined-version"
+            | "--default-symver"
+            | "--default-imported-symver"
+            | "--no-warn-mismatch"
+            | "--no-warn-search-mismatch"
+            | "--noinhibit-exec"
+            | "-nostdlib"
+            | "--reduce-memory-overheads"
+            | "--relax"
+            | "--no-relax"
+            | "--enable-new-dtags"
+            | "--disable-new-dtags"
+            | "--no-keep-memory"
+            | "--check-sections"
+            | "--no-check-sections"
+            | "--copy-dt-needed-entries"
+            | "--no-copy-dt-needed-entries"
+            | "--cref"
+            | "--demangle"
+            | "--no-demangle"
+            | "--disable-multiple-abs-defs"
+            | "--embedded-relocs"
+            | "--force-exe-suffix"
+            | "--no-define-common"
+            | "--link-mapless"
+            | "--no-link-mapless"
+            | "--print-output-format"
+            | "--print-sysroot"
+            | "-qmagic"
+            | "--target-help"
+            | "--traditional-format"
+            | "--stats"
+            | "--no-stats"
+            | "--print-memory-usage"
+            | "--no-eh-frame-hdr"
+            | "--eh-frame-hdr"
+            | "--rosegment"
+            | "--no-rosegment"
+            | "--dynamic-list-data"
+            | "--dynamic-list-cpp-new"
+            | "--dynamic-list-cpp-typeinfo"
+            | "--warn-textrel"
+            | "--error-execstack"
+            | "--no-error-execstack"
+            | "--warn-execstack-objects"
+            | "--warn-execstack"
+            | "--no-warn-execstack"
+            | "--warn-rwx-segments"
+            | "--no-warn-rwx-segments"
+            | "--error-rwx-segments"
+            | "--no-error-rwx-segments"
+            | "--warn-multiple-gp"
+            | "--warn-alternate-em"
+            | "--warn-unresolved-symbols"
+            | "--error-unresolved-symbols"
+            | "--print-map-discarded"
+            | "--no-print-map-discarded"
+            | "--print-map-locals"
+            | "--no-print-map-locals"
+            | "--ctf-variables"
+            | "--no-ctf-variables"
+            | "-Bsymbolic"
+            | "-Bsymbolic-functions"
+            | "-Bsymbolic-non-weak"
+            | "--allow-multiple-definition"
+    )
 }
 
 fn validate_sysroot(request: &EngineRequest) -> Result<()> {
@@ -496,12 +972,16 @@ where
         .frontend
         .is_driver()
         .then(|| extra::discover(&object.symbols));
-    let mut second = vec![
-        OsString::from("-r"),
+    let mut second = vec![OsString::from("-r")];
+    if let Some(emulation) = &request.emulation {
+        second.push(OsString::from("-m"));
+        second.push(OsString::from(emulation));
+    }
+    second.extend([
         OsString::from("-o"),
         final_staged.clone().into_os_string(),
         staged.into_os_string(),
-    ];
+    ]);
     if extras
         .as_ref()
         .is_some_and(|extras| extras.cxx_pure_virtual)
@@ -820,11 +1300,14 @@ fn replace_output(args: &[OsString], output: &Path) -> Result<Vec<OsString>> {
     let mut replaced = args.to_vec();
     let mut index = 0;
     while index < replaced.len() {
-        let text = replaced[index].to_string_lossy();
-        if text == "-o" {
+        let text = replaced[index].to_string_lossy().into_owned();
+        if text == "--" {
+            break;
+        }
+        if text == "-o" || text == "--output" {
             let slot = replaced
                 .get_mut(index + 1)
-                .context("linker command line ends after -o")?;
+                .with_context(|| format!("linker command line ends after {text}"))?;
             output.as_os_str().clone_into(slot);
             return Ok(replaced);
         }
@@ -833,6 +1316,16 @@ fn replace_output(args: &[OsString], output: &Path) -> Result<Vec<OsString>> {
             joined.push(output);
             replaced[index] = joined;
             return Ok(replaced);
+        }
+        if text.starts_with("--output=") {
+            let mut joined = OsString::from("--output=");
+            joined.push(output);
+            replaced[index] = joined;
+            return Ok(replaced);
+        }
+        if takes_separate_value(&text) {
+            index += 2;
+            continue;
         }
         index += 1;
     }
@@ -981,6 +1474,8 @@ mod tests {
         bytes[4] = 2;
         bytes[5] = 1;
         bytes[6] = 1;
+        put_u32(&mut bytes, 0x14, 1);
+        put_u16(&mut bytes, 0x34, 64);
         put_u64(&mut bytes, 0x28, section_table_offset as u64);
         put_u16(&mut bytes, 0x3a, 0x40);
         put_u16(&mut bytes, 0x3c, 3);
@@ -1029,6 +1524,9 @@ mod tests {
     fn only_expected_aliases_select_driver_mode() {
         assert!(is_driver_invocation(Some(OsStr::new("/tmp/collect-aros"))));
         assert!(is_driver_invocation(Some(OsStr::new("collect-aros32"))));
+        assert!(is_driver_invocation(Some(OsStr::new(
+            "/opt/cross/bin/riscv-aros-collect-aros"
+        ))));
         assert!(!is_driver_invocation(Some(OsStr::new("aros-collect"))));
     }
 
@@ -1088,12 +1586,158 @@ mod tests {
     }
 
     #[test]
-    fn missing_sibling_is_reported_without_a_path_fallback() {
-        let directory = tempfile::tempdir().unwrap();
-        let error = require_sibling(directory.path(), "ld.lld").unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("required sibling tool"));
-        assert!(message.contains("never searches PATH or COMPILER_PATH"));
+    fn configured_emulation_is_injected_and_repeated_matching_options_are_safe() {
+        let request = parse(
+            "riscv-aros-collect-aros".into(),
+            "ld.gnu".into(),
+            "strip.gnu".into(),
+            Some("riscv64elf_aros".into()),
+            strings(&[
+                "-m",
+                "riscv64elf_aros",
+                "-mriscv64elf_aros",
+                "-o",
+                "output.o",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            collect_user_emulations(&request.args)
+                .unwrap()
+                .into_iter()
+                .map(|selection| selection.value)
+                .collect::<Vec<_>>(),
+            ["riscv64elf_aros"]
+        );
+        assert_eq!(
+            collect_user_emulations(&strings(&["-m", "riscv64elf_aros", "--", "-m", "other",]))
+                .unwrap()
+                .into_iter()
+                .map(|selection| selection.value)
+                .collect::<Vec<_>>(),
+            ["riscv64elf_aros"]
+        );
+
+        let conflict = parse(
+            "riscv-aros-collect-aros".into(),
+            "ld.gnu".into(),
+            "strip.gnu".into(),
+            Some("riscv64elf_aros".into()),
+            strings(&["-mriscvelf_aros", "-o", "output.o"]),
+        )
+        .unwrap_err();
+        assert!(format!("{conflict:#}").contains("conflicting emulation"));
+
+        for unsupported in ["--emul=riscvelf_aros", "-mriscv64elf_aros=other"] {
+            let error = parse(
+                "riscv-aros-collect-aros".into(),
+                "ld.gnu".into(),
+                "strip.gnu".into(),
+                Some("riscv64elf_aros".into()),
+                strings(&[unsupported, "-o", "output.o"]),
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("emulation option"));
+        }
+    }
+
+    #[test]
+    fn declared_driver_emulation_is_normalized_without_an_inferred_mapping() {
+        let request = parse_configured(
+            "collect-aros".into(),
+            "ld".into(),
+            "strip".into(),
+            Some("riscvelf_aros".into()),
+            Some("elf32lriscv"),
+            None,
+            strings(&["-melf32lriscv", "-m", "riscvelf_aros", "-o", "output.o"]),
+        )
+        .unwrap();
+        assert_eq!(request.emulation.as_deref(), Some("riscvelf_aros"));
+        assert_eq!(
+            collect_user_emulations(&request.args)
+                .unwrap()
+                .into_iter()
+                .map(|selection| selection.value)
+                .collect::<Vec<_>>(),
+            ["riscvelf_aros"]
+        );
+
+        let inferred = parse_configured(
+            "collect-aros".into(),
+            "ld".into(),
+            "strip".into(),
+            Some("riscvelf_aros".into()),
+            None,
+            None,
+            strings(&["-melf32lriscv", "-o", "output.o"]),
+        )
+        .unwrap_err();
+        assert!(format!("{inferred:#}").contains("conflicting emulation"));
+
+        let mismatch = parse_configured(
+            "collect-aros".into(),
+            "ld".into(),
+            "strip".into(),
+            Some("riscvelf_aros".into()),
+            Some("elf32lriscv"),
+            None,
+            strings(&["-melf64lriscv", "-o", "output.o"]),
+        )
+        .unwrap_err();
+        assert!(format!("{mismatch:#}").contains("conflicting emulation"));
+    }
+
+    #[test]
+    fn emulation_scanner_skips_known_operands_and_rejects_ambiguous_options() {
+        let parsed = collect_user_emulations(&strings(&[
+            "-o",
+            "-m-output.o",
+            "-T",
+            "-m-script.ld",
+            "--sysroot",
+            "-m-root",
+            "--emulation=elf32lriscv",
+            "--gc-sections",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].value, "elf32lriscv");
+
+        let ambiguous =
+            collect_user_emulations(&strings(&["--unclassified-option", "-melf32lriscv"]))
+                .unwrap_err();
+        assert!(format!("{ambiguous:#}").contains("ambiguous linker option"));
+    }
+
+    #[test]
+    fn duplicate_output_spellings_are_rejected_before_a_request_is_built() {
+        for args in [
+            strings(&["-o", "one.o", "-o", "two.o"]),
+            strings(&["-oone.o", "--output", "two.o"]),
+            strings(&["--output=one.o", "-otwo.o"]),
+        ] {
+            let error = parse_configured(
+                "collect-aros".into(),
+                "ld".into(),
+                "strip".into(),
+                None,
+                None,
+                None,
+                args,
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("specifies output more than once"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_non_utf8_attached_emulation_is_rejected() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let argument = OsString::from_vec(b"-mriscv64elf_aros\xff".to_vec());
+        assert!(collect_user_emulations(&[argument]).is_err());
     }
 
     #[test]
@@ -1110,6 +1754,7 @@ mod tests {
             "collect-aros32".into(),
             "ld.lld".into(),
             "llvm-strip".into(),
+            None,
             args.clone(),
         )
         .unwrap();
@@ -1118,6 +1763,7 @@ mod tests {
             "collect-aros".into(),
             "ld.lld".into(),
             "llvm-strip".into(),
+            None,
             args,
         )
         .unwrap();
@@ -1130,6 +1776,7 @@ mod tests {
             "collect-aros".into(),
             "ld.lld".into(),
             "llvm-strip".into(),
+            None,
             strings(&["-Llib", "probe.o", "-o", "conftest"]),
         )
         .unwrap();
@@ -1143,6 +1790,7 @@ mod tests {
             "collect-aros".into(),
             "ld.lld".into(),
             "llvm-strip".into(),
+            None,
             strings(&["-o", "output.o"]),
         )
         .unwrap();
@@ -1163,6 +1811,7 @@ mod tests {
             "collect-aros".into(),
             "test-linker".into(),
             "test-strip".into(),
+            None,
             vec![
                 OsString::from("--sysroot"),
                 sysroot.into_os_string(),
@@ -1203,6 +1852,7 @@ mod tests {
             name: "aros-collect".into(),
             linker: "test-linker".into(),
             strip: None,
+            emulation: None,
             args: vec![
                 OsString::from("-r"),
                 OsString::from("-o"),
@@ -1252,6 +1902,7 @@ mod tests {
             name: "aros-collect".into(),
             linker: "test-linker".into(),
             strip: None,
+            emulation: None,
             args: vec![
                 OsString::from("-r"),
                 OsString::from("-o"),

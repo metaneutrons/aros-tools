@@ -8,6 +8,17 @@ use crate::{AhiFailure, AhiResult};
 use aros_common::{Diagnostic, DiagnosticCode, DiagnosticStage, SourceLocation};
 
 const MMAKE_ID: &str = "workbench-devs-AHI-subsystem";
+pub(crate) const DEPENDENCY_ALIASES: &[&str] = &[
+    "libamiga.a",
+    "libm.a",
+    "libmui.a",
+    "libposixc.a",
+    "libstdcio.a",
+    "libstdc.a",
+    "libexec.a",
+    "liblibinit.a",
+    "libautoinit.a",
+];
 const REQUIRED_FIELDS: &[&str] = &[
     "AHI_MMAKE_ID",
     "AHI_MODE",
@@ -345,11 +356,11 @@ impl Contract {
         }
         let dependency_products =
             take_path_list(&mut values, "AHI_DEPENDENCY_PRODUCTS", source, false)?;
-        if dependency_products.len() != 3 {
+        if dependency_products.len() != DEPENDENCY_ALIASES.len() {
             return Err(identity_failure(
                 source,
                 None,
-                "AHI contract requires exactly three link-library dependencies",
+                "AHI contract requires exactly nine link-library dependencies (including C/Exec and libinit/autoinit)",
             ));
         }
 
@@ -882,7 +893,7 @@ mod tests {
             ("AHI_INSTALL_PRODUCTS", install.join(";")),
             (
                 "AHI_DEPENDENCY_PRODUCTS",
-                "/build/libamiga.a;/build/libm.a;/build/libmui.a".to_owned(),
+                "/build/libamiga.a;/build/libm.a;/build/libmui.a;/build/libposixc.a;/build/libstdcio.a;/build/libstdc.a;/build/libexec.a;/build/liblibinit.a;/build/libautoinit.a".to_owned(),
             ),
         ];
         fields
@@ -903,6 +914,28 @@ mod tests {
         );
         assert_eq!(contract.product_count(), 73);
         assert_eq!(contract.input_count(), 1);
+    }
+
+    #[test]
+    fn incomplete_or_extended_runtime_closure_is_rejected() {
+        let valid = valid_x86_64_contract();
+        let original = assignment(
+            "AHI_DEPENDENCY_PRODUCTS",
+            "/build/libamiga.a;/build/libm.a;/build/libmui.a;/build/libposixc.a;/build/libstdcio.a;/build/libstdc.a;/build/libexec.a;/build/liblibinit.a;/build/libautoinit.a",
+        );
+        for paths in [
+            "/build/libamiga.a;/build/libm.a;/build/libmui.a",
+            "/build/libamiga.a;/build/libm.a;/build/libmui.a;/build/libautoinit.a",
+            "/build/libamiga.a;/build/libm.a;/build/libmui.a;/build/liblibinit.a;/build/libautoinit.a;/build/extra.a",
+            "/build/libamiga.a;/build/libm.a;/build/libmui.a;/build/libposixc.a;/build/libstdcio.a;/build/libexec.a;/build/liblibinit.a;/build/libautoinit.a",
+            "/build/libamiga.a;/build/libm.a;/build/libmui.a;/build/libposixc.a;/build/libstdcio.a;/build/libstdc.a;/build/libexec.a;/build/liblibinit.a;/build/libautoinit.a;/build/extra.a",
+        ] {
+            assert_eq!(valid.matches(&original).count(), 1);
+            let text = valid.replacen(&original, &assignment("AHI_DEPENDENCY_PRODUCTS", paths), 1);
+            let error = Contract::parse(&text, Path::new("contract.cmake")).unwrap_err();
+            assert_eq!(error.diagnostic().code, DiagnosticCode::AhiContractIdentity);
+            assert!(error.diagnostic().message.contains("including C/Exec and libinit/autoinit"));
+        }
     }
 
     #[test]

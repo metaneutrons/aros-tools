@@ -904,6 +904,14 @@ fn classify(tok: &str, set: &mut FlagSet) {
         return;
     }
 
+    // This driver switch selects the standard-C header namespace rather than
+    // POSIX C. Keep its compile provenance separate from USER_LDFLAGS: the
+    // engine consumes it as include policy, not as an arbitrary Clang option.
+    if matches!(tok, "-noposixc" | "-no-posixc") {
+        push_unique(&mut set.compile_options, "-noposixc".to_owned());
+        return;
+    }
+
     // Architecture selection materially changes which intrinsics are legal.
     // Keep the plain driver spelling, but reject quoting, variables and other
     // shell syntax rather than forwarding an arbitrary command fragment.
@@ -1182,6 +1190,17 @@ mod tests {
         assert_eq!(flags.spec_switches, ["static", "nosysbase"]);
         assert!(flags.link_options.is_empty());
         assert!(flags.skipped.is_empty());
+    }
+
+    #[test]
+    fn posix_header_selection_is_compile_local() {
+        let flags = collect_flags("USER_CFLAGS := -no-posixc\nUSER_LDFLAGS := -nostdc\n");
+        assert_eq!(flags.compile_options, ["-noposixc"]);
+        assert_eq!(flags.spec_switches, ["nostdc"]);
+        assert!(flags.skipped.is_empty());
+        let link_only = collect_flags("USER_LDFLAGS := -noposixc\n");
+        assert!(link_only.compile_options.is_empty());
+        assert_eq!(link_only.spec_switches, ["noposixc"]);
     }
 
     #[test]

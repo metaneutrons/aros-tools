@@ -4,6 +4,7 @@
 if(NOT DEFINED AROS_CMAKE_ENGINE_DIR OR "${AROS_CMAKE_ENGINE_DIR}" STREQUAL "")
     set(AROS_CMAKE_ENGINE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 endif()
+include("${CMAKE_CURRENT_LIST_DIR}/QuoteIncludes.cmake")
 # =============================================================================
 # Safe paired hand-written FlexCat source rules
 # =============================================================================
@@ -329,6 +330,6 @@ function(aros_bind_flexcat_source_consumers)
                 "aros_bind_flexcat_source_consumers: consumer is not compilable: ${_consumer}")
         endif()
         add_dependencies("${_consumer}" "${FCSB_OWNER}")
-        target_compile_options("${_consumer}" BEFORE PRIVATE "-iquote${_generated_dir}")
+        aros_add_quote_options("${_consumer}" BEFORE "-iquote${_generated_dir}")
     endforeach()
 endfunction()
