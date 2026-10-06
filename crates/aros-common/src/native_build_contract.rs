@@ -144,10 +144,10 @@ where
                         "duplicate Make variable {key:?}"
                     )));
                 }
-                if variables.len() > 64 {
-                    return Err(serde::de::Error::custom(
-                        "make_variables exceeds 64 entries",
-                    ));
+                if variables.len() > MAX_MAKE_VARIABLES {
+                    return Err(serde::de::Error::custom(format!(
+                        "make_variables exceeds {MAX_MAKE_VARIABLES} entries"
+                    )));
                 }
             }
             Ok(variables)
@@ -155,6 +155,10 @@ where
     }
     deserializer.deserialize_map(Variables)
 }
+
+/// A port declares every build switch its recipes test, including the
+/// diagnostic ones a production build leaves empty (ESP32-P4: about 120).
+const MAX_MAKE_VARIABLES: usize = 256;
 
 fn deserialize_host_make_variables<'de, D>(
     deserializer: D,
@@ -2154,7 +2158,7 @@ mod tests {
             deserialize_host_make_variables(&mut serde_json::Deserializer::from_str(&text))
                 .is_err()
         );
-        let variables = (0..65)
+        let variables = (0..=MAX_MAKE_VARIABLES)
             .map(|index| (format!("FLAG_{index}"), "0"))
             .collect::<BTreeMap<_, _>>();
         let text = serde_json::to_string(&json!({"macos-aarch64": variables})).unwrap();
@@ -2190,7 +2194,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("duplicate Make variable"));
-        let too_many: BTreeMap<_, _> = (0..65)
+        let too_many: BTreeMap<_, _> = (0..=MAX_MAKE_VARIABLES)
             .map(|index| (format!("FLAG_{index}"), "0"))
             .collect();
         let text = serde_json::to_string(&too_many).unwrap();
@@ -2465,6 +2469,15 @@ mod tests {
         );
         fixture.write_contract(&too_many);
         assert!(error_text(fixture.load()).contains("exceeds 64 entries"));
+
+        let mut switches = fixture.document.clone();
+        switches["make_variables"] = Value::Object(
+            (0..=MAX_MAKE_VARIABLES)
+                .map(|index| (format!("SWITCH_{index}"), Value::String(String::new())))
+                .collect(),
+        );
+        fixture.write_contract(&switches);
+        assert!(error_text(fixture.load()).contains("make_variables exceeds 256 entries"));
 
         let mut null_edges = fixture.document.clone();
         null_edges["optional_meta_dependencies"] = Value::Null;

@@ -13,6 +13,18 @@ const EXPECTED: [&str; 5] = [
     "%end",
 ];
 
+/// Upstream 684b78f85c passes the members through a response file: the same
+/// archiver, flags, members and order, so the same archive.
+const EXPECTED_RESPONSE_FILE: [&str; 7] = [
+    "%define mklib_q ar=$(AR) ranlib=$(RANLIB) to=$@ from=$(OBJS)",
+    "$(Q)$(ECHO) \"Creating   $(subst $(TARGETDIR)/,,%(to))...\"",
+    "$(file >%(to).ar.rsp,%(from))",
+    "$(Q)%(ar) %(to) @%(to).ar.rsp",
+    "$(Q)%(ranlib) %(to)",
+    "$(Q)$(RM) %(to).ar.rsp",
+    "%end",
+];
+
 /// Explicit roles proven by the source macro and its native configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceArchiveCommand {
@@ -76,7 +88,9 @@ pub fn prove(
         }
         definitions.push(definition);
     }
-    if definitions.as_slice() != [EXPECTED.to_vec()] {
+    if definitions.as_slice() != [EXPECTED.to_vec()]
+        && definitions.as_slice() != [EXPECTED_RESPONSE_FILE.to_vec()]
+    {
         return Err("source mklib_q macro differs from the closed archive command".into());
     }
     for name in ["AR", "RANLIB", "NATIVE_TARGET_AR", "NATIVE_TARGET_RANLIB"] {
@@ -185,6 +199,27 @@ mod tests {
             fs::remove_file(&path).unwrap();
             fs::write(tree.path().join("actual.tmpl"), original).unwrap();
             std::os::unix::fs::symlink("../actual.tmpl", &path).unwrap();
+            assert!(proof(tree.path(), &dirs, ROLES).is_err());
+        }
+    }
+
+    #[test]
+    fn response_file_revision_is_admitted_only_exactly() {
+        let (tree, dirs) = fixture();
+        let path = tree.path().join("config/make.tmpl");
+        let response = EXPECTED_RESPONSE_FILE.join("\n");
+        fs::write(&path, &response).unwrap();
+        assert_eq!(proof(tree.path(), &dirs, ROLES).unwrap().flags, ["cr"]);
+        for template in [
+            response.replace("@%(to).ar.rsp", "@other.rsp"),
+            response.replace(
+                "$(file >%(to).ar.rsp,%(from))",
+                "$(file >%(to).ar.rsp,ignored.o)",
+            ),
+            response.replace("$(Q)$(RM) %(to).ar.rsp\n", ""),
+            format!("{response}\n{}", EXPECTED.join("\n")),
+        ] {
+            fs::write(&path, template).unwrap();
             assert!(proof(tree.path(), &dirs, ROLES).is_err());
         }
     }

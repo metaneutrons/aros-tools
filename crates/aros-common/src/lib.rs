@@ -89,7 +89,7 @@ pub use publication::{
     TreeTraversalLimits,
 };
 pub use target::{BootstrapAbiProfile, TargetProfile, TranspilerProfile};
-pub use text::read_source;
+pub use text::{decode_source_bytes, read_source};
 pub use toolchain::Toolchain;
 pub use toolchain_inventory::{
     normalized_toolchain_file_mode, toolchain_inventory_sha256, toolchain_tree_inventory,

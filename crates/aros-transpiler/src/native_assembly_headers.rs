@@ -39,8 +39,10 @@ impl NativeOwnerProjection {
             if aros_common::sha256_bytes(&bytes).as_str() != digest {
                 return Err(format!("architecture include recipe changed: {recipe}"));
             }
-            let source =
-                String::from_utf8(bytes).map_err(|_| "architecture include recipe is not UTF-8")?;
+            // Legacy mmakefiles carry Latin-1 text (copyright signs); decode
+            // them as every other source reader does. The digest above is
+            // taken over the same bytes.
+            let source = aros_common::decode_source_bytes(bytes);
             if !source.contains("%set_archincludes") {
                 continue;
             }
@@ -159,8 +161,7 @@ impl NativeOwnerProjection {
             if aros_common::sha256_bytes(&bytes).as_str() != digest {
                 return Err("assembly header recipe bytes changed".into());
             }
-            let text =
-                String::from_utf8(bytes).map_err(|_| "assembly header recipe is not UTF-8")?;
+            let text = aros_common::decode_source_bytes(bytes);
             let configuration =
                 crate::local_make_includes::inline_native_make_configuration_with_templates(
                     &text,

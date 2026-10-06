@@ -590,11 +590,7 @@ fn expand_template(template: &str, substitutions: &BTreeMap<String, String>) -> 
                 "unsafe template substitution token {token:?}"
             )));
         }
-        if value.len() > MAX_SUBSTITUTION_BYTES
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte))
-        {
+        if !admitted_substitution_value(value) {
             return Err(invalid(format!(
                 "template substitution {token} must be a bounded ASCII scalar"
             )));
@@ -624,6 +620,34 @@ fn expand_template(template: &str, substitutions: &BTreeMap<String, String>) -> 
         ));
     }
     Ok(expanded)
+}
+
+/// Whether a configure substitution value may enter a generated Make template.
+///
+/// Admitted are a bounded plain scalar or a preprocessor line that Make reads
+/// as a comment. Every consumer of resolved templates applies this same rule.
+#[must_use]
+pub fn admitted_substitution_value(value: &str) -> bool {
+    value.len() <= MAX_SUBSTITUTION_BYTES && (safe_scalar(value) || preprocessor_line(value))
+}
+
+fn safe_scalar(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte))
+}
+
+/// configure substitutes C preprocessor lines such as `#define
+/// __AROSEXEC_SMP__` into some Make templates. Make reads everything from the
+/// `#` on as a comment, so only the identifier-and-space form is admitted and
+/// the assignment is checked by the value Make actually keeps.
+fn preprocessor_line(value: &str) -> bool {
+    value.strip_prefix('#').is_some_and(|directive| {
+        !directive.trim().is_empty()
+            && directive
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b' ')
+    })
 }
 
 fn template_tokens(template: &str) -> Result<BTreeSet<String>> {
@@ -755,8 +779,22 @@ fn validate_plain_make_assignments(path: &str, text: &str) -> Result<()> {
                 "template {path:?} assigns {name} more than once"
             )));
         }
-        let value = rhs.trim();
-        if !safe_assignment_value(value) {
+        // Make ends the value at an unescaped '#'; backslashes never reach
+        // here, so the first '#' is the comment start.
+        let (kept, comment) = rhs
+            .split_once('#')
+            .map_or((rhs, None), |(kept, comment)| (kept, Some(comment)));
+        let value = kept.trim();
+        let admitted = match comment {
+            None => safe_assignment_value(value),
+            // A cut preprocessor line leaves at most its opening quote.
+            Some(_) => value
+                .strip_prefix('"')
+                .unwrap_or(value)
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte)),
+        };
+        if !admitted {
             return Err(invalid(format!(
                 "template {path:?} line {line_number} has an unsafe Make value"
             )));
@@ -1062,6 +1100,43 @@ mod tests {
         let duplicate = fixture.bindings["gen/include.cfg"].clone();
         fixture.bindings.insert("GEN/include.cfg".into(), duplicate);
         assert!(fixture.resolve().is_err());
+    }
+
+    #[test]
+    fn preprocessor_line_substitution_keeps_the_value_make_reads() {
+        let mut fixture = Fixture::new();
+        fixture
+            .bindings
+            .get_mut("gen/include.cfg")
+            .unwrap()
+            .substitutions
+            .insert("@FEATURE@".into(), "#define __AROSEXEC_SMP__".into());
+        let output = fixture.resolve().unwrap();
+        assert_eq!(
+            output["gen/include.cfg"].expanded_text,
+            "FEATURE=\"#define __AROSEXEC_SMP__\"\n"
+        );
+
+        for value in [
+            "#",
+            "# ",
+            "#define $(X)",
+            "#define A\nB=x",
+            "#define \"A\"",
+            "x#define A",
+        ] {
+            let mut fixture = Fixture::new();
+            fixture
+                .bindings
+                .get_mut("gen/include.cfg")
+                .unwrap()
+                .substitutions
+                .insert("@FEATURE@".into(), value.into());
+            assert!(
+                fixture.resolve().is_err(),
+                "accepted substitution {value:?}"
+            );
+        }
     }
 
     #[test]

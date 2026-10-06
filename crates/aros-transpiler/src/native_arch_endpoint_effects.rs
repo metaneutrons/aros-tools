@@ -9,12 +9,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const BUILD_ARCHSPECIFIC_SHA256: &str =
-    "ece0c04dcb5628546286f0c10600d5438bca0efc787d888bd12d664f411e8bca";
-const SET_ARCHINCLUDES_SHA256: &str =
-    "a74165bbdcf00f2bc38c7db885a52e036967471cfaa47e4abd3f917358f0f596";
-const GET_ARCHINCLUDES_SHA256: &str =
-    "344288e6364a32e5ff3a7da878693e31aff2e6e5170a62a3baf481c6f1b6000d";
+// Reviewed revisions of each macro block. build_archspecific since upstream
+// 684b78f85c also registers its -quick and -linklib targets with %buildid,
+// which only selects classic Make's per-target variable namespace.
+const BUILD_ARCHSPECIFIC_SHA256: &[&str] = &[
+    "ece0c04dcb5628546286f0c10600d5438bca0efc787d888bd12d664f411e8bca",
+    "f3f12399d993765cff710f8f37caba7ffb0eb240f02ca1c93a6d619a208c7db8",
+];
+const SET_ARCHINCLUDES_SHA256: &[&str] =
+    &["a74165bbdcf00f2bc38c7db885a52e036967471cfaa47e4abd3f917358f0f596"];
+const GET_ARCHINCLUDES_SHA256: &[&str] =
+    &["344288e6364a32e5ff3a7da878693e31aff2e6e5170a62a3baf481c6f1b6000d"];
 const MAX_RECIPE_BYTES: u64 = 1024 * 1024;
 const MAX_TEMPLATE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -990,7 +995,7 @@ fn verify_macro_definition(
     template: &str,
     definition_line: usize,
     macro_name: &str,
-    expected_hash: &str,
+    expected_hash: &[&str],
 ) -> Result<(), String> {
     let lines = template.lines().collect::<Vec<_>>();
     let starts = lines
@@ -1010,7 +1015,8 @@ fn verify_macro_definition(
         .position(|line| line.starts_with("%end"))
         .map(|offset| start + 1 + offset)
         .ok_or_else(|| format!("{macro_name} template definition is unterminated"))?;
-    if aros_common::sha256_bytes(lines[start..=end].join("\n").as_bytes()).as_str() != expected_hash
+    if !expected_hash
+        .contains(&aros_common::sha256_bytes(lines[start..=end].join("\n").as_bytes()).as_str())
     {
         return Err(format!("{macro_name} template semantics are unsupported"));
     }
@@ -1195,6 +1201,17 @@ mod tests {
     fn macro_fingerprint_requires_unique_definition_and_exact_body() {
         let template = "%define probe value=\nline\n%end\n";
         let block_hash = aros_common::sha256_bytes(b"%define probe value=\nline\n%end").to_string();
+        let block_hash = [block_hash.as_str()];
+        let other_revision = "0".repeat(64);
+        // Any listed reviewed revision admits the block; none admits a change.
+        assert!(verify_macro_definition(
+            template,
+            1,
+            "probe",
+            &[other_revision.as_str(), block_hash[0]]
+        )
+        .is_ok());
+        assert!(verify_macro_definition(template, 1, "probe", &[other_revision.as_str()]).is_err());
         assert!(verify_macro_definition(template, 1, "probe", &block_hash).is_ok());
         assert!(verify_macro_definition(template, 2, "probe", &block_hash).is_err());
         assert!(verify_macro_definition(

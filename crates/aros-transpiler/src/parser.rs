@@ -538,17 +538,29 @@ impl TargetContext {
         self.value(name)
     }
 
+    /// MetaMake's compound `AROS_TARGET_PLATFORM`, derived as configure.in
+    /// derives it: `<machine>-<cpu>`, except that a variant replaces the
+    /// machine on every platform but `pc` (an esp32p4 `smp` build is
+    /// `smp-riscv`). An unknown variant leaves the value unknown.
+    #[must_use]
+    pub fn legacy_platform(&self) -> Option<String> {
+        let platform = self.platform.as_deref()?;
+        let cpu = self.cpu.as_deref()?;
+        let variant = self.variant.as_deref()?;
+        Some(if variant.is_empty() || platform == "pc" {
+            format!("{platform}-{cpu}")
+        } else {
+            format!("{variant}-{cpu}")
+        })
+    }
+
     pub(crate) fn value(&self, name: &str) -> Option<String> {
         match name {
             "AROS_TARGET_CPU" | "CPU" => self.cpu.clone(),
             // Historic MetaMake calls the machine ARCH.  Its
             // AROS_TARGET_PLATFORM is instead the compound machine/CPU name.
             "AROS_TARGET_ARCH" | "ARCH" => self.platform.clone(),
-            "AROS_TARGET_PLATFORM" => Some(format!(
-                "{}-{}",
-                self.platform.as_deref()?,
-                self.cpu.as_deref()?
-            )),
+            "AROS_TARGET_PLATFORM" => self.legacy_platform(),
             "AROS_TARGET_FAMILY" | "FAMILY" => self.family.clone(),
             "AROS_TARGET_VARIANT" => self.variant.clone(),
             "AROS_TOOLCHAIN" => self.toolchain.clone(),

@@ -449,11 +449,7 @@ fn failure(message: impl Into<String>) -> ArosError {
 /// Rejects unresolved selectors and unsafe or empty endpoint names.
 pub fn endpoint(raw: &str, context: &TargetContext) -> Result<String> {
     let mut value = raw.to_owned();
-    let legacy = context
-        .platform
-        .as_ref()
-        .zip(context.cpu.as_ref())
-        .map(|(platform, cpu)| format!("{platform}-{cpu}"));
+    let legacy = context.legacy_platform();
     for (name, replacement) in [
         ("AROS_TARGET_CPU", context.cpu.as_deref()),
         ("AROS_TARGET_PLATFORM", context.platform.as_deref()),
@@ -3531,12 +3527,18 @@ mod tests {
         let context = TargetContext {
             cpu: Some("riscv".into()),
             platform: Some("fixture".into()),
+            variant: Some(String::new()),
             ..TargetContext::default()
         };
         assert_eq!(
             endpoint("kernel-${AROS_TARGET_LEGACY_PLATFORM}", &context).unwrap(),
             "kernel-fixture-riscv"
         );
+        let unknown_variant = TargetContext {
+            variant: None,
+            ..context.clone()
+        };
+        assert!(endpoint("kernel-${AROS_TARGET_LEGACY_PLATFORM}", &unknown_variant).is_err());
         assert!(endpoint("../core", &context).is_err());
     }
 
