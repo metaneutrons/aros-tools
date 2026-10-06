@@ -115,7 +115,11 @@ impl NativeOwnerProjection {
                             } if pair_main == mainmmake
                                 && pair_tag == tag
                                 && pair_sources == module_sources
-                                && pair_compiler == "target"
+                                && (pair_compiler == "target"
+                                    || pair_compiler == "kernel"
+                                        && self
+                                            .architecture_context
+                                            .native_kernel_sources_in_target_role)
                         )
                 });
                 if paired.count() != 1 {
@@ -499,7 +503,13 @@ impl NativeOwnerProjection {
             return Err("architecture declaration template origin differs from its frame".into());
         }
         verify_invocation_arguments(source, source_line, expected_macro, frame)?;
-        verify_frame_arguments(frame, effect, expected_macro)?;
+        verify_frame_arguments(
+            frame,
+            effect,
+            expected_macro,
+            self.architecture_context
+                .native_kernel_sources_in_target_role,
+        )?;
 
         let callsite = origin
             .top_level_source_invocation
@@ -867,6 +877,7 @@ fn verify_frame_arguments(
     frame: &MacroExpansionFrame,
     effect: &ArchEndpointEffect,
     macro_name: &str,
+    projection_kernel_in_target_role: bool,
 ) -> Result<(), String> {
     let arg = |name: &str| {
         frame
@@ -879,6 +890,13 @@ fn verify_frame_arguments(
         let mainmmake = arg("mainmmake")?;
         let tag = arg("arch")?;
         let target_compiler = match &effect.data {
+            // A kernel-role declaration yields object groups only under the
+            // contract's target-role declaration; the frame must say which.
+            ArchEndpointEffectData::ArchModuleObjects { .. }
+                if projection_kernel_in_target_role && arg("compiler")? == "kernel" =>
+            {
+                Some("kernel")
+            }
             ArchEndpointEffectData::ArchModuleObjects { .. } => Some("target"),
             ArchEndpointEffectData::EmptyLinklibAggregate { compiler, .. } => {
                 Some(compiler.as_str())
