@@ -105,6 +105,11 @@ jobs:
           number=${identity[0]}
           head_ref=${identity[1]}
 
+          # GitHub may briefly serve the previous PR head immediately after
+          # Release Please force-updates its branch. Revalidate the full
+          # identity and changed-file snapshot until both PR reads and the
+          # branch ref agree.
+          for attempt in 1 2 3 4 5; do
           state=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}")
           head_sha=$(STATE="$state" EXPECTED_REF="$head_ref" python3 - <<'PY'
           import json
@@ -166,8 +171,14 @@ jobs:
           # App-authored PR events trigger the normal protected workflows.
           # Do not duplicate their runner work with explicit dispatches.
           current_head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')
-          if [[ "$current_head" != "$head_sha" ]]; then
-            echo '::error::Release PR head changed during identity validation'
-            exit 1
+          ref_head=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${head_ref}" --jq '.object.sha')
+          if [[ "$current_head" == "$head_sha" && "$ref_head" == "$head_sha" ]]; then
+            printf 'Verified Release Please PR #%s at %s; normal PR checks apply\n' "$number" "$head_sha"
+            exit 0
           fi
-          printf 'Verified Release Please PR #%s at %s; normal PR checks apply\n' "$number" "$head_sha"
+          if [[ "$attempt" -lt 5 ]]; then
+            sleep 2
+          fi
+          done
+          echo '::error::Release PR head did not stabilize during identity validation'
+          exit 1

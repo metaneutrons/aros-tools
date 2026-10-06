@@ -95,6 +95,71 @@ class ReleasePleaseApp(unittest.TestCase):
     def test_real_preflight_missing_repository(self):
         self.probe([], code="AP7141")
 
+    def probe_release_pr(self, heads, *, files=None, expected_success=True):
+        # Exercise the workflow step with a stateful GitHub API fake. A freshly
+        # updated App branch can precede the pull-request API's head refresh.
+        step = SOURCE.split("      - name: Verify the exact App-authored release PR\n", 1)[1]
+        run = textwrap.dedent(step.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
+        run = run.replace("sleep 2", ":")
+        gh = self.work / "gh"
+        gh.write_text(textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import json
+            import os
+            from pathlib import Path
+            import sys
+
+            args = sys.argv[1:]
+            if '/files?' in ' '.join(args):
+                print('\\n'.join(json.loads(os.environ['API_FILES'])))
+                raise SystemExit(0)
+            counter = Path(os.environ['API_COUNTER'])
+            index = int(counter.read_text()) if counter.exists() else 0
+            heads = json.loads(os.environ['API_HEADS'])
+            sha = heads[min(index, len(heads) - 1)]
+            counter.write_text(str(index + 1))
+            if '--jq' in args:
+                print(sha)
+            else:
+                print(json.dumps({
+                    'state': 'open', 'title': 'chore(main): release 0.3.14',
+                    'base': {'ref': 'main'},
+                    'head': {'sha': sha, 'ref': 'release-please--branches--main--components--aros-tools',
+                             'repo': {'full_name': 'example/tools'}},
+                }))
+            """))
+        gh.chmod(0o755)
+        env = dict(os.environ, PATH=f"{self.work}:{os.environ['PATH']}",
+                   GITHUB_REPOSITORY="example/tools", GH_TOKEN="synthetic-not-a-real-secret",
+                   PR_JSON=json.dumps({'number': 123, 'headBranchName':
+                                       'release-please--branches--main--components--aros-tools',
+                                       'baseBranchName': 'main'}),
+                   API_HEADS=json.dumps(heads), API_COUNTER=str(self.work / 'api-count'),
+                   API_FILES=json.dumps(files or ['.release-please-manifest.json', 'CHANGELOG.md',
+                                                  'Cargo.lock', 'Cargo.toml']))
+        result = subprocess.run(["bash", "-c", run], env=env, capture_output=True,
+                                text=True, timeout=10)
+        self.assertEqual(result.returncode, 0 if expected_success else 1,
+                         result.stdout + result.stderr)
+        return result
+
+    def test_release_pr_head_converges(self):
+        old, new = 'a' * 40, 'b' * 40
+        result = self.probe_release_pr([old, new, new, new, new, new])
+        self.assertIn(new, result.stdout)
+
+    def test_release_pr_head_never_stabilizes(self):
+        old, new = 'a' * 40, 'b' * 40
+        result = self.probe_release_pr([old, new] * 8, expected_success=False)
+        self.assertIn('did not stabilize', result.stdout + result.stderr)
+
+    def test_release_pr_rejects_unexpected_file_after_convergence(self):
+        result = self.probe_release_pr(['b' * 40],
+                                       files=['.release-please-manifest.json', 'CHANGELOG.md',
+                                              'Cargo.lock', 'Cargo.toml', 'src/evil.rs'],
+                                       expected_success=False)
+        self.assertIn('unexpected files', result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
