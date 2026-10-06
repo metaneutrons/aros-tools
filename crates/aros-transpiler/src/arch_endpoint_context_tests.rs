@@ -424,3 +424,47 @@ fn multiline_scope_and_directive_keep_physical_line_indexes() {
         Some(["base".to_owned(), "helper".to_owned()].as_slice())
     );
 }
+
+#[test]
+fn closed_include_flag_catalog_proves_an_empty_lookup_only_when_closed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    let recipe = Path::new("compiler/include/mmakefile.src");
+    std::fs::create_dir_all(root.join("compiler/include")).unwrap();
+    let source = concat!(
+        "%get_archincludes modname=exec \\\n",
+        "    includeflag=TARGET_EXEC_INCLUDES maindir=compiler/include\n",
+        "PRIV := $(TARGET_EXEC_INCLUDES) -Ibase\n",
+    );
+    std::fs::write(root.join(recipe), source).unwrap();
+    let dirs = crate::dirs::DirVars::load(&root);
+
+    let open = context(Some(""), &[]);
+    let refused =
+        crate::assembly_headers::native_configuration_snapshot(source, &open, &dirs, &root, recipe)
+            .err()
+            .expect("an open catalog cannot prove the lookup empty");
+    assert!(
+        refused.contains("no matching source-proved providers"),
+        "{refused}"
+    );
+
+    let mut closed = context(Some(""), &[]);
+    closed.native_arch_include_catalog_closed = true;
+    let snapshot = crate::assembly_headers::native_configuration_snapshot(
+        source, &closed, &dirs, &root, recipe,
+    )
+    .unwrap();
+    assert!(!snapshot.joined.contains("%get_archincludes"));
+    let (scope, _) = crate::make_vars::collect_vars_impl(&snapshot.joined, Some(&closed));
+    assert_eq!(scope.raw_at("PRIV", usize::MAX).as_deref(), Some("-Ibase"));
+    assert_eq!(snapshot.physical_owner_lines[1], Some(2));
+
+    let probing = format!("{source}ifdef TARGET_EXEC_INCLUDES\nX := 1\nendif\n");
+    let refused = crate::assembly_headers::native_configuration_snapshot(
+        &probing, &closed, &dirs, &root, recipe,
+    )
+    .err()
+    .expect("a definedness test cannot be answered by an empty append");
+    assert!(refused.contains("tested for definition"), "{refused}");
+}

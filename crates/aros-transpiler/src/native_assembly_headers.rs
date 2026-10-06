@@ -18,6 +18,8 @@ impl NativeOwnerProjection {
         let mut context = self.architecture_context.clone();
         context.native_arch_include_effects.clear();
         context.native_arch_include_errors.clear();
+        context.native_arch_include_catalog_closed = false;
+        let mut foreign_flag_writers = Vec::new();
         if let Err(reason) = self.verify_get_archincludes_semantics(root) {
             // This is fatal only when a consumer actually invokes the macro.
             context.native_arch_include_errors.push(reason);
@@ -43,6 +45,9 @@ impl NativeOwnerProjection {
             // them as every other source reader does. The digest above is
             // taken over the same bytes.
             let source = aros_common::decode_source_bytes(bytes);
+            if let Some(line) = foreign_include_flag_line(&source) {
+                foreign_flag_writers.push(format!("{recipe}:{line}"));
+            }
             if !source.contains("%set_archincludes") {
                 continue;
             }
@@ -92,6 +97,16 @@ impl NativeOwnerProjection {
                 }
             }
         }
+        if !foreign_flag_writers.is_empty() {
+            context.native_arch_include_errors.push(format!(
+                "include flag files are touched outside %set_archincludes/%get_archincludes: {}",
+                foreign_flag_writers.join(", ")
+            ));
+        }
+        // The template's two macros are fingerprinted by
+        // verify_get_archincludes_semantics and the producer replay; with no
+        // error the catalog of applicable flag producers is complete.
+        context.native_arch_include_catalog_closed = context.native_arch_include_errors.is_empty();
         self.verify(root)?;
         Ok(context)
     }
@@ -230,5 +245,32 @@ impl NativeOwnerProjection {
             }
         }
         Ok(())
+    }
+}
+
+/// First line (1-based) that mentions an include flag file outside a
+/// `%set_archincludes`/`%get_archincludes` invocation, if any.
+fn foreign_include_flag_line(source: &str) -> Option<usize> {
+    let joined = crate::parser::join_continuations(source);
+    let (_, origins) = crate::parser::join_continuations_with_origins(source);
+    joined.lines().zip(origins).find_map(|(line, origin)| {
+        let trimmed = line.trim_start();
+        (line.contains(".includeflag.")
+            && !trimmed.starts_with("%set_archincludes")
+            && !trimmed.starts_with("%get_archincludes"))
+        .then_some(origin + 1)
+    })
+}
+
+#[cfg(test)]
+mod include_flag_writer_tests {
+    use super::foreign_include_flag_line;
+
+    #[test]
+    fn only_the_two_macros_may_name_include_flag_files() {
+        let macros = "%set_archincludes mainmmake=m maindir=rom/m \\\n  modname=m pri=5 arch=x includes=\"-Ia\"\n%get_archincludes modname=m maindir=rom/m\n";
+        assert_eq!(foreign_include_flag_line(macros), None);
+        let handwritten = "X := 1\n\n\techo -Ib > $(GENDIR)/rom/m/m/include/.m.includeflag.1.x\n";
+        assert_eq!(foreign_include_flag_line(handwritten), Some(3));
     }
 }
