@@ -270,6 +270,9 @@ PY
     # The current integration source is the default oracle. Only tests which
     # explicitly select AROS_TEST_MESA20_SOURCE_ROOT use the historical tree.
     local -x AROS_TEST_SOURCE_ROOT="$source_root"
+    # A host with ld.lld makes the engine require aros-collect. Tests that
+    # configure it find the suite this run just built instead of an installed one.
+    local -x PATH="$repository_root/target/debug:$PATH"
     cargo test --workspace --all-features --locked \
         --exclude aros-common --exclude aros-toolchain --exclude aros-cli
     run_lock_binaries_serially
