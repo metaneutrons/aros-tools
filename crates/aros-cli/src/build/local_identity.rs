@@ -613,9 +613,11 @@ fn canonicalize_existing_prefix(path: &Path) -> Result<(std::path::PathBuf, bool
                             match remaining {
                                 std::path::Component::Normal(name) => resolved.push(name),
                                 std::path::Component::CurDir => {}
-                                _ => miette::bail!(
-                                    "configured board input path has an unsafe component"
-                                ),
+                                _ => {
+                                    miette::bail!(
+                                        "configured board input path has an unsafe component"
+                                    );
+                                }
                             }
                         }
                         return Ok((resolved, false));
@@ -624,7 +626,9 @@ fn canonicalize_existing_prefix(path: &Path) -> Result<(std::path::PathBuf, bool
                 }
             }
             std::path::Component::CurDir => {}
-            _ => miette::bail!("configured board input path has an unsafe component"),
+            _ => {
+                miette::bail!("configured board input path has an unsafe component");
+            }
         }
     }
     Ok((resolved, true))
@@ -675,7 +679,9 @@ fn literal_ninja_path(value: &str) -> Result<String> {
             match characters.next() {
                 Some(escaped @ (' ' | ':' | '$')) => path.push(escaped),
                 _ => {
-                    miette::bail!("local native configuration requires literal Ninja include paths")
+                    miette::bail!(
+                        "local native configuration requires literal Ninja include paths"
+                    );
                 }
             }
         } else {

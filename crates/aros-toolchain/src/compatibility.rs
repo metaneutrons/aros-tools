@@ -760,7 +760,7 @@ fn measure_executable(path: &Path) -> Result<(Sha256Digest, u64), ContractError>
     let metadata = file.metadata().map_err(|_| {
         ContractError::compatibility("cannot inspect the opened compatibility process program")
     })?;
-    let measured = sha256_reader(&mut file.by_ref()).map_err(|_| {
+    let measured = sha256_reader(file.by_ref()).map_err(|_| {
         ContractError::compatibility("cannot measure the compatibility process program")
     })?;
     if !metadata.is_file() || measured.size == 0 || measured.size != metadata.len() {
@@ -1151,7 +1151,7 @@ fn resolve_helpers(root: &Path) -> Result<BTreeMap<String, HelperIdentity>, Cont
                 "compatibility helper changed while it was opened for measurement",
             ));
         }
-        let measured = sha256_reader(&mut file.by_ref()).map_err(|_| {
+        let measured = sha256_reader(file.by_ref()).map_err(|_| {
             ContractError::compatibility(
                 "cannot measure a compatibility helper from the target root",
             )

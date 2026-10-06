@@ -241,7 +241,7 @@ fn read_bounded_regular_file(path: &Path, limit: usize) -> Result<Option<Vec<u8>
                 bail!(
                     "could not safely open repository semantic file '{}': {error}",
                     path.display()
-                )
+                );
             }
         };
         let file = File::from(descriptor);

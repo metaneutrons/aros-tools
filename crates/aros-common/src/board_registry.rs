@@ -165,7 +165,6 @@ impl BoardContract {
     }
 
     /// Stable transport ordering, independent of TOML document order.
-    #[must_use]
     pub fn transports(&self) -> impl ExactSizeIterator<Item = &BoardTransportContract> {
         self.transports.values()
     }
@@ -222,7 +221,6 @@ impl BoardRegistry {
     }
 
     /// Stable model ordering; it is not a hardware-qualification matrix.
-    #[must_use]
     pub fn boards(&self) -> impl ExactSizeIterator<Item = &BoardContract> {
         self.boards.values()
     }

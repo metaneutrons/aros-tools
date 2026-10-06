@@ -453,8 +453,12 @@ async fn setup(
     local: Option<PathBuf>,
 ) -> Result<()> {
     match (all, preset, local) {
-        (true, Some(_), _) => miette::bail!("--all cannot be combined with --preset"),
-        (true, None, Some(_)) => miette::bail!("--all cannot be combined with --local"),
+        (true, Some(_), _) => {
+            miette::bail!("--all cannot be combined with --preset");
+        }
+        (true, None, Some(_)) => {
+            miette::bail!("--all cannot be combined with --local");
+        }
         (true, None, None) => {
             for profile in repo::load_target_profiles(repo_root)? {
                 let outcome =
@@ -467,7 +471,9 @@ async fn setup(
                 toolchain::install(repo_root, &preset, offline, force, local.as_deref()).await?;
             record_toolchain_install(&outcome);
         }
-        (false, None, Some(_)) => miette::bail!("--local requires --preset"),
+        (false, None, Some(_)) => {
+            miette::bail!("--local requires --preset");
+        }
         (false, None, None) => {
             let outcome = host_compiler::install(repo_root, force, offline).await?;
             record_host_compiler_install(outcome);
@@ -705,7 +711,9 @@ fn clean(repo_root: &Path, preset: Option<String>, all: bool, dry_run: bool) -> 
     let target_dir = match (preset, all) {
         (Some(preset), false) => build::build_dir(repo_root, &preset)?,
         (None, true) => repo_root.join("build"),
-        _ => miette::bail!("select exactly one cleanup scope with --preset NAME or --all"),
+        _ => {
+            miette::bail!("select exactly one cleanup scope with --preset NAME or --all");
+        }
     };
     if dry_run {
         aros_common::outputln!("Dry run: would remove directory {}.", target_dir.display());

@@ -157,7 +157,9 @@ impl Transport {
             "native-tftp" => Ok(Self::NativeTftp),
             "uboot-usb-ecm" => Ok(Self::UbootUsbEcm),
             "uefi-esp" => Ok(Self::UefiEsp),
-            _ => miette::bail!("Unsupported board transport capability '{id}'."),
+            _ => {
+                miette::bail!("Unsupported board transport capability '{id}'.");
+            }
         }
     }
     /// Stable transport spelling used in profiles and command-line output.
@@ -325,7 +327,9 @@ impl Board {
         let architecture = match contract.architecture() {
             "arm" => CoreArchitecture::Arm,
             "aarch64" => CoreArchitecture::Aarch64,
-            _ => miette::bail!("Unsupported Raspberry Pi core architecture."),
+            _ => {
+                miette::bail!("Unsupported Raspberry Pi core architecture.");
+            }
         };
         let pi = self.config.raspberry_pi.as_ref().ok_or_else(|| {
             miette::miette!(
@@ -905,7 +909,7 @@ power_control = "manual"
         "opensbi-uefi" => append_template(&mut text, format_args!(
             "\n# UEFI ESP only: create a verified image with `aros board sd image`.\n[boards.{board_name}.opensbi_uefi]\ncore_kobj_dir = \"/REPLACE_ME/legacy-build/bin/{legacy_arch}/gen/kobjs\"\n"
         ))?,
-        _ => miette::bail!("Unsupported board backend capability."),
+        _ => { miette::bail!("Unsupported board backend capability."); },
     }
     match transport {
         Transport::NativeTftp => append_template(

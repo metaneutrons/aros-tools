@@ -305,9 +305,11 @@ fn verify_payload_and_tools(
 fn write_install_receipt(root: &Path, expected_sha256: &str, expected_version: &str) -> Result<()> {
     match fs::symlink_metadata(root.join(INSTALL_METADATA_DIR)) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(_) => bail!(
+        Ok(_) => {
+            bail!(
             "downloaded host compiler contains reserved metadata namespace '{INSTALL_METADATA_DIR}'"
-        ),
+        );
+        }
         Err(error) => return Err(error).into_diagnostic(),
     }
     let measurement = verify_payload_and_tools(root, expected_version)?;

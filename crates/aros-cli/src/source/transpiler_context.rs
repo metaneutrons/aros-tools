@@ -216,7 +216,9 @@ fn optional_string(cache: &Map<String, Value>, name: &str) -> Result<Option<Stri
         Value::Object(object) => object.get("value").and_then(Value::as_str).ok_or_else(|| {
             miette::miette!("configure preset {name} must have one literal string value")
         })?,
-        _ => bail!("configure preset {name} must be a literal string"),
+        _ => {
+            bail!("configure preset {name} must be a literal string");
+        }
     };
     Ok(Some(value.to_owned()))
 }
@@ -225,7 +227,9 @@ fn parse_bool(value: &str, name: &str) -> Result<bool> {
     match value.to_ascii_uppercase().as_str() {
         "1" | "ON" | "TRUE" | "YES" => Ok(true),
         "0" | "OFF" | "FALSE" | "NO" => Ok(false),
-        _ => bail!("configure preset {name} must be an explicit CMake boolean"),
+        _ => {
+            bail!("configure preset {name} must be an explicit CMake boolean");
+        }
     }
 }
 

@@ -152,13 +152,15 @@ fn exact_process_output(observed: &ProcessOutput, description: &str) -> Result<O
         });
     }
     let detail = bounded_output_detail(&observed.stdout, &observed.stderr);
-    miette::bail!(
-        "{description} failed with {}{}",
-        observed.status,
-        if detail.is_empty() {
-            String::new()
-        } else {
-            format!(":\n{detail}")
-        }
-    )
+    {
+        miette::bail!(
+            "{description} failed with {}{}",
+            observed.status,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(":\n{detail}")
+            }
+        );
+    }
 }
