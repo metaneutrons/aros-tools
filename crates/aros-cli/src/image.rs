@@ -430,7 +430,9 @@ fn verify_media_artifact(path: &Path) -> Result<VerifiedMediaArtifact> {
     match (iso.exists(), raw.exists()) {
         (true, false) => verify_iso_media_artifact(path),
         (false, true) => verify_fat32_media_artifact(path),
-        _ => miette::bail!("Media artifact must contain exactly one supported image format."),
+        _ => {
+            miette::bail!("Media artifact must contain exactly one supported image format.");
+        }
     }
 }
 

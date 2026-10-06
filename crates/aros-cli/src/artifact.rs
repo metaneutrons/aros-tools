@@ -482,10 +482,12 @@ pub fn extract_to_staging(
                 if entry_type.is_dir()
                     && metadata.is_dir()
                     && !metadata.file_type().is_symlink() => {}
-            Ok(_) => bail!(
-                "archive entry '{}' collides with an existing extracted path",
-                relative_path.display()
-            ),
+            Ok(_) => {
+                bail!(
+                    "archive entry '{}' collides with an existing extracted path",
+                    relative_path.display()
+                );
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(error)

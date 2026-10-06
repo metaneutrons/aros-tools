@@ -92,7 +92,9 @@ fn parse_snapshot(modules: &Path, inventory: &str) -> Result<Vec<DirectSubmodule
         match field {
             "path" if declaration.0.is_none() => declaration.0 = Some(PathBuf::from(value)),
             "url" if declaration.1.is_none() => declaration.1 = Some(value.to_owned()),
-            _ => bail!("submodule '{name}' declares duplicate {field} values"),
+            _ => {
+                bail!("submodule '{name}' declares duplicate {field} values");
+            }
         }
     }
 

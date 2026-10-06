@@ -1013,10 +1013,12 @@ fn resolve_new_output_path(output_dir: &Path) -> Result<PathBuf> {
 
 fn ensure_path_absent(path: &Path, label: &str) -> Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(_) => miette::bail!(
-            "Refusing to replace existing {label} '{}'. Choose a new output directory.",
-            path.display()
-        ),
+        Ok(_) => {
+            miette::bail!(
+                "Refusing to replace existing {label} '{}'. Choose a new output directory.",
+                path.display()
+            );
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(miette::miette!(
             "Could not inspect {label} '{}': {error}",

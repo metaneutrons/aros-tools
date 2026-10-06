@@ -183,13 +183,11 @@ impl SourceLock {
     }
 
     /// Every source archive, in the source-owned declaration order.
-    #[must_use]
     pub fn sources(&self) -> impl ExactSizeIterator<Item = Payload<'_>> {
         self.0.sources.iter().map(|source| source.payload())
     }
 
     /// Source components and their semantic build roles, in declaration order.
-    #[must_use]
     pub fn source_components(&self) -> impl ExactSizeIterator<Item = SourceComponent<'_>> {
         self.0.sources.iter().map(Source::component)
     }

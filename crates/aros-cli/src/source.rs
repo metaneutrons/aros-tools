@@ -540,9 +540,11 @@ fn classify_relation(repo_root: &Path, head: &str, upstream: &str) -> Result<Rel
         (true, _, _) => Ok(Relation::Equal),
         (false, true, false) => Ok(Relation::Behind),
         (false, false, true) => Ok(Relation::Ahead),
-        _ => bail!(
+        _ => {
+            bail!(
             "the current branch and fetched upstream branch have diverged; no merge was attempted. Integrate upstream through a reviewed branch or pull request"
-        ),
+        );
+        }
     }
 }
 
@@ -1428,7 +1430,9 @@ fn git_is_ancestor(repo_root: &Path, ancestor: &str, descendant: &str) -> Result
     )? {
         0 => Ok(true),
         1 => Ok(false),
-        code => bail!("Git returned unexpected accepted relation status {code}"),
+        code => {
+            bail!("Git returned unexpected accepted relation status {code}");
+        }
     }
 }
 
@@ -1580,10 +1584,12 @@ fn new_destination(requested: &Path) -> Result<PathBuf> {
 
 fn ensure_destination_absent(destination: &Path) -> Result<()> {
     match fs::symlink_metadata(destination) {
-        Ok(_) => bail!(
-            "source destination '{}' already exists; choose a new path",
-            destination.display()
-        ),
+        Ok(_) => {
+            bail!(
+                "source destination '{}' already exists; choose a new path",
+                destination.display()
+            );
+        }
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error)
             .into_diagnostic()
@@ -1670,7 +1676,11 @@ fn validate_url(value: &str, label: &str) -> Result<TransportKind> {
     if Path::new(value).is_absolute() || value.starts_with("./") || value.starts_with("../") {
         return Ok(TransportKind::Local);
     }
-    bail!("{label} must be an explicit HTTPS/SSH URL or an absolute/explicit relative local path")
+    {
+        bail!(
+            "{label} must be an explicit HTTPS/SSH URL or an absolute/explicit relative local path"
+        );
+    }
 }
 
 fn transport_argument(value: &str, transport: TransportKind) -> Result<String> {

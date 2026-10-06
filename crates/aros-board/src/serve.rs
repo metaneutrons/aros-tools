@@ -52,10 +52,12 @@ pub(super) fn resolve_from_adapters(
     match board.config.transport {
         Transport::UbootUsbEcm => resolve_usb_ecm(board, adapters),
         Transport::NativeTftp => resolve_native(board),
-        Transport::UefiEsp => miette::bail!(
-            "Board '{}' uses uefi-esp; it has no DHCP/TFTP service to start.",
-            board.name
-        ),
+        Transport::UefiEsp => {
+            miette::bail!(
+                "Board '{}' uses uefi-esp; it has no DHCP/TFTP service to start.",
+                board.name
+            );
+        }
     }
 }
 
@@ -295,7 +297,9 @@ fn resolve_native(board: &Board) -> Result<ServicePlan> {
 fn concrete_ipv4(address: IpAddr, field: &str) -> Result<Ipv4Addr> {
     let address = match address {
         IpAddr::V4(address) => address,
-        IpAddr::V6(_) => miette::bail!("{field} must be a concrete IPv4 address for DHCP/TFTP."),
+        IpAddr::V6(_) => {
+            miette::bail!("{field} must be a concrete IPv4 address for DHCP/TFTP.");
+        }
     };
     if address.is_unspecified()
         || address.is_broadcast()

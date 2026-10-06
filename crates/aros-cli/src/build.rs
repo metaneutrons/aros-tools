@@ -336,7 +336,9 @@ fn compiler_cache_variables(
             ("AROS_LINKER_BIN", "linker"),
             ("AROS_COLLECT_BIN", "collector"),
         ],
-        _ => miette::bail!("unsupported native compiler family '{family}'"),
+        _ => {
+            miette::bail!("unsupported native compiler family '{family}'");
+        }
     };
     let mut roles = roles.to_vec();
     if family == "gnu"
