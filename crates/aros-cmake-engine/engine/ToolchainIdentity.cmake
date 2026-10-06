@@ -77,7 +77,12 @@ function(aros_lock_build_tree_toolchain)
     endif()
     if(EXISTS "${_stamp}")
         if(UNIX)
-            execute_process(COMMAND test -f "${_stamp}"
+            # A pinned system `test`, as every other execution-time file-kind
+            # check in the engine uses, so an earlier PATH entry cannot make the
+            # check pass for a FIFO, device or hardlinked stamp.
+            find_program(_aros_identity_test NAMES test PATHS /usr/bin /bin
+                NO_DEFAULT_PATH NO_CACHE REQUIRED)
+            execute_process(COMMAND "${_aros_identity_test}" -f "${_stamp}"
                 RESULT_VARIABLE _regular OUTPUT_QUIET ERROR_QUIET TIMEOUT 5)
             if(NOT _regular EQUAL 0)
                 message(FATAL_ERROR "Build-tree toolchain identity must be a regular unlinked file")
