@@ -426,15 +426,14 @@ class DocsAuditCliTests(unittest.TestCase):
         self.assertNotIn(b"GHSA-ch52-4w7c-c8xp", result.stdout)
         self.assert_audit_ran()
 
-    def test_real_cli_uses_current_time_for_temporary_exception(self):
+    def test_real_cli_rejects_exception_report_once_the_locked_package_is_patched(self):
+        # The lockfile no longer carries the excepted http-cache-semantics
+        # version, so a report that relies on the exception must fail closed
+        # whatever the current time is.
         result = self.run_checker(json.dumps(exception_report()).encode(), status=1)
         self.assert_audit_ran()
-        current = dt.datetime.now(UTC)
-        active = APPROVAL_START <= current < EXPIRES
-        self.assertEqual(result.returncode == 0, active, result.stdout + result.stderr)
-        if active:
-            self.assertIn(b"GHSA-ch52-4w7c-c8xp", result.stdout)
-            self.assertIn(b"2026-10-10T22:00:00Z", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn(b"GHSA-ch52-4w7c-c8xp", result.stdout)
 
     def test_real_cli_rejects_npm_error_malformed_json_and_duplicate_fields(self):
         cases = (
