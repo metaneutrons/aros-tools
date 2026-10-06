@@ -1,3 +1,8 @@
+# Not collected by the gate loop (it only runs *Test.cmake files). This check
+# reads arch/riscv-esp32p4/flashdisk from the AROS tree, which the source
+# contract's integration commit does not carry yet. Rename it to
+# ResourceModuleAbiTest.cmake in the change that moves the pin to a tree with
+# the port; until then run it by hand against such a tree.
 cmake_minimum_required(VERSION 3.24)
 include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 

@@ -285,6 +285,7 @@ run_tests() {
     # fixture from existing only as a manually remembered test.
     local command_name discovered_count executed_count host_machine host_system
     local skipped_count test_case test_name tools_directory
+    local engine_directory fixture_scratch
     for command_name in clang cmake ninja; do
         if ! command -v "$command_name" >/dev/null 2>&1; then
             printf 'error: %s is required by the exact-source engine tests; see CONTRIBUTING.md\n' \
@@ -294,6 +295,9 @@ run_tests() {
     done
     cargo build --workspace --all-features --locked
     tools_directory="$repository_root/target/debug"
+    engine_directory="$repository_root/crates/aros-cmake-engine/engine"
+    fixture_scratch=$(mktemp -d "${TMPDIR:-/tmp}/aros-engine-fixtures.XXXXXX")
+    trap 'rm -rf "$fixture_scratch"' RETURN
     host_system=$(uname -s)
     host_machine=$(uname -m)
     discovered_count=0
@@ -311,8 +315,12 @@ run_tests() {
         fi
         executed_count=$((executed_count + 1))
         printf 'engine test %d: %s\n' "$executed_count" "$test_name"
+        # Fixtures that drive the embedded engine take its directory and a
+        # fresh binary root as parameters; the others ignore both.
         AROS_TEST_TOOLS_DIR="$tools_directory" \
-            cmake -P "$test_case"
+            cmake -DENGINE_DIR="$engine_directory" \
+                -DTEST_BINARY_DIR="$fixture_scratch/$test_name" \
+                -P "$test_case"
     done < <(find "$repository_root/crates/aros-cmake-engine/engine/tests" \
         -maxdepth 1 -type f -name '*Test.cmake' -print | sort)
     if [[ "$discovered_count" -eq 0 ]]; then

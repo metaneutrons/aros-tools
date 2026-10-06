@@ -85,24 +85,6 @@ fn sealed_host_c_file_generator_preserves_native_input_and_output_contracts() {
 }
 
 #[test]
-fn source_owned_writefiles_stamp_shares_the_client_generator_and_matches_reference() {
-    let directory = tempfile::tempdir().expect("writefiles engine fixture");
-    let engine = directory.path().join("engine");
-    materialize(&engine).expect("materialize current engine");
-    let output = Command::new("cmake")
-        .arg("-P")
-        .arg(engine.join("tests/GenmoduleWritefilesRuleTest.cmake"))
-        .output()
-        .expect("run source-owned writefiles fixture");
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
 fn the_engine_is_embedded_whole() {
     assert!(file_count() > 100, "only {} files embedded", file_count());
     // Three files that anchor the three kinds of content: the entry point, the
@@ -1276,11 +1258,6 @@ fn pc_boot_iso_verifier_rejects_data_iso_and_accepts_boot_catalog() {
 }
 
 #[test]
-fn source_module_groups_preserve_make_order_and_compile_state() {
-    run_embedded_kobj_contract_test("ModuleSourceGroupsTest.cmake");
-}
-
-#[test]
 fn source_module_kobj_inputs_preserve_known_and_unknown_scope() {
     run_embedded_kobj_contract_test("ModuleKobjInputsTest.cmake");
 }
@@ -1303,11 +1280,6 @@ fn source_values_match_gnu_sed_and_reject_changed_or_unsafe_inputs() {
 #[test]
 fn native_kobj_rejects_changed_inputs_and_failed_publication() {
     run_embedded_kobj_contract_test("NativeKobjTest.cmake");
-}
-
-#[test]
-fn native_core_consumes_registered_kobjs_instead_of_raw_module_objects() {
-    run_embedded_kobj_contract_test("NativeCoreTest.cmake");
 }
 
 fn run_embedded_kobj_contract_test(script: &str) {

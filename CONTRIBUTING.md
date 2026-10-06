@@ -101,7 +101,9 @@ Darwin/arm64**; Linux explicitly reports that host-qualified omission. A green
 Linux CI run alone is therefore not the complete macOS/GRUB evidence. The
 explicit `test`/`all` gate discovers every `*Test.cmake`, so newly added fixtures
 cannot silently fall out of the integration inventory. `clang`, `cmake` and
-`ninja` are required. The local invocation is:
+`ninja` are required; the native-core fixture also needs `ld.lld`, and the
+module source-group fixture needs a host compiler that builds Objective-C
+(`gobjc` on Debian and Ubuntu). The local invocation is:
 
 ```sh
 AROS_TEST_SOURCE_ROOT=/absolute/path/to/current/AROS-NX \
