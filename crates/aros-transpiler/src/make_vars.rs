@@ -1014,6 +1014,14 @@ fn scan_define_bodies(lines: &[&str]) -> DefineScan {
     }
 }
 
+/// A top-level `$(error ...)` call: GNU Make stops reading the makefile when
+/// it expands one.
+pub(crate) fn is_make_error_directive(line: &str) -> bool {
+    let line = line.trim();
+    line.strip_prefix("$(error")
+        .is_some_and(|rest| rest.starts_with([' ', '\t', ')']) && line.ends_with(')'))
+}
+
 pub(crate) fn collect_vars_impl_with_forward_locals(
     joined: &str,
     context: Option<&TargetContext>,
@@ -1066,6 +1074,9 @@ pub(crate) fn collect_vars_impl_with_forward_locals(
     let mut conditional_stack: Vec<ConditionalFrame> = Vec::new();
     let mut flavors: HashMap<String, VariableFlavor> = HashMap::new();
     let mut line_states = Vec::with_capacity(lines.len());
+    // Set once an $(error) may have run. Make stops there, so with a selected
+    // target nothing after it is proven, whatever the later conditionals say.
+    let mut halted = false;
 
     for (line_no, raw_line) in lines.iter().copied().enumerate() {
         let branch_state = context.map_or_else(
@@ -1077,9 +1088,13 @@ pub(crate) fn collect_vars_impl_with_forward_locals(
                 }
             },
             |_| {
-                conditional_stack
-                    .last()
-                    .map_or(ConditionalTruth::True, |frame| frame.current)
+                if halted {
+                    ConditionalTruth::Unknown
+                } else {
+                    conditional_stack
+                        .last()
+                        .map_or(ConditionalTruth::True, |frame| frame.current)
+                }
             },
         );
         line_states.push(branch_state);
@@ -1120,6 +1135,13 @@ pub(crate) fn collect_vars_impl_with_forward_locals(
         let line = strip_make_comment(raw_line);
         let trimmed = line.trim();
         if trimmed.starts_with('#') || trimmed.starts_with('%') {
+            continue;
+        }
+        if context.is_some()
+            && branch_state != ConditionalTruth::False
+            && is_make_error_directive(trimmed)
+        {
+            halted = true;
             continue;
         }
 
@@ -1516,7 +1538,8 @@ mod configuration_tests {
             ("AROS_TARGET_CPU", "arm"),
             ("ARCH", "raspi"),
             ("AROS_TARGET_ARCH", "raspi"),
-            ("AROS_TARGET_PLATFORM", "raspi-arm"),
+            // configure.in: a variant replaces the machine except on pc.
+            ("AROS_TARGET_PLATFORM", "debug-arm"),
             ("FAMILY", "amiga"),
             ("AROS_TARGET_FAMILY", "amiga"),
             ("AROS_TARGET_VARIANT", "debug"),
@@ -1632,6 +1655,75 @@ mod configuration_tests {
         assert_eq!(scope.raw_at("SMP", usize::MAX).as_deref(), Some("no"));
         let unquoted = quoted.replacen("EXECSMP=\"\"", "EXECSMP=", 1);
         let (scope, _) = collect_vars_impl(&unquoted, Some(&TargetContext::default()));
+        assert_eq!(scope.raw_at("SMP", usize::MAX).as_deref(), Some("yes"));
+    }
+
+    #[test]
+    fn make_error_guards_stop_the_proof_only_when_they_may_run() {
+        let guarded = "B ?= d1001\nifeq ($(B),bad)\n$(error bad board)\nendif\nifeq ($(B),d1001)\nF := one\nelse\n$(error unsupported $(B))\nendif\n";
+        let known = TargetContext {
+            make_variables: [("B".into(), "d1001".into())].into(),
+            ..TargetContext::default()
+        };
+        let (scope, _) = collect_vars_impl(guarded, Some(&known));
+        assert_eq!(scope.raw_at("F", usize::MAX).as_deref(), Some("one"));
+
+        let rejected = TargetContext {
+            make_variables: [("B".into(), "bad".into())].into(),
+            ..TargetContext::default()
+        };
+        let (scope, states) = collect_vars_impl(guarded, Some(&rejected));
+        assert_eq!(scope.raw_at("F", usize::MAX), None);
+        assert!(states[4..]
+            .iter()
+            .all(|state| *state == ConditionalTruth::Unknown));
+
+        let unknown = "ifeq ($(UNSET_SELECTOR),x)\n$(error stop)\nendif\nF := two\n";
+        let (scope, _) = collect_vars_impl(unknown, Some(&TargetContext::default()));
+        assert_eq!(scope.raw_at("F", usize::MAX), None);
+
+        assert!(is_make_error_directive("$(error bad)"));
+        assert!(!is_make_error_directive("$(errors x)"));
+        assert!(!is_make_error_directive("X := $(error bad)"));
+    }
+
+    #[test]
+    fn legacy_platform_follows_configure_variant_rule() {
+        let context = |platform: &str, variant: Option<&str>| TargetContext {
+            platform: Some(platform.into()),
+            cpu: Some("riscv".into()),
+            variant: variant.map(str::to_owned),
+            ..TargetContext::default()
+        };
+        assert_eq!(
+            context("esp32p4", Some("")).legacy_platform().as_deref(),
+            Some("esp32p4-riscv")
+        );
+        assert_eq!(
+            context("esp32p4", Some("smp")).legacy_platform().as_deref(),
+            Some("smp-riscv")
+        );
+        assert_eq!(
+            context("pc", Some("smp")).legacy_platform().as_deref(),
+            Some("pc-riscv")
+        );
+        assert_eq!(context("esp32p4", None).legacy_platform(), None);
+        assert_eq!(
+            context("esp32p4", Some("smp"))
+                .value_of("AROS_TARGET_PLATFORM")
+                .as_deref(),
+            Some("smp-riscv")
+        );
+    }
+
+    #[test]
+    fn configured_smp_value_is_cut_at_its_make_comment() {
+        // configure substitutes "#define __AROSEXEC_SMP__" into geninc.cfg.in.
+        // GNU Make ends the value at '#', so EXECSMP is a single quote and
+        // compiler/include selects its SMP execbase lane.
+        let source = "EXECSMP=\"#define __AROSEXEC_SMP__\"\nifneq ($(strip $(EXECSMP)),\"\")\nSMP := yes\nelse\nSMP := no\nendif\n";
+        let (scope, _) = collect_vars_impl(source, Some(&TargetContext::default()));
+        assert_eq!(scope.raw_at("EXECSMP", usize::MAX).as_deref(), Some("\""));
         assert_eq!(scope.raw_at("SMP", usize::MAX).as_deref(), Some("yes"));
     }
 

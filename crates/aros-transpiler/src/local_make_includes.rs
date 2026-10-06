@@ -857,7 +857,16 @@ fn validate_resolved_template(
             )]);
         }
         let value = rhs.trim();
-        if !safe_template_assignment_value(value) || !assigned.insert(name.to_owned()) {
+        // A substituted preprocessor line (e.g. "#define __AROSEXEC_SMP__")
+        // leaves only its opening quote once Make cuts the comment.
+        let cut_comment = uncommented.len() < trimmed.len();
+        let admitted = safe_template_assignment_value(value)
+            || cut_comment
+                && value.strip_prefix('"').is_some_and(|rest| {
+                    rest.bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte))
+                });
+        if !admitted || !assigned.insert(name.to_owned()) {
             return Err(vec![issue(
                 source,
                 logical.line,
@@ -988,10 +997,7 @@ fn validate_template_bindings(
         if template.substitutions.len() > MAX_TEMPLATE_SUBSTITUTIONS
             || template.substitutions.iter().any(|(token, value)| {
                 !safe_substitution_key(token)
-                    || value.len() > 128
-                    || !value
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte))
+                    || !aros_common::native_make_template::admitted_substitution_value(value)
             })
         {
             return Err((
@@ -1375,6 +1381,13 @@ fn validate_fragment(
         if native_configuration {
             if let Ok(Some(name)) = crate::make_vars::undefine_directive(uncommented) {
                 assigned.insert(name.to_owned());
+                all_assignments_are_plain_lists = false;
+                continue;
+            }
+            // A configuration guard. The variable scan stops proving
+            // anything after an $(error) that may run, so admitting the
+            // line cannot let an invalid configuration through.
+            if crate::make_vars::is_make_error_directive(uncommented) {
                 all_assignments_are_plain_lists = false;
                 continue;
             }

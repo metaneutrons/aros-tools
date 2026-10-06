@@ -24,26 +24,44 @@ pub use empty_library_lists::VerifiedEmptyLibraryList;
 mod library_aliases;
 pub use library_aliases::VerifiedNativeLibraryAlias;
 
-// Reviewed full GenMF definition-block fingerprints from the audited P4
-// config/make.tmpl. Hashing the complete block makes added calls or side effects
-// invalidate the caller-chain proof, not only edits to the visible callsite.
-const GEN_ARCHSPECIFICRULES_SHA256: &str =
-    "fc50253aa57b06aac5fdd739e2e871391d4e9a78d84989f83e52af71b162a062";
-const BUILD_MODULE_CORE_SHA256: &str =
-    "b98d01e189affeb9f09c965bb42816719e5faf55f156332ffeb810a402526b53";
-const BUILD_MODULE_SHA256: &str =
-    "8201f536deaec8ae141a7e66cbfda2665a21664bccab9437d7723f08a8b48705";
-const BUILD_MODULE_ABI_SHA256: &str =
-    "f2f9879bc5af8ecf68745a9878eb8efbb6f3a9d4e48752393bb528fe1bd367e3";
-const BUILD_MODULE_LIBRARY_SHA256: &str =
-    "b9d589d7528b09d17c187eae39c7bcce5df16e0a3575166b98489040d0b9ced5";
-const BUILD_LINKLIB_SHA256: &str =
-    "5cca7ef8788eb0fb09fdcd5e72def0b05e5a2e0b9cb00c7052858aee62ac357c";
-const BUILD_PROG_SHA256: &str = "e276e953080db3a15e844057a5d2454c0c537da800904c9544c0c106566d375e";
-const BUILD_PROGS_SHA256: &str = "4c0bbfa21ec9c3d27dbb2724d7b67f37db5326d1c814973389907f1269b32b5b";
+// Reviewed full GenMF definition-block fingerprints. Hashing the complete
+// block makes added calls or side effects invalidate the caller-chain proof,
+// not only edits to the visible callsite. Each macro lists every reviewed
+// revision of config/make.tmpl; a new revision is admitted only after its
+// difference has been checked against the semantics modelled here:
+// - first entry: the audited P4 baseline (upstream before 2026-10);
+// - upstream 684b78f85c: kobj links pass $^ through a response file (same
+//   inputs, same order);
+// - AROS-NX 1ae60532d9: SDK header edges select sdk-includes-$(AROS_TOOLCHAIN_RELEASE)
+//   instead of includes-generate-deps; no macro call or side effect changes.
+const GEN_ARCHSPECIFICRULES_SHA256: &[&str] =
+    &["fc50253aa57b06aac5fdd739e2e871391d4e9a78d84989f83e52af71b162a062"];
+const BUILD_MODULE_CORE_SHA256: &[&str] = &[
+    "b98d01e189affeb9f09c965bb42816719e5faf55f156332ffeb810a402526b53",
+    "0558b8b4e87dee8ed625d3cde30110066ad1b99cfedbc5216061a7a19cef44f5",
+    "d6c45f444fb1747013de633184070f0e73a3b025e0f6898f022b721485b23d2e",
+];
+const BUILD_MODULE_SHA256: &[&str] =
+    &["8201f536deaec8ae141a7e66cbfda2665a21664bccab9437d7723f08a8b48705"];
+const BUILD_MODULE_ABI_SHA256: &[&str] =
+    &["f2f9879bc5af8ecf68745a9878eb8efbb6f3a9d4e48752393bb528fe1bd367e3"];
+const BUILD_MODULE_LIBRARY_SHA256: &[&str] =
+    &["b9d589d7528b09d17c187eae39c7bcce5df16e0a3575166b98489040d0b9ced5"];
+const BUILD_LINKLIB_SHA256: &[&str] = &[
+    "5cca7ef8788eb0fb09fdcd5e72def0b05e5a2e0b9cb00c7052858aee62ac357c",
+    "e3f0f83323c9b7720c2e62b5bc80dee3e234d344967e998268a5e3fe414408b7",
+];
+const BUILD_PROG_SHA256: &[&str] = &[
+    "e276e953080db3a15e844057a5d2454c0c537da800904c9544c0c106566d375e",
+    "8f07199a7d1e18e76c5a7ba5e975ba3644344104e56c0247ab7d6b179f5ea23e",
+];
+const BUILD_PROGS_SHA256: &[&str] = &[
+    "4c0bbfa21ec9c3d27dbb2724d7b67f37db5326d1c814973389907f1269b32b5b",
+    "844db5f466948ba48af3156e0f43bc80f871b02d0fa9a59231189cbe218eb188",
+];
 // Exact small direct-caller fixture used by this module's adversarial tests.
-const DIRECT_FIXTURE_BUILD_MODULE_SHA256: &str =
-    "a6cd9dca47f203a9727e57048a155b0e1400f8fbdb4b2104d4887964a85d2715";
+const DIRECT_FIXTURE_BUILD_MODULE_SHA256: &[&str] =
+    &["a6cd9dca47f203a9727e57048a155b0e1400f8fbdb4b2104d4887964a85d2715"];
 
 #[derive(Debug, Serialize)]
 pub struct SourceVirtualAlias {
@@ -779,7 +797,7 @@ fn verify_reviewed_template_macro(
     template: &str,
     name: &str,
     definition_line: usize,
-    expected_sha256: &str,
+    expected_sha256: &[&str],
 ) -> Result<(), String> {
     let lines: Vec<_> = template.lines().collect();
     let starts: Vec<_> = lines
@@ -800,8 +818,8 @@ fn verify_reviewed_template_macro(
     let end = (start + 1..lines.len())
         .find(|index| lines[*index].starts_with("%end"))
         .ok_or_else(|| format!("template macro {name} is unterminated"))?;
-    if aros_common::sha256_bytes(lines[start..=end].join("\n").as_bytes()).as_str()
-        != expected_sha256
+    if !expected_sha256
+        .contains(&aros_common::sha256_bytes(lines[start..=end].join("\n").as_bytes()).as_str())
     {
         return Err(format!(
             "template macro {name} differs from its supported semantics"

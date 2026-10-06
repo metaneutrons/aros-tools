@@ -205,9 +205,16 @@ set(AROS_TARGET_RUST_VER "" CACHE STRING
 
 # MetaMake calls the compound machine/CPU selector AROS_TARGET_PLATFORM. Keep
 # that legacy spelling distinct from this build's machine-only platform value
-# so generated meta-target names expand unambiguously.
-set(AROS_TARGET_LEGACY_PLATFORM
-    "${AROS_TARGET_PLATFORM}-${AROS_TARGET_CPU}")
+# so generated meta-target names expand unambiguously. configure.in replaces
+# the machine by the variant on every platform but pc (esp32p4 smp is
+# smp-riscv); the transpiler's TargetContext::legacy_platform() matches this.
+if(NOT AROS_TARGET_VARIANT STREQUAL "" AND NOT AROS_TARGET_PLATFORM STREQUAL "pc")
+    set(AROS_TARGET_LEGACY_PLATFORM
+        "${AROS_TARGET_VARIANT}-${AROS_TARGET_CPU}")
+else()
+    set(AROS_TARGET_LEGACY_PLATFORM
+        "${AROS_TARGET_PLATFORM}-${AROS_TARGET_CPU}")
+endif()
 
 # 1. Compiler Cache Integration (sccache / ccache)
 include("${AROS_CMAKE_ENGINE_DIR}/CompilerCache.cmake")

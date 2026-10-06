@@ -599,7 +599,11 @@ impl NativeOwnerProjection {
                 || origin.source_path.as_ref() != Some(&caller.template_path)
                 || origin.template_path.as_ref() != Some(&caller.template_path)
                 || origin.template_definition_line != Some(caller.definition_line)
-                || raw != Some("#MM %(mmake) : includes-generate-deps")
+                || !raw.is_some_and(|raw| {
+                    LINKLIB_SDK_HEADER_EDGES
+                        .iter()
+                        .any(|(expression, _)| raw == format!("#MM %(mmake) : {expression}"))
+                })
             {
                 return Ok(None);
             }
@@ -618,8 +622,12 @@ impl NativeOwnerProjection {
                 )?;
             }
             if !declaration.dependencies.iter().any(|edge| {
-                edge.raw_expression == "includes-generate-deps"
-                    && edge.concrete == "includes-generate-deps"
+                LINKLIB_SDK_HEADER_EDGES
+                    .iter()
+                    .any(|(expression, concrete)| {
+                        edge.raw_expression == *expression
+                            && concrete.contains(&edge.concrete.as_str())
+                    })
             }) {
                 return Ok(None);
             }
@@ -632,6 +640,17 @@ impl NativeOwnerProjection {
         Ok(Some(recipe))
     }
 }
+
+/// The single SDK-header edge of a reviewed build_linklib block, raw and
+/// concrete: upstream's includes-generate-deps, or AROS-NX's selection by
+/// AROS_TOOLCHAIN_RELEASE (0 normally, 1 for the compiler-only release).
+const LINKLIB_SDK_HEADER_EDGES: &[(&str, &[&str])] = &[
+    ("includes-generate-deps", &["includes-generate-deps"]),
+    (
+        "sdk-includes-$(AROS_TOOLCHAIN_RELEASE)",
+        &["sdk-includes-0", "sdk-includes-1"],
+    ),
+];
 
 fn source_supplemental_provider_rule(
     root: &Path,

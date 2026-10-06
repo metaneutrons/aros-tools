@@ -39,6 +39,14 @@ pub fn read_source_with_sha256(path: &Path) -> io::Result<(String, crate::Sha256
     Ok((decode_source(bytes), digest))
 }
 
+/// Decode one source byte snapshot as [`read_source`] does: UTF-8, else
+/// Latin-1. Callers that hash the bytes first use this so the parsed text
+/// and the digest describe the same snapshot.
+#[must_use]
+pub fn decode_source_bytes(bytes: Vec<u8>) -> String {
+    decode_source(bytes)
+}
+
 fn decode_source(bytes: Vec<u8>) -> String {
     match String::from_utf8(bytes) {
         Ok(text) => text,

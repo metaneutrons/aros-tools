@@ -323,7 +323,11 @@ fn collect_arch_endpoint_effects_at_positions(
                     recipe: recipe.clone(),
                     line: line + 1,
                     directive: "%build_archspecific".into(),
-                    endpoint: candidate_endpoint("%build_archspecific", &body),
+                    endpoint: candidate_endpoint_in(
+                        "%build_archspecific",
+                        &body,
+                        position.map(|position| (scope, position, recipe_dir)),
+                    ),
                     reason,
                 }),
             },
@@ -369,7 +373,11 @@ fn collect_arch_endpoint_effects_at_positions(
                     recipe: recipe.clone(),
                     line: line + 1,
                     directive: "%set_archincludes".into(),
-                    endpoint: candidate_endpoint("%set_archincludes", &body),
+                    endpoint: candidate_endpoint_in(
+                        "%set_archincludes",
+                        &body,
+                        position.map(|position| (scope, position, recipe_dir)),
+                    ),
                     reason,
                 }),
             },
@@ -406,9 +414,25 @@ fn rejected(
 }
 
 fn candidate_endpoint(directive: &str, body: &str) -> Option<String> {
+    candidate_endpoint_in(directive, body, None)
+}
+
+/// The endpoint a rejected declaration would have produced, so its failure
+/// is attributed to that owner. With the declaration's scope, a resolvable
+/// `arch=` expression names it too.
+fn candidate_endpoint_in(
+    directive: &str,
+    body: &str,
+    scope: Option<(&VarScope, usize, &str)>,
+) -> Option<String> {
     let fields = parse_arguments(body, directive).ok()?;
     let mainmmake = required_literal(&fields, "mainmmake").ok()?;
-    let tag = required_literal(&fields, "arch").ok()?;
+    let tag = match scope {
+        Some((scope, line, recipe_dir)) => {
+            architecture_tag(&fields, scope, line, recipe_dir).ok()?
+        }
+        None => required_literal(&fields, "arch").ok()?,
+    };
     Some(match directive {
         "%build_archspecific" => format!("{mainmmake}-{tag}"),
         "%set_archincludes" => format!("{mainmmake}-{tag}-set-archincludes"),
@@ -499,7 +523,7 @@ fn parse_empty_linklib(
 ) -> Result<Option<(String, Vec<String>, ArchEndpointEffectData)>, String> {
     let fields = parse_arguments(body, "%build_archspecific")?;
     let mainmmake = required_literal(&fields, "mainmmake")?;
-    let tag = required_literal(&fields, "arch")?;
+    let tag = architecture_tag(&fields, scope, line, recipe_dir)?;
 
     // The source template rejects other compiler values while parsing the
     // macro, even when the linklib-object lane is empty.
@@ -582,7 +606,7 @@ fn parse_arch_includes(
 ) -> Result<Option<(String, Vec<String>, ArchEndpointEffectData)>, String> {
     let fields = parse_arguments(body, "%set_archincludes")?;
     let mainmmake = required_literal(&fields, "mainmmake")?;
-    let tag = required_literal(&fields, "arch")?;
+    let tag = architecture_tag(&fields, scope, line, recipe_dir)?;
     let modname = required_literal(&fields, "modname")?;
     let maindir = required_scalar(&fields, "maindir", scope, line, recipe_dir)?;
     validate_relative_path(&maindir).map_err(|reason| format!("unsafe maindir=: {reason}"))?;
@@ -655,6 +679,27 @@ fn required_literal(fields: &BTreeMap<String, Argument>, name: &str) -> Result<S
     }
     validate_identifier(&value).map_err(|reason| format!("invalid {name}=: {reason}"))?;
     Ok(value)
+}
+
+/// `arch=` as one identifier: literal, or an expression the declaration's
+/// scope resolves to exactly one (pfs3 uses `arch=$(AROS_TARGET_CPU)`).
+fn architecture_tag(
+    fields: &BTreeMap<String, Argument>,
+    scope: &VarScope,
+    line: usize,
+    recipe_dir: &str,
+) -> Result<String, String> {
+    let raw = fields.get("arch").ok_or("missing required arch=")?;
+    if !raw.value.contains('$') {
+        return required_literal(fields, "arch");
+    }
+    let value = expand_scalar(&raw.value, scope, line, recipe_dir)?;
+    let value = value.trim();
+    if value.split_whitespace().count() != 1 {
+        return Err("arch= must resolve to exactly one tag".into());
+    }
+    validate_identifier(value).map_err(|reason| format!("invalid arch=: {reason}"))?;
+    Ok(value.to_owned())
 }
 
 fn required_scalar(
@@ -1142,6 +1187,72 @@ mod tests {
                 result.rejected
             );
         }
+    }
+
+    #[test]
+    fn arch_expression_resolves_to_one_tag_or_stays_unowned() {
+        let input = "%build_archspecific mainmmake=m maindir=rom/module arch=$(AROS_TARGET_CPU) asmfiles=\"$(AROS_TARGET_CPU)/stackswap\"\n";
+        let recipe = Path::new("rom/module/mmakefile.src");
+        let riscv = crate::TargetContext {
+            cpu: Some("riscv".into()),
+            ..crate::TargetContext::default()
+        };
+        let (scope, states) = collect_arch_effect_scope_with_context(input, Some(&riscv));
+        let result = collect_arch_endpoint_effects(input, recipe, &scope, Some(&states)).unwrap();
+        // The tag resolves, so the rejection names its owner.
+        assert_eq!(result.rejected.len(), 1);
+        assert_eq!(result.rejected[0].endpoint.as_deref(), Some("m-riscv"));
+
+        let (scope, states) = collect_arch_effect_scope(input);
+        let result = collect_arch_endpoint_effects(input, recipe, &scope, Some(&states)).unwrap();
+        assert_eq!(result.rejected.len(), 1);
+        assert_eq!(result.rejected[0].endpoint, None);
+    }
+
+    #[test]
+    fn kernel_lane_compiles_in_target_role_only_when_the_contract_declares_it() {
+        let input = "%build_archspecific mainmmake=m maindir=rom/module arch=pc files=module compiler=kernel\n";
+        let recipe = Path::new("arch/all-pc/module/mmakefile.src");
+        let (scope, states) = collect_arch_effect_scope(input);
+        for (declared, groups) in [(false, 0), (true, 1)] {
+            let result = collect_arch_endpoint_effects_at_positions(
+                input,
+                recipe,
+                &scope,
+                Some(&states),
+                None,
+                declared,
+            )
+            .unwrap();
+            assert_eq!(
+                result
+                    .effects
+                    .iter()
+                    .filter(|effect| matches!(
+                        effect.data,
+                        ArchEndpointEffectData::ArchModuleObjects { .. }
+                    ))
+                    .count(),
+                groups,
+                "declared={declared}"
+            );
+        }
+        // Host sources never get a target-role object group.
+        let host = input.replace("compiler=kernel", "compiler=host");
+        let (scope, states) = collect_arch_effect_scope(&host);
+        let result = collect_arch_endpoint_effects_at_positions(
+            &host,
+            recipe,
+            &scope,
+            Some(&states),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(!result.effects.iter().any(|effect| matches!(
+            effect.data,
+            ArchEndpointEffectData::ArchModuleObjects { .. }
+        )));
     }
 
     #[test]

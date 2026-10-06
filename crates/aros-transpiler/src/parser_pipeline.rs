@@ -217,6 +217,62 @@ fn literal_object_source_anchors(
     Some(logical_anchors)
 }
 
+/// Evaluate `%make_package`/`%link_kickstart` in the selected native scope,
+/// with diagnostics reported at physical source lines.
+fn collect_native_packages(
+    content: &str,
+    target: &TargetContext,
+    dirs: &crate::dirs::DirVars,
+    root: &Path,
+    relative_path: &Path,
+    rel_dir: &Path,
+) -> (Vec<crate::packages::PackageDecl>, Vec<String>) {
+    let snapshot = match crate::assembly_headers::native_configuration_snapshot(
+        content,
+        target,
+        dirs,
+        root,
+        relative_path,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(reason) => {
+            return (
+                Vec::new(),
+                vec![format!(
+                    "{}: native package context is unproven: {reason}",
+                    relative_path.display()
+                )],
+            )
+        }
+    };
+    let (native_scope, native_states) = collect_vars_impl(&snapshot.joined, Some(target));
+    let (packages, skipped) = crate::packages::collect_packages_with_scope(
+        &snapshot.joined,
+        rel_dir,
+        &native_scope,
+        dirs,
+        root,
+        &native_states,
+    );
+    // Messages carry native scope lines; report physical ones.
+    let file_prefix = format!("{}:", relative_path.display());
+    let skipped = skipped
+        .into_iter()
+        .map(|message| {
+            let physical = message
+                .strip_prefix(&file_prefix)
+                .and_then(|rest| rest.split_once(':'))
+                .and_then(|(line, tail)| {
+                    let line = line.parse::<usize>().ok()?.checked_sub(1)?;
+                    let physical = snapshot.physical_owner_lines.get(line).copied().flatten()?;
+                    Some(format!("{file_prefix}{}:{tail}", physical + 1))
+                });
+            physical.unwrap_or(message)
+        })
+        .collect();
+    (packages, skipped)
+}
+
 /// Map physical declaration starts to an independently reconstructed, inlined
 /// scope. Continuation tails and inserted configuration lines never acquire
 /// the identity of a physical declaration in the invoking recipe.
@@ -512,13 +568,26 @@ pub(super) fn parse_mmakefile_impl(
         .as_deref()
         .or(fallback_package_states.as_deref())
         .expect("package scan has selected or conservative conditional states");
-    let (packages, skipped_packages) = crate::packages::collect_packages_with_scope(
-        &joined,
-        &rel_dir,
-        &scope,
-        dirs,
-        root,
-        package_line_states,
+    // A selected native configuration binds includes such as a board's
+    // rules file. Package members read through those bindings, so the
+    // declaration is evaluated in the same native scope as the architecture
+    // sources below; the classic scope above never saw the bound text.
+    let native_package_context = target.filter(|context| {
+        (!context.make_include_bindings.is_empty() || !context.generated_make_templates.is_empty())
+            && (content.contains("%make_package") || content.contains("%link_kickstart"))
+    });
+    let (packages, skipped_packages) = native_package_context.map_or_else(
+        || {
+            crate::packages::collect_packages_with_scope(
+                &joined,
+                &rel_dir,
+                &scope,
+                dirs,
+                root,
+                package_line_states,
+            )
+        },
+        |context| collect_native_packages(&content, context, dirs, root, &relative_path, &rel_dir),
     );
     // Collected from `joined`, not from `content`: the declaration line has to
     // be in the same coordinate system as `scope`, which is built from the
