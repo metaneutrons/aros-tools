@@ -455,6 +455,7 @@ fn fixture_from_text(families: &[&str], source: &str, template: &str) -> Fixture
     let projection = NativeOwnerProjection {
         sealed_configuration_inputs: BTreeMap::new(),
         architecture_context: TargetContext::default(),
+        metamake_globals: std::collections::BTreeMap::new(),
         graph,
         expansion_origins,
         architecture_hook_families: families.iter().map(|family| (*family).to_owned()).collect(),

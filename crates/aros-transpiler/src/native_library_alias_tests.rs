@@ -295,6 +295,7 @@ fn make_fixture(
     let projection = NativeOwnerProjection {
         sealed_configuration_inputs: BTreeMap::new(),
         architecture_context: TargetContext::default(),
+        metamake_globals: std::collections::BTreeMap::new(),
         graph,
         expansion_origins,
         architecture_hook_families: BTreeSet::new(),

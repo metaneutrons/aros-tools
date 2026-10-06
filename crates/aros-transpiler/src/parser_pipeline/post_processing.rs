@@ -168,11 +168,19 @@ pub(super) fn collect_meta_rules_and_apply_llvm(
     make_meta_providers: &mut Vec<String>,
 ) -> Vec<Diagnostic> {
     let mut unresolved_rules = Vec::new();
-    // 3. Extract #MM and #MM- meta-target rules
+    let no_globals = std::collections::BTreeMap::new();
+    let globals = target.map_or(&no_globals, |target| &target.native_metamake_globals);
+    // A dependency word that is exactly one policy global with an empty value
+    // expands to nothing, as in MetaMake's word list.
+    let empty_global = |raw: &str| {
+        raw.strip_prefix("$(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .is_some_and(|name| globals.get(name).is_some_and(String::is_empty))
+    };
     let mm_content = join_mm_continuations(content);
     for cap in META_RULE_RE.captures_iter(&mm_content) {
         let raw_meta = &cap[1];
-        let Some(meta_name) = render_meta_token(raw_meta) else {
+        let Some(meta_name) = crate::parser::render_meta_token_with(raw_meta, globals) else {
             skipped_meta_rules.push(format!(
                 "{}: #MM target {raw_meta} contains an unmapped Make variable",
                 rel_dir.display()
@@ -180,9 +188,13 @@ pub(super) fn collect_meta_rules_and_apply_llvm(
             continue;
         };
         let deps_str = &cap[2];
+        let dep_words = deps_str
+            .split_whitespace()
+            .filter(|raw| !empty_global(raw))
+            .collect::<Vec<_>>();
         let mut deps = Vec::new();
-        for raw_dep in deps_str.split_whitespace() {
-            match render_meta_token(raw_dep) {
+        for raw_dep in dep_words.iter().copied() {
+            match crate::parser::render_meta_token_with(raw_dep, globals) {
                 Some(dep) => deps.push(dep),
                 None => skipped_meta_rules.push(format!(
                     "{}: #MM {raw_meta} dependency {raw_dep} contains an unmapped Make variable",
@@ -191,7 +203,7 @@ pub(super) fn collect_meta_rules_and_apply_llvm(
             }
         }
 
-        if deps.len() != deps_str.split_whitespace().count() {
+        if deps.len() != dep_words.len() {
             unresolved_rules.push(super::source_meta_provider_diagnostic(
                 &rel_dir.join("mmakefile.src"),
                 &meta_name,
@@ -203,8 +215,7 @@ pub(super) fn collect_meta_rules_and_apply_llvm(
         if !virtual_target {
             make_meta_providers.push(meta_name.clone());
         }
-        if (virtual_target || !deps.is_empty()) && deps.len() == deps_str.split_whitespace().count()
-        {
+        if (virtual_target || !deps.is_empty()) && deps.len() == dep_words.len() {
             meta_rules.push(MetaTargetRule {
                 name: meta_name,
                 dependencies: deps,
@@ -352,5 +363,58 @@ mod tests {
         );
         assert!(failures[0].message.contains("unresolved prerequisites"));
         assert!(!skipped.is_empty());
+    }
+
+    #[test]
+    fn native_policy_globals_resolve_meta_names_and_empty_words() {
+        let source = "#MM- linklibs-x-includes : sdk-includes-$(AROS_TOOLCHAIN_RELEASE) $(CROSSTOOLS_PORTS_INCLUDES) $(UNBOUND)\n#MM- linklibs-y : sdk-includes-$(AROS_TOOLCHAIN_RELEASE) $(CROSSTOOLS_PORTS_INCLUDES)\n";
+        let context = TargetContext {
+            native_metamake_globals: [
+                ("AROS_TOOLCHAIN_RELEASE".to_owned(), "0".to_owned()),
+                ("CROSSTOOLS_PORTS_INCLUDES".to_owned(), String::new()),
+            ]
+            .into(),
+            ..TargetContext::default()
+        };
+        let mut rules = Vec::new();
+        let mut skipped = Vec::new();
+        let mut providers = Vec::new();
+        let failures = collect_meta_rules_and_apply_llvm(
+            source,
+            Path::new("compiler/x"),
+            Some(&context),
+            &mut [],
+            &mut rules,
+            &mut skipped,
+            &mut providers,
+        );
+        // A variable the policy does not bind stays unresolved.
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].context.as_ref().unwrap().target.as_deref(),
+            Some("linklibs-x-includes")
+        );
+        // The empty global contributes no word; the bound one its value.
+        assert_eq!(
+            rules
+                .iter()
+                .find(|rule| rule.name == "linklibs-y")
+                .map(|rule| rule.dependencies.clone()),
+            Some(vec!["sdk-includes-0".to_owned()])
+        );
+
+        // Without a native policy nothing changes: both rules are unresolved.
+        let mut rules = Vec::new();
+        let failures = collect_meta_rules_and_apply_llvm(
+            source,
+            Path::new("compiler/x"),
+            None,
+            &mut [],
+            &mut rules,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(failures.len(), 2);
+        assert!(rules.is_empty());
     }
 }

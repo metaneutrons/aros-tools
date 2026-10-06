@@ -80,6 +80,17 @@ pub(crate) fn sanitize_ident(s: &str) -> String {
 /// would still be unreachable. Only variables with an unambiguous counterpart
 /// are translated; callers report every other dynamic token.
 fn render_meta_token(raw: &str) -> Option<String> {
+    render_meta_token_with(raw, &std::collections::BTreeMap::new())
+}
+
+/// Like [`render_meta_token`], with a selected native policy's project
+/// globals for variables outside the fixed selector mapping. A global
+/// substitutes its literal single-word value; an empty value contributes
+/// nothing, as in MetaMake's word list.
+pub(crate) fn render_meta_token_with(
+    raw: &str,
+    globals: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
     let mut out = String::new();
     let mut rest = raw.trim();
     while let Some(start) = rest.find("$(") {
@@ -99,7 +110,17 @@ fn render_meta_token(raw: &str) -> Option<String> {
             "AROS_TARGET_VARIANT" => "AROS_TARGET_VARIANT",
             "AROS_TARGET_ICONSET" => "AROS_TARGET_ICONSET",
             "AROS_TARGET_CPU32" => "AROS_TARGET_CPU32",
-            _ => return None,
+            _ => {
+                let value = globals.get(name)?;
+                if value.contains(|character: char| {
+                    character.is_whitespace() || matches!(character, '$' | '(' | ')')
+                }) {
+                    return None;
+                }
+                out.push_str(&sanitize_ident(value));
+                rest = &after[end + 1..];
+                continue;
+            }
         };
         out.push_str("${");
         out.push_str(cmake_name);
@@ -503,6 +524,10 @@ pub struct TargetContext {
     /// The selected contract's declaration that `compiler=kernel`
     /// architecture sources build in the target compiler role.
     pub native_kernel_sources_in_target_role: bool,
+    /// The selected MetaMake policy's project globals. #MM names use them
+    /// where the fixed selector mapping has no placeholder; empty without a
+    /// native selection.
+    pub native_metamake_globals: std::collections::BTreeMap<String, String>,
     /// Hash-bound source exports; admitted only after matching their recipes.
     pub host_file_generators: Vec<aros_common::native_host_generator::NativeHostFileGenerator>,
     /// Source configuration fallback values, never board-name-specific logic.

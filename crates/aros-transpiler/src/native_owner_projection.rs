@@ -89,6 +89,9 @@ pub struct NativeOwnerProjection {
     /// Architecture effects replay with this exact context, not an arbitrary
     /// caller-provided or ambient configuration.
     architecture_context: TargetContext,
+    /// Project globals the policy binds (target.cfg/host.cfg snapshots and
+    /// environment), as MetaMake substitutes them into #MM names.
+    metamake_globals: BTreeMap<String, String>,
     graph: MetaMakeOwnerGraph,
     /// Expansion origins keyed by generated owner and directive-start line.
     /// A direct Make fragment intentionally has no template origin.
@@ -208,6 +211,7 @@ impl NativeOwnerProjection {
         )?;
         let projection = Self {
             architecture_context: context.clone(),
+            metamake_globals: globals.values,
             sealed_configuration_inputs: sealed,
             graph,
             expansion_origins,
@@ -1216,6 +1220,7 @@ mod tests {
         .unwrap();
         NativeOwnerProjection {
             architecture_context: TargetContext::default(),
+            metamake_globals: BTreeMap::new(),
             sealed_configuration_inputs: BTreeMap::new(),
             graph,
             expansion_origins: BTreeMap::new(),

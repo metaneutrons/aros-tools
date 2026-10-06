@@ -19,6 +19,9 @@ impl NativeOwnerProjection {
         context.native_arch_include_effects.clear();
         context.native_arch_include_errors.clear();
         context.native_arch_include_catalog_closed = false;
+        context
+            .native_metamake_globals
+            .clone_from(&self.metamake_globals);
         let mut foreign_flag_writers = Vec::new();
         if let Err(reason) = self.verify_get_archincludes_semantics(root) {
             // This is fatal only when a consumer actually invokes the macro.
