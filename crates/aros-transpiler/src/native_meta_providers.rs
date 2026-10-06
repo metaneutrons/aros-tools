@@ -62,7 +62,14 @@ pub struct RejectedProvider {
 /// by declarations in this same makefile. `meta_rules` are intentionally not
 /// producers: their generated utility targets only model dependency edges.
 #[must_use]
-pub fn validate(parsed: &ParsedMmakefile) -> Vec<RejectedProvider> {
+///
+/// With a selected target, a provider spelled with selector placeholders
+/// (`includes-asm_h-${AROS_TARGET_CPU}`) is matched by its exact resolved
+/// name, as a local producer registers it concretely.
+pub fn validate(
+    parsed: &ParsedMmakefile,
+    target: Option<&crate::TargetContext>,
+) -> Vec<RejectedProvider> {
     let mut local_producers = BTreeSet::new();
     for header in &parsed.assembly_headers {
         local_producers.insert(header.owner.clone());
@@ -305,7 +312,15 @@ pub fn validate(parsed: &ParsedMmakefile) -> Vec<RejectedProvider> {
         .iter()
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .filter(|owner| !local_producers.contains(*owner))
+        .filter(|owner| {
+            let resolved_locally = || {
+                owner.contains("${")
+                    && target
+                        .and_then(|target| crate::graph::native_endpoint(owner, target).ok())
+                        .is_some_and(|resolved| local_producers.contains(&resolved))
+            };
+            !local_producers.contains(*owner) && !resolved_locally()
+        })
         .map(|owner| RejectedProvider {
             owner: owner.clone(),
             reason: format!(
@@ -405,8 +420,8 @@ mod tests {
             ..ParsedMmakefile::default()
         };
 
-        assert!(validate(&abi_file).is_empty());
-        let rejected = validate(&provider_file);
+        assert!(validate(&abi_file, None).is_empty());
+        let rejected = validate(&provider_file, None);
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0].owner, "fixture-abi-includes");
     }
@@ -431,14 +446,17 @@ mod tests {
             ],
             ..ParsedMmakefile::default()
         };
-        assert!(validate(&valid).is_empty());
+        assert!(validate(&valid, None).is_empty());
 
         let invalid = ParsedMmakefile {
             targets: vec![ordinary],
             make_meta_providers: vec!["fixture-ordinary-includes".to_owned()],
             ..ParsedMmakefile::default()
         };
-        assert_eq!(validate(&invalid)[0].owner, "fixture-ordinary-includes");
+        assert_eq!(
+            validate(&invalid, None)[0].owner,
+            "fixture-ordinary-includes"
+        );
     }
 
     #[test]
@@ -465,7 +483,7 @@ mod tests {
             ..ParsedMmakefile::default()
         };
 
-        let rejected = validate(&parsed);
+        let rejected = validate(&parsed, None);
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0].owner, "fixture-only-linklib-rel");
     }
@@ -480,6 +498,29 @@ mod tests {
             make_meta_providers: vec!["fixture-prepare".to_owned()],
             ..ParsedMmakefile::default()
         };
-        assert!(validate(&parsed).is_empty());
+        assert!(validate(&parsed, None).is_empty());
+    }
+
+    #[test]
+    fn placeholder_provider_matches_its_resolved_local_producer_only_with_a_target() {
+        let parsed = ParsedMmakefile {
+            directory_setups: vec![crate::directory_setup::DirectorySetupDecl {
+                owner: "fixture-riscv".to_owned(),
+                directories: vec!["${AROS_BUILD_DIR}/gen/include".to_owned()],
+            }],
+            make_meta_providers: vec!["fixture-${AROS_TARGET_CPU}".to_owned()],
+            ..ParsedMmakefile::default()
+        };
+        assert_eq!(validate(&parsed, None).len(), 1);
+        let riscv = crate::TargetContext {
+            cpu: Some("riscv".to_owned()),
+            ..crate::TargetContext::default()
+        };
+        assert!(validate(&parsed, Some(&riscv)).is_empty());
+        let arm = crate::TargetContext {
+            cpu: Some("arm".to_owned()),
+            ..crate::TargetContext::default()
+        };
+        assert_eq!(validate(&parsed, Some(&arm)).len(), 1);
     }
 }

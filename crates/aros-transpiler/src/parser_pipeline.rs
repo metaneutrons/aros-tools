@@ -3410,7 +3410,7 @@ pub(super) fn parse_mmakefile_impl(
             }
         }
     }
-    for rejection in crate::native_meta_providers::validate(&parsed) {
+    for rejection in crate::native_meta_providers::validate(&parsed, target) {
         parsed
             .native_graph_errors
             .push(source_meta_provider_diagnostic(
