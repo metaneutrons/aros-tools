@@ -12,12 +12,15 @@ ROOT = Path(__file__).resolve().parents[1]
 # This is a closed architectural allow-list, not an unrestricted crates.io
 # exception. M4 additionally permits the statically linked XZ codec and the
 # existing SHA-2 primitive required for bounded archive/content verification;
-# producer lifecycle/publication owners remain forbidden below.
+# producer lifecycle/publication owners remain forbidden below. Native media
+# preparation reads the ESP image and partition-table verifiers of aros-verify,
+# a read-only library with no lifecycle or publication role.
 ALLOWED = {
     "aros-cache",
     "aros-cmake-engine",
     "aros-common",
     "aros-fetch",
+    "aros-verify",
     "flate2",
     "fs2",
     "rustix",
