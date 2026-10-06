@@ -62,6 +62,12 @@ pub struct NativeBuildContract {
     /// transpiler proves their executable recipe shape before graph admission.
     #[serde(default)]
     pub host_file_generators: Vec<crate::native_host_generator::NativeHostFileGenerator>,
+    /// How `%build_archspecific ... compiler=kernel` sources are compiled.
+    /// The only admitted value, `target`, is the source's declaration that
+    /// its kernel code builds in the target compiler role, as AROS-NX already
+    /// builds pc's kernel. Absent, such sources have no native producer.
+    #[serde(default)]
+    pub kernel_compiler_role: Option<String>,
     pub inputs: Vec<NativeBuildInput>,
     pub abi: NativeBuildAbi,
     pub core: NativeBuildCore,
@@ -551,6 +557,15 @@ fn validate_contract(
     if !safe_token(&contract.profile) || !safe_token(&contract.board) {
         return Err(invalid(
             "profile and board must be portable code tokens".to_owned(),
+        ));
+    }
+    if contract
+        .kernel_compiler_role
+        .as_deref()
+        .is_some_and(|role| role != "target")
+    {
+        return Err(invalid(
+            "kernel_compiler_role admits only \"target\"".to_owned(),
         ));
     }
     if contract.profile != profile.name {
@@ -1232,6 +1247,26 @@ mod tests {
                 Path::new(CONTRACT_PATH),
                 &self.profile,
             )
+        }
+    }
+
+    #[test]
+    fn kernel_compiler_role_admits_only_the_target_role() {
+        let fixture = new_fixture();
+        let mut document = fixture.document.clone();
+        document["kernel_compiler_role"] = json!("target");
+        fixture.write_contract(&document);
+        assert_eq!(
+            fixture.load().unwrap().kernel_compiler_role.as_deref(),
+            Some("target")
+        );
+        for role in ["kernel", "host", ""] {
+            document["kernel_compiler_role"] = json!(role);
+            fixture.write_contract(&document);
+            assert!(
+                error_text(fixture.load()).contains("kernel_compiler_role"),
+                "{role}"
+            );
         }
     }
 

@@ -200,7 +200,7 @@ pub(crate) fn collect_arch_endpoint_effects(
     scope: &VarScope,
     line_states: Option<&[ConditionalTruth]>,
 ) -> Result<ArchEndpointEffectScan, String> {
-    collect_arch_endpoint_effects_at_positions(content, recipe, scope, line_states, None)
+    collect_arch_endpoint_effects_at_positions(content, recipe, scope, line_states, None, false)
 }
 
 /// Source-native include scopes are adopted atomically and replayed using the
@@ -233,6 +233,7 @@ pub(crate) fn collect_source_arch_endpoint_effects(
             &scope,
             Some(&states),
             Some(&positions),
+            target.is_some_and(|target| target.native_kernel_sources_in_target_role),
         );
     }
     // An incomplete include traversal cannot lend even a partially resolved
@@ -248,6 +249,7 @@ fn collect_arch_endpoint_effects_at_positions(
     scope: &VarScope,
     line_states: Option<&[ConditionalTruth]>,
     positions: Option<&[Option<usize>]>,
+    kernel_in_target_role: bool,
 ) -> Result<ArchEndpointEffectScan, String> {
     let recipe = normalize_recipe(recipe)?;
     let recipe_dir = recipe
@@ -295,7 +297,10 @@ fn collect_arch_endpoint_effects_at_positions(
                         compiler,
                     } = &data
                     {
-                        if compiler == "target" {
+                        // Kernel sources get an object group only when the
+                        // source contract declares they build in the target
+                        // role; otherwise their objects stay without producer.
+                        if compiler == "target" || kernel_in_target_role && compiler == "kernel" {
                             scan.effects.push(ArchEndpointEffect {
                                 recipe: recipe.clone(),
                                 line: line + 1,

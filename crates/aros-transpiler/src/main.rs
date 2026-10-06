@@ -424,6 +424,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         native_arch_include_effects: Vec::new(),
         native_arch_include_errors: Vec::new(),
         native_arch_include_catalog_closed: false,
+        native_kernel_sources_in_target_role: false,
         host_file_generators: Vec::new(),
         make_variables: std::collections::BTreeMap::new(),
         make_include_bindings: std::collections::BTreeMap::new(),
@@ -456,6 +457,8 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         target
             .make_include_bindings
             .clone_from(&contract.contract.make_include_bindings);
+        target.native_kernel_sources_in_target_role =
+            contract.contract.kernel_compiler_role.as_deref() == Some("target");
         target.generated_make_templates =
             aros_common::native_make_template::resolve_generated_make_templates(
                 &args.source_dir,
