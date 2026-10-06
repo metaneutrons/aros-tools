@@ -317,7 +317,7 @@ run_tests() {
         printf 'engine test %d: %s\n' "$executed_count" "$test_name"
         # Fixtures that drive the embedded engine take its directory and a
         # fresh binary root as parameters; the others ignore both.
-        AROS_TEST_TOOLS_DIR="$tools_directory" \
+        PATH="$tools_directory:$PATH" AROS_TEST_TOOLS_DIR="$tools_directory" \
             cmake -DENGINE_DIR="$engine_directory" \
                 -DTEST_BINARY_DIR="$fixture_scratch/$test_name" \
                 -P "$test_case"

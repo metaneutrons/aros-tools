@@ -1282,6 +1282,26 @@ fn native_kobj_rejects_changed_inputs_and_failed_publication() {
     run_embedded_kobj_contract_test("NativeKobjTest.cmake");
 }
 
+/// `PATH` with the workspace's built executables first.
+///
+/// An engine configure that finds `ld.lld` also requires `aros-collect`. The
+/// test executable sits in `target/<profile>/deps`; the tools the workspace
+/// test run built sit one level up. Without this, such a host fails these
+/// fixtures only because the suite is not installed.
+fn path_with_workspace_tools() -> std::ffi::OsString {
+    let mut directories = Vec::new();
+    if let Some(tools) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent()?.parent().map(std::path::Path::to_path_buf))
+    {
+        directories.push(tools);
+    }
+    directories.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(directories).expect("PATH entries without separators")
+}
+
 fn run_embedded_kobj_contract_test(script: &str) {
     let directory = tempfile::tempdir().expect("fresh KOBJ test directory");
     let engine = directory.path().join("engine");
@@ -1289,6 +1309,7 @@ fn run_embedded_kobj_contract_test(script: &str) {
     materialize(&engine).expect("materialize exact embedded engine");
     let output = Command::new("cmake")
         .current_dir(directory.path())
+        .env("PATH", path_with_workspace_tools())
         .arg(format!("-DENGINE_DIR={}", engine.display()))
         .arg(format!("-DTEST_BINARY_DIR={}", build.display()))
         .arg("-P")
