@@ -57,13 +57,14 @@ pub struct AdhocHeaderRule {
 }
 
 /// A hand-written SDK-header rule whose recipe is a safe, literal copy or
-/// one-line substitution.
+/// bounded substitution.
 ///
 /// This is intentionally narrower than arbitrary Make recipes. The parser
-/// accepts exact `$<` to `$@` copies and
-/// `$(SED) -e 's/^literal/literal/' $< > $@`, records the exact input/output,
-/// and lets CMake own the real build-time operation. Dependencies and consumers
-/// are joined later from the complete target/fetch graph.
+/// accepts exact `$<` to `$@` copies, a literal anchored-prefix sed
+/// substitution, and one exact whole-line sed form with a literal containing
+/// token. It records the exact input/output and lets CMake own the real
+/// build-time operation. Dependencies and consumers are joined later from the
+/// complete target/fetch graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeaderTransformDecl {
     /// Make target which owns the generated header.
@@ -83,6 +84,10 @@ pub struct HeaderTransformDecl {
     /// The recipe is an exact `$<` to `$@` copy rather than a substitution.
     #[serde(default)]
     pub copy_only: bool,
+    /// Replace each complete input line containing `match_text` with
+    /// `replacement`, preserving the line's original newline state.
+    #[serde(default)]
+    pub replace_whole_line_containing: bool,
     /// Alternating literal token/replacement values for a safe template pipe.
     #[serde(default)]
     pub substitutions: Vec<String>,
@@ -92,6 +97,10 @@ pub struct HeaderTransformDecl {
     /// Concrete compile targets whose port source tree contains the input.
     #[serde(default)]
     pub consumers: Vec<String>,
+    /// Exact previously declared transform owner for a generated input.
+    /// This is not permission to consume arbitrary cached build-tree files.
+    #[serde(default)]
+    pub generated_input_owner: Option<String>,
 }
 
 /// A deterministic host-Bison rule whose generated C file is included by one
@@ -195,7 +204,15 @@ pub struct CopyIncludesDecl {
     pub excludes: Vec<String>,
     /// Whether to strip directories from the copied names (`dir=` was given).
     pub flatten: bool,
+    /// A source-selected, explicitly known empty list. Unknown variables and
+    /// unresolved file lists must never be promoted to an empty endpoint.
+    #[serde(default)]
+    pub proven_empty: bool,
 }
+
+#[path = "copy_includes_empty.rs"]
+mod empty;
+pub(crate) use empty::collect_proven_empty;
 
 fn default_copy_target() -> String {
     "includes-copy".to_owned()
@@ -777,6 +794,156 @@ fn literal_sed_substitution(commands: &[String]) -> Option<(String, String)> {
     Some((match_text.to_owned(), replacement))
 }
 
+/// Decodes the small POSIX shell double-quoted subset used by the source
+/// recipe. Expansion, command substitution and line continuation are outside
+/// this literal-header capability.
+fn decode_shell_double_quoted(value: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '$' | '`' | '"' | '\n' | '\r' => return None,
+            '\\' => match chars.next()? {
+                '\\' => decoded.push('\\'),
+                '"' => decoded.push('"'),
+                // Do not infer the shell's handling of any other escape.
+                _ => return None,
+            },
+            _ => decoded.push(character),
+        }
+    }
+    Some(decoded)
+}
+
+/// Decodes sed's literal replacement subset. GNU sed's `\n` replacement is
+/// an embedded newline, while `\\` and `\|` are literal backslash and
+/// delimiter. Backreferences, `&`, and other sed escapes are rejected.
+fn decode_whole_line_sed_replacement(value: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '|' | '&' | '\n' | '\r' | '$' | '`' => return None,
+            '\\' => match chars.next()? {
+                'n' => decoded.push('\n'),
+                '\\' => decoded.push('\\'),
+                '|' => decoded.push('|'),
+                _ => return None,
+            },
+            _ => decoded.push(character),
+        }
+    }
+    Some(decoded)
+}
+
+/// Recognises exactly `$(SED) "s|.*TOKEN.*|REPLACEMENT|g" $< > $@`.
+/// `TOKEN` is literal and accepted shell/sed escapes are decoded explicitly.
+fn literal_sed_whole_line_substitution(commands: &[String]) -> Option<(String, String)> {
+    let [recipe] = commands else {
+        return None;
+    };
+    let expression = recipe
+        .strip_prefix("$(SED) \"")?
+        .strip_suffix("\" $< > $@")?;
+    let expression = decode_shell_double_quoted(expression)?;
+    let body = expression.strip_prefix("s|.*")?.strip_suffix("|g")?;
+    let (token, replacement) = body.split_once(".*|")?;
+    if token.is_empty()
+        || token.chars().any(|character| {
+            matches!(
+                character,
+                '.' | '*'
+                    | '['
+                    | ']'
+                    | '^'
+                    | '$'
+                    | '\\'
+                    | '|'
+                    | '&'
+                    | ';'
+                    | '`'
+                    | '"'
+                    | '\n'
+                    | '\r'
+            )
+        })
+    {
+        return None;
+    }
+    Some((
+        token.to_owned(),
+        decode_whole_line_sed_replacement(replacement)?,
+    ))
+}
+
+#[derive(Clone, Copy)]
+enum MakeConditionalDirective {
+    Open,
+    Else,
+    Close,
+}
+
+fn make_conditional_directive(line: &str) -> Option<MakeConditionalDirective> {
+    let clean = line.trim_start();
+    if clean.starts_with('#') {
+        return None;
+    }
+    for (name, directive) in [
+        ("ifeq", MakeConditionalDirective::Open),
+        ("ifneq", MakeConditionalDirective::Open),
+        ("ifdef", MakeConditionalDirective::Open),
+        ("ifndef", MakeConditionalDirective::Open),
+        ("else", MakeConditionalDirective::Else),
+        ("endif", MakeConditionalDirective::Close),
+    ] {
+        if clean.strip_prefix(name).is_some_and(|rest| {
+            rest.is_empty()
+                || rest.starts_with(|character: char| character.is_whitespace() || character == '(')
+        }) {
+            return Some(directive);
+        }
+    }
+    None
+}
+
+/// Returns true when the rule line is controlled by an unmodelled Make
+/// conditional. Header staging currently has no positional conditional-state
+/// evaluator, so even branches that a different TargetContext might resolve
+/// stay in the residual audit rather than being promoted.
+fn rule_is_in_conditional(lines: &[&str], rule_index: usize) -> bool {
+    let mut depth = 0usize;
+    let mut malformed = false;
+    for line in lines.iter().take(rule_index) {
+        match make_conditional_directive(line) {
+            Some(MakeConditionalDirective::Open) => depth += 1,
+            Some(MakeConditionalDirective::Else | MakeConditionalDirective::Close)
+                if depth == 0 =>
+            {
+                malformed = true;
+            }
+            Some(MakeConditionalDirective::Close) => depth -= 1,
+            Some(MakeConditionalDirective::Else) | None => {}
+        }
+    }
+    malformed || depth != 0
+}
+
+/// Make conditionals are parsed outside recipe text and can supply more
+/// commands to the preceding target. Since this collector does not evaluate
+/// that branch, a conditional immediately after the tab recipe blocks safe
+/// promotion. Blank and comment lines do not close the possible continuation.
+fn has_conditional_recipe_continuation(lines: &[&str], mut next_line: usize) -> bool {
+    while let Some(line) = lines.get(next_line) {
+        let clean = line.trim();
+        next_line += 1;
+        if clean.is_empty() || clean.starts_with('#') {
+            continue;
+        }
+        return make_conditional_directive(clean).is_some();
+    }
+    false
+}
+
 fn parse_header_transform(
     rule: &AdhocHeaderRule,
     lines: &[&str],
@@ -786,22 +953,29 @@ fn parse_header_transform(
     external: ExternalVarLookup<'_>,
     output_owners: &HashMap<String, String>,
 ) -> Option<HeaderTransformDecl> {
+    if rule_is_in_conditional(lines, rule_index) {
+        return None;
+    }
     let raw_output = format!("{}/{}", rule.root.trim_end_matches('/'), rule.dest);
     let output = resolve_transform_path(&raw_output, base, vars, external, true)?;
     let owner = output_owners
         .get(&raw_output)
         .or_else(|| output_owners.get(&output))?
         .clone();
-    let mut prereqs = rule.prereqs.split_whitespace();
-    let raw_input = prereqs.next()?;
-    if raw_input.contains(['%', '*', '?']) || prereqs.any(|prereq| prereq.contains(['%', '*', '?']))
+    let prereqs: Vec<_> = rule.prereqs.split_whitespace().collect();
+    let raw_input = *prereqs.first()?;
+    if raw_input.contains(['%', '*', '?'])
+        || prereqs
+            .iter()
+            .any(|prereq| prereq.contains(['%', '*', '?']))
     {
         return None;
     }
 
     let mut commands = Vec::new();
     let mut command = String::new();
-    for line in lines.iter().skip(rule_index + 1) {
+    let mut next_line = rule_index + 1;
+    while let Some(line) = lines.get(next_line) {
         if !line.starts_with('\t') {
             break;
         }
@@ -814,18 +988,24 @@ fn parse_header_transform(
         if !continued {
             commands.push(std::mem::take(&mut command));
         }
+        next_line += 1;
     }
-    if !command.is_empty() {
+    if !command.is_empty() || has_conditional_recipe_continuation(lines, next_line) {
         return None;
     }
-    let (match_text, replacement, copy_only, substitutions) =
-        if let Some((match_text, replacement)) = literal_sed_substitution(&commands) {
-            (match_text, replacement, false, Vec::new())
+    let (match_text, replacement, copy_only, replace_whole_line_containing, substitutions) =
+        if let Some((match_text, replacement)) = literal_sed_whole_line_substitution(&commands) {
+            if prereqs.len() != 1 {
+                return None;
+            }
+            (match_text, replacement, false, true, Vec::new())
+        } else if let Some((match_text, replacement)) = literal_sed_substitution(&commands) {
+            (match_text, replacement, false, false, Vec::new())
         } else if literal_copy(&commands) {
-            (String::new(), String::new(), true, Vec::new())
+            (String::new(), String::new(), true, false, Vec::new())
         } else {
             let substitutions = literal_template_substitutions(&commands, vars, external)?;
-            (String::new(), String::new(), false, substitutions)
+            (String::new(), String::new(), false, false, substitutions)
         };
     let input = resolve_transform_path(raw_input, base, vars, external, false)?;
 
@@ -838,9 +1018,11 @@ fn parse_header_transform(
         match_text,
         replacement,
         copy_only,
+        replace_whole_line_containing,
         substitutions,
         dependencies: Vec::new(),
         consumers: Vec::new(),
+        generated_input_owner: None,
     })
 }
 
@@ -1306,6 +1488,7 @@ fn resolve_directive(
         patterns,
         excludes,
         flatten,
+        proven_empty: false,
     });
 }
 
@@ -1327,3 +1510,72 @@ fn join_rel(base: &str, add: &str) -> String {
 #[cfg(test)]
 #[path = "copy_includes_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod conditional_recipe_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn exact_unconditional_copy_remains_promotable() {
+        let source = "\
+copy-owner : $(AROS_INCLUDES)/example.h\n\
+$(AROS_INCLUDES)/example.h : input.h\n\
+\t$(CP) $< $@\n";
+        let scan = collect_copy_includes(source, &PathBuf::from("workbench/example"));
+        assert!(scan.adhoc.is_empty(), "adhoc: {:?}", scan.adhoc);
+        assert_eq!(
+            scan.transforms.len(),
+            1,
+            "transforms: {:?}",
+            scan.transforms
+        );
+        assert!(scan.transforms[0].copy_only);
+        assert_eq!(scan.transforms[0].name, "copy-owner");
+    }
+
+    #[test]
+    fn conditional_recipe_continuation_is_not_misclassified_as_copy_only() {
+        let source = "\
+execbase-owner : $(AROS_INCLUDES)/exec/execbase.h\n\
+$(AROS_INCLUDES)/exec/execbase.h : execbase.h\n\
+\t$(CP) $< $@\n\
+ifneq ($(EXECSMP),)\n\
+\t$(SED) -e 's/^EXECSMP/EXECSMP_ENABLED/' $< > $@\n\
+endif\n";
+        let scan = collect_copy_includes(source, &PathBuf::from("compiler/include"));
+        assert!(
+            scan.transforms.is_empty(),
+            "transforms: {:?}",
+            scan.transforms
+        );
+        assert_eq!(scan.adhoc.len(), 1, "adhoc: {:?}", scan.adhoc);
+        assert_eq!(scan.adhoc[0].dest, "exec/execbase.h");
+    }
+
+    #[test]
+    fn rule_in_unresolved_conditional_branch_stays_in_residual_audit() {
+        let source = "\
+ifeq ($(UNKNOWN_PROFILE),yes)\n\
+copy-owner : $(AROS_INCLUDES)/example.h\n\
+$(AROS_INCLUDES)/example.h : input.h\n\
+\t$(CP) $< $@\n\
+endif\n";
+        let scan = collect_copy_includes(source, &PathBuf::from("workbench/example"));
+        assert!(
+            scan.transforms.is_empty(),
+            "transforms: {:?}",
+            scan.transforms
+        );
+        assert_eq!(scan.adhoc.len(), 1, "adhoc: {:?}", scan.adhoc);
+        assert_eq!(scan.adhoc[0].dest, "example.h");
+    }
+
+    #[test]
+    fn parenthesized_condition_without_space_cannot_hide_a_recipe_tail() {
+        let source = "copy-owner : $(AROS_INCLUDES)/example.h\n$(AROS_INCLUDES)/example.h : input.h\n\t$(CP) $< $@\nifneq($(EXECSMP),)\n\t$(SED) -e 's/^old/new/' $< > $@\nendif\n";
+        let scan = collect_copy_includes(source, &PathBuf::from("fixture"));
+        assert!(scan.transforms.is_empty());
+        assert_eq!(scan.adhoc.len(), 1);
+    }
+}

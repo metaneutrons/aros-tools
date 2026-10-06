@@ -227,6 +227,7 @@ fi
         "aros-collect",
         "aros-ahi-runner",
         "aros-fetch",
+        "aros-verify",
     ] {
         let tool = tools.join(name);
         fs::write(
@@ -1474,6 +1475,7 @@ fn real_aros_source_sync_rejects_full_manifest_then_accepts_supported_fixture() 
         "aros-collect",
         "aros-ahi-runner",
         "aros-fetch",
+        "aros-verify",
     ] {
         assert!(
             tools.join(name).is_file(),

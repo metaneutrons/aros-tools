@@ -139,6 +139,116 @@ if(NOT _configure_result EQUAL 0)
         "${_configure_stdout}\n${_configure_stderr}")
 endif()
 
+function(_configure_archive_probe _mode _expectation _expected_pattern)
+    set(_probe_build "${_root}/archive-probes/${_mode}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_probe_build}" -G Ninja
+            "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+            "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+            "-DAROS_HOST_GENMODULE=${_host_genmodule}"
+            "-DAROS_ARCHIVE_PROBE=${_mode}"
+            ${AROS_TEST_TOOL_ARGS}
+        RESULT_VARIABLE _probe_result
+        OUTPUT_VARIABLE _probe_stdout
+        ERROR_VARIABLE _probe_stderr
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT})
+    set(_probe_output "${_probe_stdout}\n${_probe_stderr}")
+    if(_expectation STREQUAL "accept")
+        if(NOT _probe_result EQUAL 0)
+            message(FATAL_ERROR
+                "${_mode} archive probe configure failed (${_probe_result})\n${_probe_output}")
+        endif()
+    elseif(_expectation STREQUAL "reject")
+        if(_probe_result EQUAL 0 OR
+           NOT _probe_output MATCHES "${_expected_pattern}")
+            message(FATAL_ERROR
+                "${_mode} archive probe did not fail as expected (${_probe_result}); "
+                "expected '${_expected_pattern}'\n${_probe_output}")
+        endif()
+    else()
+        message(FATAL_ERROR "unknown archive probe expectation: ${_expectation}")
+    endif()
+endfunction()
+
+# Every suppression spelling requires a source-native runtime declaration and
+# cannot be used for genmodule-only declarations. Test the all-archives switch
+# and both partial switches against both invalid contexts.
+foreach(_context no-contract genmodule-only)
+    foreach(_variant all normal relative)
+        _configure_archive_probe("reject-${_context}-${_variant}" reject
+            "NO_CLIENT_ARCHIVES requires a selected native runtime")
+    endforeach()
+endforeach()
+
+# Canonical implementation archives and generated client archive spellings
+# share one configure-time ownership ledger. Exercise primary, relative and
+# LINKLIB_NAME archive collisions in both declaration orders.
+foreach(_collision primary relative alias alias-relative)
+    foreach(_order client-first implementation-first)
+        if(_collision STREQUAL "primary")
+            set(_collision_archive "libtiff\\.a")
+        elseif(_collision STREQUAL "relative")
+            set(_collision_archive "libtiff_rel\\.a")
+        elseif(_collision STREQUAL "alias")
+            set(_collision_archive "libarchive-probe-alias\\.a")
+        else()
+            set(_collision_archive "libarchive-probe-alias_rel\\.a")
+        endif()
+        _configure_archive_probe("collision-${_collision}-${_order}" reject
+            "${_collision_archive}")
+    endforeach()
+endforeach()
+
+# All three valid native suppression modes retain the runtime and ABI support
+# graph. The all-suppressed case is built below to prove actual headers, FD,
+# libdefs and generated module sources remain available without client archive
+# targets.
+foreach(_variant all normal-suppressed relative-suppressed)
+    _configure_archive_probe("positive-${_variant}" accept "")
+endforeach()
+
+set(_archive_probe_build "${_root}/archive-probes/positive-all")
+foreach(_target archive-native-includes archive-native-genmodfiles)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" --build "${_archive_probe_build}"
+            --target "${_target}"
+        RESULT_VARIABLE _archive_build_result
+        OUTPUT_VARIABLE _archive_build_stdout
+        ERROR_VARIABLE _archive_build_stderr
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT})
+    if(NOT _archive_build_result EQUAL 0)
+        message(FATAL_ERROR
+            "native archive-suppressed ABI target ${_target} failed "
+            "(${_archive_build_result})\n${_archive_build_stdout}\n${_archive_build_stderr}")
+    endif()
+endforeach()
+
+set(_archive_output_root "${_archive_probe_build}/SYS/Developer")
+file(GLOB _archive_public_protos
+    "${_archive_output_root}/include/clib/*_protos.h")
+file(GLOB _archive_public_fds
+    "${_archive_output_root}/SDK/fd/*_lib.fd")
+set(_archive_genmodule_root
+    "${_archive_probe_build}/genmodule/workbench/libs/tiff/archive_native")
+file(GLOB _archive_libdefs "${_archive_genmodule_root}/gen/*_libdefs.h")
+file(GLOB _archive_module_sources
+    "${_archive_genmodule_root}/gen/*_start.c"
+    "${_archive_genmodule_root}/gen/*_end.c")
+foreach(_outputs _archive_public_protos _archive_public_fds
+        _archive_libdefs _archive_module_sources)
+    if(NOT ${_outputs})
+        message(FATAL_ERROR
+            "NO_CLIENT_ARCHIVES removed required ABI/genmodule output set ${_outputs}")
+    endif()
+endforeach()
+foreach(_archive libtiff.a libtiff_rel.a
+        libarchive-probe-alias.a libarchive-probe-alias_rel.a)
+    if(EXISTS "${_archive_output_root}/lib/${_archive}")
+        message(FATAL_ERROR
+            "NO_CLIENT_ARCHIVES unexpectedly produced ${_archive_output_root}/lib/${_archive}")
+    endif()
+endforeach()
+
 execute_process(
     COMMAND "${CMAKE_COMMAND}" --build "${_build}" --target probe-includes
     RESULT_VARIABLE _build_result

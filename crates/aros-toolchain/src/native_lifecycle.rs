@@ -30,6 +30,7 @@ use crate::cargo_vendor::{
 };
 use crate::executor::{BuildRequest, BuildResult, Evidence, Output, ResumePhase, ToolObservation};
 use crate::metamake_fetch::SourceUseLedger;
+use crate::native_compiler_cache::{self, HostCompilerLaunchers};
 use crate::native_declaration::NativeExecutorDeclaration;
 use crate::plan::{self, Identity, PlanRequest};
 use crate::preflight::{self, HostPreflight};
@@ -56,6 +57,44 @@ pub fn run(
     cancellation: &CancellationToken,
 ) -> Result<BuildResult, ContractError> {
     validate_request(request)?;
+    let compiler_cache = aros_cache::resolve_managed_compiler_cache_for_build(
+        request.compiler_cache,
+        request.compiler_cache_dir.as_deref(),
+    )
+    .map_err(|error| {
+        ContractError::environment(format!("native compiler-cache selection failed: {error}"))
+    })?;
+    if let aros_cache::CompilerCacheBuildSelection::Managed(managed) = &compiler_cache {
+        let cache_root = managed.root().root().canonicalize().map_err(|_| {
+            ContractError::environment("cannot canonicalize the managed compiler-cache root")
+        })?;
+        for root in [
+            &request.source_dir,
+            &request.producer_dir,
+            &request.tools_dir,
+            &request.work_dir,
+            &request.output_dir,
+            &request.cache_dir,
+        ] {
+            // Existing input roots are canonical; absent owned roots are
+            // normalized through their existing parent before reservation.
+            let normalized = root
+                .canonicalize()
+                .or_else(|_| {
+                    root.parent()
+                        .and_then(|parent| parent.canonicalize().ok())
+                        .zip(root.file_name())
+                        .map(|(parent, name)| parent.join(name))
+                        .ok_or_else(|| std::io::Error::other("unresolved root"))
+                })
+                .map_err(|_| {
+                    ContractError::environment(
+                        "cannot prove compiler cache is outside producer roots",
+                    )
+                })?;
+            native_compiler_cache::require_disjoint_root(&cache_root, &normalized)?;
+        }
+    }
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(request.timeout_seconds))
         .ok_or_else(|| ContractError::preflight("build timeout is not representable"))?;
@@ -76,10 +115,24 @@ pub fn run(
         Some(ResumePhase::Compiler) => RunDirectories::resume(&plan_request, &owner, cancellation)?,
     };
     let result = match request.resume_from {
-        None => run_owned(request, plan, &recipe, &run_dirs, deadline, cancellation),
-        Some(ResumePhase::Compiler) => {
-            resume_after_compiler(request, plan, &recipe, &run_dirs, deadline, cancellation)
-        }
+        None => run_owned(
+            request,
+            plan,
+            &recipe,
+            &run_dirs,
+            &compiler_cache,
+            deadline,
+            cancellation,
+        ),
+        Some(ResumePhase::Compiler) => resume_after_compiler(
+            request,
+            plan,
+            &recipe,
+            &run_dirs,
+            &compiler_cache,
+            deadline,
+            cancellation,
+        ),
     };
     let release = run_dirs.release();
     match (result, release) {
@@ -96,6 +149,7 @@ fn run_owned(
     mut plan: plan::Plan,
     recipe: &Recipe,
     run_dirs: &RunDirectories,
+    compiler_cache: &aros_cache::CompilerCacheBuildSelection,
     deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<BuildResult, ContractError> {
@@ -144,6 +198,8 @@ fn run_owned(
     )?;
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
+    let host_compilers =
+        HostCompilerLaunchers::prepare(compiler_cache, &host, lifecycle.work_root(), false)?;
     let cache_request = SourceCacheRequest::from_source_lock(&lock_bytes)?;
     // Keep the exact source-lock closure leased for the full upstream
     // configure/MetaMake consumption window. The fetch bridge revalidates its
@@ -178,6 +234,7 @@ fn run_owned(
         snapshots: &snapshots,
         environment: None,
         cargo: None,
+        compiler_cache: host_compilers.as_ref(),
     };
     let preflight_input = phase_input("preflight", &preflight_context, None)?;
     let preflight_receipt = persist_receipt(
@@ -258,7 +315,10 @@ fn run_owned(
             prefix.display()
         ));
     apply_child_environment(&mut configure, &environment, &python, &lifecycle);
-    if bound.source_lock().family() == crate::source_lock::CompilerFamily::Gnu {
+    native_compiler_cache::apply_environment(compiler_cache, &mut configure);
+    if let Some(launchers) = &host_compilers {
+        launchers.apply_compilers(&mut configure);
+    } else if bound.source_lock().family() == crate::source_lock::CompilerFamily::Gnu {
         configure
             .env("CC", host_tool(&host, "cc")?)
             .env("CXX", host_tool(&host, "c++")?);
@@ -296,6 +356,7 @@ fn run_owned(
         .arg("AROS_TOOLCHAIN_DEFAULT_SYSROOT=")
         .arg(format!("FETCH={fetch}"));
     apply_child_environment(&mut compiler, &environment, &python, &lifecycle);
+    native_compiler_cache::apply_environment(compiler_cache, &mut compiler);
     if bound.source_lock().family() == crate::source_lock::CompilerFamily::Gnu {
         // Configure has already bound the host prefix maps in HOST_*FLAGS.
         // Importing CFLAGS/CXXFLAGS into make retains their export attribute:
@@ -449,6 +510,7 @@ fn resume_after_compiler(
     mut plan: plan::Plan,
     recipe: &Recipe,
     run_dirs: &RunDirectories,
+    compiler_cache: &aros_cache::CompilerCacheBuildSelection,
     deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<BuildResult, ContractError> {
@@ -482,6 +544,8 @@ fn resume_after_compiler(
     )?;
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
+    let host_compilers =
+        HostCompilerLaunchers::prepare(compiler_cache, &host, lifecycle.work_root(), true)?;
     let cache_request = SourceCacheRequest::from_source_lock(&lock_bytes)?;
     let cache = verify_prepared_cache(&request.cache_dir, &cache_request)?;
     let environment = ProducerEnvironment::prepare(
@@ -505,6 +569,7 @@ fn resume_after_compiler(
         snapshots: &snapshots,
         environment: None,
         cargo: None,
+        compiler_cache: host_compilers.as_ref(),
     };
 
     let preflight_input = phase_input("preflight", &preflight_context, None)?;
@@ -1507,6 +1572,7 @@ struct PhaseInputContext<'a> {
     snapshots: &'a SnapshotDigests,
     environment: Option<&'a ProducerEnvironment>,
     cargo: Option<&'a CargoVendorGeneration>,
+    compiler_cache: Option<&'a HostCompilerLaunchers>,
 }
 
 fn phase_input(
@@ -1544,7 +1610,7 @@ fn phase_input(
             })
             .collect::<Vec<_>>()
     });
-    let value = json!({
+    let mut value = json!({
         "schema": "aros-toolchain-phase-input-v1",
         "phase": phase,
         "recipe_sha256": context.recipe.sha256(),
@@ -1579,6 +1645,11 @@ fn phase_input(
         })),
         "previous_receipt_sha256": previous_receipt_sha256,
     });
+    // Preserve existing cache-off receipts. Opt-in receipts additionally bind
+    // the launcher, exact host compilers and owned local cache configuration.
+    if let Some(cache) = context.compiler_cache {
+        value["compiler_cache"] = cache.binding().clone();
+    }
     Ok(sha256_bytes(&canonical::bytes(&value)?))
 }
 

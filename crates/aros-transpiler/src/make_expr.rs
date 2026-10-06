@@ -24,6 +24,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 const MAX_EXPANSION_DEPTH: usize = 32;
+const MAX_VALUE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_EMITTED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SCANNED_BYTES: usize = 64 * 1024 * 1024;
+const MAX_WORK_UNITS: usize = 1_048_576;
+const MAX_LIST_ITEMS: usize = 65_536;
+const MAX_ERROR_PREVIEW_BYTES: usize = 128;
 const ESCAPED_DOLLAR: char = '\u{e000}';
 
 /// Collector-specific raw variable lookup used to extend the shared scopes.
@@ -42,6 +48,7 @@ pub struct MakeExprContext<'a> {
     relative_dir: &'a Path,
     lookup: Option<&'a MakeVariableLookup<'a>>,
     guard: Option<&'a MakeVariableGuard<'a>>,
+    filesystem_enabled: bool,
 }
 
 impl<'a> MakeExprContext<'a> {
@@ -66,6 +73,7 @@ impl<'a> MakeExprContext<'a> {
             relative_dir,
             lookup: None,
             guard: None,
+            filesystem_enabled: true,
         }
     }
 
@@ -92,11 +100,25 @@ impl<'a> MakeExprContext<'a> {
         self
     }
 
+    /// Disables filesystem enumeration by Make's `wildcard` functions.
+    ///
+    /// This mode is suitable for evaluating expressions against sealed scopes
+    /// whose values are already available in memory. Reached `wildcard` and
+    /// `call WILDCARD` functions return [`MakeExprError::FilesystemAccessDisabled`];
+    /// lazy branches which are not selected are not evaluated.
+    #[must_use]
+    pub const fn without_filesystem(mut self) -> Self {
+        self.filesystem_enabled = false;
+        self
+    }
+
     /// Returns a positional local value only when it is safe to expand before
     /// expression evaluation. Conditional values must reach the evaluator so
     /// its `UnsafeVariable` error remains fatal for the complete source lane.
     pub(crate) fn safe_local_raw(&self, name: &str) -> Option<String> {
-        if self.scope.conditionally_assigned_before(name, self.line) {
+        if self.scope.conditionally_assigned_before(name, self.line)
+            || self.guard.is_some_and(|guard| guard(name).is_some())
+        {
             None
         } else {
             self.scope.raw_at(name, self.line)
@@ -125,21 +147,24 @@ pub enum MakeExprError {
     },
     /// The bounded recursion limit was reached.
     ExpansionLimit { expression: String },
+    /// A per-evaluation resource budget was exhausted.
+    ResourceLimit {
+        resource: &'static str,
+        limit: usize,
+    },
     /// The expression asks for a GNU Make function outside the safe subset.
     UnsupportedFunction { name: String },
     /// A single-character or automatic Make reference cannot be decided here.
     UnsupportedReference { reference: String },
-    /// A glob over a build-tree location the transpiler does not resolve, so
-    /// the fragment containing it is dropped. Named "deferred" because the
-    /// intent was for CMake to expand it; nothing does, and the glob results
-    /// feed further Make functions (`:%.c=%`, `filter-out`, `addprefix`) that
-    /// only this evaluator can apply, so an opaque marker would not work
-    /// either. The real blocker is ordering: these globs cover Ports content
-    /// that a build step fetches, and a source list is needed at configure
-    /// time.
+    /// A glob whose build-tree inventory is not materialized yet. Source-list
+    /// collectors preserve the pattern for an owning-fetch preparation pass,
+    /// but must not invent compilation units from it. The full evaluator runs
+    /// again on the materialized sources before graph qualification.
     DeferredWildcard { pattern: String },
     /// A glob pattern or one of its filesystem results was invalid.
     Wildcard { pattern: String, detail: String },
+    /// Filesystem enumeration was requested in a context which disabled it.
+    FilesystemAccessDisabled { function: String },
 }
 
 impl fmt::Display for MakeExprError {
@@ -178,6 +203,9 @@ impl fmt::Display for MakeExprError {
                     "Make expression exceeded the expansion limit: `{expression}`"
                 )
             }
+            Self::ResourceLimit { resource, limit } => {
+                write!(f, "Make expression exceeded the {resource} limit ({limit})")
+            }
             Self::UnsupportedFunction { name } => {
                 write!(
                     f,
@@ -193,13 +221,16 @@ impl fmt::Display for MakeExprError {
             Self::DeferredWildcard { pattern } => {
                 write!(
                     f,
-                    "wildcard over an unresolved build-tree path was dropped, \
-                     not deferred: `{pattern}`"
+                    "wildcard requires a materialized source inventory: `{pattern}`"
                 )
             }
             Self::Wildcard { pattern, detail } => {
                 write!(f, "cannot evaluate wildcard `{pattern}`: {detail}")
             }
+            Self::FilesystemAccessDisabled { function } => write!(
+                f,
+                "filesystem access is disabled for Make function `{function}`"
+            ),
         }
     }
 }
@@ -222,8 +253,7 @@ pub fn evaluate_make_expr(
 ) -> Result<String, MakeExprError> {
     let mut evaluator = Evaluator::new(context)?;
     let value = evaluator.expand_text(raw, MAX_EXPANSION_DEPTH)?;
-    reject_unsupported_references(&value)?;
-    Ok(value.replace(ESCAPED_DOLLAR, "$"))
+    evaluator.finish_value(value)
 }
 
 /// Evaluates an expression and splits its result into Make list words.
@@ -235,10 +265,10 @@ pub fn evaluate_make_list(
     raw: &str,
     context: &MakeExprContext<'_>,
 ) -> Result<Vec<String>, MakeExprError> {
-    Ok(evaluate_make_expr(raw, context)?
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect())
+    let mut evaluator = Evaluator::new(context)?;
+    let expanded = evaluator.expand_text(raw, MAX_EXPANSION_DEPTH)?;
+    let value = evaluator.finish_value(expanded)?;
+    evaluator.make_words(&value)
 }
 
 struct Evaluator<'a> {
@@ -250,11 +280,21 @@ struct Evaluator<'a> {
     wildcard_root: PathBuf,
     lookup: Option<&'a MakeVariableLookup<'a>>,
     guard: Option<&'a MakeVariableGuard<'a>>,
+    filesystem_enabled: bool,
     expansion_chain: Vec<String>,
     /// Innermost-last bindings of `$(foreach var,...)` loop variables. Make
     /// gives the loop variable a temporary value that shadows any global of
     /// the same name, so this is consulted before every other source.
     loop_vars: Vec<(String, String)>,
+    budget: EvaluationBudget,
+}
+
+#[derive(Default)]
+struct EvaluationBudget {
+    scanned_bytes: usize,
+    emitted_bytes: usize,
+    work_units: usize,
+    list_items: usize,
 }
 
 impl<'a> Evaluator<'a> {
@@ -280,55 +320,360 @@ impl<'a> Evaluator<'a> {
             wildcard_root: context.source_dir.join(context.relative_dir),
             lookup: context.lookup,
             guard: context.guard,
+            filesystem_enabled: context.filesystem_enabled,
             expansion_chain: Vec::new(),
             loop_vars: Vec::new(),
+            budget: EvaluationBudget::default(),
         })
+    }
+
+    const fn resource_limit(resource: &'static str, limit: usize) -> MakeExprError {
+        MakeExprError::ResourceLimit { resource, limit }
+    }
+
+    fn finish_value(&mut self, value: String) -> Result<String, MakeExprError> {
+        self.charge_scanned(value.len())?;
+        reject_unsupported_references(&value)?;
+        if !value.contains(ESCAPED_DOLLAR) {
+            return Ok(value);
+        }
+        let escaped_count = value.matches(ESCAPED_DOLLAR).count();
+        let output_len = value
+            .len()
+            .checked_sub(escaped_count.saturating_mul(ESCAPED_DOLLAR.len_utf8()))
+            .and_then(|length| length.checked_add(escaped_count))
+            .ok_or_else(|| Self::resource_limit("value bytes", MAX_VALUE_BYTES))?;
+        Self::check_value_size(output_len)?;
+        self.charge_emitted(output_len)?;
+        self.charge_work(escaped_count)?;
+        Ok(value.replace(ESCAPED_DOLLAR, "$"))
+    }
+
+    const fn charge(
+        current: &mut usize,
+        amount: usize,
+        limit: usize,
+        resource: &'static str,
+    ) -> Result<(), MakeExprError> {
+        let Some(next) = current.checked_add(amount) else {
+            return Err(MakeExprError::ResourceLimit { resource, limit });
+        };
+        if next > limit {
+            return Err(MakeExprError::ResourceLimit { resource, limit });
+        }
+        *current = next;
+        Ok(())
+    }
+
+    const fn charge_scanned(&mut self, amount: usize) -> Result<(), MakeExprError> {
+        Self::charge(
+            &mut self.budget.scanned_bytes,
+            amount,
+            MAX_SCANNED_BYTES,
+            "scanned bytes",
+        )
+    }
+
+    const fn charge_emitted(&mut self, amount: usize) -> Result<(), MakeExprError> {
+        Self::charge(
+            &mut self.budget.emitted_bytes,
+            amount,
+            MAX_EMITTED_BYTES,
+            "aggregate emitted bytes",
+        )
+    }
+
+    const fn charge_work(&mut self, amount: usize) -> Result<(), MakeExprError> {
+        Self::charge(
+            &mut self.budget.work_units,
+            amount,
+            MAX_WORK_UNITS,
+            "work units",
+        )
+    }
+
+    const fn charge_items(&mut self, amount: usize) -> Result<(), MakeExprError> {
+        Self::charge(
+            &mut self.budget.list_items,
+            amount,
+            MAX_LIST_ITEMS,
+            "list items",
+        )
+    }
+
+    const fn check_value_size(size: usize) -> Result<(), MakeExprError> {
+        if size > MAX_VALUE_BYTES {
+            Err(Self::resource_limit("value bytes", MAX_VALUE_BYTES))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn append_output(&mut self, output: &mut String, piece: &str) -> Result<(), MakeExprError> {
+        let next_len = output
+            .len()
+            .checked_add(piece.len())
+            .ok_or_else(|| Self::resource_limit("value bytes", MAX_VALUE_BYTES))?;
+        Self::check_value_size(next_len)?;
+        self.charge_work(1)?;
+        self.charge_emitted(piece.len())?;
+        output.push_str(piece);
+        Ok(())
+    }
+
+    fn append_char(&mut self, output: &mut String, character: char) -> Result<(), MakeExprError> {
+        let len = character.len_utf8();
+        let next_len = output
+            .len()
+            .checked_add(len)
+            .ok_or_else(|| Self::resource_limit("value bytes", MAX_VALUE_BYTES))?;
+        Self::check_value_size(next_len)?;
+        self.charge_work(1)?;
+        self.charge_emitted(len)?;
+        output.push(character);
+        Ok(())
+    }
+
+    fn append_word(&mut self, output: &mut String, pieces: &[&str]) -> Result<(), MakeExprError> {
+        let word_len = pieces
+            .iter()
+            .try_fold(0usize, |size, piece| size.checked_add(piece.len()));
+        let Some(word_len) = word_len else {
+            return Err(Self::resource_limit("value bytes", MAX_VALUE_BYTES));
+        };
+        self.charge_work(1)?;
+        if word_len == 0 {
+            return Ok(());
+        }
+        let separator_len = usize::from(!output.is_empty());
+        let next_len = output
+            .len()
+            .checked_add(separator_len)
+            .and_then(|size| size.checked_add(word_len))
+            .ok_or_else(|| Self::resource_limit("value bytes", MAX_VALUE_BYTES))?;
+        Self::check_value_size(next_len)?;
+        self.charge_items(1)?;
+        self.charge_emitted(separator_len.saturating_add(word_len))?;
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        for piece in pieces {
+            output.push_str(piece);
+        }
+        Ok(())
+    }
+
+    fn make_words(&mut self, raw: &str) -> Result<Vec<String>, MakeExprError> {
+        self.charge_scanned(raw.len())?;
+        let mut words = Vec::new();
+        for word in raw.split_whitespace() {
+            self.charge_items(1)?;
+            self.charge_emitted(word.len())?;
+            self.charge_work(1)?;
+            words.push(word.to_owned());
+        }
+        Ok(words)
+    }
+
+    fn join_words(&mut self, words: &[String]) -> Result<String, MakeExprError> {
+        let payload_bytes = words
+            .iter()
+            .try_fold(0usize, |size, word| size.checked_add(word.len()));
+        let Some(payload_bytes) = payload_bytes else {
+            return Err(Self::resource_limit("value bytes", MAX_VALUE_BYTES));
+        };
+        let separator_bytes = words.len().saturating_sub(1);
+        let bytes = payload_bytes
+            .checked_add(separator_bytes)
+            .ok_or_else(|| Self::resource_limit("value bytes", MAX_VALUE_BYTES))?;
+        Self::check_value_size(bytes)?;
+        self.charge_emitted(bytes)?;
+        self.charge_work(words.len())?;
+        let mut output = String::with_capacity(bytes);
+        for (index, word) in words.iter().enumerate() {
+            if index != 0 {
+                output.push(' ');
+            }
+            output.push_str(word);
+        }
+        Ok(output)
+    }
+
+    fn function_arguments<'b>(
+        &mut self,
+        function: &str,
+        raw: &'b str,
+        expected: usize,
+    ) -> Result<Vec<&'b str>, MakeExprError> {
+        self.function_arguments_between(function, raw, expected, expected)
+    }
+
+    fn function_arguments_between<'b>(
+        &mut self,
+        function: &str,
+        raw: &'b str,
+        minimum: usize,
+        maximum: usize,
+    ) -> Result<Vec<&'b str>, MakeExprError> {
+        self.charge_scanned(raw.len())?;
+        let args = split_top_level(raw, ',')?;
+        if args.len() < minimum || args.len() > maximum {
+            return Err(MakeExprError::InvalidSyntax {
+                expression: bounded_preview(raw),
+                detail: format!(
+                    "function `{function}` expects {minimum}..={maximum} argument(s), got {}",
+                    args.len()
+                ),
+            });
+        }
+        self.charge_items(args.len())?;
+        Ok(args)
+    }
+
+    fn function_arguments_at_least<'b>(
+        &mut self,
+        function: &str,
+        raw: &'b str,
+        minimum: usize,
+    ) -> Result<Vec<&'b str>, MakeExprError> {
+        self.charge_scanned(raw.len())?;
+        let args = split_top_level(raw, ',')?;
+        if args.len() < minimum {
+            return Err(MakeExprError::InvalidSyntax {
+                expression: bounded_preview(raw),
+                detail: format!(
+                    "function `{function}` expects at least {minimum} argument(s), got {}",
+                    args.len()
+                ),
+            });
+        }
+        self.charge_items(args.len())?;
+        Ok(args)
+    }
+
+    fn filter_words(
+        &mut self,
+        patterns: &[String],
+        words: &[String],
+        keep_matches: bool,
+    ) -> Result<String, MakeExprError> {
+        let comparisons = patterns
+            .len()
+            .checked_mul(words.len())
+            .ok_or_else(|| Self::resource_limit("work units", MAX_WORK_UNITS))?;
+        self.charge_work(comparisons)?;
+        let mut output = String::new();
+        for word in words {
+            let mut matched = false;
+            for pattern in patterns {
+                self.charge_scanned(pattern.len().saturating_add(word.len()))?;
+                self.charge_work(pattern.len().saturating_add(word.len()))?;
+                if pattern_stem(pattern, word).is_some() {
+                    matched = true;
+                    break;
+                }
+            }
+            if matched == keep_matches {
+                self.append_word(&mut output, &[word])?;
+            }
+        }
+        Ok(output)
+    }
+
+    fn patsubst_words(
+        &mut self,
+        pattern: &str,
+        replacement: &str,
+        words: &[String],
+    ) -> Result<String, MakeExprError> {
+        let mut output = String::new();
+        for word in words {
+            self.charge_scanned(word.len().saturating_add(pattern.len()))?;
+            self.charge_work(word.len().saturating_add(pattern.len()))?;
+            if let Some(stem) = pattern_stem(pattern, word) {
+                if let Some(percent) = replacement.find('%') {
+                    self.append_word(
+                        &mut output,
+                        &[&replacement[..percent], stem, &replacement[percent + 1..]],
+                    )?;
+                } else {
+                    self.append_word(&mut output, &[replacement])?;
+                }
+            } else {
+                self.append_word(&mut output, &[word])?;
+            }
+        }
+        Ok(output)
+    }
+
+    fn suffix_substitute_words(
+        &mut self,
+        words: &[String],
+        from: &str,
+        to: &str,
+    ) -> Result<String, MakeExprError> {
+        let mut output = String::new();
+        for word in words {
+            self.charge_scanned(word.len().saturating_add(from.len()))?;
+            self.charge_work(word.len().saturating_add(from.len()))?;
+            if let Some(stem) = word.strip_suffix(from) {
+                self.append_word(&mut output, &[stem, to])?;
+            } else {
+                self.append_word(&mut output, &[word])?;
+            }
+        }
+        Ok(output)
     }
 
     fn expand_text(&mut self, raw: &str, depth: usize) -> Result<String, MakeExprError> {
         if depth == 0 {
             return Err(MakeExprError::ExpansionLimit {
-                expression: raw.to_owned(),
+                expression: bounded_preview(raw),
             });
         }
 
-        let mut out = String::with_capacity(raw.len());
+        self.charge_scanned(raw.len())?;
+        let mut out = String::new();
         let mut cursor = 0usize;
         while cursor < raw.len() {
             let Some(relative_dollar) = raw[cursor..].find('$') else {
-                out.push_str(&raw[cursor..]);
+                self.append_output(&mut out, &raw[cursor..])?;
                 break;
             };
             let dollar = cursor + relative_dollar;
-            out.push_str(&raw[cursor..dollar]);
+            self.append_output(&mut out, &raw[cursor..dollar])?;
             match raw.as_bytes().get(dollar + 1) {
                 Some(b'$') => {
-                    out.push(ESCAPED_DOLLAR);
+                    self.append_char(&mut out, ESCAPED_DOLLAR)?;
                     cursor = dollar + 2;
                 }
                 Some(b'(') => {
+                    self.charge_scanned(raw.len().saturating_sub(dollar))?;
                     let end = reference_end(raw, dollar)?;
-                    out.push_str(&self.evaluate_reference(&raw[dollar + 2..end], depth - 1)?);
+                    let expanded = self.evaluate_reference(&raw[dollar + 2..end], depth - 1)?;
+                    self.append_output(&mut out, &expanded)?;
                     cursor = end + 1;
                 }
                 Some(b'{') => {
+                    self.charge_scanned(raw.len().saturating_sub(dollar))?;
                     let Some(relative_end) = raw[dollar + 2..].find('}') else {
                         return Err(MakeExprError::InvalidSyntax {
-                            expression: raw[dollar..].to_owned(),
+                            expression: bounded_preview(&raw[dollar..]),
                             detail: "unclosed `${...}` reference".to_owned(),
                         });
                     };
                     let end = dollar + 2 + relative_end;
                     let body = &raw[dollar + 2..end];
                     if is_deferred_cmake_reference(body) {
-                        out.push_str(&raw[dollar..=end]);
+                        self.append_output(&mut out, &raw[dollar..=end])?;
                     } else {
-                        out.push_str(&self.evaluate_reference(body, depth - 1)?);
+                        let expanded = self.evaluate_reference(body, depth - 1)?;
+                        self.append_output(&mut out, &expanded)?;
                     }
                     cursor = end + 1;
                 }
                 _ => {
-                    out.push('$');
+                    self.append_char(&mut out, '$')?;
                     cursor = dollar + 1;
                 }
             }
@@ -337,7 +682,10 @@ impl<'a> Evaluator<'a> {
     }
 
     fn evaluate_reference(&mut self, body: &str, depth: usize) -> Result<String, MakeExprError> {
-        let trimmed = body.trim();
+        // Function argument text retains its trailing whitespace: foreach,
+        // subst and other text-valued functions observe those bytes.
+        let trimmed = body.trim_start();
+        self.charge_scanned(trimmed.len())?;
         if trimmed.is_empty() {
             return Err(MakeExprError::InvalidSyntax {
                 expression: "$()".to_owned(),
@@ -351,20 +699,49 @@ impl<'a> Evaluator<'a> {
             return self.evaluate_function(name, args, depth);
         }
 
-        self.evaluate_variable(trimmed, depth)
+        self.evaluate_variable(trimmed.trim_end(), depth)
     }
 
     fn evaluate_variable(&mut self, body: &str, depth: usize) -> Result<String, MakeExprError> {
+        self.charge_scanned(
+            body.len()
+                .checked_mul(2)
+                .ok_or_else(|| Self::resource_limit("scanned bytes", MAX_SCANNED_BYTES))?,
+        )?;
         let (raw_name, substitution) = split_substitution_reference(body)?;
-        let name = self.expand_text(raw_name, depth)?.trim().to_owned();
+        let expanded_name = self.expand_text(raw_name, depth)?;
+        let trimmed_name = expanded_name.trim();
+        Self::check_value_size(trimmed_name.len())?;
+        self.charge_emitted(trimmed_name.len())?;
+        self.charge_work(1)?;
+        let name = trimmed_name.to_owned();
         if name.is_empty() || name.chars().any(char::is_whitespace) {
             return Err(MakeExprError::InvalidSyntax {
-                expression: format!("$({body})"),
+                expression: bounded_preview(body),
                 detail: format!("invalid expanded variable name `{name}`"),
             });
         }
 
+        self.charge_work(self.expansion_chain.len())?;
+        let compared_bytes = self
+            .expansion_chain
+            .iter()
+            .try_fold(
+                name.len().saturating_mul(self.expansion_chain.len()),
+                |size, item| size.checked_add(item.len()),
+            )
+            .ok_or_else(|| Self::resource_limit("scanned bytes", MAX_SCANNED_BYTES))?;
+        self.charge_scanned(compared_bytes)?;
         if let Some(at) = self.expansion_chain.iter().position(|item| item == &name) {
+            let chain_bytes = self.expansion_chain[at..]
+                .iter()
+                .try_fold(0usize, |size, item| size.checked_add(item.len()))
+                .and_then(|size| size.checked_add(name.len()))
+                .ok_or_else(|| {
+                    Self::resource_limit("aggregate emitted bytes", MAX_EMITTED_BYTES)
+                })?;
+            self.charge_emitted(chain_bytes)?;
+            self.charge_work(self.expansion_chain.len() - at + 1)?;
             let mut chain = self.expansion_chain[at..].to_vec();
             chain.push(name);
             return Err(MakeExprError::VariableCycle {
@@ -381,18 +758,16 @@ impl<'a> Evaluator<'a> {
         let Some((raw_from, raw_to)) = substitution else {
             return Ok(expanded);
         };
-        let from = self.expand_text(raw_from, depth)?.trim().to_owned();
-        let to = self.expand_text(raw_to, depth)?.trim().to_owned();
-        let words = make_words(&expanded);
-        let transformed = if from.contains('%') {
-            patsubst(&from, &to, &words)
+        let expanded_from = self.expand_text(raw_from, depth)?;
+        let from = expanded_from.trim().to_owned();
+        let expanded_to = self.expand_text(raw_to, depth)?;
+        let to = expanded_to.trim().to_owned();
+        let words = self.make_words(&expanded)?;
+        if from.contains('%') {
+            self.patsubst_words(&from, &to, &words)
         } else {
-            words
-                .iter()
-                .map(|word| suffix_substitute(word, &from, &to))
-                .collect()
-        };
-        Ok(join_words(&transformed))
+            self.suffix_substitute_words(&words, &from, &to)
+        }
     }
 
     fn resolve_variable(&self, name: &str) -> Result<String, MakeExprError> {
@@ -500,7 +875,7 @@ impl<'a> Evaluator<'a> {
             // dos.library is built with no ELF loader at all. muimaster needs
             // it for its 44 classes.
             "foreach" => {
-                let args = function_arguments(name, raw_args, 3)?;
+                let args = self.function_arguments(name, raw_args, 3)?;
                 let variable = self.expand_text(args[0].trim(), depth)?;
                 let variable = variable.trim().to_owned();
                 if variable.is_empty() {
@@ -509,67 +884,94 @@ impl<'a> Evaluator<'a> {
                         detail: "foreach has an empty loop variable name".to_owned(),
                     });
                 }
-                let list = make_words(&self.expand_text(args[1].trim(), depth)?);
-                let mut output: Vec<String> = Vec::with_capacity(list.len());
-                for word in list {
+                let expanded_list = self.expand_text(args[1].trim(), depth)?;
+                let list = self.make_words(&expanded_list)?;
+                let mut output = String::new();
+                for (index, word) in list.into_iter().enumerate() {
+                    self.charge_items(1)?;
+                    self.charge_emitted(variable.len())?;
+                    self.charge_work(1)?;
                     self.loop_vars.push((variable.clone(), word));
                     let expanded = self.expand_text(args[2], depth);
                     self.loop_vars.pop();
-                    output.push(expanded?);
+                    let expanded = expanded?;
+                    if index != 0 {
+                        self.append_char(&mut output, ' ')?;
+                    }
+                    self.append_output(&mut output, &expanded)?;
                 }
-                Ok(join_words(&make_words(&output.join(" "))))
+                Ok(output)
             }
             "addprefix" | "addsuffix" | "filter" | "filter-out" => {
-                let args = function_arguments(name, raw_args, 2)?;
+                let args = self.function_arguments(name, raw_args, 2)?;
                 let first = self.expand_text(args[0].trim(), depth)?;
-                let words = make_words(&self.expand_text(args[1].trim(), depth)?);
-                let output = match name {
-                    "addprefix" => words
-                        .iter()
-                        .map(|word| format!("{}{word}", first.trim()))
-                        .collect(),
-                    "addsuffix" => words
-                        .iter()
-                        .map(|word| format!("{word}{}", first.trim()))
-                        .collect(),
-                    "filter" => filter_words(&make_words(&first), &words, true),
-                    "filter-out" => filter_words(&make_words(&first), &words, false),
-                    unsupported => {
-                        return Err(MakeExprError::UnsupportedFunction {
-                            name: unsupported.to_owned(),
-                        });
+                let expanded_words = self.expand_text(args[1].trim(), depth)?;
+                let words = self.make_words(&expanded_words)?;
+                match name {
+                    "addprefix" | "addsuffix" => {
+                        let prefix_or_suffix = first.trim();
+                        let mut output = String::new();
+                        for word in &words {
+                            if name == "addprefix" {
+                                self.append_word(&mut output, &[prefix_or_suffix, word])?;
+                            } else {
+                                self.append_word(&mut output, &[word, prefix_or_suffix])?;
+                            }
+                        }
+                        Ok(output)
                     }
-                };
-                Ok(join_words(&output))
+                    "filter" | "filter-out" => {
+                        let patterns = self.make_words(&first)?;
+                        self.filter_words(&patterns, &words, name == "filter")
+                    }
+                    unsupported => Err(MakeExprError::UnsupportedFunction {
+                        name: unsupported.to_owned(),
+                    }),
+                }
             }
             "patsubst" => {
-                let args = function_arguments(name, raw_args, 3)?;
+                let args = self.function_arguments(name, raw_args, 3)?;
                 let pattern = self.expand_text(args[0].trim(), depth)?;
                 let replacement = self.expand_text(args[1].trim(), depth)?;
-                let words = make_words(&self.expand_text(args[2].trim(), depth)?);
-                Ok(join_words(&patsubst(
-                    pattern.trim(),
-                    replacement.trim(),
-                    &words,
-                )))
+                let expanded_words = self.expand_text(args[2].trim(), depth)?;
+                let words = self.make_words(&expanded_words)?;
+                self.patsubst_words(pattern.trim(), replacement.trim(), &words)
             }
             "subst" => {
-                let args = function_arguments(name, raw_args, 3)?;
+                let args = self.function_arguments(name, raw_args, 3)?;
                 let from = self.expand_text(args[0], depth)?;
                 if from.is_empty() {
                     return Err(MakeExprError::InvalidSyntax {
-                        expression: format!("$(subst {raw_args})"),
+                        expression: bounded_preview(raw_args),
                         detail: "subst with an empty search string is not supported".to_owned(),
                     });
                 }
                 let to = self.expand_text(args[1], depth)?;
                 let text = self.expand_text(args[2], depth)?;
+                self.charge_scanned(text.len())?;
+                let matches = text.match_indices(&from).count();
+                let removed = matches
+                    .checked_mul(from.len())
+                    .ok_or_else(|| Self::resource_limit("value bytes", MAX_VALUE_BYTES))?;
+                let added = matches
+                    .checked_mul(to.len())
+                    .ok_or_else(|| Self::resource_limit("value bytes", MAX_VALUE_BYTES))?;
+                let output_len = text
+                    .len()
+                    .checked_sub(removed)
+                    .and_then(|length| length.checked_add(added))
+                    .ok_or_else(|| Self::resource_limit("value bytes", MAX_VALUE_BYTES))?;
+                Self::check_value_size(output_len)?;
+                self.charge_work(matches)?;
+                self.charge_emitted(output_len)?;
                 Ok(text.replace(&from, &to))
             }
             "findstring" => {
-                let args = function_arguments(name, raw_args, 2)?;
+                let args = self.function_arguments(name, raw_args, 2)?;
                 let needle = self.expand_text(args[0], depth)?;
                 let haystack = self.expand_text(args[1], depth)?;
+                self.charge_scanned(needle.len().saturating_add(haystack.len()))?;
+                self.charge_work(1)?;
                 Ok(if haystack.contains(&needle) {
                     needle
                 } else {
@@ -578,7 +980,7 @@ impl<'a> Evaluator<'a> {
             }
             "word" | "wordlist" => {
                 let expected = if name == "word" { 2 } else { 3 };
-                let args = function_arguments(name, raw_args, expected)?;
+                let args = self.function_arguments(name, raw_args, expected)?;
                 let first =
                     parse_word_index(name, &self.expand_text(args[0].trim(), depth)?, raw_args)?;
                 let (last, text_at) = if name == "word" {
@@ -593,31 +995,35 @@ impl<'a> Evaluator<'a> {
                         2,
                     )
                 };
-                let words = make_words(&self.expand_text(args[text_at], depth)?);
+                let expanded_words = self.expand_text(args[text_at], depth)?;
+                let words = self.make_words(&expanded_words)?;
                 if first == 0 || last < first || first > words.len() {
                     return Ok(String::new());
                 }
                 let end = last.min(words.len());
-                Ok(join_words(&words[first - 1..end]))
+                self.join_words(&words[first - 1..end])
             }
             "join" => {
-                let args = function_arguments(name, raw_args, 2)?;
-                let left = make_words(&self.expand_text(args[0], depth)?);
-                let right = make_words(&self.expand_text(args[1], depth)?);
+                let args = self.function_arguments(name, raw_args, 2)?;
+                let expanded_left = self.expand_text(args[0], depth)?;
+                let left = self.make_words(&expanded_left)?;
+                let expanded_right = self.expand_text(args[1], depth)?;
+                let right = self.make_words(&expanded_right)?;
                 let length = left.len().max(right.len());
-                let output = (0..length)
-                    .map(|index| {
-                        format!(
-                            "{}{}",
+                let mut output = String::new();
+                for index in 0..length {
+                    self.append_word(
+                        &mut output,
+                        &[
                             left.get(index).map_or("", String::as_str),
-                            right.get(index).map_or("", String::as_str)
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                Ok(join_words(&output))
+                            right.get(index).map_or("", String::as_str),
+                        ],
+                    )?;
+                }
+                Ok(output)
             }
             "if" => {
-                let args = function_arguments_between(name, raw_args, 2, 3)?;
+                let args = self.function_arguments_between(name, raw_args, 2, 3)?;
                 let condition = self.expand_text(args[0], depth)?;
                 let selected = if condition.trim().is_empty() {
                     args.get(2).copied().unwrap_or("")
@@ -627,7 +1033,7 @@ impl<'a> Evaluator<'a> {
                 self.expand_text(selected, depth)
             }
             "or" | "and" => {
-                let args = function_arguments_at_least(name, raw_args, 1)?;
+                let args = self.function_arguments_at_least(name, raw_args, 1)?;
                 let mut last = String::new();
                 for argument in args {
                     let value = self.expand_text(argument, depth)?;
@@ -644,52 +1050,67 @@ impl<'a> Evaluator<'a> {
                 }
             }
             "notdir" | "dir" | "basename" | "suffix" | "sort" | "strip" | "wildcard" => {
-                let args = function_arguments(name, raw_args, 1)?;
+                let args = self.function_arguments(name, raw_args, 1)?;
                 let expanded = self.expand_text(args[0].trim(), depth)?;
                 match name {
-                    "notdir" => Ok(join_words(
-                        &make_words(&expanded)
-                            .iter()
-                            .filter_map(|word| notdir(word))
-                            .collect::<Vec<_>>(),
-                    )),
-                    "dir" => Ok(join_words(
-                        &make_words(&expanded)
-                            .iter()
-                            .map(|word| directory_part(word))
-                            .collect::<Vec<_>>(),
-                    )),
-                    "basename" => Ok(join_words(
-                        &make_words(&expanded)
-                            .iter()
-                            .filter_map(|word| basename(word))
-                            .collect::<Vec<_>>(),
-                    )),
-                    "suffix" => Ok(join_words(
-                        &make_words(&expanded)
-                            .iter()
-                            .filter_map(|word| suffix(word))
-                            .collect::<Vec<_>>(),
-                    )),
+                    "notdir" | "dir" | "basename" | "suffix" => {
+                        let words = self.make_words(&expanded)?;
+                        let mut output = String::new();
+                        for word in &words {
+                            self.charge_work(word.len())?;
+                            let transformed = match name {
+                                "notdir" => notdir(word),
+                                "dir" => Some(directory_part(word)),
+                                "basename" => basename(word),
+                                "suffix" => suffix(word),
+                                _ => unreachable!(),
+                            };
+                            if let Some(transformed) = transformed {
+                                self.append_word(&mut output, &[&transformed])?;
+                            }
+                        }
+                        Ok(output)
+                    }
                     "sort" => {
-                        let mut words = make_words(&expanded);
+                        let mut words = self.make_words(&expanded)?;
+                        let log_word_count = usize::try_from(words.len().max(1).ilog2())
+                            .map_err(|_| Self::resource_limit("work units", MAX_WORK_UNITS))?;
+                        let comparisons = words
+                            .len()
+                            .checked_mul(log_word_count + 1)
+                            .ok_or_else(|| Self::resource_limit("work units", MAX_WORK_UNITS))?;
+                        let maximum_word_len = words.iter().map(String::len).max().unwrap_or(0);
+                        self.charge_work(
+                            comparisons
+                                .checked_mul(maximum_word_len.max(1))
+                                .ok_or_else(|| {
+                                    Self::resource_limit("work units", MAX_WORK_UNITS)
+                                })?,
+                        )?;
                         words.sort();
                         words.dedup();
-                        Ok(join_words(&words))
+                        self.join_words(&words)
                     }
-                    "strip" => Ok(join_words(&make_words(&expanded))),
-                    "wildcard" => Ok(join_words(&self.wildcard(&expanded, false)?)),
+                    "strip" => {
+                        let words = self.make_words(&expanded)?;
+                        self.join_words(&words)
+                    }
+                    "wildcard" => {
+                        let words = self.wildcard(&expanded, false)?;
+                        self.join_words(&words)
+                    }
                     unsupported => Err(MakeExprError::UnsupportedFunction {
                         name: unsupported.to_owned(),
                     }),
                 }
             }
             "firstword" | "lastword" | "words" => {
-                let args = function_arguments(name, raw_args, 1)?;
-                let words = make_words(&self.expand_text(args[0], depth)?);
+                let args = self.function_arguments(name, raw_args, 1)?;
+                let expanded = self.expand_text(args[0], depth)?;
+                let words = self.make_words(&expanded)?;
                 match name {
-                    "firstword" => Ok(words.first().cloned().unwrap_or_default()),
-                    "lastword" => Ok(words.last().cloned().unwrap_or_default()),
+                    "firstword" => Ok(words.into_iter().next().unwrap_or_default()),
+                    "lastword" => Ok(words.into_iter().last().unwrap_or_default()),
                     "words" => Ok(words.len().to_string()),
                     unsupported => Err(MakeExprError::UnsupportedFunction {
                         name: unsupported.to_owned(),
@@ -697,29 +1118,34 @@ impl<'a> Evaluator<'a> {
                 }
             }
             "value" => {
-                let args = function_arguments(name, raw_args, 1)?;
+                let args = self.function_arguments(name, raw_args, 1)?;
                 let variable = args[0].trim();
                 if variable.is_empty() || variable.contains(char::is_whitespace) {
                     return Err(MakeExprError::InvalidSyntax {
-                        expression: format!("$(value {raw_args})"),
+                        expression: bounded_preview(raw_args),
                         detail: "value requires one variable name".to_owned(),
                     });
                 }
-                self.resolve_variable(variable)
+                let value = self.resolve_variable(variable)?;
+                Self::check_value_size(value.len())?;
+                self.charge_emitted(value.len())?;
+                self.charge_work(value.len())?;
+                Ok(value)
             }
             "call" => {
-                let args = function_arguments_at_least(name, raw_args, 1)?;
+                let args = self.function_arguments_at_least(name, raw_args, 1)?;
                 let callee = self.expand_text(args[0].trim(), depth)?;
                 let callee = callee.trim();
                 if callee == "WILDCARD" {
                     if args.len() != 2 {
                         return Err(MakeExprError::InvalidSyntax {
-                            expression: format!("$(call {raw_args})"),
+                            expression: bounded_preview(raw_args),
                             detail: "AROS WILDCARD expects one argument".to_owned(),
                         });
                     }
                     let patterns = self.expand_text(args[1].trim(), depth)?;
-                    return Ok(join_words(&self.wildcard(&patterns, true)?));
+                    let words = self.wildcard(&patterns, true)?;
+                    return self.join_words(&words);
                 }
                 let body = self.resolve_variable(callee)?;
                 let mut bindings = Vec::with_capacity(args.len());
@@ -727,6 +1153,7 @@ impl<'a> Evaluator<'a> {
                 for (index, argument) in args.iter().skip(1).enumerate() {
                     bindings.push(((index + 1).to_string(), self.expand_text(argument, depth)?));
                 }
+                self.charge_items(bindings.len())?;
                 let binding_count = bindings.len();
                 self.loop_vars.extend(bindings);
                 let expanded = self.expand_text(&body, depth);
@@ -741,11 +1168,22 @@ impl<'a> Evaluator<'a> {
     }
 
     fn wildcard(
-        &self,
+        &mut self,
         expanded_patterns: &str,
         regular_files_only: bool,
     ) -> Result<Vec<String>, MakeExprError> {
+        if !self.filesystem_enabled {
+            return Err(MakeExprError::FilesystemAccessDisabled {
+                function: if regular_files_only {
+                    "call WILDCARD".to_owned()
+                } else {
+                    "wildcard".to_owned()
+                },
+            });
+        }
+        self.charge_scanned(expanded_patterns.len())?;
         reject_unsupported_references(expanded_patterns)?;
+        let patterns = self.make_words(expanded_patterns)?;
         let options = MatchOptions {
             case_sensitive: true,
             require_literal_separator: true,
@@ -755,13 +1193,15 @@ impl<'a> Evaluator<'a> {
         let escaped_root = Pattern::escape(&root_text);
         let escaped_source = Pattern::escape(&self.source_text);
         let mut output = Vec::new();
+        let mut output_bytes = 0usize;
 
-        for original_pattern in expanded_patterns.split_whitespace() {
+        for original_pattern in patterns {
+            self.charge_work(original_pattern.len())?;
             let (materialized_pattern, glob_pattern, backing) =
                 if let Some(suffix) = original_pattern.strip_prefix("${AROS_SOURCE_DIR}") {
                     if suffix.contains("${") {
                         return Err(MakeExprError::DeferredWildcard {
-                            pattern: original_pattern.to_owned(),
+                            pattern: bounded_preview(&original_pattern),
                         });
                     }
                     (
@@ -772,12 +1212,12 @@ impl<'a> Evaluator<'a> {
                 } else if let Some(suffix) = original_pattern.strip_prefix("${AROS_PORTS_DIR}") {
                     if suffix.contains("${") {
                         return Err(MakeExprError::DeferredWildcard {
-                            pattern: original_pattern.to_owned(),
+                            pattern: bounded_preview(&original_pattern),
                         });
                     }
                     let Some(ports_root) = self.dirs.materialized_path("AROS_PORTS_DIR") else {
                         return Err(MakeExprError::DeferredWildcard {
-                            pattern: original_pattern.to_owned(),
+                            pattern: bounded_preview(&original_pattern),
                         });
                     };
                     let ports_text = path_text(ports_root, "Ports directory")?;
@@ -790,63 +1230,97 @@ impl<'a> Evaluator<'a> {
                 } else {
                     if original_pattern.contains("${") {
                         return Err(MakeExprError::DeferredWildcard {
-                            pattern: original_pattern.to_owned(),
+                            pattern: bounded_preview(&original_pattern),
                         });
                     }
-                    let absolute = Path::new(original_pattern).is_absolute();
+                    let absolute = Path::new(&original_pattern).is_absolute();
                     let glob_pattern = if absolute || escaped_root.is_empty() {
-                        original_pattern.to_owned()
+                        original_pattern.clone()
                     } else {
-                        concatenate_path_prefix(&escaped_root, original_pattern)
+                        concatenate_path_prefix(&escaped_root, &original_pattern)
                     };
-                    (original_pattern.to_owned(), glob_pattern, None)
+                    (original_pattern.clone(), glob_pattern, None)
                 };
             if materialized_pattern.contains("${") {
                 return Err(MakeExprError::DeferredWildcard {
-                    pattern: original_pattern.to_owned(),
+                    pattern: bounded_preview(&original_pattern),
                 });
             }
             let absolute = Path::new(&materialized_pattern).is_absolute();
             let paths =
                 glob_with(&glob_pattern, options).map_err(|error| MakeExprError::Wildcard {
-                    pattern: original_pattern.to_owned(),
-                    detail: error.to_string(),
+                    pattern: bounded_preview(&original_pattern),
+                    detail: bounded_preview(&error.to_string()),
                 })?;
             let mut matches = Vec::new();
+            let mut pattern_bytes = 0usize;
             for result in paths {
                 let path = result.map_err(|error| MakeExprError::Wildcard {
-                    pattern: original_pattern.to_owned(),
-                    detail: error.to_string(),
+                    pattern: bounded_preview(&original_pattern),
+                    detail: bounded_preview(&error.to_string()),
                 })?;
+                self.charge_work(1)?;
+                self.charge_items(1)?;
                 if regular_files_only && !path.is_file() {
                     continue;
                 }
-                if let Some((physical_root, logical_root)) = &backing {
+                let shown = if let Some((physical_root, logical_root)) = &backing {
                     let relative = path.strip_prefix(Path::new(physical_root)).map_err(|_| {
                         MakeExprError::Wildcard {
-                            pattern: original_pattern.to_owned(),
+                            pattern: bounded_preview(&original_pattern),
                             detail: format!(
-                                "match `{}` escaped the materialized directory `{physical_root}`",
-                                path.display()
+                                "match escaped materialized directory `{}`",
+                                bounded_preview(physical_root)
                             ),
                         }
                     })?;
                     let relative = path_text(relative, "materialized wildcard result")?;
-                    matches.push(if relative.is_empty() {
+                    if relative.is_empty() {
                         logical_root.clone()
                     } else {
                         format!("{logical_root}/{relative}")
-                    });
-                    continue;
-                }
-                let shown = if absolute {
-                    path.as_path()
+                    }
                 } else {
-                    path.strip_prefix(&self.wildcard_root)
-                        .unwrap_or(path.as_path())
+                    let shown = if absolute {
+                        path.as_path()
+                    } else {
+                        path.strip_prefix(&self.wildcard_root)
+                            .unwrap_or(path.as_path())
+                    };
+                    path_text(shown, "wildcard result")?
                 };
-                matches.push(path_text(shown, "wildcard result")?);
+                self.charge_emitted(shown.len())?;
+                pattern_bytes = pattern_bytes
+                    .checked_add(shown.len())
+                    .ok_or_else(|| Self::resource_limit("value bytes", MAX_VALUE_BYTES))?;
+                if pattern_bytes > MAX_VALUE_BYTES {
+                    return Err(Self::resource_limit("value bytes", MAX_VALUE_BYTES));
+                }
+                matches.push(shown);
             }
+            let separator_count = matches
+                .len()
+                .saturating_sub(1)
+                .saturating_add(usize::from(!output.is_empty() && !matches.is_empty()));
+            let next_output_bytes = output_bytes
+                .checked_add(pattern_bytes)
+                .and_then(|size| size.checked_add(separator_count))
+                .ok_or_else(|| Self::resource_limit("value bytes", MAX_VALUE_BYTES))?;
+            if next_output_bytes > MAX_VALUE_BYTES {
+                return Err(Self::resource_limit("value bytes", MAX_VALUE_BYTES));
+            }
+            let log_match_count = usize::try_from(matches.len().max(1).ilog2())
+                .map_err(|_| Self::resource_limit("work units", MAX_WORK_UNITS))?;
+            let sort_comparisons = matches
+                .len()
+                .checked_mul(log_match_count + 1)
+                .ok_or_else(|| Self::resource_limit("work units", MAX_WORK_UNITS))?;
+            let maximum_match_len = matches.iter().map(String::len).max().unwrap_or(0);
+            self.charge_work(
+                sort_comparisons
+                    .checked_mul(maximum_match_len.max(1))
+                    .ok_or_else(|| Self::resource_limit("work units", MAX_WORK_UNITS))?,
+            )?;
             matches.sort();
             // An empty source-tree wildcard is ordinary Make behaviour. An
             // empty wildcard below a fetched Ports root, however, means the
@@ -859,9 +1333,10 @@ impl<'a> Evaluator<'a> {
                     .is_some_and(|(_, logical)| logical == "${AROS_PORTS_DIR}")
             {
                 return Err(MakeExprError::DeferredWildcard {
-                    pattern: original_pattern.to_owned(),
+                    pattern: bounded_preview(&original_pattern),
                 });
             }
+            output_bytes = next_output_bytes;
             output.extend(matches);
         }
         Ok(output)
@@ -876,6 +1351,17 @@ fn concatenate_path_prefix(prefix: &str, suffix: &str) -> String {
         }
         _ => format!("{prefix}{suffix}"),
     }
+}
+
+fn bounded_preview(value: &str) -> String {
+    if value.len() <= MAX_ERROR_PREVIEW_BYTES {
+        return value.to_owned();
+    }
+    let mut end = MAX_ERROR_PREVIEW_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &value[..end])
 }
 
 fn path_text(path: &Path, purpose: &str) -> Result<String, MakeExprError> {
@@ -906,64 +1392,9 @@ fn reference_end(raw: &str, start: usize) -> Result<usize, MakeExprError> {
         cursor += 1;
     }
     Err(MakeExprError::InvalidSyntax {
-        expression: raw[start..].to_owned(),
+        expression: bounded_preview(&raw[start..]),
         detail: "unclosed `$(...)` reference".to_owned(),
     })
-}
-
-fn function_arguments<'a>(
-    function: &str,
-    raw: &'a str,
-    expected: usize,
-) -> Result<Vec<&'a str>, MakeExprError> {
-    let args = split_top_level(raw, ',')?;
-    if args.len() != expected {
-        return Err(MakeExprError::InvalidSyntax {
-            expression: format!("$({function} {raw})"),
-            detail: format!(
-                "function `{function}` expects {expected} argument(s), got {}",
-                args.len()
-            ),
-        });
-    }
-    Ok(args)
-}
-
-fn function_arguments_between<'a>(
-    function: &str,
-    raw: &'a str,
-    minimum: usize,
-    maximum: usize,
-) -> Result<Vec<&'a str>, MakeExprError> {
-    let args = split_top_level(raw, ',')?;
-    if args.len() < minimum || args.len() > maximum {
-        return Err(MakeExprError::InvalidSyntax {
-            expression: format!("$({function} {raw})"),
-            detail: format!(
-                "function `{function}` expects {minimum}..={maximum} argument(s), got {}",
-                args.len()
-            ),
-        });
-    }
-    Ok(args)
-}
-
-fn function_arguments_at_least<'a>(
-    function: &str,
-    raw: &'a str,
-    minimum: usize,
-) -> Result<Vec<&'a str>, MakeExprError> {
-    let args = split_top_level(raw, ',')?;
-    if args.len() < minimum {
-        return Err(MakeExprError::InvalidSyntax {
-            expression: format!("$({function} {raw})"),
-            detail: format!(
-                "function `{function}` expects at least {minimum} argument(s), got {}",
-                args.len()
-            ),
-        });
-    }
-    Ok(args)
 }
 
 fn parse_word_index(function: &str, value: &str, raw_args: &str) -> Result<usize, MakeExprError> {
@@ -973,7 +1404,7 @@ fn parse_word_index(function: &str, value: &str, raw_args: &str) -> Result<usize
         .ok()
         .filter(|index| *index > 0)
         .ok_or_else(|| MakeExprError::InvalidSyntax {
-            expression: format!("$({function} {raw_args})"),
+            expression: bounded_preview(raw_args),
             detail: format!("function `{function}` requires a positive word index, got `{value}`"),
         })?;
     Ok(index)
@@ -995,6 +1426,12 @@ fn split_top_level(raw: &str, separator: char) -> Result<Vec<&str>, MakeExprErro
         if bytes[cursor] == b')' && depth > 0 {
             depth -= 1;
         } else if bytes[cursor] == separator && depth == 0 {
+            if out.len() >= MAX_LIST_ITEMS {
+                return Err(MakeExprError::ResourceLimit {
+                    resource: "list items",
+                    limit: MAX_LIST_ITEMS,
+                });
+            }
             out.push(&raw[start..cursor]);
             start = cursor + 1;
         }
@@ -1002,8 +1439,14 @@ fn split_top_level(raw: &str, separator: char) -> Result<Vec<&str>, MakeExprErro
     }
     if depth != 0 {
         return Err(MakeExprError::InvalidSyntax {
-            expression: raw.to_owned(),
+            expression: bounded_preview(raw),
             detail: "unclosed nested reference in function arguments".to_owned(),
+        });
+    }
+    if out.len() >= MAX_LIST_ITEMS {
+        return Err(MakeExprError::ResourceLimit {
+            resource: "list items",
+            limit: MAX_LIST_ITEMS,
         });
     }
     out.push(&raw[start..]);
@@ -1019,7 +1462,7 @@ fn split_substitution_reference(body: &str) -> Result<SubstitutionReference<'_>,
     let remainder = &body[colon + 1..];
     let Some(equal) = top_level_byte(remainder, b'=') else {
         return Err(MakeExprError::InvalidSyntax {
-            expression: format!("$({body})"),
+            expression: bounded_preview(body),
             detail: "substitution reference has `:` but no `=`".to_owned(),
         });
     };
@@ -1069,14 +1512,6 @@ fn top_level_whitespace(raw: &str) -> Option<usize> {
     None
 }
 
-fn make_words(raw: &str) -> Vec<String> {
-    raw.split_whitespace().map(str::to_owned).collect()
-}
-
-fn join_words(words: &[String]) -> String {
-    words.join(" ")
-}
-
 fn pattern_stem<'a>(pattern: &str, word: &'a str) -> Option<&'a str> {
     let Some(percent) = pattern.find('%') else {
         return (pattern == word).then_some("");
@@ -1090,50 +1525,6 @@ fn pattern_stem<'a>(pattern: &str, word: &'a str) -> Option<&'a str> {
         return None;
     }
     Some(&word[prefix.len()..word.len() - suffix.len()])
-}
-
-fn pattern_replacement(replacement: &str, stem: &str) -> String {
-    replacement.find('%').map_or_else(
-        || replacement.to_owned(),
-        |percent| {
-            format!(
-                "{}{}{}",
-                &replacement[..percent],
-                stem,
-                &replacement[percent + 1..]
-            )
-        },
-    )
-}
-
-fn filter_words(patterns: &[String], words: &[String], keep_matches: bool) -> Vec<String> {
-    words
-        .iter()
-        .filter(|word| {
-            let matched = patterns
-                .iter()
-                .any(|pattern| pattern_stem(pattern, word).is_some());
-            matched == keep_matches
-        })
-        .cloned()
-        .collect()
-}
-
-fn patsubst(pattern: &str, replacement: &str, words: &[String]) -> Vec<String> {
-    words
-        .iter()
-        .map(|word| {
-            pattern_stem(pattern, word).map_or_else(
-                || word.clone(),
-                |stem| pattern_replacement(replacement, stem),
-            )
-        })
-        .collect()
-}
-
-fn suffix_substitute(word: &str, from: &str, to: &str) -> String {
-    word.strip_suffix(from)
-        .map_or_else(|| word.to_owned(), |stem| format!("{stem}{to}"))
 }
 
 fn notdir(word: &str) -> Option<String> {
@@ -1196,7 +1587,7 @@ fn reject_unsupported_references(raw: &str) -> Result<(), MakeExprError> {
             Some(b'{') => {
                 let Some(relative_end) = raw[cursor + 2..].find('}') else {
                     return Err(MakeExprError::UnsupportedReference {
-                        reference: raw[cursor..].to_owned(),
+                        reference: bounded_preview(&raw[cursor..]),
                     });
                 };
                 cursor += relative_end + 3;
@@ -1218,514 +1609,5 @@ fn reject_unsupported_references(raw: &str) -> Result<(), MakeExprError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{evaluate_make_expr, evaluate_make_list, MakeExprContext, MakeExprError};
-    use crate::dirs::DirVars;
-    use crate::make_vars::collect_vars;
-    use crate::parser::join_continuations;
-    use aros_common::read_source;
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-
-    struct TempTree(PathBuf);
-
-    impl TempTree {
-        fn new() -> Self {
-            let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir()
-                .join(format!("aros-make-expr-{}-{serial}", std::process::id()));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempTree {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn root() -> PathBuf {
-        crate::testing::root()
-    }
-
-    fn evaluate(src: &str, expression: &str) -> Result<String, MakeExprError> {
-        let scope = collect_vars(src);
-        let dirs = DirVars::load(Path::new("/path/which/does/not/exist"));
-        let context = MakeExprContext::new(
-            &scope,
-            &dirs,
-            usize::MAX,
-            Path::new("."),
-            Path::new("fixture"),
-        );
-        evaluate_make_expr(expression, &context)
-    }
-
-    #[test]
-    fn nested_prefix_and_suffix_match_compiler_startup() {
-        let value = evaluate(
-            "NIXFILES := startup crt\n",
-            "$(addprefix $(GENDIR)/$(CURDIR)/nix/,$(addsuffix .o,$(NIXFILES)))",
-        )
-        .unwrap();
-        assert_eq!(
-            value,
-            "${AROS_BUILD_DIR}/gen/fixture/nix/startup.o \
-             ${AROS_BUILD_DIR}/gen/fixture/nix/crt.o"
-        );
-    }
-
-    #[test]
-    fn filters_and_both_substitution_reference_forms_are_aligned() {
-        let value = evaluate(
-            "BASE := source/a.c source/b.cpp source/c.c\nSKIP := source/c\n",
-            "$(filter-out $(SKIP),$(BASE:%.c=%)) $(BASE:.cpp=.cc)",
-        )
-        .unwrap();
-        assert_eq!(
-            value,
-            "source/a source/b.cpp source/a.c source/b.cc source/c.c"
-        );
-    }
-
-    #[test]
-    fn subst_handles_archive_version_spellings() {
-        assert_eq!(
-            evaluate(
-                "VERSION := 2.14.3\n",
-                "$(subst .,,$(VERSION)) $(subst .,_,$(VERSION))",
-            ),
-            Ok("2143 2_14_3".to_owned())
-        );
-    }
-
-    #[test]
-    fn patsubst_filter_and_path_functions_cover_real_shapes() {
-        let value = evaluate(
-            "FILES := src/a.c src/b.cpp include/c.h archive.tar.gz plain\n",
-            "$(patsubst src/%,gen/%,$(filter %.c %.cpp,$(FILES)))",
-        )
-        .unwrap();
-        assert_eq!(value, "gen/a.c gen/b.cpp");
-        assert_eq!(
-            evaluate("", "$(notdir a/b.c plain tail/)"),
-            Ok("b.c plain".to_owned())
-        );
-        assert_eq!(
-            evaluate("", "$(dir a/b.c plain /root.c)"),
-            Ok("a/ ./ /".to_owned())
-        );
-        assert_eq!(
-            evaluate("", "$(basename a/b.c plain archive.tar.gz)"),
-            Ok("a/b plain archive.tar".to_owned())
-        );
-        assert_eq!(
-            evaluate("", "$(suffix a/b.c plain archive.tar.gz)"),
-            Ok(".c .gz".to_owned())
-        );
-    }
-
-    #[test]
-    fn sort_and_strip_use_make_word_semantics() {
-        assert_eq!(
-            evaluate("LIST := z a z b\n", "$(sort $(strip   $(LIST)   c  ))"),
-            Ok("a b c z".to_owned())
-        );
-    }
-
-    #[test]
-    fn computed_variable_names_and_source_order_are_supported() {
-        let joined = "ID := 2\nFILES_2 := old.c\nuse\nFILES_2 := new.c\n";
-        let scope = collect_vars(joined);
-        let dirs = DirVars::load(Path::new("/path/which/does/not/exist"));
-        let context = MakeExprContext::new(&scope, &dirs, 2, Path::new("."), Path::new("fixture"));
-        assert_eq!(
-            evaluate_make_list("$($(addprefix FILES_,$(ID)))", &context).unwrap(),
-            vec!["old.c"]
-        );
-    }
-
-    #[test]
-    fn simple_and_recursive_assignments_observe_different_times() {
-        let source = "BASE = old\n\
-                      RECURSIVE_BASE = $(BASE)\n\
-                      SIMPLE := $(RECURSIVE_BASE)\n\
-                      RECURSIVE = $(BASE)\n\
-                      BASE = new\n";
-        assert_eq!(evaluate(source, "$(SIMPLE)"), Ok("old".to_owned()));
-        assert_eq!(evaluate(source, "$(RECURSIVE)"), Ok("new".to_owned()));
-
-        let appended = "BASE = old\n\
-                        SIMPLE := first\n\
-                        SIMPLE += $(BASE)\n\
-                        RECURSIVE = first\n\
-                        RECURSIVE += $(BASE)\n\
-                        BASE = new\n";
-        assert_eq!(
-            evaluate(appended, "$(SIMPLE) $(RECURSIVE)"),
-            Ok("first old first new".to_owned())
-        );
-    }
-
-    #[test]
-    fn collector_lookup_values_fall_back_to_global_directory_variables() {
-        let source = root();
-        let scope = collect_vars("");
-        let dirs = DirVars::load(&source);
-        let lookup = |name: &str| {
-            (name == "LOCAL_PORT_DIR").then(|| "$(PORTSDIR)/Example/source".to_owned())
-        };
-        let context = MakeExprContext::new(
-            &scope,
-            &dirs,
-            usize::MAX,
-            &source,
-            Path::new("external/example"),
-        )
-        .with_lookup(&lookup);
-
-        assert_eq!(
-            evaluate_make_expr("$(LOCAL_PORT_DIR)/file.c", &context).unwrap(),
-            "${AROS_PORTS_DIR}/Example/source/file.c"
-        );
-        assert_eq!(
-            evaluate_make_expr("$(TOP)/generated", &context).unwrap(),
-            "${AROS_BUILD_DIR}/generated"
-        );
-    }
-
-    #[test]
-    fn a_simple_local_directory_does_not_reshadow_its_global_base() {
-        let source = root();
-        let scope = collect_vars(
-            "TARGETDIR := $(AROS_TESTS)/Library\n\
-             CUNITEXEDIR := $(AROS_TESTS)/cunit/genmodule/library\n",
-        );
-        let dirs = DirVars::load(&source);
-        let context = MakeExprContext::new(
-            &scope,
-            &dirs,
-            usize::MAX,
-            &source,
-            Path::new("developer/debug/test/library"),
-        );
-
-        assert_eq!(
-            evaluate_make_expr("$(TARGETDIR)", &context).unwrap(),
-            "${AROS_BUILD_DIR}/SYS/Developer/Debug/Tests/Library"
-        );
-        assert_eq!(
-            evaluate_make_expr("$(CUNITEXEDIR)", &context).unwrap(),
-            "${AROS_BUILD_DIR}/SYS/Developer/Debug/Tests/cunit/genmodule/library"
-        );
-    }
-
-    #[test]
-    fn wildcard_is_sorted_and_call_wildcard_keeps_only_regular_files() {
-        let tree = TempTree::new();
-        let rel = Path::new("locale");
-        fs::create_dir_all(tree.0.join(rel).join("directory.po")).unwrap();
-        fs::write(tree.0.join(rel).join("z.po"), "").unwrap();
-        fs::write(tree.0.join(rel).join("a.po"), "").unwrap();
-        let scope = collect_vars("");
-        let dirs = DirVars::load(Path::new("/path/which/does/not/exist"));
-        let context = MakeExprContext::new(&scope, &dirs, usize::MAX, &tree.0, rel);
-
-        let rendered_source = evaluate_make_expr("$(SRCDIR)/$(CURDIR)/a.po", &context).unwrap();
-        assert_eq!(rendered_source, "${AROS_SOURCE_DIR}/locale/a.po");
-        assert!(!rendered_source.contains(&tree.0.display().to_string()));
-
-        assert_eq!(
-            evaluate_make_list("$(wildcard *.po)", &context).unwrap(),
-            vec!["a.po", "directory.po", "z.po"]
-        );
-        assert_eq!(
-            evaluate_make_list("$(call WILDCARD,*.po)", &context).unwrap(),
-            vec!["a.po", "z.po"]
-        );
-        let source_matches =
-            evaluate_make_list("$(call WILDCARD,$(SRCDIR)/$(CURDIR)/*.po)", &context).unwrap();
-        assert_eq!(
-            source_matches,
-            vec![
-                "${AROS_SOURCE_DIR}/locale/a.po",
-                "${AROS_SOURCE_DIR}/locale/z.po"
-            ]
-        );
-        assert!(!source_matches
-            .join(" ")
-            .contains(&tree.0.display().to_string()));
-        assert_eq!(
-            evaluate_make_list(
-                "$(basename $(notdir $(call WILDCARD,$(SRCDIR)/$(CURDIR)/*.po)))",
-                &context,
-            )
-            .unwrap(),
-            vec!["a", "z"]
-        );
-    }
-
-    #[test]
-    fn missing_cycles_and_unsupported_syntax_are_never_empty_successes() {
-        let missing = evaluate("", "$(DOES_NOT_EXIST)").unwrap_err();
-        assert!(matches!(
-            missing,
-            MakeExprError::UnresolvedVariables { names, .. }
-                if names == vec!["DOES_NOT_EXIST"]
-        ));
-
-        let cycle = evaluate("A := $(B)\nB := $(A)\n", "$(A)").unwrap_err();
-        assert!(matches!(cycle, MakeExprError::VariableCycle { .. }));
-
-        let unsupported = evaluate("", "$(eval SOMETHING := x)").unwrap_err();
-        assert!(matches!(
-            unsupported,
-            MakeExprError::UnsupportedFunction { ref name } if name == "eval"
-        ));
-        assert!(unsupported
-            .to_string()
-            .contains("transpiler must be updated"));
-        assert!(matches!(
-            evaluate("", "$(call SOMETHING,x)"),
-            Err(MakeExprError::UnresolvedVariables { names, .. })
-                if names == vec!["SOMETHING"]
-        ));
-        assert!(matches!(
-            evaluate("", "$(notdir $@)"),
-            Err(MakeExprError::UnsupportedReference { reference }) if reference == "$@"
-        ));
-        assert!(matches!(
-            evaluate("", "$(BROKEN"),
-            Err(MakeExprError::InvalidSyntax { .. })
-        ));
-        assert_eq!(evaluate("A := foo\n", "${A} $$x"), Ok("foo $x".to_owned()));
-    }
-
-    #[test]
-    fn conditional_variable_guard_wins_over_all_value_lookups() {
-        let conditional_scope =
-            collect_vars("ifeq ($(ARCH),pc)\nFILES := pc.c\nelse\nFILES := other.c\nendif\n");
-        let dirs = DirVars::load(Path::new("/path/which/does/not/exist"));
-        let conditional_context = MakeExprContext::new(
-            &conditional_scope,
-            &dirs,
-            usize::MAX,
-            Path::new("."),
-            Path::new("fixture"),
-        );
-        assert!(matches!(
-            evaluate_make_expr("$(FILES)", &conditional_context),
-            Err(MakeExprError::UnsafeVariable { name, detail, .. })
-                if name == "FILES" && detail.contains("unevaluated Make conditional")
-        ));
-
-        let scope = collect_vars("FILES := last-branch.c\n");
-        let lookup = |name: &str| (name == "FILES").then(|| "collector.c".to_owned());
-        let guard = |name: &str| {
-            (name == "FILES").then(|| "assigned in both sides of an undecidable ifeq".to_owned())
-        };
-        let context = MakeExprContext::new(
-            &scope,
-            &dirs,
-            usize::MAX,
-            Path::new("."),
-            Path::new("fixture"),
-        )
-        .with_lookup(&lookup)
-        .with_guard(&guard);
-
-        assert!(matches!(
-            evaluate_make_expr("$(FILES)", &context),
-            Err(MakeExprError::UnsafeVariable { name, detail, .. })
-                if name == "FILES" && detail.contains("undecidable ifeq")
-        ));
-    }
-
-    #[test]
-    fn deferred_cmake_paths_cannot_silently_become_empty_wildcards() {
-        assert!(matches!(
-            evaluate("FILES := $(wildcard $(GENDIR)/*.c)\n", "$(FILES)"),
-            Err(MakeExprError::DeferredWildcard { pattern })
-                if pattern == "${AROS_BUILD_DIR}/gen/*.c"
-        ));
-    }
-
-    #[test]
-    fn fetched_port_wildcards_use_physical_files_but_keep_logical_paths() {
-        let tree = TempTree::new();
-        let components = tree.0.join("acpica/source/components/executer");
-        fs::create_dir_all(&components).unwrap();
-        fs::write(components.join("second.c"), "").unwrap();
-        fs::write(components.join("first.c"), "").unwrap();
-
-        let scope = collect_vars("");
-        let mut dirs = DirVars::load(Path::new("/path/which/does/not/exist"));
-        dirs.set_materialized_path("AROS_PORTS_DIR", tree.0.clone());
-        let context = MakeExprContext::new(
-            &scope,
-            &dirs,
-            usize::MAX,
-            Path::new("."),
-            Path::new("fixture"),
-        );
-        assert_eq!(
-            evaluate_make_list(
-                "$(wildcard ${AROS_PORTS_DIR}/acpica/source/components/executer/*.c)",
-                &context
-            )
-            .unwrap(),
-            vec![
-                "${AROS_PORTS_DIR}/acpica/source/components/executer/first.c",
-                "${AROS_PORTS_DIR}/acpica/source/components/executer/second.c",
-            ]
-        );
-
-        assert!(matches!(
-            evaluate_make_expr(
-                "$(wildcard ${AROS_PORTS_DIR}/missing/components/*.c)",
-                &context
-            ),
-            Err(MakeExprError::DeferredWildcard { pattern })
-                if pattern == "${AROS_PORTS_DIR}/missing/components/*.c"
-        ));
-    }
-
-    #[test]
-    fn real_language_module_expression_matches_the_source_tree() {
-        let source = root();
-        let relative = Path::new("workbench/locale/languages");
-        let text = read_source(&source.join(relative).join("mmakefile.src")).unwrap();
-        let joined = join_continuations(&text);
-        let scope = collect_vars(&joined);
-        let dirs = DirVars::load(&source);
-        let context = MakeExprContext::new(&scope, &dirs, usize::MAX, &source, relative);
-
-        let languages = evaluate_make_list("$(LANGUAGES)", &context).unwrap();
-        assert_eq!(languages.len(), 30);
-        assert_eq!(languages.first().map(String::as_str), Some("albanian"));
-        assert!(languages.iter().any(|name| name == "portuguese-brazil"));
-
-        let modules = evaluate_make_list("$(MODULES)", &context).unwrap();
-        assert_eq!(modules.len(), languages.len());
-        assert_eq!(
-            modules.first().map(String::as_str),
-            Some("${AROS_BUILD_DIR}/SYS/Locale/Languages/albanian.language")
-        );
-    }
-
-    #[test]
-    fn foreach_binds_its_loop_variable_and_shadows_a_global() {
-        // rom/dos:42 verbatim: without this, dos.library has no ELF loader.
-        assert_eq!(
-            evaluate("", "$(foreach img, aos elf, internalloadseg_$(img))").unwrap(),
-            "internalloadseg_aos internalloadseg_elf"
-        );
-        // The binding is temporary: a global of the same name is shadowed
-        // inside the body and intact outside it.
-        assert_eq!(
-            evaluate("f := global\n", "$(foreach f,one two,classes/$(f)) $(f)").unwrap(),
-            "classes/one classes/two global"
-        );
-        // Nesting, and an empty list yielding nothing.
-        assert_eq!(
-            evaluate("", "$(foreach a,x y,$(foreach b,1 2,$(a)$(b)))").unwrap(),
-            "x1 x2 y1 y2"
-        );
-        assert_eq!(evaluate("", "[$(foreach a,,body)]").unwrap(), "[]");
-    }
-
-    #[test]
-    fn remaining_aros_word_and_conditional_functions_match_make_semantics() {
-        let source = "LIST := alpha beta gamma\n\
-                      OTHER := 1 2\n\
-                      mapper = $(addprefix $(1)-,$(2))\n";
-        assert_eq!(
-            evaluate(
-                source,
-                "$(findstring et,$(LIST))|$(word 2,$(LIST))|\
-                 $(wordlist 2,9,$(LIST))|$(words $(LIST))|\
-                 $(firstword $(LIST))|$(lastword $(LIST))|\
-                 $(join $(LIST),$(OTHER))",
-            )
-            .unwrap(),
-            "et|beta|beta gamma|3|alpha|gamma|alpha1 beta2 gamma"
-        );
-        assert_eq!(
-            evaluate(source, "$(if ,bad,good) $(or ,first,second) $(and yes,ok)").unwrap(),
-            "good first ok"
-        );
-        assert_eq!(
-            evaluate(source, "$(call mapper,item,a b)").unwrap(),
-            "item-a item-b"
-        );
-        assert_eq!(
-            evaluate("RAW = literal\n", "$(value RAW)"),
-            Ok("literal".to_owned())
-        );
-    }
-
-    #[test]
-    fn pure_function_corpus_is_differentially_checked_against_gnu_make() {
-        let executable = ["gmake", "make"].into_iter().find(|candidate| {
-            Command::new(candidate)
-                .arg("--version")
-                .output()
-                .is_ok_and(|output| {
-                    output.status.success()
-                        && String::from_utf8_lossy(&output.stdout).contains("GNU Make")
-                })
-        });
-        let Some(executable) = executable else {
-            return;
-        };
-
-        let source = "LIST := gamma alpha beta alpha\n\
-                      OTHER := 1 2\n\
-                      mapper = $(addsuffix -$(1),$(2))\n";
-        let expressions = [
-            "$(sort $(LIST))",
-            "$(patsubst %a,X%,$(LIST))",
-            "$(filter %a,$(LIST))",
-            "$(filter-out %a,$(LIST))",
-            "$(wordlist 2,7,$(LIST))",
-            "$(join $(LIST),$(OTHER))",
-            "$(if $(findstring beta,$(LIST)),yes,no)",
-            "$(or ,,$(firstword $(LIST)))",
-            "$(and one,two,$(lastword $(LIST)))",
-            "$(call mapper,tag,a b)",
-            "$(foreach item,a b,prefix-$(item))",
-        ];
-        let tree = TempTree::new();
-        for (index, expression) in expressions.iter().enumerate() {
-            let expected = evaluate(source, expression).unwrap();
-            let makefile = tree.0.join(format!("oracle-{index}.mk"));
-            fs::write(
-                &makefile,
-                format!("{source}RESULT := {expression}\nall:\n\t@printf '%s\\n' '$(RESULT)'\n"),
-            )
-            .unwrap();
-            let output = Command::new(executable)
-                .arg("--no-print-directory")
-                .arg("-f")
-                .arg(&makefile)
-                .current_dir(&tree.0)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "GNU Make oracle failed for {expression}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(
-                expected,
-                String::from_utf8_lossy(&output.stdout).trim_end(),
-                "expression: {expression}"
-            );
-        }
-    }
-}
+#[path = "make_expr_tests.rs"]
+mod tests;

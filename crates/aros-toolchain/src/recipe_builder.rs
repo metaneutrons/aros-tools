@@ -221,7 +221,14 @@ fn git_text(
 }
 
 fn producer_relative(root: &Path, path: &Path, label: &str) -> Result<String, ContractError> {
-    let path = inspection::absolute(path)?;
+    // The public contract names these paths relative to the selected producer,
+    // not to the caller's working directory. Absolute callers remain supported.
+    let selected = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        root.join(path)
+    };
+    let path = inspection::absolute(&selected)?;
     let parent = path.parent().ok_or_else(|| {
         ContractError::preflight(format!("selected {label} has no parent directory"))
     })?;
@@ -290,13 +297,34 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), ContractError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use aros_common::{run_status, sha256_bytes};
 
-    use super::{build, RecipeBuildRequest};
+    use super::{build, producer_relative, RecipeBuildRequest};
     use crate::recipe::Recipe;
+
+    #[test]
+    fn producer_paths_resolve_against_selected_root_not_invocation_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        fs::create_dir(root.join("toolchains")).unwrap();
+        for selected in [
+            PathBuf::from("toolchains/input.json"),
+            root.join("toolchains/input.json"),
+        ] {
+            assert_eq!(
+                producer_relative(&root, &selected, "source lock").unwrap(),
+                "toolchains/input.json"
+            );
+        }
+        assert!(producer_relative(&root, Path::new("../escape.json"), "source lock").is_err());
+        assert!(producer_relative(&root, Path::new("/tmp/escape.json"), "source lock").is_err());
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("redirect")).unwrap();
+        assert!(producer_relative(&root, Path::new("redirect/input.json"), "source lock").is_err());
+    }
 
     fn git(root: &Path, arguments: &[&str]) {
         let mut command = Command::new("git");

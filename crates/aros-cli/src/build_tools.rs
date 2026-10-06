@@ -19,6 +19,7 @@ const REQUIRED_BUILD_TOOLS: &[&str] = &[
     "aros-collect",
     "aros-ahi-runner",
     "aros-fetch",
+    "aros-verify",
 ];
 const BUILD_TOOL_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 

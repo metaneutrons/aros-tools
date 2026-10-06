@@ -74,6 +74,8 @@ pub struct Section {
     pub name: String,
     pub kind: u32,
     pub flags: u64,
+    /// Virtual address assigned by the linker (`sh_addr`).
+    pub address: u64,
     pub offset: u64,
     pub size: u64,
     pub align: u64,
@@ -370,6 +372,7 @@ struct RawSection {
     name: String,
     kind: u32,
     flags: u64,
+    address: u64,
     offset: u64,
     size: u64,
     align: u64,
@@ -384,6 +387,7 @@ impl From<RawSection> for Section {
             name: raw.name,
             kind: raw.kind,
             flags: raw.flags,
+            address: raw.address,
             offset: raw.offset,
             size: raw.size,
             align: raw.align,
@@ -409,11 +413,13 @@ fn raw_section(bytes: &[u8], shoff: usize, index: usize, class: Class) -> Result
     // cannot overflow even when the file supplies an extreme table offset.
     let bytes = bytes.get(at..end).context("truncated section header")?;
     let at = 0;
-    let (name_offset, kind, flags, offset, size, link, table_entsize, align) = match class {
+    let (name_offset, kind, flags, address, offset, size, link, table_entsize, align) = match class
+    {
         Class::Elf64 => (
             u32_at(bytes, at)?,
             u32_at(bytes, at + 4)?,
             u64_at(bytes, at + 8)?,
+            u64_at(bytes, at + 0x10)?,
             u64_at(bytes, at + 0x18)?,
             u64_at(bytes, at + 0x20)?,
             u32_at(bytes, at + 0x28)?,
@@ -424,6 +430,7 @@ fn raw_section(bytes: &[u8], shoff: usize, index: usize, class: Class) -> Result
             u32_at(bytes, at)?,
             u32_at(bytes, at + 4)?,
             u64::from(u32_at(bytes, at + 8)?),
+            u64::from(u32_at(bytes, at + 0xc)?),
             u64::from(u32_at(bytes, at + 0x10)?),
             u64::from(u32_at(bytes, at + 0x14)?),
             u32_at(bytes, at + 0x18)?,
@@ -437,6 +444,7 @@ fn raw_section(bytes: &[u8], shoff: usize, index: usize, class: Class) -> Result
         name: String::new(),
         kind,
         flags,
+        address,
         offset,
         size,
         align,

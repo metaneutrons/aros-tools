@@ -9,11 +9,6 @@ if(NOT DEFINED CMAKE_SYSTEM_NAME)
     set(CMAKE_SYSTEM_NAME Generic)
 endif()
 
-project(AROS-NX
-    VERSION 0.1.0
-    LANGUAGES C CXX ASM
-)
-
 # Where this engine's own modules are.
 #
 # Every module addresses its siblings through this rather than through the
@@ -58,12 +53,33 @@ if(NOT IS_DIRECTORY "${AROS_SOURCE_DIR}")
         "AROS_SOURCE_DIR does not name a directory: ${AROS_SOURCE_DIR}")
 endif()
 
+# Source contracts must be checked before project() can invoke a compiler.
+# An absent contract preserves the established LLVM/GNU consumer paths.
+include("${AROS_CMAKE_ENGINE_DIR}/NativeBuildContract.cmake")
+if(AROS_NATIVE_BUILD_CONTRACT)
+    aros_validate_native_build_contract()
+    aros_lock_native_build_contract_identity()
+elseif(AROS_NATIVE_BUILD_CONTRACT_SHA256 OR
+       DEFINED AROS_NATIVE_BUILD_CONTRACT_LOCKED_SHA256)
+    message(FATAL_ERROR
+        "A native build contract digest or retained binding requires its contract; "
+        "use a separate build tree for a different source contract")
+endif()
+
+project(AROS-NX
+    VERSION 0.1.0
+    LANGUAGES C CXX ASM
+)
+if(AROS_NATIVE_BUILD_CONTRACT)
+    aros_validate_native_build_compiler_target()
+endif()
+
 
 # libc++ deliberately ships C-compatible wrapper headers such as math.h.
 # They must precede the target SDK's C headers for C++ compilations so the
 # wrapper can add the standard overloads and then reach AROS via include_next.
 # C compilations continue to see the SDK directly.
-if(AROS_CROSS_TOOLCHAIN_ROOT)
+if(AROS_CROSS_TOOLCHAIN_ROOT AND NOT AROS_TOOLCHAIN STREQUAL "gnu")
     # CMake otherwise suppresses this explicit directory because Clang also
     # reports it as implicit. The implicit search class comes after every -I
     # SDK directory, which is precisely the ordering we must override.
@@ -131,10 +147,12 @@ endif()
 # The reference configure pairs every x86_64 target with i386 for the few
 # bootstrap rules that explicitly build a 32-bit companion (for example the
 # GRUB EFI helper). Other target CPUs have no companion value.
-if(AROS_TARGET_CPU STREQUAL "x86_64")
-    set(AROS_TARGET_CPU32 "i386")
-else()
-    set(AROS_TARGET_CPU32 "")
+if(NOT DEFINED AROS_TARGET_CPU32)
+    if(AROS_TARGET_CPU STREQUAL "x86_64")
+        set(AROS_TARGET_CPU32 "i386")
+    else()
+        set(AROS_TARGET_CPU32 "")
+    endif()
 endif()
 
 # Values used by target-dependent MetaMake conditionals. Keep them as named
@@ -187,9 +205,16 @@ set(AROS_TARGET_RUST_VER "" CACHE STRING
 
 # MetaMake calls the compound machine/CPU selector AROS_TARGET_PLATFORM. Keep
 # that legacy spelling distinct from this build's machine-only platform value
-# so generated meta-target names expand unambiguously.
-set(AROS_TARGET_LEGACY_PLATFORM
-    "${AROS_TARGET_PLATFORM}-${AROS_TARGET_CPU}")
+# so generated meta-target names expand unambiguously. configure.in replaces
+# the machine by the variant on every platform but pc (esp32p4 smp is
+# smp-riscv); the transpiler's TargetContext::legacy_platform() matches this.
+if(NOT AROS_TARGET_VARIANT STREQUAL "" AND NOT AROS_TARGET_PLATFORM STREQUAL "pc")
+    set(AROS_TARGET_LEGACY_PLATFORM
+        "${AROS_TARGET_VARIANT}-${AROS_TARGET_CPU}")
+else()
+    set(AROS_TARGET_LEGACY_PLATFORM
+        "${AROS_TARGET_PLATFORM}-${AROS_TARGET_CPU}")
+endif()
 
 # 1. Compiler Cache Integration (sccache / ccache)
 include("${AROS_CMAKE_ENGINE_DIR}/CompilerCache.cmake")
@@ -252,13 +277,20 @@ if(NOT _aros_transpiler_executable)
 endif()
 
 message(STATUS "⚡ AROS-NX: Running Rust aros-transpiler on mmakefile tree...")
+aros_native_transpiler_arguments(_aros_native_transpiler_args)
 if(AROS_ENABLE_MMU)
     set(_aros_transpiler_use_mmu "1")
 else()
     set(_aros_transpiler_use_mmu "0")
 endif()
+set(_aros_inventory_prepare_args "")
+if(AROS_NATIVE_BUILD_CONTRACT)
+    list(APPEND _aros_inventory_prepare_args "--source-inventory-only")
+endif()
 execute_process(
     COMMAND "${TRANSPILER_BIN}"
+            ${_aros_inventory_prepare_args}
+            ${_aros_native_transpiler_args}
             "--source-dir" "${AROS_SOURCE_DIR}"
             "--output" "${GENERATED_TARGETS_CMAKE}"
             "--ports-dir" "${AROS_PORTS_DIR}"
@@ -278,20 +310,20 @@ execute_process(
     RESULT_VARIABLE TRANSPILER_RES
     ERROR_VARIABLE _aros_transpiler_error
 )
-if(NOT TRANSPILER_RES EQUAL 0 OR NOT EXISTS "${GENERATED_TARGETS_CMAKE}")
+set(_aros_source_inventory_manifest
+    "${CMAKE_BINARY_DIR}/generated_targets.source-inventory.cmake")
+if(NOT TRANSPILER_RES EQUAL 0 OR NOT EXISTS "${_aros_source_inventory_manifest}" OR
+   (NOT AROS_NATIVE_BUILD_CONTRACT AND NOT EXISTS "${GENERATED_TARGETS_CMAKE}"))
     message(FATAL_ERROR
-        "AROS-NX transpiler failed (${TRANSPILER_RES}) and did not produce "
-        "${GENERATED_TARGETS_CMAKE}.\n${_aros_transpiler_error}")
+        "AROS-NX source inventory preparation failed (${TRANSPILER_RES}): "
+        "${_aros_source_inventory_manifest}.\n${_aros_transpiler_error}")
 endif()
 
 # A Make wildcard below PORTSDIR cannot be turned into compilation units until
 # its archive has been unpacked. The same applies to exact transitive header
 # ownership when the public and private headers both live in fetched trees. The
-# first cold transpiler pass writes only the relevant owning fetch declarations
-# to a sidecar. Materialise those inventories, then replace the partial graph
-# with a second pass before it is ever included.
-set(_aros_source_inventory_manifest
-    "${CMAKE_BINARY_DIR}/generated_targets.source-inventory.cmake")
+# first pass writes only owning fetch declarations, never a partial build graph.
+# Materialise inventories, then require the full export before including a graph.
 include("${_aros_source_inventory_manifest}")
 if(AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
     math(EXPR _aros_source_inventory_last
@@ -309,8 +341,11 @@ if(AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
             PATCH_ORIGINS "${AROS_SOURCE_INVENTORY_FETCH_${_index}_PATCH_ORIGINS}"
             PATCHES "${AROS_SOURCE_INVENTORY_FETCH_${_index}_PATCHES}")
     endforeach()
+endif()
+if(AROS_NATIVE_BUILD_CONTRACT OR AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
     execute_process(
         COMMAND "${TRANSPILER_BIN}"
+                ${_aros_native_transpiler_args}
                 "--source-dir" "${AROS_SOURCE_DIR}"
                 "--output" "${GENERATED_TARGETS_CMAKE}"
                 "--ports-dir" "${AROS_PORTS_DIR}"
@@ -329,7 +364,7 @@ if(AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
                 "--target-rust-ver" "${AROS_TARGET_RUST_VER}"
         RESULT_VARIABLE TRANSPILER_RES
         ERROR_VARIABLE _aros_transpiler_error)
-    if(NOT TRANSPILER_RES EQUAL 0)
+    if(NOT TRANSPILER_RES EQUAL 0 OR NOT EXISTS "${GENERATED_TARGETS_CMAKE}")
         message(FATAL_ERROR
             "AROS-NX transpiler failed after fetching source inventories "
             "(${TRANSPILER_RES}).\n${_aros_transpiler_error}")
@@ -355,6 +390,7 @@ endif()
 # this run just wrote, so a record that drifts from the call is reported rather
 # than trusted.
 set(_aros_transpiler_record
+    ${_aros_native_transpiler_args}
     "--source-dir" "${AROS_SOURCE_DIR}"
     "--output" "${GENERATED_TARGETS_CMAKE}"
     "--ports-dir" "${AROS_PORTS_DIR}"
@@ -421,9 +457,9 @@ aros_attach_host_header_dependencies()
 # Host-tool headers that could not be generated.
 aros_report_host_header_gaps()
 
-# compiler/startup's raw object rules are outside the generated declarations.
-# Locked C++ partial links explicitly consume cxx-startup.o, so make the
-# historic aggregate publish that concrete sysroot object as well.
+# Legacy graphs use bootstrap objects outside the generated declarations.
+# Native graphs instead bind source-owned roles before creating consumers;
+# these legacy aggregate adapters do not add or guess native producers.
 if(AROS_CROSS_TOOLCHAIN_ROOT)
     aros_bind_cxx_startup_target("linklibs-startup")
 endif()
@@ -674,7 +710,7 @@ foreach(_pair IN LISTS _gen_header_deps)
     add_dependencies(${_tgt} gen-${_stamp})
     # The module's own sources are compiled into several targets (module, link
     # library, kernel object); each carries the same dependency.
-    foreach(_suffix linklib kobj)
+    foreach(_suffix linklib kobj objs)
         if(TARGET ${_tgt}-${_suffix})
             add_dependencies(${_tgt}-${_suffix} gen-${_stamp})
         endif()
@@ -843,6 +879,70 @@ aros_add_libdefs_audit_target()
 # remains nameable, while the implicit CMake `all` target contains only the
 # exact dependency closure rooted at AROS.
 aros_limit_all_to_metamake_root(AROS)
+
+if(AROS_NATIVE_BUILD_CONTRACT)
+    # Use canonical source module/archive identities, never a board-name map
+    # or an already linked Make payload. Each source group compiles afresh,
+    # then passes through its source-shaped collected/localized KOBJ link.
+    include("${AROS_CMAKE_ENGINE_DIR}/SourceNativeKobj.cmake")
+    set(_native_runtime_names "")
+    foreach(_resource IN LISTS AROS_NATIVE_BUILD_CORE_RESOURCES)
+        list(APPEND _native_runtime_names "${_resource}.resource")
+    endforeach()
+    foreach(_library IN LISTS AROS_NATIVE_BUILD_CORE_LIBRARIES)
+        list(APPEND _native_runtime_names "${_library}.library")
+    endforeach()
+    foreach(_device IN LISTS AROS_NATIVE_BUILD_CORE_DEVICES)
+        list(APPEND _native_runtime_names "${_device}.device")
+    endforeach()
+    aros_resolve_native_core_modules(_native_core_modules ${_native_runtime_names})
+    aros_resolve_native_core_linklibs(_native_core_linklibs
+        ${AROS_NATIVE_BUILD_CORE_LINK_LIBRARIES})
+    aros_path_is_executable("${AROS_VERIFY_BIN}" _native_verify_executable)
+    if(NOT _native_verify_executable)
+        message(FATAL_ERROR "Native core requires the owned aros-verify executable")
+    endif()
+    foreach(_module IN LISTS _native_core_modules)
+        aros_add_source_native_kobj(NAME "${_module}-native-kobj"
+            OWNER "${_module}"
+            OUTPUT "${AROS_BOOT_ARCH_DIR}/kobjs/${_module}.o"
+            LINKER "${AROS_LINKER_BIN}" COLLECTOR "${AROS_COLLECT_BIN}"
+            NM "${CMAKE_NM}" OBJCOPY "${CMAKE_OBJCOPY}"
+            LIBDIR "${AROS_DEVELOPER_LIB_DIR}")
+    endforeach()
+    aros_add_native_core(
+        NAME "native-core-link-${AROS_TARGET_PROFILE}"
+        OUTPUT "${AROS_BOOT_ARCH_DIR}/core.elf"
+        LINKER_SCRIPT "${AROS_SOURCE_DIR}/${AROS_NATIVE_BUILD_CORE_LINKER_SCRIPT}"
+        MODULES ${_native_core_modules}
+        LINKLIBS ${_native_core_linklibs}
+        BUILTINS "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}"
+        LINKER "${AROS_LINKER_BIN}")
+    set(_native_core_report "${AROS_BOOT_ARCH_DIR}/core.verified.json")
+    set(_native_contract_deps "${AROS_NATIVE_BUILD_CONTRACT_PATH}")
+    foreach(_input IN LISTS AROS_NATIVE_BUILD_INPUT_PATHS)
+        list(APPEND _native_contract_deps "${AROS_SOURCE_DIR}/${_input}")
+    endforeach()
+    file(RELATIVE_PATH _native_contract_relative "${AROS_SOURCE_DIR}"
+        "${AROS_NATIVE_BUILD_CONTRACT_PATH}")
+    add_custom_command(
+        OUTPUT "${_native_core_report}"
+        COMMAND "${CMAKE_COMMAND}" -E rm -f "${_native_core_report}"
+        COMMAND "${AROS_VERIFY_BIN}" native-core
+                --source "${AROS_SOURCE_DIR}" --profile "${AROS_TARGET_PROFILE}"
+                --contract "${_native_contract_relative}"
+                --contract-sha256 "${AROS_NATIVE_BUILD_CONTRACT_SHA256}"
+                --toolchain-prefix "${AROS_CROSS_TOOLCHAIN_ROOT}"
+                --elf "${AROS_BOOT_ARCH_DIR}/core.elf"
+                --report "${_native_core_report}"
+        DEPENDS "${AROS_BOOT_ARCH_DIR}/core.elf" "${AROS_VERIFY_BIN}"
+                ${_native_contract_deps}
+        COMMENT "Verify native core ABI and source-bound SRAM/XIP references"
+        VERBATIM)
+    add_custom_target("native-core-${AROS_TARGET_PROFILE}" DEPENDS "${_native_core_report}")
+    # A native core now requires the owned verifier, never the script named in
+    # the data contract. Complete package and locked bootloader gates remain.
+endif()
 
 get_property(_outside_default_root GLOBAL PROPERTY
     AROS_OUTSIDE_DEFAULT_ROOT_TARGETS)

@@ -16,6 +16,18 @@ pub enum Architecture {
 }
 
 impl Architecture {
+    /// CPU token used by AROS source directories and MetaMake selectors.
+    /// AROS names its 32-bit RISC-V CPU `riscv`; the public architecture
+    /// identifier retains the width as `riscv32`.
+    #[must_use]
+    pub fn source_cpu(&self) -> String {
+        if *self == Self::Riscv32 {
+            "riscv".to_owned()
+        } else {
+            self.to_string()
+        }
+    }
+
     #[must_use]
     pub const fn triple_prefix(&self) -> &'static str {
         match self {

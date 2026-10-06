@@ -59,6 +59,10 @@ pub struct ArosConfig {
 #[serde(deny_unknown_fields)]
 pub struct TargetProfile {
     pub name: String,
+    /// Explicit compiler/runtime profile shared by compatible board presets.
+    /// Absence preserves the historic same-named compiler selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain_profile: Option<String>,
     pub arch: Architecture,
     pub platform: String,
     pub bsp: String,
@@ -78,6 +82,22 @@ pub struct TargetProfile {
     /// separately validated CMake preset by the source orchestrator.
     #[serde(default)]
     pub transpiler: Option<TranspilerProfile>,
+    /// Source-owned public ABI decisions used while bootstrapping SDK headers.
+    /// Absence preserves the existing platform contracts; it never enables an
+    /// unknown platform implicitly.
+    #[serde(default)]
+    pub bootstrap_abi: Option<BootstrapAbiProfile>,
+    /// Explicit source-relative native build export; never discovered by name.
+    #[serde(default)]
+    pub native_build_contract: Option<String>,
+}
+
+/// Public ABI configuration, independent of runtime SMP enablement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapAbiProfile {
+    pub flavour: String,
+    pub platform_smp: bool,
 }
 
 /// Checkout-owned MetaMake selectors that cannot be inferred from CPU and
@@ -96,6 +116,12 @@ pub struct TranspilerProfile {
 }
 
 impl TargetProfile {
+    /// The compiler/runtime identity selected by this source target.
+    #[must_use]
+    pub fn toolchain_profile(&self) -> &str {
+        self.toolchain_profile.as_deref().unwrap_or(&self.name)
+    }
+
     /// The bootloader this profile builds for.
     ///
     /// `CMakePresets.json` set `AROS_TARGET_BOOTLOADER` to `grub2gfx` for the
@@ -188,6 +214,16 @@ fn validate_config(label: &str, config: &ArosConfig) -> Result<()> {
                 target.name
             )));
         }
+        if target
+            .toolchain_profile
+            .as_deref()
+            .is_some_and(|value| !safe_token(value) || matches!(value, "." | ".."))
+        {
+            return Err(invalid(format!(
+                "target {:?} has an invalid toolchain_profile token",
+                target.name
+            )));
+        }
         for (field, value) in [("platform", &target.platform), ("bsp", &target.bsp)] {
             if !safe_token(value) {
                 return Err(invalid(format!(
@@ -241,6 +277,26 @@ fn validate_config(label: &str, config: &ArosConfig) -> Result<()> {
                 )));
             }
         }
+        if let Some(abi) = &target.bootstrap_abi {
+            if !matches!(abi.flavour.as_str(), "native" | "standalone" | "emulation") {
+                return Err(invalid(format!(
+                    "target {:?} has an unsupported bootstrap_abi.flavour",
+                    target.name
+                )));
+            }
+        }
+        if let Some(path) = &target.native_build_contract {
+            if path.len() > 1024
+                || path.split('/').any(|part| {
+                    !safe_token(part) || matches!(part, "." | "..") || part.starts_with('-')
+                })
+            {
+                return Err(invalid(format!(
+                    "target {:?} has an unsafe native_build_contract path",
+                    target.name
+                )));
+            }
+        }
     }
     if let Some(host) = &config.host_compiler {
         if host.llvm_version.trim().is_empty() || host.base_url.trim().is_empty() {
@@ -278,6 +334,61 @@ fn safe_token(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compatible_board_targets_select_an_explicit_shared_compiler_profile() {
+        let base = "[[targets]]\nname='board-a'\narch='riscv32'\nplatform='custom'\nbsp='custom'\n";
+        let default = parse_config(base, "fixture").unwrap();
+        assert_eq!(default.targets[0].toolchain_profile(), "board-a");
+        let shared = parse_config(
+            &format!(
+                "{base}toolchain_profile='rv32-aros'\n{}toolchain_profile='rv32-aros'\n",
+                base.replace("board-a", "board-b")
+            ),
+            "fixture",
+        )
+        .unwrap();
+        assert_eq!(shared.targets.len(), 2);
+        assert!(shared
+            .targets
+            .iter()
+            .all(|profile| profile.toolchain_profile() == "rv32-aros"));
+        for value in ["", ".", "..", "../other", "https://remote", "two profiles"] {
+            assert!(
+                parse_config(&format!("{base}toolchain_profile='{value}'\n"), "fixture").is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_abi_is_explicit_complete_and_closed() {
+        let base = "[[targets]]\nname='arbitrary-board'\narch='riscv32'\nplatform='custom'\nbsp='custom'\n";
+        let config = parse_config(
+            &format!("{base}[targets.bootstrap_abi]\nflavour='standalone'\nplatform_smp=false\n"),
+            "fixture",
+        )
+        .unwrap();
+        assert_eq!(
+            config.targets[0].bootstrap_abi.as_ref().unwrap(),
+            &BootstrapAbiProfile {
+                flavour: "standalone".into(),
+                platform_smp: false,
+            }
+        );
+        for fields in [
+            "flavour='unknown'\nplatform_smp=false\n",
+            "flavour='standalone'\n",
+            "platform_smp=false\n",
+            "flavour='standalone'\nplatform_smp=false\ncommand='unsafe'\n",
+            "flavour='standalone'\nplatform_smp='OFF'\n",
+        ] {
+            assert!(parse_config(
+                &format!("{base}[targets.bootstrap_abi]\n{fields}"),
+                "fixture"
+            )
+            .is_err());
+        }
+    }
 
     #[test]
     fn accepts_legacy_toolchain_table_as_host_compiler() {

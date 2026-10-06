@@ -33,6 +33,7 @@ pub struct ToolRoles {
     collector: String,
     nm: Option<String>,
     objcopy: Option<String>,
+    objdump: Option<String>,
 }
 
 impl ToolRoles {
@@ -51,6 +52,7 @@ impl ToolRoles {
         .into_iter()
         .chain(self.nm.as_deref().map(|path| ("nm", path)))
         .chain(self.objcopy.as_deref().map(|path| ("objcopy", path)))
+        .chain(self.objdump.as_deref().map(|path| ("objdump", path)))
     }
 }
 
@@ -69,6 +71,7 @@ pub struct ToolchainToolLayout {
 enum ToolchainToolsSchemaVersion {
     V1,
     V2,
+    V3,
 }
 
 #[derive(Deserialize)]
@@ -85,6 +88,12 @@ enum ToolchainToolLayoutRecord {
         compiler: ArosCompilerIdentity,
         target_triple: String,
         tools: ToolRolesV2Record,
+    },
+    #[serde(rename = "aros-toolchain-tools-v3")]
+    V3 {
+        compiler: ArosCompilerIdentity,
+        target_triple: String,
+        tools: ToolRolesV3Record,
     },
 }
 
@@ -114,6 +123,22 @@ struct ToolRolesV2Record {
     collector: String,
     nm: String,
     objcopy: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolRolesV3Record {
+    c: String,
+    cxx: String,
+    assembler: String,
+    linker: String,
+    archive: String,
+    ranlib: String,
+    strip: String,
+    collector: String,
+    nm: String,
+    objcopy: String,
+    objdump: String,
 }
 
 impl ToolchainToolLayout {
@@ -149,6 +174,7 @@ impl ToolchainToolLayout {
                     collector: tools.collector,
                     nm: None,
                     objcopy: None,
+                    objdump: None,
                 },
             ),
             ToolchainToolLayoutRecord::V2 {
@@ -170,6 +196,29 @@ impl ToolchainToolLayout {
                     collector: tools.collector,
                     nm: Some(tools.nm),
                     objcopy: Some(tools.objcopy),
+                    objdump: None,
+                },
+            ),
+            ToolchainToolLayoutRecord::V3 {
+                compiler,
+                target_triple,
+                tools,
+            } => (
+                ToolchainToolsSchemaVersion::V3,
+                compiler,
+                target_triple,
+                ToolRoles {
+                    c: tools.c,
+                    cxx: tools.cxx,
+                    assembler: tools.assembler,
+                    linker: tools.linker,
+                    archive: tools.archive,
+                    ranlib: tools.ranlib,
+                    strip: tools.strip,
+                    collector: tools.collector,
+                    nm: Some(tools.nm),
+                    objcopy: Some(tools.objcopy),
+                    objdump: Some(tools.objdump),
                 },
             ),
         };
@@ -254,7 +303,16 @@ impl ToolchainToolLayout {
     /// Whether the contract declares the v2 `nm` and `objcopy` roles.
     #[must_use]
     pub const fn has_native_utilities(&self) -> bool {
-        matches!(self.schema_version, ToolchainToolsSchemaVersion::V2)
+        matches!(
+            self.schema_version,
+            ToolchainToolsSchemaVersion::V2 | ToolchainToolsSchemaVersion::V3
+        )
+    }
+
+    /// Whether the contract declares the verified v3 `objdump` role.
+    #[must_use]
+    pub const fn has_objdump_role(&self) -> bool {
+        self.tools.objdump.is_some()
     }
 
     /// SHA-256 digest of the exact parsed contract bytes.
@@ -278,7 +336,13 @@ impl ToolchainToolLayout {
                 root.display()
             )
         })?;
-        let mut resolved = Vec::with_capacity(if self.has_native_utilities() { 10 } else { 8 });
+        let mut resolved = Vec::with_capacity(if self.has_objdump_role() {
+            11
+        } else if self.has_native_utilities() {
+            10
+        } else {
+            8
+        });
         for (role, relative) in self.tools.entries() {
             let declared_path = root.join(relative);
             let target = declared_path.canonicalize().map_err(|error| {
@@ -467,6 +531,12 @@ mod tests {
         tools
     }
 
+    fn paths_v3(layout: &str, arch: &str) -> Value {
+        let mut tools = paths_v2(layout, arch);
+        tools["objdump"] = json!(format!("{arch}-aros-objdump"));
+        tools
+    }
+
     fn document(compiler: &ArosCompilerIdentity, triple: &str, tools: &Value) -> Vec<u8> {
         serde_json::to_vec(&json!({
             "schema": "aros-toolchain-tools-v1",
@@ -480,6 +550,16 @@ mod tests {
     fn document_v2(compiler: &ArosCompilerIdentity, triple: &str, tools: &Value) -> Vec<u8> {
         serde_json::to_vec(&json!({
             "schema": "aros-toolchain-tools-v2",
+            "compiler": compiler,
+            "target_triple": triple,
+            "tools": tools
+        }))
+        .unwrap()
+    }
+
+    fn document_v3(compiler: &ArosCompilerIdentity, triple: &str, tools: &Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "schema": "aros-toolchain-tools-v3",
             "compiler": compiler,
             "target_triple": triple,
             "tools": tools
@@ -567,6 +647,37 @@ mod tests {
             ]
             .map(|(role, path)| (role.to_owned(), path));
             assert_eq!(entries, expected);
+        }
+    }
+
+    #[test]
+    fn parses_v3_rv32_and_rv64_layouts_with_verified_objdump_role() {
+        for (abi, arch, triple) in [
+            ("ilp32d", "riscv32", "riscv-unknown-aros"),
+            ("lp64d", "riscv64", "riscv64-unknown-aros"),
+        ] {
+            let identity = compiler(abi);
+            let layout = ToolchainToolLayout::parse(&document_v3(
+                &identity,
+                triple,
+                &paths_v3("flat", arch),
+            ))
+            .unwrap();
+            layout.validate_binding(&identity, triple).unwrap();
+            assert!(layout.has_native_utilities());
+            assert!(layout.has_objdump_role());
+            let roles = layout
+                .tools()
+                .entries()
+                .map(|(role, path)| (role.to_owned(), path.to_owned()))
+                .collect::<Vec<_>>();
+            assert_eq!(roles.len(), 11);
+            assert_eq!(roles[8], ("nm".into(), format!("{arch}-aros-nm")));
+            assert_eq!(roles[9], ("objcopy".into(), format!("{arch}-aros-objcopy")));
+            assert_eq!(
+                roles[10],
+                ("objdump".into(), format!("{arch}-aros-objdump"))
+            );
         }
     }
 
@@ -663,6 +774,54 @@ mod tests {
         let mut value: Value = serde_json::from_slice(&valid).unwrap();
         value["tools"]["objdump"] = json!("riscv64-aros-objdump");
         assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn v3_requires_exact_safe_objdump_role_without_changing_v1_or_v2() {
+        let identity = compiler("lp64d");
+        let triple = "riscv64-unknown-aros";
+        let valid = document_v3(&identity, triple, &paths_v3("flat", "riscv64"));
+
+        let mut value: Value = serde_json::from_slice(&valid).unwrap();
+        value["tools"].as_object_mut().unwrap().remove("objdump");
+        assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+
+        value = serde_json::from_slice(&valid).unwrap();
+        value["tools"]["objdump"] = Value::Null;
+        assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+
+        value = serde_json::from_slice(&valid).unwrap();
+        value["tools"]["objdumpd"] = json!("riscv64-aros-objdumpd");
+        assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+
+        let valid_text = String::from_utf8(valid).unwrap();
+        let duplicate_objdump = valid_text.replacen(
+            "\"objdump\":\"riscv64-aros-objdump\"",
+            "\"objdump\":\"riscv64-aros-objdump\",\"objdump\":\"riscv64-aros-objdump\"",
+            1,
+        );
+        assert!(ToolchainToolLayout::parse(duplicate_objdump.as_bytes()).is_err());
+
+        for escaped in ["../objdump", "/usr/bin/objdump", "bin/-objdump"] {
+            let mut tools = paths_v3("flat", "riscv64");
+            tools["objdump"] = json!(escaped);
+            assert!(
+                ToolchainToolLayout::parse(&document_v3(&identity, triple, &tools)).is_err(),
+                "accepted escaped objdump path {escaped:?}"
+            );
+        }
+
+        let v1 = ToolchainToolLayout::parse(&document(&identity, triple, &paths("flat"))).unwrap();
+        let v2 = ToolchainToolLayout::parse(&document_v2(
+            &identity,
+            triple,
+            &paths_v2("flat", "riscv64"),
+        ))
+        .unwrap();
+        assert!(!v1.has_objdump_role());
+        assert!(!v2.has_objdump_role());
+        assert!(v1.tools().entries().all(|(role, _)| role != "objdump"));
+        assert!(v2.tools().entries().all(|(role, _)| role != "objdump"));
     }
 
     #[test]
@@ -904,6 +1063,43 @@ mod tests {
         fs::set_permissions(&non_executable, fs::Permissions::from_mode(0o644)).unwrap();
         symlink(&non_executable, &objcopy).unwrap();
         assert!(layout.resolve_tools(root.path()).is_err());
+    }
+
+    #[test]
+    fn resolves_v3_objdump_only_as_an_executable_inside_the_payload() {
+        let identity = compiler("lp64d");
+        let layout = ToolchainToolLayout::parse(&document_v3(
+            &identity,
+            "riscv64-unknown-aros",
+            &paths_v3("flat", "riscv64"),
+        ))
+        .unwrap();
+        assert!(layout.has_objdump_role());
+
+        let root = tempfile::tempdir().unwrap();
+        create_tools(root.path(), layout.tools());
+        let objdump = root.path().join("riscv64-aros-objdump");
+        fs::remove_file(&objdump).unwrap();
+        let in_root_target = root.path().join("libexec/objdump-driver");
+        create_executable(root.path(), "libexec/objdump-driver");
+        symlink(&in_root_target, &objdump).unwrap();
+
+        let resolved = layout.resolve_tools(root.path()).unwrap();
+        assert_eq!(resolved.len(), 11);
+        assert_eq!(resolved[10], ("objdump", objdump.clone()));
+
+        let outside = tempfile::tempdir().unwrap();
+        create_executable(outside.path(), "objdump-driver");
+        fs::remove_file(&objdump).unwrap();
+        symlink(outside.path().join("objdump-driver"), &objdump).unwrap();
+        let error = layout.resolve_tools(root.path()).unwrap_err();
+        assert!(error.contains("objdump executable resolves outside"));
+
+        fs::remove_file(&objdump).unwrap();
+        fs::write(&objdump, b"not executable").unwrap();
+        fs::set_permissions(&objdump, fs::Permissions::from_mode(0o644)).unwrap();
+        let error = layout.resolve_tools(root.path()).unwrap_err();
+        assert!(error.contains("objdump executable has no executable permission"));
     }
 
     #[test]

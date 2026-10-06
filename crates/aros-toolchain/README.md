@@ -29,6 +29,48 @@ source trees that require PyYAML. It never invokes `pip`, and proves every modul
 version and private import origin with the selected host Python 3 interpreter.
 It retains the interpreter plus lock-verified package filename/hash/version/size
 observations for a later receipt rather than treating host site packages as proof.
+The separate experimental `wheel_environment` boundary prepares a vendor
+Python venv from an explicit CPython executable/prefix pin and exact local
+wheel bytes. Rust owns snapshots, fixed argv, environment, deadlines and
+receipts; upstream venv/pip do the installation without downloads, activation
+helpers or ambient pip. The complete installed set, private import origins,
+local install-report URLs/hashes and input revalidation must agree. This
+local-byte lock is not distribution provenance, an ESP-IDF build receipt or
+release authority. `aros image prepare` uses it through an explicit, raw-byte-bound
+local media-input document; there is no ambient environment adoption.
+The separate `idf_bootloader` adapter copies only inventoried source-project
+files into a fresh private root and invokes fixed dependency-check/configure/
+bootloader phases. Explicit local tree/file locks bind IDF, vendor compiler,
+CMake, Ninja, Git, constraints and the prepared Python receipt. It disables
+component-manager fetches and submodule updates, verifies parent/nested CMake
+tool selection, retains command/output receipts and collects only the bootloader
+binary/ELF. PATH exposes only private aliases for the selected executable tools
+and a fixed POSIX utility baseline; vendor and wheel bin directories are not
+searched. Non-executable selected tools are refused before alias publication.
+Python launchers retain the fresh venv interpreter path.
+GCC, CMake and Ninja each require a pinned fetch receipt and an unchanged
+archive tree. Their archive names and checksums must match the recommended
+host entries in the locked IDF `tools/tools.json`; executable/prefix selections
+cannot escape those trees. The build receipt retains all three archive bindings.
+The IDF input requires an exact archive/ordered-patch fetch receipt, pinned in
+the local lock and matched to the inventoried source patch. Revalidation binds
+the complete prepared tree, including fetch metadata. IDF executes a fresh
+no-follow snapshot copy, not that prepared input: Git's `describe --dirty`
+refreshes its index despite disabled optional locks. Only the owned copy's
+regular `.git/index` may change bytes/size; names, kinds, modes and every other
+file remain bound. Both complete tree and index digests are recorded. The
+execution snapshot must match the lock before any vendor subprocess starts.
+The dummy app and default flash table are never adopted. Actual
+macOS ARM production and independent source-bound image checks pass. These
+local editable receipts are not authenticated vendor provenance; reviewed
+release input provenance and complete native flash composition remain separate
+open gates. `native_media_preparation` connects these external producers to
+`aros image prepare`, resolves the selected source preset, independently checks
+the bootloader and source table, and records `complete_flash_plan: false`.
+No native core/BSP/Developer output or device-write authority is inferred.
+Host POSIX utilities remain an explicit platform prerequisite, not a sealed
+runtime or network sandbox. Compiler timestamps remain source-owned; these
+local build tests do not claim byte-identical A/B output.
 The Cargo
 vendor input is copied through no-follow descriptors into a fresh private tree,
 validated against every `.cargo-checksum.json` and the selected tools
@@ -206,7 +248,8 @@ serves only declared cache payloads, then builds the exact vendored
 candidate selects configure arguments and collector layout from its bound
 compiler family. LLVM removes producer-only configuration inputs; GNU selects
 its locked GCC/binutils versions, atomically replaces both legacy collector
-invocations and measures the adjacent manifests plus ten-role tool layout.
+invocations and measures the adjacent manifests plus the eleven-role tools-v3
+layout, including the prefix-owned `objdump` used for native ELF inspection.
 GNU's source-declared format lists are narrowed to one verified lock entry;
 they cannot select an ambient archive or transport fallback. GNU execution
 requires GNU Make 4.0 or newer and its additional measured host prerequisites.

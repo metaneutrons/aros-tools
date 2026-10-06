@@ -52,6 +52,7 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'Command reference', slug: 'reference/cli' },
+            { label: 'Native media inputs', slug: 'reference/native-media-inputs' },
             { label: 'Standalone tools', slug: 'reference/standalone-tools' },
             { label: 'Configuration', slug: 'reference/configuration' },
             { label: 'Platform support', slug: 'reference/platform-support' },

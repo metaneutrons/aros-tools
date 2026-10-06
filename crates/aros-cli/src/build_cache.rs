@@ -1,16 +1,16 @@
-//! Parser-owned vocabulary for the product and board compiler-cache option.
+//! Parser-owned vocabulary for managed compiler-cache policy.
 
 use clap::ValueEnum;
 
-/// Explicit compiler-cache launcher policy shared by all CMake build commands.
+/// Compiler-cache policy shared by product, board and producer builds.
 #[derive(Clone, Copy, ValueEnum)]
 pub enum BuildCompilerCache {
-    /// Use sccache first, then ccache; offline builds disable automatic caching.
+    /// Use prepared local backends in order (sccache, then ccache); works offline.
     Auto,
-    /// Do not configure a compiler-cache launcher.
+    /// Do not use a compiler-cache launcher.
     Off,
-    /// Require sccache; an offline build rejects an unverified storage scope.
+    /// Require a prepared AROS-owned local namespace; works offline.
     Sccache,
-    /// Require ccache; an offline build rejects an unverified storage scope.
+    /// Require a prepared AROS-owned local namespace; works offline.
     Ccache,
 }

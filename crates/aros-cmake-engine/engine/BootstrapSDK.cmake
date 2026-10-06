@@ -6,7 +6,16 @@ include("${CMAKE_CURRENT_LIST_DIR}/Executable.cmake")
 # configure sets PLATFORM_EXECSMP for these targets even in uniprocessor builds.
 # Omitting it changes public Exec/pthread layouts relative to released libc++.
 function(aros_platform_abi_config cpu platform output)
-    if((platform STREQUAL "pc" AND cpu MATCHES "^(i386|x86_64)$") OR
+    if(DEFINED AROS_ABI_PLATFORM_SMP)
+        if(NOT AROS_ABI_PLATFORM_SMP MATCHES "^(ON|OFF)$")
+            message(FATAL_ERROR "AROS_ABI_PLATFORM_SMP must be explicit ON or OFF")
+        endif()
+        if(AROS_ABI_PLATFORM_SMP STREQUAL "ON")
+            set(${output} "#define __AROSPLATFORM_SMP__" PARENT_SCOPE)
+        else()
+            set(${output} "" PARENT_SCOPE)
+        endif()
+    elseif((platform STREQUAL "pc" AND cpu MATCHES "^(i386|x86_64)$") OR
        (platform STREQUAL "raspi" AND cpu MATCHES "^(arm|aarch64)$") OR
        (platform STREQUAL "opensbi" AND cpu STREQUAL "riscv64"))
         set(${output} "#define __AROSPLATFORM_SMP__" PARENT_SCOPE)
@@ -54,9 +63,17 @@ function(aros_generate_asm_header sdk_inc geninc)
     else()
         set(_compiler_target "${AROS_TARGET_CPU}-unknown-elf")
     endif()
+    if(AROS_TOOLCHAIN STREQUAL "gnu")
+        if(NOT AROS_GNU_TARGET_COMPILE_OPTIONS)
+            message(FATAL_ERROR "GNU SDK header generation requires manifest-bound target options")
+        endif()
+        set(_target_options ${AROS_GNU_TARGET_COMPILE_OPTIONS})
+    else()
+        set(_target_options -target "${_compiler_target}")
+    endif()
     execute_process(
         COMMAND "${CMAKE_C_COMPILER}"
-                -target "${_compiler_target}"
+                ${_target_options}
                 -ffreestanding -fno-builtin
                 ${_incs}
                 -S "${_src}" -o "${_asm}"
@@ -186,6 +203,15 @@ function(aros_bootstrap_sdk_includes)
         )
     endif()
 
+    # A source-owned CPU namespace may extend the profiles without extending
+    # a Rust board enum. Preserve the established staging above, and stage a
+    # declared shared CPU's headers when that namespace is new (e.g. riscv-all).
+    if(NOT AROS_TARGET_CPU MATCHES "^(x86_64|i386|aarch64|arm|riscv64)$" AND
+       IS_DIRECTORY "${AROS_SOURCE_DIR}/arch/${AROS_TARGET_CPU}-all/include/aros")
+        file(COPY "${AROS_SOURCE_DIR}/arch/${AROS_TARGET_CPU}-all/include/aros/"
+            DESTINATION "${SDK_INC}/aros/${AROS_TARGET_CPU}")
+    endif()
+
     # IRQ types header
     if(AROS_TARGET_CPU STREQUAL "x86_64" OR AROS_TARGET_CPU STREQUAL "i386")
         if(EXISTS "${AROS_SOURCE_DIR}/arch/i386-all/include/irqtypes.h")
@@ -222,7 +248,16 @@ function(aros_bootstrap_sdk_includes)
     # the XSAVE/AVX context path for the same reason.
     #
     # A platform this does not know must not inherit a flavour by accident.
-    if(AROS_TARGET_PLATFORM STREQUAL "pc" OR
+    if(DEFINED AROS_ABI_FLAVOUR)
+        if(NOT DEFINED AROS_ABI_PLATFORM_SMP OR
+           NOT AROS_ABI_FLAVOUR MATCHES "^(native|standalone|emulation)$")
+            message(FATAL_ERROR "Explicit bootstrap ABI requires a valid flavour and platform_smp")
+        endif()
+        string(TOUPPER "${AROS_ABI_FLAVOUR}" _abi_flavour)
+        set(_aros_flavour "AROS_FLAVOUR_${_abi_flavour}")
+    elseif(DEFINED AROS_ABI_PLATFORM_SMP)
+        message(FATAL_ERROR "Explicit bootstrap ABI requires flavour and platform_smp together")
+    elseif(AROS_TARGET_PLATFORM STREQUAL "pc" OR
        AROS_TARGET_PLATFORM STREQUAL "raspi" OR
        AROS_TARGET_PLATFORM STREQUAL "opensbi")
         set(_aros_flavour "AROS_FLAVOUR_STANDALONE")

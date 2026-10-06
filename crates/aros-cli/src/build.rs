@@ -1,11 +1,162 @@
 //! Validated CMake configure/build orchestration shared by all build commands.
 
 use crate::{build_tools, toolchain};
+use aros_common::local_toolchain::{LocalToolchainDescriptor, LOCAL_TOOLCHAIN_DESCRIPTOR_FILE};
+use aros_common::native_build_contract::{
+    load_bound_native_build_contract, validate_native_build_compiler, LoadedNativeBuildContract,
+};
 use console::{style, Emoji};
 use miette::{IntoDiagnostic, Result, WrapErr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
+
+const MAX_LOCAL_TOOLCHAIN_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
+
+mod host_inputs;
+mod local_identity;
+
+/// Source facts must pass before any compiler or build-tool subprocess runs.
+fn native_build_contract(
+    root: &Path,
+    profile: &aros_common::TargetProfile,
+) -> Result<Option<LoadedNativeBuildContract>> {
+    profile
+        .native_build_contract
+        .as_ref()
+        .map(|relative| {
+            load_bound_native_build_contract(root, Path::new(relative), profile)
+                .into_diagnostic()
+                .wrap_err("native source build contract is invalid")
+        })
+        .transpose()
+}
+
+/// Forward only the exact validated source bytes. CMake revalidates the hash
+/// and inputs before translating their graph, independently of this frontend.
+fn native_build_variables(
+    binding: Option<&LoadedNativeBuildContract>,
+    resolved: &toolchain::ResolvedToolchain,
+    profile: &aros_common::TargetProfile,
+) -> Result<Vec<(String, String)>> {
+    let (local_compiler, local_variables) = if resolved.source
+        == toolchain::ToolchainSource::LocalCompilerOnly
+    {
+        let descriptor = LocalToolchainDescriptor::load(&resolved.paths.root).map_err(|error| {
+            miette::miette!("cannot reload local compiler-only descriptor: {error}")
+        })?;
+        descriptor.verify(&resolved.paths.root).map_err(|error| {
+            miette::miette!("local compiler-only descriptor is no longer verified: {error}")
+        })?;
+        let expected_host = crate::host_compiler::host_platform_key()?;
+        let expected_profile = profile.toolchain_profile();
+        if descriptor.host != expected_host
+            || descriptor.target_profile != expected_profile
+            || descriptor.target_triple != resolved.target_triple
+        {
+            miette::bail!(
+                "local compiler descriptor is for {}/{}/{}; expected {}/{}/{}",
+                descriptor.host,
+                descriptor.target_profile,
+                descriptor.target_triple,
+                expected_host,
+                expected_profile,
+                resolved.target_triple
+            );
+        }
+        toolchain::validate_profile_compiler(
+            profile,
+            &descriptor.compiler,
+            &descriptor.target_triple,
+        )?;
+
+        // Hash the exact descriptor bytes CMake will independently read.
+        // Reparse and compare after the bounded no-follow read to detect a
+        // replacement between `load`, verification, and hashing.
+        let descriptor_path = resolved.paths.root.join(LOCAL_TOOLCHAIN_DESCRIPTOR_FILE);
+        let (_, bytes) = aros_common::measure_regular_file_bounded(
+            &descriptor_path,
+            MAX_LOCAL_TOOLCHAIN_DESCRIPTOR_BYTES,
+        )
+        .into_diagnostic()
+        .wrap_err("cannot safely reread local compiler-only descriptor")?
+        .ok_or_else(|| miette::miette!("local compiler-only descriptor disappeared"))?;
+        let reread = LocalToolchainDescriptor::parse(&bytes)
+            .map_err(|error| miette::miette!("invalid reread local descriptor: {error}"))?;
+        if reread != descriptor {
+            miette::bail!("local compiler-only descriptor changed while selecting its SHA-256");
+        }
+        (
+            Some(descriptor.compiler.clone()),
+            vec![
+                (
+                    "AROS_CROSS_TOOLCHAIN_QUALIFICATION".into(),
+                    descriptor.qualification,
+                ),
+                (
+                    "AROS_CROSS_TOOLCHAIN_LOCAL_SHA256".into(),
+                    aros_common::sha256_bytes(&bytes).to_string(),
+                ),
+            ],
+        )
+    } else {
+        (
+            None,
+            vec![
+                ("AROS_CROSS_TOOLCHAIN_QUALIFICATION".into(), String::new()),
+                ("AROS_CROSS_TOOLCHAIN_LOCAL_SHA256".into(), String::new()),
+            ],
+        )
+    };
+
+    let mut variables = if let Some(binding) = binding {
+        let compiler = if let Some(compiler) = local_compiler {
+            compiler
+        } else {
+            let manifest = aros_common::ArosToolchainManifest::load(&resolved.paths.root)
+                .into_diagnostic()
+                .wrap_err("native source contracts require a verified compiler manifest")?;
+            manifest
+                .compiler_identity()
+                .map_err(|error| miette::miette!(error))?
+        };
+        validate_native_build_compiler(&binding.contract, &compiler, &resolved.target_triple)
+            .into_diagnostic()?;
+        if resolved
+            .paths
+            .executable_roles
+            .iter()
+            .filter(|(role, _)| *role == "objdump")
+            .count()
+            != 1
+        {
+            miette::bail!(
+                "native source contracts require one verified objdump role (toolchain-tools v3); no host fallback is permitted"
+            );
+        }
+        let path = binding
+            .path
+            .to_str()
+            .filter(|path| !path.contains([';', '\n', '\r']))
+            .ok_or_else(|| miette::miette!("native contract path is unsafe for CMake"))?;
+        vec![
+            ("AROS_NATIVE_BUILD_CONTRACT".into(), path.into()),
+            (
+                "AROS_NATIVE_BUILD_CONTRACT_SHA256".into(),
+                binding.sha256.to_string(),
+            ),
+        ]
+    } else {
+        // Clear stale native-contract cache entries when configuring a
+        // non-contract profile.
+        vec![
+            ("AROS_NATIVE_BUILD_CONTRACT".into(), String::new()),
+            ("AROS_NATIVE_BUILD_CONTRACT_SHA256".into(), String::new()),
+        ]
+    };
+    variables.extend(local_variables);
+    Ok(variables)
+}
 
 static ROCKET: Emoji<'_, '_> = Emoji("🚀 ", "");
 static HAMMER: Emoji<'_, '_> = Emoji("🔨 ", "");
@@ -91,8 +242,9 @@ impl BuildType {
 ///
 /// They are derived rather than named because none of them is a free choice:
 /// the system name is fixed for a bare-metal target, the processor is the
-/// profile's architecture, the compilers are the LLVM path the target graph
-/// assumes, and the bootloader follows the platform. Deriving them is what
+/// profile's architecture, the compiler family is the profile's declared
+/// selector, and the bootloader follows the platform. Compiler executables
+/// come separately from the verified payload roles. Deriving these is what
 /// removes the last reason for a checkout to carry `CMakePresets.json`, and it
 /// is what lets a tree without one be built from built-in profiles.
 fn profile_cache_variables(
@@ -105,10 +257,14 @@ fn profile_cache_variables(
             "CMAKE_SYSTEM_PROCESSOR".to_owned(),
             profile.arch.to_string(),
         ),
-        ("CMAKE_C_COMPILER".to_owned(), "clang".to_owned()),
-        ("CMAKE_CXX_COMPILER".to_owned(), "clang++".to_owned()),
-        ("CMAKE_ASM_COMPILER".to_owned(), "clang".to_owned()),
-        ("AROS_TOOLCHAIN".to_owned(), "llvm".to_owned()),
+        (
+            "AROS_TOOLCHAIN".to_owned(),
+            profile
+                .transpiler
+                .as_ref()
+                .map_or("llvm", |selectors| selectors.toolchain.as_str())
+                .to_owned(),
+        ),
         (
             "AROS_TARGET_BOOTLOADER".to_owned(),
             profile.bootloader().to_owned(),
@@ -119,6 +275,17 @@ fn profile_cache_variables(
         ),
         ("CMAKE_EXPORT_COMPILE_COMMANDS".to_owned(), "ON".to_owned()),
     ];
+    if let Some(context) = &profile.transpiler {
+        variables.extend([
+            ("AROS_TARGET_FAMILY".to_owned(), context.family.clone()),
+            ("AROS_TARGET_VARIANT".to_owned(), context.variant.clone()),
+            ("AROS_TARGET_CPU32".to_owned(), context.cpu32.clone()),
+            (
+                "AROS_ENABLE_MMU".to_owned(),
+                if context.use_mmu { "ON" } else { "OFF" }.to_owned(),
+            ),
+        ]);
+    }
     if let Some(version) = profile
         .transpiler
         .as_ref()
@@ -126,7 +293,84 @@ fn profile_cache_variables(
     {
         variables.push(("AROS_MESA_VERSION".to_owned(), version.clone()));
     }
+    if let Some(abi) = &profile.bootstrap_abi {
+        variables.extend([
+            ("AROS_ABI_FLAVOUR".to_owned(), abi.flavour.clone()),
+            (
+                "AROS_ABI_PLATFORM_SMP".to_owned(),
+                if abi.platform_smp { "ON" } else { "OFF" }.to_owned(),
+            ),
+        ]);
+    }
     variables
+}
+
+/// Forward only executable roles already verified by toolchain resolution.
+/// GNU tools are never guessed from a triple or discovered on the host PATH.
+fn compiler_cache_variables(
+    profile: &aros_common::TargetProfile,
+    paths: &toolchain::ToolchainPaths,
+) -> Result<Vec<(String, String)>> {
+    let family = profile
+        .transpiler
+        .as_ref()
+        .map_or("llvm", |selectors| selectors.toolchain.as_str());
+    let roles: &[(&str, &str)] = match family {
+        "llvm" => &[
+            ("CMAKE_C_COMPILER", "clang"),
+            ("CMAKE_CXX_COMPILER", "clang++"),
+            ("CMAKE_ASM_COMPILER", "clang"),
+            ("CMAKE_AR", "llvm-ar"),
+            ("AROS_LLD_BIN", "ld.lld"),
+        ],
+        "gnu" => &[
+            ("CMAKE_C_COMPILER", "c"),
+            ("CMAKE_CXX_COMPILER", "cxx"),
+            ("CMAKE_ASM_COMPILER", "c"),
+            ("AROS_AS_BIN", "assembler"),
+            ("CMAKE_AR", "archive"),
+            ("CMAKE_RANLIB", "ranlib"),
+            ("CMAKE_NM", "nm"),
+            ("CMAKE_STRIP", "strip"),
+            ("CMAKE_OBJCOPY", "objcopy"),
+            ("AROS_LINKER_BIN", "linker"),
+            ("AROS_COLLECT_BIN", "collector"),
+        ],
+        _ => miette::bail!("unsupported native compiler family '{family}'"),
+    };
+    let mut roles = roles.to_vec();
+    if family == "gnu"
+        && paths
+            .executable_roles
+            .iter()
+            .any(|(role, _)| *role == "objdump")
+    {
+        roles.push(("CMAKE_OBJDUMP", "objdump"));
+    }
+    roles
+        .iter()
+        .map(|(variable, required)| {
+            let matches: Vec<_> = paths
+                .executable_roles
+                .iter()
+                .filter(|(role, _)| role == required)
+                .collect();
+            let [(_, path)] = matches.as_slice() else {
+                miette::bail!(
+                    "native {family} build requires exactly one verified '{required}' tool role"
+                );
+            };
+            if !path.is_absolute()
+                || !path.starts_with(&paths.root)
+                || path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                miette::bail!("verified '{required}' tool is outside its payload root");
+            }
+            Ok(((*variable).to_owned(), path.display().to_string()))
+        })
+        .collect()
 }
 
 /// Puts the CMake engine where this build will read it from.
@@ -195,6 +439,10 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     .map_err(|error| miette::miette!(error))?;
     let compiler_cache_selection = compiler_cache.selection();
     let profile = toolchain::target_profile(repo_root, &options.toolchain_preset)?;
+    let native_contract = native_build_contract(repo_root, &profile)?;
+    for definition in &options.cmake_definitions {
+        validate_cmake_definition(definition)?;
+    }
     let resolved = toolchain::resolve_for_build(
         repo_root,
         &options.toolchain_preset,
@@ -203,6 +451,19 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     )
     .await?;
     let lease = crate::toolchain_lifecycle::acquire_for_build(repo_root, &resolved)?;
+    let native_variables = native_build_variables(native_contract.as_ref(), &resolved, &profile)?;
+    if resolved.source == toolchain::ToolchainSource::LocalCompilerOnly && native_contract.is_some()
+    {
+        if let Some(contract) = &native_contract {
+            local_identity::validate_source_namespace(&profile, contract)?;
+        }
+        aros_common::local_source::LocalSourceIdentity::validate_build_namespace(
+            repo_root,
+            &options.preset,
+        )
+        .map_err(|error| miette::miette!(error))?;
+    }
+    let compiler_variables = compiler_cache_variables(&profile, &resolved.paths)?;
     let build_tools = build_tools::ensure(repo_root)?;
 
     aros_common::outputln!(
@@ -244,7 +505,19 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
             cmake_toolchain.display()
         );
     }
-    let mut configure = Command::new("cmake");
+    let is_local_native = resolved.source == toolchain::ToolchainSource::LocalCompilerOnly
+        && native_contract.is_some();
+    let cmake_executor = if is_local_native {
+        which::which("cmake")
+            .into_diagnostic()?
+            .canonicalize()
+            .into_diagnostic()?
+    } else {
+        PathBuf::from("cmake")
+    };
+    let mut configure = Command::new(&cmake_executor);
+    let host_inputs =
+        host_inputs::prepare(native_contract.as_ref(), options.input_policy.offline).await?;
     // The engine is the project and the checkout is an input, which is what
     // lets a tree that does not carry a build system be built at all. A preset
     // cannot express this: it fixes the binary directory relative to its own
@@ -257,10 +530,18 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         .arg(&build_dir)
         .args(["-G", "Ninja"]);
     compiler_cache.apply_to(&mut configure);
-    configure.arg(format!("-DAROS_SOURCE_DIR={}", repo_root.display()));
-    for (key, value) in profile_cache_variables(&profile, options.build_type) {
-        configure.arg(format!("-D{key}={value}"));
+    // General definitions precede every source, compiler and ABI identity.
+    // Board callers may add build options but cannot replace verified inputs.
+    for definition in &options.cmake_definitions {
+        configure.arg(format!("-D{}={}", definition.key, definition.value));
     }
+    configure.arg(format!(
+        "-DAROS_NATIVE_HOST_INPUT_DIRECTORY={}",
+        host_inputs
+            .as_ref()
+            .map_or_else(String::new, |root| root.display().to_string())
+    ));
+    configure.arg(format!("-DAROS_SOURCE_DIR={}", repo_root.display()));
     configure.arg(format!(
         "-DCMAKE_TOOLCHAIN_FILE={}",
         cmake_toolchain.display()
@@ -277,9 +558,13 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         .into_diagnostic()
         .wrap_err("cannot locate the current aros executable for media receipts")?;
     configure.arg(format!("-DAROS_MEDIA_CLI_BIN={}", media_cli.display()));
-    configure.arg(format!("-DAROS_TARGET_CPU={}", profile.arch));
+    configure.arg(format!("-DAROS_TARGET_CPU={}", profile.arch.source_cpu()));
     configure.arg(format!("-DAROS_TARGET_PLATFORM={}", profile.platform));
     configure.arg(format!("-DAROS_TARGET_PROFILE={}", profile.name));
+    configure.arg(format!(
+        "-DAROS_CROSS_TOOLCHAIN_PROFILE={}",
+        profile.toolchain_profile()
+    ));
     configure.arg(format!("-DAROS_TARGET_TRIPLE={}", resolved.target_triple));
     configure.arg(format!(
         "-DAROS_FETCH_OFFLINE={}",
@@ -300,9 +585,14 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     if let Some(float_abi) = &profile.float_abi {
         configure.arg(format!("-DGCC_CONFIG_FLOAT_ABI={float_abi}"));
     }
-    for definition in &options.cmake_definitions {
-        validate_cmake_definition(definition)?;
-        configure.arg(format!("-D{}={}", definition.key, definition.value));
+    // General CMake definitions cannot change source/compiler/ABI contracts
+    // already validated by this frontend.
+    for (key, value) in profile_cache_variables(&profile, options.build_type)
+        .into_iter()
+        .chain(compiler_variables)
+        .chain(native_variables)
+    {
+        configure.arg(format!("-D{key}={value}"));
     }
     for definition in compiler_cache_cmake_definitions(&compiler_cache_selection)? {
         configure.arg(format!("-D{}={}", definition.key, definition.value));
@@ -310,6 +600,34 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     if options.verbose {
         configure.arg("--log-level=VERBOSE");
     }
+    if is_local_native {
+        let ninja = which::which("ninja")
+            .into_diagnostic()?
+            .canonicalize()
+            .into_diagnostic()?;
+        configure.arg(format!("-DCMAKE_MAKE_PROGRAM={}", ninja.display()));
+    }
+    // Local source identity is not a clean Git/released-toolchain receipt.
+    // Capture before execution, refuse adoption of historical output trees,
+    // and remeasure before declaring a successful native build.
+    let local_native = if resolved.source == toolchain::ToolchainSource::LocalCompilerOnly
+        && native_contract.is_some()
+    {
+        let identity = local_identity::LocalNativeInputs::capture(
+            repo_root,
+            &options.preset,
+            &profile,
+            &resolved.paths.root,
+            &engine,
+            &build_tools.bin_dir,
+            &configure,
+        )?;
+        identity.bind_build_tree(&build_dir)?;
+        local_identity::verify_configured_tree(&build_dir, false)?;
+        Some(identity)
+    } else {
+        None
+    };
     crate::observability::run_command_at(
         &mut configure,
         &format!("CMake configure for preset '{}'", options.preset),
@@ -320,8 +638,23 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         },
     )?;
 
+    if let Some(expected) = &local_native {
+        let actual = local_identity::LocalNativeInputs::capture(
+            repo_root,
+            &options.preset,
+            &profile,
+            &resolved.paths.root,
+            &engine,
+            &build_tools.bin_dir,
+            &configure,
+        )?;
+        expected.require_unchanged(&actual)?;
+        expected.bind_build_tree(&build_dir)?;
+        local_identity::verify_configured_tree(&build_dir, true)?;
+    }
+
     aros_common::outputln!("{HAMMER} Compiling AROS modules with Ninja...");
-    let mut build = Command::new("cmake");
+    let mut build = Command::new(&cmake_executor);
     build.current_dir(repo_root).args(["--build"]);
     compiler_cache.apply_to(&mut build);
     build.arg(&build_dir);
@@ -340,6 +673,21 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
             hint: "inspect the bounded CMake output and retry the exact reported build target",
         },
     )?;
+
+    if let Some(expected) = &local_native {
+        let actual = local_identity::LocalNativeInputs::capture(
+            repo_root,
+            &options.preset,
+            &profile,
+            &resolved.paths.root,
+            &engine,
+            &build_tools.bin_dir,
+            &configure,
+        )?;
+        expected.require_unchanged(&actual)?;
+        expected.bind_build_tree(&build_dir)?;
+        local_identity::verify_configured_tree(&build_dir, false)?;
+    }
 
     aros_common::outputln!(
         "{CHECK} {}Build completed successfully in {:.2?}!",
@@ -495,13 +843,121 @@ pub fn detected_compiler_cache() -> Option<CompilerCache> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dir, compiler_cache_cmake_definitions, profile_cache_variables, run,
-        validate_cmake_definition, validate_preset, BuildInputPolicy, BuildOptions, BuildType,
-        CmakeDefinition,
+        build_dir, compiler_cache_cmake_definitions, compiler_cache_variables,
+        native_build_variables, profile_cache_variables, run, validate_cmake_definition,
+        validate_preset, BuildInputPolicy, BuildOptions, BuildType, CmakeDefinition,
     };
 
+    #[cfg(unix)]
+    fn local_compiler_variables_fixture() -> (
+        tempfile::TempDir,
+        aros_common::TargetProfile,
+        crate::toolchain::ResolvedToolchain,
+    ) {
+        use serde_json::json;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let host = crate::host_compiler::host_platform_key().unwrap();
+        assert!(
+            matches!(host, "linux-x86_64" | "linux-aarch64" | "macos-aarch64"),
+            "local compiler fixture host is unsupported: {host}"
+        );
+        let profile = aros_common::TargetProfile {
+            name: "fixture-target".into(),
+            toolchain_profile: None,
+            arch: aros_common::Architecture::Riscv32,
+            platform: "fixture".into(),
+            bsp: "fixture".into(),
+            features: Vec::new(),
+            float_abi: Some("ilp32f".into()),
+            bootloader: None,
+            transpiler: Some(aros_common::TranspilerProfile {
+                family: String::new(),
+                variant: String::new(),
+                toolchain: "gnu".into(),
+                cpu32: String::new(),
+                use_mmu: false,
+                mesa_version: None,
+            }),
+            bootstrap_abi: None,
+            native_build_contract: None,
+        };
+        let compiler = json!({
+            "family": "gnu", "gcc_version": "16.2.0", "binutils_version": "2.47",
+            "target": {
+                "schema": "aros-riscv-target-v1",
+                "isa": "rv32imafc_zicsr_zifencei_zaamo_zalrsc",
+                "abi": "ilp32f", "code_model": "medany",
+                "architecture": "rv32i2p1_m2p0_a2p1_f2p2_c2p0_zicsr2p0_zifencei2p0_zaamo1p0_zalrsc1p0",
+                "unaligned_access": false, "atomic_abi": 0, "x3_reg_usage": 0
+            }
+        });
+        let tools = json!({
+            "c": "bin/gcc", "cxx": "bin/g++", "assembler": "bin/as",
+            "linker": "bin/ld", "archive": "bin/ar", "ranlib": "bin/ranlib",
+            "strip": "bin/strip", "collector": "bin/collect-aros", "nm": "bin/nm",
+            "objcopy": "bin/objcopy", "objdump": "bin/objdump"
+        });
+        let layout = json!({
+            "schema": "aros-toolchain-tools-v3", "compiler": compiler,
+            "target_triple": "riscv-aros", "tools": tools
+        });
+        fs::create_dir_all(root.path().join("bin")).unwrap();
+        let script = "#!/bin/sh\ncase \"$1\" in\n--version) printf '%s\\n' fixture;;\n-dumpmachine) printf '%s\\n' 'riscv-aros';;\n-dumpfullversion) printf '%s\\n' '16.2.0';;\n*) exit 0;;\nesac\n";
+        for path in [
+            "bin/gcc",
+            "bin/g++",
+            "bin/as",
+            "bin/ld",
+            "bin/ar",
+            "bin/ranlib",
+            "bin/strip",
+            "bin/collect-aros",
+            "bin/nm",
+            "bin/objcopy",
+            "bin/objdump",
+        ] {
+            let path = root.path().join(path);
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(
+            root.path()
+                .join(aros_common::toolchain_layout::TOOLCHAIN_TOOLS_FILE),
+            serde_json::to_vec(&layout).unwrap(),
+        )
+        .unwrap();
+        let identity = serde_json::from_value(layout["compiler"].clone()).unwrap();
+        let descriptor = aros_common::local_toolchain::LocalToolchainDescriptor::capture(
+            root.path(),
+            host,
+            profile.toolchain_profile(),
+            "riscv-aros",
+            identity,
+        )
+        .unwrap();
+        fs::write(
+            root.path()
+                .join(aros_common::local_toolchain::LOCAL_TOOLCHAIN_DESCRIPTOR_FILE),
+            serde_json::to_vec(&descriptor).unwrap(),
+        )
+        .unwrap();
+        let resolved = crate::toolchain::ResolvedToolchain {
+            paths: crate::toolchain::ToolchainPaths {
+                root: root.path().to_path_buf(),
+                executable_roles: Vec::new(),
+            },
+            target_triple: "riscv-aros".into(),
+            release_id: None,
+            source: crate::toolchain::ToolchainSource::LocalCompilerOnly,
+        };
+        (root, profile, resolved)
+    }
+
     #[test]
-    fn built_in_profiles_pin_clang_llvm_and_platform_bootloader() {
+    fn built_in_profiles_pin_llvm_family_and_platform_bootloader() {
         let absent_override = tempfile::tempdir().unwrap();
         let profiles = aros_common::TargetProfile::load_config_or_builtin(
             &absent_override.path().join("aros-targets.toml"),
@@ -515,13 +971,7 @@ mod tests {
                 profile_cache_variables(&profile, BuildType::Release)
                     .into_iter()
                     .collect();
-            for (key, expected) in [
-                ("CMAKE_C_COMPILER", "clang"),
-                ("CMAKE_CXX_COMPILER", "clang++"),
-                ("CMAKE_ASM_COMPILER", "clang"),
-                ("AROS_TOOLCHAIN", "llvm"),
-                ("CMAKE_SYSTEM_NAME", "Generic"),
-            ] {
+            for (key, expected) in [("AROS_TOOLCHAIN", "llvm"), ("CMAKE_SYSTEM_NAME", "Generic")] {
                 assert_eq!(
                     values.get(key).map(String::as_str),
                     Some(expected),
@@ -541,7 +991,151 @@ mod tests {
                 profile.name
             );
             assert!(!values.contains_key("AROS_MESA_VERSION"));
+            assert!(!values.contains_key("CMAKE_C_COMPILER"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_compiler_cmake_variables_bind_raw_descriptor_even_without_native_contract() {
+        let (root, profile, resolved) = local_compiler_variables_fixture();
+        let values: std::collections::HashMap<_, _> =
+            native_build_variables(None, &resolved, &profile)
+                .unwrap()
+                .into_iter()
+                .collect();
+        let descriptor = root
+            .path()
+            .join(aros_common::local_toolchain::LOCAL_TOOLCHAIN_DESCRIPTOR_FILE);
+        let bytes = std::fs::read(&descriptor).unwrap();
+        assert_eq!(
+            values["AROS_CROSS_TOOLCHAIN_QUALIFICATION"],
+            "local-byte-verified"
+        );
+        assert_eq!(
+            values["AROS_CROSS_TOOLCHAIN_LOCAL_SHA256"],
+            aros_common::sha256_bytes(&bytes).to_string()
+        );
+        assert_eq!(values["AROS_NATIVE_BUILD_CONTRACT"], "");
+        assert_eq!(values["AROS_NATIVE_BUILD_CONTRACT_SHA256"], "");
+    }
+
+    #[test]
+    fn nonlocal_source_clears_stale_local_cmake_variables() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = aros_common::TargetProfile::load_config_or_builtin(
+            &std::path::Path::new("/absent-config").join("aros-targets.toml"),
+        )
+        .unwrap()
+        .targets
+        .remove(0);
+        let resolved = crate::toolchain::ResolvedToolchain {
+            paths: crate::toolchain::ToolchainPaths {
+                root: root.path().to_path_buf(),
+                executable_roles: Vec::new(),
+            },
+            target_triple: "x86_64-unknown-aros".into(),
+            release_id: Some("test-release".into()),
+            source: crate::toolchain::ToolchainSource::LockedRelease,
+        };
+        let values: std::collections::HashMap<_, _> =
+            native_build_variables(None, &resolved, &profile)
+                .unwrap()
+                .into_iter()
+                .collect();
+        for key in [
+            "AROS_CROSS_TOOLCHAIN_QUALIFICATION",
+            "AROS_CROSS_TOOLCHAIN_LOCAL_SHA256",
+            "AROS_NATIVE_BUILD_CONTRACT",
+            "AROS_NATIVE_BUILD_CONTRACT_SHA256",
+        ] {
+            assert_eq!(values[key], "", "{key}");
+        }
+    }
+
+    #[test]
+    fn native_compiler_selection_uses_verified_roles_and_rejects_missing_or_ambiguous_tools() {
+        let mut profile = aros_common::TargetProfile::load_config_or_builtin(
+            &std::path::Path::new("/absent-config").join("aros-targets.toml"),
+        )
+        .unwrap()
+        .targets
+        .remove(0);
+        let root = std::path::PathBuf::from("/verified/payload");
+        let llvm = crate::toolchain::get_toolchain_paths(&root);
+        let llvm_values: std::collections::HashMap<_, _> =
+            compiler_cache_variables(&profile, &llvm)
+                .unwrap()
+                .into_iter()
+                .collect();
+        assert_eq!(
+            llvm_values["CMAKE_C_COMPILER"],
+            "/verified/payload/bin/clang"
+        );
+        profile.transpiler.as_mut().unwrap().toolchain = "gnu".into();
+        profile.arch = aros_common::Architecture::Riscv32;
+        profile.transpiler.as_mut().unwrap().use_mmu = false;
+        profile.transpiler.as_mut().unwrap().cpu32.clear();
+        profile.transpiler.as_mut().unwrap().variant = "experimental".into();
+        profile.bootstrap_abi = Some(aros_common::BootstrapAbiProfile {
+            flavour: "standalone".into(),
+            platform_smp: false,
+        });
+        let profile_values: std::collections::HashMap<_, _> =
+            profile_cache_variables(&profile, BuildType::Release)
+                .into_iter()
+                .collect();
+        assert_eq!(profile_values["AROS_TOOLCHAIN"], "gnu");
+        assert_eq!(profile_values["AROS_ENABLE_MMU"], "OFF");
+        assert_eq!(profile_values["AROS_TARGET_VARIANT"], "experimental");
+        assert_eq!(profile_values["AROS_TARGET_CPU32"], "");
+        assert_eq!(profile_values["AROS_ABI_FLAVOUR"], "standalone");
+        assert_eq!(profile_values["AROS_ABI_PLATFORM_SMP"], "OFF");
+        assert_eq!(profile.arch.source_cpu(), "riscv");
+        assert!(compiler_cache_variables(&profile, &llvm).is_err());
+        let mut gnu = crate::toolchain::ToolchainPaths {
+            root: root.clone(),
+            executable_roles: [
+                "c",
+                "cxx",
+                "assembler",
+                "archive",
+                "ranlib",
+                "nm",
+                "strip",
+                "objcopy",
+                "linker",
+                "collector",
+            ]
+            .into_iter()
+            .map(|role| (role, root.join("bin").join(format!("declared-{role}"))))
+            .collect(),
+        };
+        let values: std::collections::HashMap<_, _> = compiler_cache_variables(&profile, &gnu)
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            values["CMAKE_C_COMPILER"],
+            "/verified/payload/bin/declared-c"
+        );
+        assert_eq!(
+            values["AROS_LINKER_BIN"],
+            "/verified/payload/bin/declared-linker"
+        );
+        assert!(!values.contains_key("AROS_LLD_BIN"));
+        assert_eq!(values["CMAKE_ASM_COMPILER"], values["CMAKE_C_COMPILER"]);
+        assert_eq!(
+            values["AROS_AS_BIN"],
+            "/verified/payload/bin/declared-assembler"
+        );
+        gnu.executable_roles.push(gnu.executable_roles[0].clone());
+        assert!(compiler_cache_variables(&profile, &gnu).is_err());
+        gnu.executable_roles.pop();
+        gnu.executable_roles[0].1 = "/host/bin/gcc".into();
+        assert!(compiler_cache_variables(&profile, &gnu).is_err());
+        profile.transpiler.as_mut().unwrap().toolchain = "unknown".into();
+        assert!(compiler_cache_variables(&profile, &gnu).is_err());
     }
 
     #[test]

@@ -24,6 +24,8 @@ const MAX_INPUT_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
 /// Plan, compose or inspect an image artifact; never write a block device.
 #[derive(Subcommand)]
 pub enum ImageCommand {
+    /// Build and verify source-selected external media inputs offline; never flash
+    Prepare(crate::image_prepare::ImagePrepareArgs),
     /// Measure CMake-built files and trees after their producer targets finish
     Receipt(ImageReceiptArgs),
     /// Plan or explicitly compose a reviewed FAT32 or ISO media profile
@@ -157,8 +159,9 @@ pub enum ImageOutputFormat {
 ///
 /// Rejects incomplete or altered artifacts, unsupported formats and unsafe
 /// paths before printing a success result.
-pub fn run(command: ImageCommand) -> Result<()> {
+pub async fn run(command: ImageCommand) -> Result<()> {
     let (operation, args) = match command {
+        ImageCommand::Prepare(args) => return crate::image_prepare::run(args).await,
         ImageCommand::Receipt(args) => return receipt(&args),
         ImageCommand::Build(args) => return build(&args),
         ImageCommand::Inspect(args) => ("inspect", args),

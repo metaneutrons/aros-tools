@@ -270,9 +270,37 @@ fn expand_source_fragments(raw: &str, context: &MakeExprContext<'_>, depth: usiz
                 continue;
             }
         }
+        // A literal suffix substitution distributes over the words of a
+        // source list. Preserve each independent fragment, so one cold port
+        // does not discard inventory ownership for the remaining fragments.
+        // Pattern/variable substitutions stay with the full Make evaluator.
+        if let Some((name, from, to)) = literal_suffix_reference(&fragment) {
+            if let Some(value) = context.safe_local_raw(name) {
+                output.extend(
+                    expand_source_fragments(&value, context, depth - 1)
+                        .into_iter()
+                        .map(|part| format!("$(patsubst %{from},%{to},{part})")),
+                );
+                continue;
+            }
+        }
         output.push(fragment);
     }
     output
+}
+
+fn literal_suffix_reference(raw: &str) -> Option<(&str, &str, &str)> {
+    let body = raw.strip_prefix("$(")?.strip_suffix(')')?;
+    let (name, substitution) = body.split_once(':')?;
+    let (from, to) = substitution.split_once('=')?;
+    let token = |text: &str| {
+        text.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    };
+    if name.is_empty() || from.is_empty() || !token(name) || !token(from) || !token(to) {
+        return None;
+    }
+    Some((name, from, to))
 }
 
 fn contains_make_function(raw: &str) -> bool {
@@ -419,7 +447,11 @@ pub(crate) fn evaluate_macro_sources_with_files(
             }
         }
     }
-    if sources.is_empty() {
+    // A cold fetched tree has no compilation units yet. Preserve its deferred
+    // patterns so the configure-time inventory pass can find the real fetch
+    // owner. The parser still omits the empty module; this is not permission
+    // to publish a generated-only or incomplete compilation target.
+    if sources.is_empty() && sources.deferred_wildcards.is_empty() {
         if let Some(error) = unresolved_lanes.into_iter().next() {
             return Err(error);
         }

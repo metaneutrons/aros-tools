@@ -10,7 +10,7 @@
 # number from here, so the Rust side cannot drift from the CMake side.
 include_guard(GLOBAL)
 
-set(AROS_CMAKE_ENGINE_API_VERSION 1)
+set(AROS_CMAKE_ENGINE_API_VERSION 2)
 
 # Checks that a generated target graph was produced for this engine.
 #

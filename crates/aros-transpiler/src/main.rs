@@ -3,7 +3,7 @@
 use aros_common::{
     effective_log_level, requested_diagnostic_format, ArosError, Diagnostic, DiagnosticCode,
     DiagnosticContext, DiagnosticFormat, DiagnosticSet, DiagnosticSeverity, DiagnosticStage,
-    LogFormat, LogLevel, Logger, Result, SourceLocation,
+    LogLevel, Logger, Result, SourceLocation,
 };
 use aros_transpiler::dirs::DirVars;
 use aros_transpiler::{
@@ -11,122 +11,30 @@ use aros_transpiler::{
     generated_header, parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context_and_fetches,
     read_default_link_set, DependencyGraph, TargetContext,
 };
-use clap::{error::ErrorKind, parser::ValueSource, CommandFactory, FromArgMatches, Parser};
+use clap::{error::ErrorKind, parser::ValueSource, CommandFactory, FromArgMatches};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use walkdir::WalkDir;
 
+mod cli_args;
+mod error_mapping;
+mod native_selection;
 mod observability;
 mod publication;
+mod reports;
+mod source_discovery;
 
+use cli_args::Args;
+use error_mapping::{diagnostics_error, error_to_diagnostics, source_location};
+use native_selection::{
+    append_unscoped_diagnostics, bind_architecture_effects, load_native_selection,
+    native_selection_input_error, reverify_native_owner_projection,
+};
 use publication::Publication;
-
-#[derive(Parser, Debug)]
-#[command(
-    author,
-    version,
-    about = "Fail-closed AROS MetaMake-to-CMake transpiler",
-    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_TRANSPILER_DIAGNOSTIC_FORMAT,\nAROS_TRANSPILER_LOG_LEVEL, AROS_TRANSPILER_LOG_FORMAT, and\nAROS_TRANSPILER_LOG_FILE. Logging is off by default. A selected file without a\nselected level uses info; explicit off creates no sink, and a non-off level\nrequires a local file."
-)]
-struct Args {
-    /// Root directory of AROS source tree
-    #[arg(short, long, default_value = ".")]
-    source_dir: PathBuf,
-
-    /// Output path for generated CMake targets file
-    #[arg(short, long, default_value = "build/generated_targets.cmake")]
-    output: PathBuf,
-
-    /// Physical configure-time path behind `${AROS_PORTS_DIR}`
-    #[arg(long)]
-    ports_dir: Option<PathBuf>,
-
-    /// Target instruction set (for example x86_64, arm, or aarch64)
-    #[arg(long)]
-    cpu: Option<String>,
-
-    /// Target machine/platform (for example pc or raspi)
-    #[arg(long)]
-    platform: Option<String>,
-
-    /// MetaMake target family
-    #[arg(long)]
-    family: Option<String>,
-
-    /// MetaMake target variant; pass an empty value for the ordinary variant
-    #[arg(long)]
-    variant: Option<String>,
-
-    /// Toolchain family (gnu or llvm)
-    #[arg(long)]
-    toolchain: Option<String>,
-
-    /// Optional 32-bit companion CPU
-    #[arg(long)]
-    cpu32: Option<String>,
-
-    /// Historic USE_MMU value (0 or 1)
-    #[arg(long)]
-    use_mmu: Option<String>,
-
-    /// Historic GCC_CONFIG_FLOAT_ABI value
-    #[arg(long)]
-    float_abi: Option<String>,
-
-    /// Explicit Mesa version selector (MetaMake OPT_MESAGL)
-    #[arg(long = "mesa-version")]
-    mesa_version: Option<String>,
-
-    /// Explicit target LLVM version selector (MetaMake TARGET_LLVM_VER)
-    #[arg(long = "target-llvm-ver")]
-    target_llvm_ver: Option<String>,
-
-    /// Explicit target LLVM runtimes layout selector
-    #[arg(long = "target-llvm-runtimes-style")]
-    target_llvm_runtimes_style: Option<String>,
-
-    /// Explicit target Rust selector (MetaMake TARGET_RUST)
-    #[arg(long = "target-rust")]
-    target_rust: Option<String>,
-
-    /// Explicit target Rust version selector (MetaMake TARGET_RUST_VER)
-    #[arg(long = "target-rust-ver")]
-    target_rust_ver: Option<String>,
-
-    /// Diagnostic renderer used for failures
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = DiagnosticFormat::Human,
-        env = "AROS_TRANSPILER_DIAGNOSTIC_FORMAT"
-    )]
-    diagnostic_format: DiagnosticFormat,
-
-    /// Local logging threshold; logging is disabled by default.
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = LogLevel::Off,
-        env = "AROS_TRANSPILER_LOG_LEVEL"
-    )]
-    log_level: LogLevel,
-
-    /// Stable local log encoding.
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = LogFormat::Human,
-        env = "AROS_TRANSPILER_LOG_FORMAT"
-    )]
-    log_format: LogFormat,
-
-    /// Explicit local log destination.
-    #[arg(long, env = "AROS_TRANSPILER_LOG_FILE")]
-    log_file: Option<PathBuf>,
-}
+use reports::{render_source_inventory_manifest, resolved_publication_path, write_report};
 
 fn main() -> ExitCode {
     let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
@@ -265,6 +173,14 @@ fn main() -> ExitCode {
     reason = "the transpiler command coordinates one diagnostic transaction; parsing and generation remain isolated library stages"
 )]
 fn run(args: &Args, logger: &Logger) -> Result<()> {
+    if resolved_publication_path(&args.output)?
+        == resolved_publication_path(&args.output.with_extension("native-invocation.json"))?
+    {
+        return Err(ArosError::Configuration {
+            file: args.output.display().to_string(),
+            message: "output path must not alias its native invocation sidecar".into(),
+        });
+    }
     if let Err(error) = aros_transpiler::fingerprints::validate() {
         return Err(diagnostics_error(vec![Diagnostic::error(
             DiagnosticCode::InternalInvariant,
@@ -284,68 +200,11 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         args.source_dir.display()
     );
 
-    // Build trees must be skipped. The SDK staging step copies whole source
-    // directories, mmakefile.src included, so scanning build/ would parse those
-    // copies a second time and attribute their rules to the wrong location.
-    let skip_dirs = ["build", "target", ".git"];
-    let mut files: Vec<PathBuf> = Vec::new();
-    for entry in WalkDir::new(&args.source_dir)
-        .into_iter()
-        .filter_entry(|e| {
-            !e.file_type().is_dir()
-                || e.depth() == 0
-                || !skip_dirs
-                    .iter()
-                    .any(|d| e.file_name().to_string_lossy() == *d)
-        })
-    {
-        let entry = entry.map_err(|error| {
-            diagnostics_error(vec![Diagnostic::error(
-                DiagnosticCode::SourceWalk,
-                DiagnosticStage::SourceWalk,
-                format!("cannot walk MetaMake source tree: {error}"),
-            )
-            .with_location(SourceLocation::new("."))])
-        })?;
-        // MetaMake reads both generated-template inputs (`mmakefile.src`) and
-        // direct make fragments (`mmakefile`).  The latter include the
-        // top-level AROS/AROS-complete roots and 32 further dependency files;
-        // omitting them leaves an apparently valid but disconnected graph.
-        if matches!(
-            entry.file_name().to_str(),
-            Some("mmakefile.src" | "mmakefile")
-        ) {
-            files.push(entry.into_path());
-        }
-    }
-    // Stable source order matters for duplicate-output semantics: GNU Make's
-    // first satisfiable icon rule wins, and the CMake output registry mirrors
-    // that choice while reporting conflicting later claims.
-    files.sort();
-
-    aros_common::outputln!(
-        "📦 Found {} MetaMake input files. Parsing in parallel...",
-        files.len()
-    );
-
-    let pb = if matches!(args.diagnostic_format, DiagnosticFormat::Json) {
-        ProgressBar::hidden()
-    } else {
-        ProgressBar::new(files.len() as u64)
-    };
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
-            )
-            .unwrap(),
-    );
-
     let mut dirs = DirVars::load(&args.source_dir);
     if let Some(ports_dir) = &args.ports_dir {
         dirs.set_materialized_path("AROS_PORTS_DIR", ports_dir.clone());
     }
-    let target = [
+    let mut target = [
         &args.cpu,
         &args.platform,
         &args.family,
@@ -363,6 +222,15 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     .iter()
     .any(|value| value.is_some())
     .then(|| TargetContext {
+        native_arch_include_effects: Vec::new(),
+        native_arch_include_errors: Vec::new(),
+        native_arch_include_catalog_closed: false,
+        native_kernel_sources_in_target_role: false,
+        native_metamake_globals: std::collections::BTreeMap::new(),
+        host_file_generators: Vec::new(),
+        make_variables: std::collections::BTreeMap::new(),
+        make_include_bindings: std::collections::BTreeMap::new(),
+        generated_make_templates: std::collections::BTreeMap::new(),
         cpu: args.cpu.clone(),
         platform: args.platform.clone(),
         family: args.family.clone(),
@@ -377,6 +245,133 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         target_rust: args.target_rust.clone(),
         target_rust_ver: args.target_rust_ver.clone(),
     });
+    let native_contract =
+        load_native_selection(args, target.as_ref()).map_err(native_selection_input_error)?;
+    if let (Some(contract), Some(target)) = (&native_contract, &mut target) {
+        dirs.bind_native_target_tool_roles();
+        target
+            .host_file_generators
+            .clone_from(&contract.contract.host_file_generators);
+        target.make_variables = contract
+            .contract
+            .make_variables_for_host(aros_common::target::native_host_key().unwrap_or(""))
+            .map_err(native_selection_input_error)?;
+        target
+            .make_include_bindings
+            .clone_from(&contract.contract.make_include_bindings);
+        target.native_kernel_sources_in_target_role =
+            contract.contract.kernel_compiler_role.as_deref() == Some("target");
+        target.generated_make_templates =
+            aros_common::native_make_template::resolve_generated_make_templates(
+                &args.source_dir,
+                &contract.contract.generated_make_templates,
+                &contract
+                    .contract
+                    .inputs
+                    .iter()
+                    .map(|input| (input.path.clone(), input.sha256.clone()))
+                    .collect(),
+            )
+            .map_err(native_selection_input_error)?;
+    }
+    // Source-owned literal ignoredirs follow MetaMake basename semantics at
+    // every depth. A closed native invocation must not silently prune recipe
+    // directories merely because their basename happens to be build/target.
+    let source_ignoredirs =
+        source_discovery::ignored_directories(&args.source_dir, native_contract.as_ref())?;
+    let skip_dirs: &[&str] = if native_contract
+        .as_ref()
+        .is_some_and(|native| native.contract.metamake_projection.is_some())
+    {
+        &[".git"]
+    } else {
+        &["build", "target", ".git"]
+    };
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(&args.source_dir)
+        .into_iter()
+        .filter_entry(|entry| {
+            !entry.file_type().is_dir()
+                || entry.depth() == 0
+                || !entry.file_name().to_str().is_some_and(|name| {
+                    skip_dirs.contains(&name) || source_ignoredirs.contains(name)
+                })
+        })
+    {
+        let entry = entry.map_err(|error| {
+            diagnostics_error(vec![Diagnostic::error(
+                DiagnosticCode::SourceWalk,
+                DiagnosticStage::SourceWalk,
+                format!("cannot walk MetaMake source tree: {error}"),
+            )
+            .with_location(SourceLocation::new("."))])
+        })?;
+        // Both template inputs and direct fragments belong to MetaMake.
+        if matches!(
+            entry.file_name().to_str(),
+            Some("mmakefile.src" | "mmakefile")
+        ) {
+            files.push(entry.into_path());
+        }
+    }
+    files.sort();
+    let native_owner_projection = native_contract
+        .as_ref()
+        .map(|contract| {
+            aros_transpiler::native_owner_projection::NativeOwnerProjection::load(
+                &args.source_dir,
+                contract,
+                &files,
+                aros_common::target::native_host_key().unwrap_or(""),
+                target
+                    .as_ref()
+                    .expect("validated native selection has explicit selectors"),
+            )
+            .map_err(|message| {
+                native_selection_input_error(ArosError::Configuration {
+                    file: "native MetaMake projection".into(),
+                    message,
+                })
+            })
+        })
+        .transpose()?
+        .flatten();
+    if let Some(projection) = &native_owner_projection {
+        target = Some(
+            projection
+                .native_header_context(&args.source_dir)
+                .map_err(|message| {
+                    native_selection_input_error(ArosError::Configuration {
+                        file: "native architecture include context".into(),
+                        message,
+                    })
+                })?,
+        );
+        // Owner metadata and native parsing must consume the same inputs.
+        // A stale generated sibling cannot contribute edges or diagnostics
+        // after its `.src` has superseded it in source-owned generation.
+        files = projection
+            .effective_inputs()
+            .map(|relative| args.source_dir.join(relative))
+            .collect();
+        files.sort();
+    }
+    aros_common::outputln!(
+        "📦 Found {} MetaMake input files. Parsing in parallel...",
+        files.len()
+    );
+    let pb = if matches!(args.diagnostic_format, DiagnosticFormat::Json) {
+        ProgressBar::hidden()
+    } else {
+        ProgressBar::new(files.len() as u64)
+    };
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
+            .unwrap(),
+    );
     let known_fetches = if let Some(target) = target.as_ref() {
         let results: Vec<_> = files
             .par_iter()
@@ -433,9 +428,156 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
 
     let mut parse_errors = Vec::new();
     let mut parsed_files = Vec::new();
+    // Preserve the actual invocation input, not the diagnostic's displayed
+    // location: an included fragment may report a foreign path while still
+    // belonging to a selected recipe.
+    let mut native_diagnostic_origins =
+        std::collections::BTreeMap::<Diagnostic, std::collections::BTreeSet<String>>::new();
+    let mut native_parser_origins =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    let mut native_meta_edge_origins =
+        std::collections::BTreeMap::<(String, String), std::collections::BTreeSet<String>>::new();
+    let mut native_script_origins = std::collections::BTreeMap::<
+        aros_transpiler::native_parser_origins::ScriptInputIdentity,
+        std::collections::BTreeSet<String>,
+    >::new();
+    let mut optional_meta_proofs = std::collections::BTreeSet::new();
+    let mut meta_edge_sources =
+        std::collections::BTreeMap::<(String, String), std::collections::BTreeSet<String>>::new();
     for (path, result) in parsed_results {
         match result {
-            Ok(parsed) => parsed_files.push(parsed),
+            Ok(parsed) => {
+                let origin = path
+                    .strip_prefix(&args.source_dir)
+                    .map_err(|error| ArosError::Configuration {
+                        file: path.display().to_string(),
+                        message: error.to_string(),
+                    })?
+                    .to_string_lossy()
+                    .into_owned();
+                for diagnostic in &parsed.native_graph_errors {
+                    native_diagnostic_origins
+                        .entry(diagnostic.clone())
+                        .or_default()
+                        .insert(origin.clone());
+                }
+                if let Some(context) = target.as_ref().filter(|_| native_contract.is_some()) {
+                    for rule in parsed.meta_rules.iter().chain(&parsed.explicit_meta_rules) {
+                        for dependency in &rule.dependencies {
+                            native_meta_edge_origins
+                                .entry((rule.name.clone(), dependency.clone()))
+                                .or_default()
+                                .insert(origin.clone());
+                        }
+                    }
+                    for identity in
+                        aros_transpiler::native_parser_origins::script_input_identities(&parsed)
+                    {
+                        native_script_origins
+                            .entry(identity)
+                            .or_default()
+                            .insert(origin.clone());
+                    }
+                    for endpoint in
+                        aros_transpiler::native_parser_origins::endpoints(&parsed, context)
+                    {
+                        native_parser_origins
+                            .entry(endpoint)
+                            .or_default()
+                            .insert(origin.clone());
+                    }
+                }
+                if let Some(contract) = &native_contract {
+                    let relative = path
+                        .strip_prefix(&args.source_dir)
+                        .map_err(|error| ArosError::Configuration {
+                            file: path.display().to_string(),
+                            message: format!("optional MetaMake recipe is outside source: {error}"),
+                        })?
+                        .to_string_lossy();
+                    for rule in &parsed.explicit_meta_rules {
+                        for dependency in &rule.dependencies {
+                            meta_edge_sources
+                                .entry((rule.name.clone(), dependency.clone()))
+                                .or_default()
+                                .insert(relative.to_string());
+                        }
+                    }
+                    for declaration in &contract.contract.optional_meta_dependencies {
+                        if declaration.recipe != relative {
+                            continue;
+                        }
+                        let expected = contract
+                            .contract
+                            .inputs
+                            .iter()
+                            .find(|input| input.path == declaration.recipe)
+                            .ok_or_else(|| {
+                                native_selection_input_error(ArosError::Configuration {
+                                    file: declaration.recipe.clone(),
+                                    message: "optional MetaMake recipe is not hash-bound".into(),
+                                })
+                            })?;
+                        if parsed.source_sha256.as_deref() != Some(expected.sha256.as_str()) {
+                            return Err(native_selection_input_error(ArosError::Configuration {
+                                file: declaration.recipe.clone(),
+                                message: "optional MetaMake proof was parsed from bytes different from the bound recipe snapshot".into(),
+                            }));
+                        }
+                        if !parsed.explicit_meta_rules.iter().any(|rule| {
+                            rule.name == declaration.target
+                                && rule.dependencies.contains(&declaration.dependency)
+                        }) {
+                            return Err(native_selection_input_error(ArosError::Configuration {
+                                file: declaration.recipe.clone(),
+                                message: format!(
+                                    "optional MetaMake edge {} -> {} is not declared by this bound source recipe",
+                                    declaration.target, declaration.dependency
+                                ),
+                            }));
+                        }
+                        if declaration.absence
+                            == aros_common::native_build_contract::NativeMetaAbsence::DisabledOwner
+                            && !parsed
+                                .disabled_meta_owners
+                                .contains(&declaration.dependency)
+                        {
+                            return Err(native_selection_input_error(ArosError::Configuration {
+                                file: declaration.recipe.clone(),
+                                message: format!(
+                                    "disabled MetaMake owner {} is not explicitly commented in this bound source recipe",
+                                    declaration.dependency
+                                ),
+                            }));
+                        }
+                        optional_meta_proofs.insert((
+                            declaration.recipe.clone(),
+                            declaration.target.clone(),
+                            declaration.dependency.clone(),
+                        ));
+                    }
+                }
+                if let Some(projection) = &native_owner_projection {
+                    let relative = path
+                        .strip_prefix(&args.source_dir)
+                        .map_err(|error| ArosError::Configuration {
+                            file: path.display().to_string(),
+                            message: error.to_string(),
+                        })?
+                        .to_string_lossy()
+                        .into_owned();
+                    if projection
+                        .snapshots
+                        .get(&relative)
+                        .is_none_or(|digest| parsed.source_sha256.as_ref() != Some(digest))
+                    {
+                        return Err(native_selection_input_error(ArosError::Configuration {
+                            file: relative, message: "MetaMake source changed between owner projection and native parsing".into(),
+                        }));
+                    }
+                }
+                parsed_files.push(parsed);
+            }
             Err(error) => parse_errors.push(
                 Diagnostic::error(
                     DiagnosticCode::SourceParse,
@@ -449,9 +591,45 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     if !parse_errors.is_empty() {
         return Err(diagnostics_error(parse_errors));
     }
+    if let Some(contract) = &native_contract {
+        if optional_meta_proofs.len() != contract.contract.optional_meta_dependencies.len() {
+            return Err(native_selection_input_error(ArosError::Configuration {
+                file: "native build contract".into(),
+                message:
+                    "every optional MetaMake edge must be proven in its selected source recipe"
+                        .into(),
+            }));
+        }
+        for declaration in &contract.contract.optional_meta_dependencies {
+            let sources =
+                &meta_edge_sources[&(declaration.target.clone(), declaration.dependency.clone())];
+            if sources.iter().any(|recipe| {
+                !optional_meta_proofs.contains(&(
+                    recipe.clone(),
+                    declaration.target.clone(),
+                    declaration.dependency.clone(),
+                ))
+            }) {
+                return Err(native_selection_input_error(ArosError::Configuration {
+                    file: declaration.recipe.clone(),
+                    message: "optional MetaMake edge also has a source declaration without explicit optionality".into(),
+                }));
+            }
+        }
+    }
 
     let mut graph = DependencyGraph::new();
+    if let Some(contract) = &native_contract {
+        for input in &contract.contract.inputs {
+            graph
+                .host_file_generator_source_digests
+                .insert(input.path.clone(), input.sha256.to_string());
+        }
+    }
+    let mut native_optional_omissions = Vec::new();
+    let mut native_invocation_report = None;
     let mut capability_errors: Vec<Diagnostic> = Vec::new();
+    let mut unscoped_diagnostics = std::collections::BTreeSet::new();
     let mut unresolved: Vec<String> = Vec::new();
     let mut skipped_headers: Vec<String> = Vec::new();
     let mut skipped_copy_directories: Vec<String> = Vec::new();
@@ -466,6 +644,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     let mut skipped_programs: Vec<String> = Vec::new();
     let mut partial_source_lists: Vec<String> = Vec::new();
     let mut source_inventory_patterns: Vec<String> = Vec::new();
+    let mut source_inventory_needs = Vec::new();
     let mut skipped_client_archives: Vec<String> = Vec::new();
     let mut skipped_binary_objects: Vec<String> = Vec::new();
     let mut skipped_host_generated_headers: Vec<String> = Vec::new();
@@ -479,7 +658,94 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     let mut skipped_ilbm_sources: Vec<String> = Vec::new();
     let mut skipped_meta_rules: Vec<String> = Vec::new();
     for parsed in parsed_files {
+        unscoped_diagnostics.extend(parsed.capability_errors.iter().cloned());
         capability_errors.extend(parsed.capability_errors);
+        if native_contract.is_some() {
+            capability_errors.extend(parsed.native_graph_errors);
+        } else {
+            // Old full-tree builds report unmodelled handwritten Make rules
+            // and use their established SDK bootstrap. Only an explicit
+            // native source contract promises a complete selected graph; its
+            // reachable rejections must fail before any graph is published.
+            skipped_meta_rules.extend(
+                parsed
+                    .native_graph_errors
+                    .into_iter()
+                    .map(|error| format!("native graph coverage: {}", error.message)),
+            );
+        }
+        graph.directory_setups.extend(parsed.directory_setups);
+        graph
+            .genmodule_header_rules
+            .extend(parsed.genmodule_header_rules);
+        graph
+            .genmodule_writefiles_rules
+            .extend(parsed.genmodule_writefiles_rules);
+        graph.host_header_rules.extend(parsed.host_header_rules);
+        graph
+            .host_file_generators
+            .extend(parsed.host_file_generators);
+        if native_contract.is_some() {
+            graph
+                .host_header_aggregates
+                .extend(parsed.host_header_aggregates);
+        }
+        graph.sdk_text_rules.extend(parsed.sdk_text_rules);
+        graph.sfd_header_rules.extend(parsed.sfd_header_rules);
+        graph.source_text_rules.extend(parsed.source_text_rules);
+        graph.source_value_rules.extend(parsed.source_value_rules);
+        graph.sdk_file_copies.extend(parsed.sdk_file_copies);
+        graph.sdk_asset_rules.extend(parsed.sdk_asset_rules);
+        graph.sdk_program_outputs.extend(parsed.sdk_program_outputs);
+        if native_contract.is_some() {
+            capability_errors.extend(parsed.assembly_header_rejections.into_iter().map(|rejection| {
+                Diagnostic::error(DiagnosticCode::CapabilityDrift, DiagnosticStage::CapabilityValidation,
+                    format!("assembly header {} is not proved: {}", rejection.owner, rejection.reason))
+                    .with_context(DiagnosticContext { target: Some(rejection.owner), ..Default::default() })
+                    .with_location(SourceLocation { path: rejection.file, line: Some(rejection.line), column: None })
+                    .with_hint("resolve the source-owned compiler/sysroot/include contract; existing output files never establish producer support")
+            }));
+            graph.assembly_headers.extend(parsed.assembly_headers);
+            capability_errors.extend(parsed.arch_endpoint_rejections.into_iter().map(|rejection| {
+                Diagnostic::error(
+                    DiagnosticCode::CapabilityDrift,
+                    DiagnosticStage::CapabilityValidation,
+                    format!("{} architecture effect is not proved: {}", rejection.directive, rejection.reason),
+                )
+                .with_context(DiagnosticContext { target: rejection.endpoint, ..Default::default() })
+                .with_location(SourceLocation {
+                    path: rejection.recipe,
+                    line: Some(rejection.line),
+                    column: None,
+                })
+                .with_hint("review the source declaration and the unsupported transpiler capability; a rejected architecture effect is not an optional hook")
+            }));
+            graph
+                .arch_endpoint_effects
+                .extend(parsed.arch_endpoint_effects);
+            graph.sdk_object_groups.extend(parsed.sdk_object_groups);
+            graph
+                .source_archive_projections
+                .extend(parsed.source_archive_projections);
+            graph
+                .source_archive_commands
+                .extend(parsed.source_archive_commands);
+            graph
+                .source_compile_projections
+                .extend(parsed.source_compile_projections);
+            graph
+                .layered_header_projections
+                .extend(parsed.layered_header_projections);
+            graph
+                .source_header_pipelines
+                .extend(parsed.source_header_pipelines);
+            graph
+                .source_directory_groups
+                .extend(parsed.source_directory_groups);
+            graph
+                .literal_object_groups
+                .extend(parsed.literal_object_groups);
+        }
         for target in parsed.targets {
             graph.add_target(target);
         }
@@ -506,6 +772,10 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         for rule in parsed.meta_rules {
             graph.add_meta_rule(rule);
         }
+        for rule in parsed.explicit_meta_rules {
+            graph.add_explicit_meta_rule(rule);
+        }
+        graph.make_meta_providers.extend(parsed.make_meta_providers);
         graph.add_icons(parsed.icon_targets, parsed.icons);
         skipped_icons.extend(parsed.skipped_icons);
         graph.add_catalogs(parsed.catalogs);
@@ -530,6 +800,12 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         skipped_programs.extend(parsed.skipped_programs);
         partial_source_lists.extend(parsed.partial_source_lists);
         source_inventory_patterns.extend(parsed.source_inventory_patterns);
+        source_inventory_needs.extend(parsed.source_inventory_needs);
+        if args.source_inventory_only {
+            graph
+                .inventory_targets
+                .extend(parsed.source_inventory_targets);
+        }
         skipped_client_archives.extend(parsed.skipped_client_archives);
         unresolved_output_paths.extend(parsed.unresolved_output_paths);
         graph.add_packages(parsed.packages);
@@ -550,37 +826,36 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         }
     }
 
-    if !capability_errors.is_empty() {
+    if !args.source_inventory_only && native_contract.is_none() && !capability_errors.is_empty() {
         return Err(diagnostics_error(capability_errors));
     }
 
-    if let Err(errors) = graph.validate_python_output_consumers() {
-        let diagnostics = errors
-            .into_iter()
-            .map(|message| {
-                Diagnostic::error(
-                    DiagnosticCode::GraphValidation,
-                    DiagnosticStage::GraphValidation,
-                    message,
-                )
-            })
-            .collect();
-        return Err(diagnostics_error(diagnostics));
+    if !args.source_inventory_only && native_contract.is_none() {
+        if let Err(errors) = graph.validate_python_output_consumers() {
+            let diagnostics = errors
+                .into_iter()
+                .map(|message| {
+                    Diagnostic::error(
+                        DiagnosticCode::GraphValidation,
+                        DiagnosticStage::GraphValidation,
+                        message,
+                    )
+                })
+                .collect();
+            return Err(diagnostics_error(diagnostics));
+        }
     }
 
-    source_inventory_patterns.sort();
-    source_inventory_patterns.dedup();
-    partial_source_lists.extend(
-        graph
-            .resolve_source_inventory_fetches(&source_inventory_patterns)
-            .into_iter()
-            .map(|pattern| {
-                format!(
-                    "fetched-tree source wildcard has no owning %fetch declaration: `{pattern}`"
-                )
-            }),
-    );
-    graph.resolve_header_inventory_fetches(args.ports_dir.as_deref());
+    if native_contract.is_none() {
+        source_inventory_patterns.sort();
+        source_inventory_patterns.dedup();
+        let unresolved_inventory =
+            graph.resolve_source_inventory_fetches(&source_inventory_patterns);
+        partial_source_lists.extend(unresolved_inventory.into_iter().map(|pattern| {
+            format!("fetched-tree source wildcard has no owning %fetch declaration: `{pattern}`")
+        }));
+        graph.resolve_header_inventory_fetches(args.ports_dir.as_deref());
+    }
 
     // Architecture includes are declared in the arch/ tree but consumed in
     // rom/, so they can only be joined once every file has been parsed.
@@ -595,13 +870,45 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // The HIDD stub archive has to exist before uselibs are resolved: 61
     // declarations name `uselibs=hiddstubs`, and until %make_hidd_stubs was
     // modelled every one of them was reported as having no link library.
-    skipped_hidd_stubs.extend(graph.resolve_hidd_stubs());
+    if native_contract.is_none() {
+        skipped_hidd_stubs.extend(graph.resolve_hidd_stubs());
+    } else {
+        append_unscoped_diagnostics(
+            &mut capability_errors,
+            &mut unscoped_diagnostics,
+            graph.bind_source_archives(),
+        );
+        graph.discharge_bound_archive_provider_failures(&mut capability_errors);
+    }
 
     // Before uselibs, because a generated source has to be registered before
     // the target that names it is emitted.
     skipped_script_outputs.extend(graph.resolve_script_outputs());
+    // Preserve the original invocation inputs across consumer-bound script
+    // naming. Compare exact declared script/output identities, not guessed
+    // recipe directories or generated target-name prefixes.
+    for declaration in &graph.script_outputs {
+        if let Some(origins) =
+            native_script_origins.get(&(declaration.script.clone(), declaration.outputs.clone()))
+        {
+            native_parser_origins
+                .entry(declaration.owner.clone())
+                .or_default()
+                .extend(origins.iter().cloned());
+        }
+    }
 
-    let unresolved_libs = graph.resolve_use_libs();
+    if let Some(context) = target.as_ref() {
+        graph.bind_explicit_meta_provenance(context);
+    }
+    // Preparation binds normal and cold declaration metadata together below.
+    // The full resolver would otherwise erase rejected raw link options or
+    // rebind aliases before cold source-owned producers are visible.
+    let unresolved_libs = if args.source_inventory_only {
+        Vec::new()
+    } else {
+        graph.resolve_use_libs()
+    };
 
     // The compiler spec's default link set. configure.in:3044 selects
     // config/<object-format>-specs.in and falls back to config/elf-specs.in;
@@ -689,11 +996,380 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // direct Ninja invocation of this target.
     let mut unowned_port_sources = graph.resolve_port_source_fetches();
     unowned_port_sources.extend(graph.resolve_header_transforms());
+    if native_contract.is_some() {
+        append_unscoped_diagnostics(
+            &mut capability_errors,
+            &mut unscoped_diagnostics,
+            graph.bind_source_headers(),
+        );
+        graph.discharge_bound_header_provider_failures(&mut capability_errors);
+    }
     skipped_copy_directories.extend(graph.resolve_copy_directories());
     // GNU Make drops a circular phony prerequisite during traversal; CMake
     // rejects utility-target cycles outright. Collapse each meta-only SCC to
     // its shared external prerequisite closure and make that visible.
-    let flattened_meta_cycles = graph.flatten_meta_cycles();
+    // Native source-edge proofs must see the original metadata prerequisites,
+    // not dependencies rewritten by SCC flattening. Flatten native routes
+    // together after source aliases and explicit hooks have been verified.
+    let mut flattened_meta_cycles = if native_contract.is_none() {
+        graph.flatten_meta_cycles()
+    } else {
+        Vec::new()
+    };
+    if let Some(contract) = &native_contract {
+        let context = target.as_ref().ok_or_else(|| {
+            native_selection_input_error(ArosError::Configuration {
+                file: "native profile".into(),
+                message: "native selection requires explicit target context".into(),
+            })
+        })?;
+        let selected_package_errors: Vec<_> = skipped_packages
+            .iter()
+            .filter(|message| {
+                message.split_whitespace().any(|word| word == contract.contract.package.target)
+            })
+            .map(|message| {
+                Diagnostic::error(
+                    DiagnosticCode::CapabilityDrift,
+                    DiagnosticStage::CapabilityValidation,
+                    format!("selected native package declaration is unresolved: {message}"),
+                )
+                .with_location(SourceLocation {
+                    path: contract.contract.package.recipe.clone(),
+                    line: None,
+                    column: None,
+                })
+                .with_hint("declare the selected build variables in the source-owned contract; package members and output paths cannot be inferred")
+            })
+            .collect();
+        if !selected_package_errors.is_empty() && args.native_graph_audit.is_none() {
+            return Err(diagnostics_error(selected_package_errors));
+        }
+        append_unscoped_diagnostics(
+            &mut capability_errors,
+            &mut unscoped_diagnostics,
+            selected_package_errors,
+        );
+        if args.source_inventory_only {
+            append_unscoped_diagnostics(
+                &mut capability_errors,
+                &mut unscoped_diagnostics,
+                graph.resolve_inventory_link_edges(context)?,
+            );
+        }
+        if let Some(projection) = &native_owner_projection {
+            let headers = std::mem::take(&mut graph.assembly_headers);
+            for header in headers {
+                match projection.verify_assembly_headers(&args.source_dir, std::slice::from_ref(&header)) {
+                    Ok(()) => graph.assembly_headers.push(header),
+                    Err(message) => capability_errors.push(Diagnostic::error(
+                        DiagnosticCode::CapabilityDrift, DiagnosticStage::CapabilityValidation,
+                        format!("assembly header source proof failed: {message}"))
+                        .with_context(DiagnosticContext { target: Some(header.owner), ..Default::default() })
+                        .with_location(SourceLocation { path: header.file, line: Some(header.line), column: None })
+                        .with_hint("fix the source contract or unsupported transpiler capability; no generated header is accepted as proof")),
+                }
+            }
+            bind_architecture_effects(
+                projection,
+                &args.source_dir,
+                context,
+                &mut graph,
+                &mut capability_errors,
+            )?;
+        } else if !graph.arch_endpoint_effects.is_empty() || !graph.assembly_headers.is_empty() {
+            return Err(native_selection_input_error(ArosError::Configuration {
+                file: "architecture endpoint effects".into(),
+                message: "architecture effects require sealed source projection".into(),
+            }));
+        }
+        let plain_archive_header_omissions = graph.omit_native_plain_linklib_headers(context);
+        for omission in &plain_archive_header_omissions {
+            aros_common::outputln!(
+                "Typed plain archive has no generated ABI-header interface: {omission}"
+            );
+        }
+        let (roots, root_resolution_error) =
+            match graph.native_contract_roots(&contract.contract, context) {
+                Ok(roots) => (roots, None),
+                Err(error) if args.native_graph_audit.is_some() => {
+                    (Vec::new(), Some(error.to_string()))
+                }
+                Err(error) => return Err(error),
+            };
+        let source_meta_semantics = native_owner_projection
+            .as_ref()
+            .filter(|_| root_resolution_error.is_none() && !roots.is_empty())
+            .map(|projection| {
+                projection.bind_native_meta_semantics(
+                    &args.source_dir,
+                    &mut graph,
+                    aros_transpiler::native_owner_projection::NativeMetaSemanticsSelection {
+                        context,
+                        roots: &roots,
+                        declarations: &contract.contract.optional_meta_dependencies,
+                        diagnostics: &capability_errors,
+                        meta_edge_origins: &native_meta_edge_origins,
+                    },
+                    &mut native_parser_origins,
+                )
+            })
+            .transpose()
+            .map_err(|message| {
+                native_selection_input_error(ArosError::Configuration {
+                    file: "native source metadata semantics".into(),
+                    message,
+                })
+            })?;
+        // Imported source aliases can add metadata-only cycles. Flatten only
+        // after exact optional hook edges have been independently evidenced.
+        let imported_meta_cycles = graph.flatten_meta_cycles();
+        flattened_meta_cycles.extend(imported_meta_cycles.iter().cloned());
+        // Keep full parsing, provider resolution and global failure checks.
+        // Only a reverified source invocation can establish that an unowned
+        // parser failure belongs to a recipe that this profile never calls.
+        let (native_owner_evidence, source_uninvoked_capability_failures) =
+            if let Some(projection) = native_owner_projection
+                .as_ref()
+                .filter(|_| root_resolution_error.is_none() && !roots.is_empty())
+            {
+                // Native link dependencies can be stricter than the classic
+                // MetaMake root traversal. Keep every source owner named by
+                // either closure; metadata-only exclusion cannot hide an
+                // unsupported rule in a native-required provider's recipe.
+                let native_audit =
+                    graph.audit_native_dependency_graph(&roots, context, &capability_errors);
+                let unavailable_endpoints = native_audit
+                    .missing_endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.name.clone())
+                    .collect();
+                let (evidence, excluded) = projection
+                    .scope_capability_failures(
+                        &args.source_dir,
+                        aros_transpiler::native_owner_projection::NativeInvocationSelection {
+                            roots: &roots,
+                            endpoints: &native_audit.reachable,
+                            unavailable_endpoints: &unavailable_endpoints,
+                            parser_origins: &native_parser_origins,
+                        },
+                        &mut capability_errors,
+                        &native_diagnostic_origins,
+                        &unscoped_diagnostics,
+                    )
+                    .map_err(|message| {
+                        native_selection_input_error(ArosError::Configuration {
+                            file: "native MetaMake projection".into(),
+                            message,
+                        })
+                    })?;
+                (Some(evidence), excluded)
+            } else {
+                (None, Vec::new())
+            };
+        if let Some(evidence) = &native_owner_evidence {
+            native_invocation_report = Some(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": 1,
+                    "qualification": "source-invocation-scope-not-build-proof",
+                    "native_profile": args.native_profile,
+                    "native_contract_sha256": contract.sha256,
+                    "native_owner_projection": evidence,
+                    "source_uninvoked_capability_failures": source_uninvoked_capability_failures,
+                    "source_meta_semantics": source_meta_semantics,
+                }))
+                .map_err(|error| ArosError::Configuration {
+                    file: "native invocation report".into(),
+                    message: error.to_string(),
+                })?,
+            );
+        }
+        // A diagnostic-only audit retains source errors alongside every other
+        // graph failure. It cannot publish a build graph or grant admission.
+        // Malformed/unbound declarations remain fatal even in audit mode.
+        let remaining_meta_declarations: Vec<_> = contract
+            .contract
+            .optional_meta_dependencies
+            .iter()
+            .filter(|edge| {
+                !source_meta_semantics
+                    .as_ref()
+                    .is_some_and(|proof| proof.verifies(edge))
+            })
+            .cloned()
+            .collect();
+        let source_dependency_validation_error = match graph.omit_absent_optional_meta_dependencies(
+            &remaining_meta_declarations,
+            context,
+            &capability_errors,
+        ) {
+            Ok(omissions) => {
+                native_optional_omissions = omissions;
+                None
+            }
+            Err(error @ ArosError::Diagnostics(_)) if args.native_graph_audit.is_some() => {
+                Some(error.to_string())
+            }
+            Err(error) => return Err(error),
+        };
+        for omission in &native_optional_omissions {
+            aros_common::outputln!("Source-declared absent optional MetaMake edge: {omission}");
+        }
+        if let Some(audit_path) = &args.native_graph_audit {
+            let audit_destination = resolved_publication_path(audit_path)?;
+            let protected_outputs = [
+                args.output.clone(),
+                args.output.with_extension("coverage.json"),
+                args.output.with_extension("source-inventory.cmake"),
+                args.output.with_extension("native-invocation.json"),
+            ];
+            if audit_path
+                .extension()
+                .is_none_or(|extension| extension != "json")
+                || protected_outputs
+                    .iter()
+                    .map(|path| resolved_publication_path(path))
+                    .collect::<std::io::Result<Vec<_>>>()?
+                    .contains(&audit_destination)
+            {
+                return Err(ArosError::Configuration {
+                    file: audit_path.display().to_string(),
+                    message: "native graph audit requires a separate .json report path".to_owned(),
+                });
+            }
+            let mut audit =
+                graph.audit_native_dependency_graph(&roots, context, &capability_errors);
+            if let Some(error) = &root_resolution_error {
+                audit.strict_validation_error = Some(error.clone());
+            }
+            if let Some(error) = &source_dependency_validation_error {
+                audit.strict_validation_error = Some(
+                    audit
+                        .strict_validation_error
+                        .take()
+                        .map_or_else(|| error.clone(), |existing| format!("{existing}\n{error}")),
+                );
+            }
+            let report_json = serde_json::to_string_pretty(&serde_json::json!({
+                "native_profile": args.native_profile,
+                "native_contract_sha256": contract.sha256,
+                "source_root": args.source_dir,
+                "source_baseline": contract.contract.source_baseline,
+                "bound_source_inputs": contract.contract.inputs,
+                "source_literal_ignoredirs": source_ignoredirs,
+                "typed_plain_archive_header_omissions": plain_archive_header_omissions,
+                "source_declared_optional_omissions": native_optional_omissions,
+                "native_owner_projection": native_owner_evidence,
+                "source_uninvoked_capability_failures": source_uninvoked_capability_failures,
+                "source_meta_semantics": source_meta_semantics,
+                "imported_meta_cycles": imported_meta_cycles,
+                "root_resolution_error": root_resolution_error,
+                "source_dependency_validation_error": source_dependency_validation_error,
+                "coverage_limits": [
+                    "If root resolution fails, reachability is unavailable; no substitute roots are invented.",
+                    "Traverses every known reachable declaration, including sibling failures; does not infer prerequisites hidden by rejected declarations.",
+                    "Unowned diagnostics remain unresolved ownership; foreign architecture locations do not prove selected P4 requirements.",
+                    "Uninvoked parser failures are separated only by complete, reverified source invocation metadata and every actual parser origin; this does not support their capabilities.",
+                    "Does not compile, link, produce boot images or prove complete source-language coverage, target ABI or runtime behavior."
+                ],
+                "audit": audit,
+            }))
+            .map_err(|error| ArosError::Configuration {
+                file: audit_path.display().to_string(),
+                message: format!("cannot serialize native graph audit: {error}"),
+            })?;
+            let mut publication = Publication::for_output(audit_path);
+            publication.present(audit_path.clone(), report_json);
+            reverify_native_owner_projection(native_owner_projection.as_ref(), &args.source_dir)?;
+            publication.publish()?;
+            aros_common::outputln!(
+                "Diagnostic-only graph audit written; no build graph or source inventory published."
+            );
+            return Ok(());
+        }
+        let selected = graph.selected_dependency_closure(&roots, context, &capability_errors)?;
+        let mut patterns: Vec<_> = source_inventory_needs
+            .iter()
+            .filter(|need| selected.contains(&need.owner_mmake))
+            .map(|need| need.pattern.clone())
+            .collect();
+        patterns.sort();
+        patterns.dedup();
+        graph.source_inventory_fetches.clear();
+        let unresolved_inventory = graph.resolve_source_inventory_fetches(&patterns);
+        let errors: Vec<_> = unresolved_inventory.iter()
+            .filter(|pattern| pattern.starts_with("${AROS_PORTS_DIR}/"))
+            .map(|pattern| Diagnostic::error(
+                DiagnosticCode::GraphValidation,
+                DiagnosticStage::GraphValidation,
+                format!("selected fetched-tree source wildcard has no owning %fetch declaration: `{pattern}`"),
+            )).collect();
+        if !errors.is_empty() {
+            return Err(diagnostics_error(errors));
+        }
+        if !args.source_inventory_only && !patterns.is_empty() {
+            return Err(diagnostics_error(vec![Diagnostic::error(
+                DiagnosticCode::GraphValidation,
+                DiagnosticStage::GraphValidation,
+                "selected compilation declarations still require a materialized source inventory",
+            ).with_hint("prepare and fetch the selected source inventory, then repeat the full export; no incomplete compilation graph is published")]));
+        }
+        graph.resolve_selected_header_inventory_fetches(args.ports_dir.as_deref(), Some(&selected));
+        if args.source_inventory_only {
+            // Only preparation may use pending declaration identities. The
+            // marker contains sources, never a partial or source-less graph.
+            let output = args.output.with_extension("source-inventory.cmake");
+            let mut inventory = Publication::for_output(&output);
+            inventory.present(output, render_source_inventory_manifest(&graph));
+            if let Some(report) = native_invocation_report.take() {
+                inventory.present(args.output.with_extension("native-invocation.json"), report);
+            } else {
+                inventory.absent(args.output.with_extension("native-invocation.json"));
+            }
+            reverify_native_owner_projection(native_owner_projection.as_ref(), &args.source_dir)?;
+            inventory.publish()?;
+            aros_common::outputln!("Selected source inventory prepared; no build graph published.");
+            return Ok(());
+        }
+        graph.retain_native_selection(&selected, context)?;
+        let mut failures = graph.resolve_use_libs();
+        if default_link_set_available(&args.source_dir) {
+            failures.extend(graph.resolve_default_link_set(
+                &read_default_link_set(&args.source_dir, "elf").map_err(|error| {
+                    ArosError::Configuration {
+                        file: "config/elf-specs.in".into(),
+                        message: error,
+                    }
+                })?,
+            ));
+        }
+        if let Err(errors) = graph.validate_python_output_consumers() {
+            failures.extend(errors);
+        }
+        if !failures.is_empty() {
+            return Err(diagnostics_error(
+                failures
+                    .into_iter()
+                    .map(|message| {
+                        Diagnostic::error(
+                            DiagnosticCode::GraphValidation,
+                            DiagnosticStage::GraphValidation,
+                            message,
+                        )
+                    })
+                    .collect(),
+            ));
+        }
+        graph.add_meta_rule(aros_transpiler::ast::MetaTargetRule {
+            name: "native-contract-selection".into(),
+            dependencies: roots,
+        });
+        aros_common::outputln!(
+            "Native source contract {} selects {} dependency endpoints",
+            contract.sha256,
+            selected.len()
+        );
+    }
     let n_overrides: usize = graph.arch_sources.values().map(Vec::len).sum();
     aros_common::outputln!(
         "🔧 {n_overrides} architecture source override(s) from %build_archspecific"
@@ -704,6 +1380,11 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     );
 
     let mut publication = Publication::for_output(&args.output);
+    if let Some(report) = native_invocation_report {
+        publication.present(args.output.with_extension("native-invocation.json"), report);
+    } else {
+        publication.absent(args.output.with_extension("native-invocation.json"));
+    }
     write_report(
         &mut publication,
         &args.output,
@@ -1007,9 +1688,18 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         args.output.display()
     );
 
+    let mut optional_meta_comments = String::new();
+    for omission in &native_optional_omissions {
+        writeln!(
+            optional_meta_comments,
+            "# Source-declared absent optional MetaMake edge: {omission}"
+        )
+        .expect("writing into a String cannot fail");
+    }
     let cmake_content = format!(
-        "{}{}",
+        "{}{}{}",
         generated_header(target.as_ref()),
+        optional_meta_comments,
         generate_cmake(&graph)
     );
     let coverage_json = publication.coverage_json()?;
@@ -1047,6 +1737,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // The graph is the commit marker consumed by CMake and is deliberately
     // replaced after every sidecar and report in the same transaction.
     publication.present(args.output.clone(), cmake_content);
+    reverify_native_owner_projection(native_owner_projection.as_ref(), &args.source_dir)?;
     publication.publish().map_err(|error| {
         diagnostics_error(vec![Diagnostic::error(
             DiagnosticCode::OutputIo,
@@ -1073,271 +1764,4 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         args.output.display()
     );
     Ok(())
-}
-
-fn cmake_quoted_value(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn diagnostics_error(diagnostics: Vec<Diagnostic>) -> ArosError {
-    ArosError::Diagnostics(DiagnosticSet::new(diagnostics))
-}
-
-fn source_location(path: &Path, root: &Path) -> SourceLocation {
-    SourceLocation::new(
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .display()
-            .to_string(),
-    )
-}
-
-fn error_to_diagnostics(error: ArosError) -> DiagnosticSet {
-    match error {
-        ArosError::Diagnostics(diagnostics) => diagnostics,
-        ArosError::TranspilerSyntax { file, message } => DiagnosticSet::single(
-            Diagnostic::error(
-                DiagnosticCode::SourceParse,
-                DiagnosticStage::Parsing,
-                message,
-            )
-            .with_location(SourceLocation::new(file)),
-        ),
-        ArosError::Configuration { file, message } => DiagnosticSet::single(
-            Diagnostic::error(
-                DiagnosticCode::InternalInvariant,
-                DiagnosticStage::Internal,
-                format!("unexpected configuration error in `{file}`: {message}"),
-            )
-            .with_location(SourceLocation::new(file)),
-        ),
-        ArosError::ToolchainManifest { file, message } => DiagnosticSet::single(
-            Diagnostic::error(
-                DiagnosticCode::InternalInvariant,
-                DiagnosticStage::Internal,
-                format!("unexpected toolchain manifest error in `{file}`: {message}"),
-            )
-            .with_location(SourceLocation::new(file)),
-        ),
-        ArosError::MediaProfile { file, message } => DiagnosticSet::single(
-            Diagnostic::error(
-                DiagnosticCode::InternalInvariant,
-                DiagnosticStage::Internal,
-                format!("unexpected media profile error in `{file}`: {message}"),
-            )
-            .with_location(SourceLocation::new(file)),
-        ),
-        ArosError::DependencyCycle { target } => DiagnosticSet::single(
-            Diagnostic::error(
-                DiagnosticCode::GraphValidation,
-                DiagnosticStage::GraphValidation,
-                format!("dependency cycle detected in module: {target}"),
-            )
-            .with_hint("break or explicitly model the cycle before publishing the graph"),
-        ),
-        ArosError::Io(error) => DiagnosticSet::single(Diagnostic::error(
-            DiagnosticCode::OutputIo,
-            DiagnosticStage::OutputPublication,
-            error.to_string(),
-        )),
-        ArosError::Json(error) => DiagnosticSet::single(Diagnostic::error(
-            DiagnosticCode::InternalInvariant,
-            DiagnosticStage::Internal,
-            format!("diagnostic serialization failed: {error}"),
-        )),
-        ArosError::ToolchainNotFound { binary } => DiagnosticSet::single(Diagnostic::error(
-            DiagnosticCode::InternalInvariant,
-            DiagnosticStage::Internal,
-            format!("unexpected toolchain lookup for `{binary}`"),
-        )),
-        ArosError::CommandFailed { cmd } => DiagnosticSet::single(Diagnostic::error(
-            DiagnosticCode::InternalInvariant,
-            DiagnosticStage::Internal,
-            format!("unexpected command failure: {cmd}"),
-        )),
-    }
-}
-
-fn render_source_inventory_manifest(graph: &DependencyGraph) -> String {
-    let mut fetches: Vec<_> = graph
-        .source_inventory_fetches
-        .iter()
-        .filter_map(|name| graph.fetches.iter().find(|fetch| &fetch.name == name))
-        .collect();
-    fetches.sort_by(|left, right| left.name.cmp(&right.name));
-
-    let mut body = format!("set(AROS_SOURCE_INVENTORY_FETCH_COUNT {})\n", fetches.len());
-    for (index, fetch) in fetches.into_iter().enumerate() {
-        let fields = [
-            ("NAME", fetch.name.as_str()),
-            ("ARCHIVE", fetch.archive.as_str()),
-            ("SUFFIXES", fetch.suffixes.as_str()),
-            ("ORIGINS", fetch.origins.as_str()),
-            ("CHECKSUMS", fetch.checksums.as_str()),
-            ("LOCATION", fetch.location.as_str()),
-            ("DESTINATION", fetch.destination.as_str()),
-            ("BASE", fetch.base.as_str()),
-            ("PATCH_ORIGINS", fetch.patch_origins.as_str()),
-            ("PATCHES", fetch.patches.as_str()),
-        ];
-        for (field, value) in fields {
-            let _ = writeln!(
-                body,
-                "set(AROS_SOURCE_INVENTORY_FETCH_{index}_{field} \"{}\")",
-                cmake_quoted_value(value)
-            );
-        }
-    }
-    body
-}
-
-/// Writes one skip report next to the generated CMake file.
-///
-/// Removes the file when there is nothing left to report. Every report used to
-/// be written only in the non-empty case, so a file outlived the change that
-/// emptied it and went on naming declarations that were no longer skipped. That
-/// is worse than no report: the numbers are what the next step is chosen from.
-///
-/// Reports are part of the same publication transaction as the generated
-/// graph. A stale report is removed only when the replacement generation
-/// commits successfully.
-fn write_report(
-    publication: &mut Publication,
-    output: &Path,
-    extension: &str,
-    mut lines: Vec<String>,
-    what: &str,
-) {
-    let report = output.with_extension(extension);
-    lines.sort_unstable();
-    lines.dedup();
-    let n = lines.len();
-    let (code, severity) = report_metadata(extension);
-    publication.record_coverage(code, severity, Some(&report), n, what);
-    if lines.is_empty() {
-        publication.absent(report);
-        return;
-    }
-    let body = lines.join("\n");
-    publication.present(report.clone(), format!("{body}\n"));
-    let marker = if severity == DiagnosticSeverity::Info {
-        "ℹ️ "
-    } else {
-        "⚠️ "
-    };
-    publication.notice(format!(
-        "{marker} [{code}] {n} {what} -> {}",
-        report.display()
-    ));
-}
-
-fn report_metadata(extension: &str) -> (&'static str, DiagnosticSeverity) {
-    use DiagnosticSeverity::{Error, Info, Warning};
-    match extension {
-        "skipped-script-outputs.txt" => ("AT1001", Warning),
-        "skipped-hidd-stubs.txt" => ("AT1002", Warning),
-        "skipped-host-generated-headers.txt" => ("AT1003", Warning),
-        "kickstart-kobj-ldscript.txt" => ("AT1004", Warning),
-        "skipped-binary-objects.txt" => ("AT1005", Warning),
-        "arch-lane-attachments.txt" => ("AT1006", Info),
-        "inherited-arch-sources.txt" => ("AT1007", Info),
-        "unresolved-default-link-set.txt" => ("AT1008", Warning),
-        "skipped-client-archives.txt" => ("AT1009", Warning),
-        "skipped-make-opts.txt" => ("AT1010", Warning),
-        "skipped-local-make-includes.txt" => ("AT1011", Warning),
-        "skipped-fetches.txt" => ("AT1012", Warning),
-        "unowned-port-sources.txt" => ("AT1013", Warning),
-        "unresolved-generated-headers.txt" => ("AT1014", Warning),
-        "skipped-arch-sources.txt" => ("AT1015", Warning),
-        "skipped-icons.txt" => ("AT1016", Warning),
-        "skipped-catalogs.txt" => ("AT1017", Warning),
-        "skipped-flexcat-sources.txt" => ("AT1018", Warning),
-        "skipped-meta-rules.txt" => ("AT1019", Warning),
-        "meta-cycles.txt" => ("AT1020", Info),
-        "skipped-header-staging.txt" => ("AT1021", Warning),
-        "skipped-directory-staging.txt" => ("AT1022", Warning),
-        "unresolved-uselibs.txt" => ("AT1023", Warning),
-        "unresolved-package-members.txt" => ("AT1024", Warning),
-        "unmodelled-declarations.txt" => ("AT1025", Warning),
-        "partial-source-lists.txt" => ("AT1026", Warning),
-        "unresolved-output-paths.txt" => ("AT1027", Warning),
-        "generated-file-rules.txt" => ("AT1028", Warning),
-        "skipped-flags.txt" => ("AT1029", Warning),
-        "skipped-conditions.txt" => ("AT1030", Warning),
-        "unresolved-includes.txt" => ("AT1031", Warning),
-        "skipped-ilbm-sources.txt" => ("AT1033", Warning),
-        // Adding a report without assigning a stable code is an internal
-        // contract error. Publication rejects Error-severity coverage entries.
-        _ => ("AT1099", Error),
-    }
-}
-
-#[cfg(test)]
-mod error_mapping_tests {
-    use super::*;
-
-    #[test]
-    fn unexpected_toolchain_manifest_error_has_a_stable_diagnostic() {
-        let diagnostics = error_to_diagnostics(ArosError::ToolchainManifest {
-            file: "toolchain-manifest.json".to_owned(),
-            message: "unknown field".to_owned(),
-        });
-
-        assert_eq!(diagnostics.diagnostics.len(), 1);
-        let diagnostic = &diagnostics.diagnostics[0];
-        assert_eq!(diagnostic.code, DiagnosticCode::InternalInvariant);
-        assert_eq!(diagnostic.stage, DiagnosticStage::Internal);
-        assert_eq!(
-            diagnostic
-                .location
-                .as_ref()
-                .map(|location| location.path.as_str()),
-            Some("toolchain-manifest.json")
-        );
-        assert!(diagnostic
-            .message
-            .contains("unexpected toolchain manifest error"));
-    }
-}
-
-#[cfg(test)]
-mod target_context_cli_tests {
-    use super::*;
-
-    #[test]
-    fn upstream_selector_arguments_are_explicit_and_omittable() {
-        let selected = Args::try_parse_from([
-            "aros-transpiler",
-            "--mesa-version",
-            "26.0.0",
-            "--target-llvm-ver",
-            "23.0.0",
-            "--target-llvm-runtimes-style",
-            "umbrella",
-            "--target-rust",
-            "yes",
-            "--target-rust-ver",
-            "1.98.1",
-        ])
-        .expect("explicit upstream selectors");
-        assert_eq!(selected.mesa_version.as_deref(), Some("26.0.0"));
-        assert_eq!(selected.target_llvm_ver.as_deref(), Some("23.0.0"));
-        assert_eq!(
-            selected.target_llvm_runtimes_style.as_deref(),
-            Some("umbrella")
-        );
-        assert_eq!(selected.target_rust.as_deref(), Some("yes"));
-        assert_eq!(selected.target_rust_ver.as_deref(), Some("1.98.1"));
-
-        let altered = Args::try_parse_from(["aros-transpiler", "--target-llvm-ver", "24.0.0"])
-            .expect("altered LLVM selector");
-        assert_eq!(altered.target_llvm_ver.as_deref(), Some("24.0.0"));
-
-        let omitted = Args::try_parse_from(["aros-transpiler"]).expect("legacy caller");
-        assert_eq!(omitted.mesa_version, None);
-        assert_eq!(omitted.target_llvm_ver, None);
-        assert_eq!(omitted.target_llvm_runtimes_style, None);
-        assert_eq!(omitted.target_rust, None);
-        assert_eq!(omitted.target_rust_ver, None);
-    }
 }

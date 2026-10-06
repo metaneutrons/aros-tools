@@ -93,6 +93,12 @@ may be evaluated later; each target's runtime libraries and ABI remain explicit
 qualification units. No additional generic RV32 release is required without an
 actual AROS consumer.
 
+The CMake boundary must preserve that distinction: `AROS_TARGET_PROFILE` names
+the selected board/source preset; `AROS_CROSS_TOOLCHAIN_PROFILE` names its
+declared compiler distribution. The GNU manifest checks the latter and the
+build-tree identity binds both when they differ. Do not rename a measured
+compiler manifest merely to match a new board preset.
+
 The P4 GNU path is the initial reference to reproduce, not permission to label
 an Espressif bare-metal compiler as an AROS toolchain. Source-declared GNU
 versions must be resolved to exact available source/patch inputs and measured
@@ -108,6 +114,73 @@ belong to the source-derived native build graph. The separately locked
 ESP-IDF bootloader is an external producer, not the AROS platform SDK. Vendor
 Python dependencies may be isolated and locked; our orchestration stays Rust.
 No successful native result may substitute pre-existing Make core/BSP outputs.
+
+Local RV3 build evidence must remain distinct from release provenance. An
+explicit byte-verified local compiler descriptor carries no release ID or
+producer attestation; the source export's recorded baseline is not the current
+dirty checkout identity. Capture the actual source snapshot before building,
+bind it together with the raw native-contract digest and the validated input
+inventory, and remeasure before receipt publication and media composition.
+Source measurement must include submodule content and uncommitted inputs,
+exclude Git metadata and only the untracked CLI-owned generated build tree,
+and reject unsafe links or special files. Do not weaken the existing clean
+source/released-toolchain receipt contract to accommodate this local path.
+Compiler admission alone is not native payload or media qualification.
+
+The local native CLI records a pre-build input stamp, separate from the
+successful-build/media receipt. It binds the whole measured checkout, native
+contract, compiler descriptor/tree, engine files, suite executables, selected
+CMake/Ninja/cache executors, configure arguments and hashes of the declared
+build environment. Reconfiguration and build recheck these identities.
+The selected generated namespace must be untracked and free of symlink/file
+prefixes before cleanup. An engine override must contain regular files and
+directories only. Existing unstamped output trees are not adopted. Persistent
+CMake cache and the bounded literal Ninja include/subninja closure are sealed;
+changed rules require a fresh tree or explicit cleanup after retaining evidence.
+Dynamic Ninja include expressions are refused rather than approximated.
+Cached program paths resolve before the generated-product exclusion, so a
+build-local link cannot hide an external executable. Explicit configured DTB
+and consumed KOBJ inputs remain byte-bound even inside the selected build;
+those are direct inputs, not proven generated products. The closed member
+set mirrors the existing CMake consumers, not every file in an external SDK.
+These checks do not claim isolation from a hostile concurrent filesystem
+replacement, a complete environment attestation or successful P4 compilation.
+
+Native selection preserves missing source-generated virtual routes without
+fabricating producers. Additional virtual prerequisites of existing native
+aggregates remain required unless separately justified; alias import can expose
+further missing endpoints and unsupported capabilities. With a sealed MetaMake policy, source-owned
+`optional_meta_dependencies` Selector records can authorize absent architecture
+hooks only after exact recipe/expression/edge validation. Contracted virtual
+descendants also require unanimous selector provenance and no independent
+required ingress. The contract is explicit policy, not an inferred exception
+for a board. Real/rejected providers, literal collisions and concrete native
+prerequisites remain checked. `DisabledOwner` entries cannot waive an active
+consumer or activate commented-out TIFF declarations. Audit and invocation
+receipts record aliases, contracts and omitted edges in `source_meta_semantics`.
+Missing required endpoints fail with the recipe and `fix upstream`; supported
+siblings and unsupported active providers retain their normal selection checks.
+A diagnostic-only graph audit retains
+these failures and sibling evidence without publishing a graph or inventory.
+Rejected rules are attributed only through an exact source consumer chain;
+unmodeled Make includes and unknown conditional consumers retain unowned
+capability failures. These are translation limits, not source-defect proofs.
+The sealed MetaMake invocation can independently prove that a recipe is never
+called for the selected native roots. Only unowned parser capability failures
+with complete nonselected origins are separated from fatal failures, with the
+diagnostic and actual invoking recipes retained in audit/export scope evidence.
+Named, selected, shared, unknown and global failures retain normal checks. This
+selection also protects actual parser inputs of implicit native dependencies;
+an available endpoint with unbound provenance prevents all exclusions. This
+does not implement the excluded capabilities, remove source dependencies, or
+grant producer/build qualification. Full discovery and snapshots are rechecked
+before publishing either a graph or a source-preparation sidecar.
+
+Native owner projection and parsing use the same effective inputs:
+`mmakefile.src` supersedes its generated `mmakefile`, while direct fragments
+remain inputs. The complete discovery set, project ignore policy and captured
+bytes are rechecked before admission. Added or removed recipes require a new
+projection; a stale generated sibling cannot add edges to the selected graph.
 
 Flash-image planning validates exact chip/silicon compatibility, partition
 ranges, capacity, required roles and output identity before mutation. Wrong

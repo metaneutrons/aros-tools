@@ -22,6 +22,11 @@ include("${CMAKE_CURRENT_LIST_DIR}/QuoteIncludes.cmake")
 # none of it.
 
 set(AROS_HOST_CC "cc" CACHE STRING "C compiler for tools that run on the build machine")
+# Native host-header recipes retain $(HOST_CFLAGS) as this explicit policy.
+# These are host flags, not target flags or an inferred Autoconf configuration.
+# An explicitly empty list is permitted; ambient CFLAGS are not imported.
+set(AROS_HOST_CFLAGS "-O2;-w" CACHE STRING
+    "Explicit host C flag list for source-owned header-generator recipes")
 set(AROS_HOST_TOOL_DIR "${CMAKE_BINARY_DIR}/hosttools")
 file(MAKE_DIRECTORY "${AROS_HOST_TOOL_DIR}")
 

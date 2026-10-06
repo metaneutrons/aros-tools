@@ -2,30 +2,55 @@
 
 use super::{
     all_sources_are_fetch_owned, apply_mesa_compile_contract, capability_diagnostic,
-    collect_arch_decls, collect_arch_sources, collect_copy_includes_with_scope,
-    collect_fetches_with_scope_and_context, collect_flags, collect_flexcat_source_rules,
-    collect_ilbm_sources, collect_includes, collect_includes_at, collect_make_opts, collect_vars,
-    collect_vars_impl, collect_vars_impl_with_forward_locals, collector_forward_local_prelude,
-    copy_directories, current_profile, declaration_flags_at, declaration_global_link_options,
+    capability_diagnostic_for_target, capability_diagnostics_for_targets, collect_arch_decls,
+    collect_arch_sources, collect_copy_includes_with_scope, collect_fetches_with_scope_and_context,
+    collect_flags, collect_flexcat_source_rules, collect_ilbm_sources, collect_includes,
+    collect_includes_at, collect_make_opts, collect_vars, collect_vars_impl,
+    collect_vars_impl_with_forward_locals, collector_forward_local_prelude, copy_directories,
+    current_profile, declaration_flags_at, declaration_global_link_options,
     declaration_owned_port_scope, evaluate_linklib_list, evaluate_macro_sources,
     evaluate_macro_sources_with_files, evaluate_make_expr, evaluate_name,
-    evaluate_output_directory, expand_file_list, expected_ahi_profile_exclusion,
-    expected_grub_profile_exclusion, external_cmake, generators, implicit_module_meta_rules,
-    inline_collector_make_includes, inline_local_make_includes, is_explicit_genmodule_only,
-    join_continuations, literal_defines, macro_arg, map_linklib_object_sources,
-    merge_named_link_flags, read_genmodule_linklib_config, read_genmodule_linklib_config_files,
-    read_source, record_partial_source_lists, remaining_linklib_sources, render_meta_token,
-    resolve_generated_linklib_sources, resolve_module_suffix, resolve_module_target_dir,
-    resolve_no_argument, resolve_yes_argument, safe_build_tree_output_directory, sanitize_ident,
-    select_target_invocations, sse41, wildcard_c_sources, Diagnostic, EvaluatedSources, FetchDecl,
-    GenmoduleConfigFacts, GenmoduleLinklibs, HashSet, LocalMakeFragmentPolicy,
+    evaluate_output_directory, exact_mmake_target, expand_file_list,
+    expected_ahi_profile_exclusion, expected_grub_profile_exclusion, external_cmake, generators,
+    implicit_module_meta_rules, inline_collector_make_includes, inline_local_make_includes,
+    is_concrete_build_invocation, is_explicit_genmodule_only, join_continuations, literal_defines,
+    macro_arg, map_linklib_object_sources, merge_named_link_flags, read_genmodule_linklib_config,
+    read_genmodule_linklib_config_files, read_source, record_partial_source_lists,
+    remaining_linklib_sources, render_meta_token, resolve_generated_linklib_sources,
+    resolve_module_suffix, resolve_module_target_dir, resolve_no_argument, resolve_yes_argument,
+    safe_build_tree_output_directory, sanitize_ident, select_target_invocations, sse41,
+    unique_mmake_owners, wildcard_c_sources, Diagnostic, EvaluatedSources, FetchDecl,
+    GenmoduleConfigFacts, GenmoduleLinklibs, HashSet, Invocation, LocalMakeFragmentPolicy,
     LocalMakeIncludeLimits, MakeExprContext, MetaTargetRule, ModuleType, ParsedMmakefile, Path,
     Regex, Result, TargetContext, TargetDefinition, PRIVATE_LIBDIR,
 };
 use crate::capability::mesa::mesa26;
 
+#[path = "parser_pipeline/build_macro_declarations.rs"]
+mod build_macro_declarations;
+#[path = "parser_pipeline/declaration_context.rs"]
+mod declaration_context;
+#[path = "parser_pipeline/module_declarations.rs"]
+mod module_declarations;
 #[path = "parser_pipeline/post_processing.rs"]
 mod post_processing;
+#[path = "parser_pipeline/program_declarations.rs"]
+mod program_declarations;
+#[path = "parser_pipeline/source_scope.rs"]
+mod source_scope;
+
+#[cfg(test)]
+#[path = "parser_pipeline/literal_object_source_span_tests.rs"]
+mod literal_object_source_span_tests;
+
+use declaration_context::{DeclarationInputs, DeclarationOutputs};
+pub use source_scope::architecture_scope_positions;
+pub(super) use source_scope::invocation_owner_registry;
+use source_scope::{
+    capability_diagnostic_with_owner, collect_native_packages, literal_object_source_anchors,
+    rejected_rule_owner_proofs, rejection_source_location, source_meta_provider_diagnostic,
+    source_rejection_diagnostics,
+};
 
 #[expect(
     clippy::too_many_lines,
@@ -38,7 +63,8 @@ pub(super) fn parse_mmakefile_impl(
     target: Option<&TargetContext>,
     known_fetches: &[FetchDecl],
 ) -> Result<ParsedMmakefile> {
-    let content = read_source(path)?;
+    let (content, source_sha256) = aros_common::text::read_source_with_sha256(path)?;
+    let disabled_meta_owners = crate::native_meta_providers::disabled_owners(&content);
     let parent_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let rel_dir = parent_dir
         .strip_prefix(root)
@@ -174,14 +200,125 @@ pub(super) fn parse_mmakefile_impl(
     // USER_CPPFLAGS / USER_CFLAGS apply to every rule in the mmakefile, so the
     // same set is attached to each target parsed out of it.
     let mut flag_set = collect_flags(&content);
-    let (packages, skipped_packages) = crate::packages::collect_packages(&content, &rel_dir);
+    let fallback_package_states = conditional_line_states
+        .is_none()
+        .then(|| collect_vars_impl(&joined, None).1);
+    let package_line_states = conditional_line_states
+        .as_deref()
+        .or(fallback_package_states.as_deref())
+        .expect("package scan has selected or conservative conditional states");
+    // A selected native configuration binds includes such as a board's
+    // rules file. Package members read through those bindings, so the
+    // declaration is evaluated in the same native scope as the architecture
+    // sources below; the classic scope above never saw the bound text.
+    let native_package_context = target.filter(|context| {
+        (!context.make_include_bindings.is_empty() || !context.generated_make_templates.is_empty())
+            && (content.contains("%make_package") || content.contains("%link_kickstart"))
+    });
+    let (packages, skipped_packages) = native_package_context.map_or_else(
+        || {
+            crate::packages::collect_packages_with_scope(
+                &joined,
+                &rel_dir,
+                &scope,
+                dirs,
+                root,
+                package_line_states,
+            )
+        },
+        |context| collect_native_packages(&content, context, dirs, root, &relative_path, &rel_dir),
+    );
     // Collected from `joined`, not from `content`: the declaration line has to
     // be in the same coordinate system as `scope`, which is built from the
     // joined and locally-included text. Read against the raw file the line
     // numbers drift with every continuation and every inlined fragment, so the
     // positional flag lookup below would read some other declaration's flags.
-    let (mut arch_sources, skipped_arch_sources) = collect_arch_sources(&joined, &rel_dir, target);
-    crate::arch_sources::bind_declaration_context(&mut arch_sources, &joined, &scope, &rel_dir)?;
+    let native_arch_context = target.filter(|context| {
+        !context.make_include_bindings.is_empty() || !context.generated_make_templates.is_empty()
+    });
+    let (arch_sources, skipped_arch_sources) = if let Some(context) =
+        native_arch_context.filter(|_| content.contains("%build_archspecific"))
+    {
+        match crate::assembly_headers::native_configuration_snapshot(
+            &content,
+            context,
+            dirs,
+            root,
+            &relative_path,
+        ) {
+            Ok(snapshot) => {
+                let native_joined = snapshot.joined;
+                let (native_scope, native_states) =
+                    collect_vars_impl(&native_joined, Some(context));
+                let (mut declarations, mut rejected) =
+                    crate::arch_sources::collect_arch_sources_with_scope(
+                        &native_joined,
+                        &rel_dir,
+                        Some(context),
+                        &native_scope,
+                        &native_states,
+                        dirs,
+                        root,
+                    );
+                crate::arch_sources::bind_declaration_context(
+                    &mut declarations,
+                    &native_joined,
+                    &native_scope,
+                    &rel_dir,
+                )?;
+                // Configuration insertion changes offsets, never ownership. A
+                // declaration that does not start on a physical recipe line
+                // (inserted configuration or a continuation tail) has no owner;
+                // the file's architecture lanes are then rejected as a whole.
+                let unowned = declarations
+                    .iter()
+                    .filter(|declaration| {
+                        snapshot
+                            .physical_owner_lines
+                            .get(declaration.line)
+                            .copied()
+                            .flatten()
+                            .is_none()
+                    })
+                    .map(|declaration| declaration.line + 1)
+                    .collect::<Vec<_>>();
+                if unowned.is_empty() {
+                    for declaration in &mut declarations {
+                        declaration.line = snapshot.physical_owner_lines[declaration.line]
+                            .expect("ownership was checked above");
+                    }
+                    (declarations, rejected)
+                } else {
+                    rejected.push(format!(
+                        "{}: %build_archspecific at native scope line(s) {} has no physical source owner; included configuration cannot declare architecture sources, fix upstream by moving the declaration into the recipe",
+                        relative_path.display(),
+                        unowned
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    (Vec::new(), rejected)
+                }
+            }
+            Err(reason) => (
+                Vec::new(),
+                vec![format!(
+                    "{}: native architecture context is unproven: {reason}",
+                    relative_path.display()
+                )],
+            ),
+        }
+    } else {
+        let (mut declarations, rejected) = collect_arch_sources(&joined, &rel_dir, target);
+        crate::arch_sources::bind_declaration_context(
+            &mut declarations,
+            &joined,
+            &scope,
+            &rel_dir,
+        )?;
+        (declarations, rejected)
+    };
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
     // transpiler itself stays target-agnostic.
@@ -283,6 +420,9 @@ pub(super) fn parse_mmakefile_impl(
         &rel_dir,
         &mut skipped_programs,
     );
+    // Preserve source-declared owners before capability checks can reject and
+    // remove their TargetDefinition from the translated graph.
+    let invocation_owners = invocation_owner_registry(&invocations, &scope, dirs, root, &rel_dir);
     // `%copy_dir_recursive` owns filesystem output, so unlike a generic
     // auxiliary macro it must not survive an inactive or unknown conditional.
     // Non-profiled parser callers still get a line-state scan: only their
@@ -293,6 +433,584 @@ pub(super) fn parse_mmakefile_impl(
     let copy_directory_line_states = conditional_line_states
         .as_deref()
         .or(fallback_copy_directory_states.as_deref());
+    let (literal_header_copies, literal_header_copy_rejections) =
+        crate::literal_header_copies::collect(
+            &invocations,
+            &scope,
+            dirs,
+            root,
+            &rel_dir,
+            copy_directory_line_states,
+        );
+    let mut native_graph_errors = Vec::new();
+    copy_scan.transforms.extend(literal_header_copies);
+    for rejection in literal_header_copy_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            None,
+            rejection.owner.as_deref(),
+            format!(
+                "literal header copy is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (static_header_copies, static_header_copy_rejections) =
+        crate::static_header_copies::collect(
+            &joined,
+            &scope,
+            dirs,
+            root,
+            &rel_dir,
+            copy_directory_line_states,
+        );
+    copy_scan.transforms.extend(static_header_copies);
+    for rejection in static_header_copy_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            None,
+            rejection.owner.as_deref(),
+            format!(
+                "static header copy is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (directory_setups, directory_setup_rejections) =
+        crate::directory_setup::collect_directory_setups_with_context(
+            &joined,
+            &rel_dir,
+            &scope,
+            dirs,
+            root,
+            copy_directory_line_states,
+        );
+    for rejection in directory_setup_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            None,
+            Some(&rejection.owner),
+            format!(
+                "directory setup recipe is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let genmodule_header_scan =
+        crate::genmodule_header_rules::collect_genmodule_header_rules_with_context(
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rejection in genmodule_header_scan.rejected {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "genmodule header stamp is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let genmodule_writefiles_scan =
+        crate::genmodule_writefiles_rules::collect_genmodule_writefiles_rules_with_context(
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rejection in genmodule_writefiles_scan.rejected {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "genmodule writefiles stamp is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (host_header_rules, host_header_rule_rejections) =
+        crate::host_header_rules::collect_host_header_rules(
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rejection in host_header_rule_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            None,
+            Some(&rejection.owner),
+            format!(
+                "host-C header rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (mut sdk_text_rules, sdk_text_rejections) =
+        crate::sdk_text_rules::collect_sdk_text_rules_with_physical_source(
+            &joined,
+            &local_make_scan.expanded,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rule in &mut sdk_text_rules {
+        source_sha256.as_str().clone_into(&mut rule.file_sha256);
+    }
+    let sdk_text_anchors = (!sdk_text_rejections.is_empty())
+        .then(|| literal_object_source_anchors(root, path, &content, &local_make_scan, &joined))
+        .flatten();
+    for rejection in sdk_text_rejections {
+        let (diagnostic_path, diagnostic_line) =
+            rejection_source_location(&relative_path, sdk_text_anchors.as_deref(), rejection.line);
+        let mut diagnostic = capability_diagnostic_with_owner(
+            diagnostic_path,
+            diagnostic_line,
+            Some(&rejection.owner),
+            format!(
+                "SDK text rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        );
+        if rejection.disabled_owner_only {
+            diagnostic.context.get_or_insert_with(Default::default).mode =
+                Some(crate::sdk_text_rules::DISABLED_OWNER_DIAGNOSTIC_MODE.to_owned());
+        }
+        native_graph_errors.push(diagnostic);
+    }
+    let (source_text_rules, source_text_rejections) =
+        crate::source_text_rules::collect_source_text_rules_with_context(
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rejection in source_text_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "source text rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (mut source_value_rules, source_value_rejections) =
+        crate::source_value_rules::collect_source_value_rules_with_context(
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rule in &mut source_value_rules {
+        source_sha256.as_str().clone_into(&mut rule.file_sha256);
+    }
+    for rejection in source_value_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "source value rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (sdk_file_copies, sdk_file_copy_rejections) = crate::sdk_file_copies::collect_from_snapshot(
+        &invocations,
+        &scope,
+        dirs,
+        root,
+        &rel_dir,
+        copy_directory_line_states,
+        &fetches,
+        &joined,
+    );
+    for rejection in sdk_file_copy_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "SDK file copy is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (sdk_asset_rules, sdk_asset_rejections) = crate::sdk_asset_rules::collect_from_snapshot(
+        &joined,
+        &scope,
+        dirs,
+        root,
+        &rel_dir,
+        copy_directory_line_states,
+    );
+    for rejection in sdk_asset_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "SDK asset rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (sdk_object_groups, sdk_object_rejections) = crate::sdk_objects::collect_from_snapshot(
+        &invocations,
+        &scope,
+        dirs,
+        root,
+        &rel_dir,
+        copy_directory_line_states,
+        &joined,
+    );
+    // Literal recipes execute after all source assignments have been read.
+    // Their native configuration is a separate, explicitly bound scope; it
+    // must not silently expand the global configuration of unrelated macros.
+    let literal_configuration =
+        crate::local_make_includes::inline_native_make_configuration_with_templates(
+            &content,
+            root,
+            &relative_path,
+            LocalMakeIncludeLimits::default(),
+            &target.map_or_else(std::collections::BTreeMap::new, |target| {
+                target.make_include_bindings.clone()
+            }),
+            &target.map_or_else(std::collections::BTreeMap::new, |target| {
+                target.generated_make_templates.clone()
+            }),
+        );
+    let literal_joined = join_continuations(&literal_configuration.expanded);
+    let (literal_scope, literal_states) = collect_vars_impl(&literal_joined, target);
+    // A complete source-bound configuration can prove a copy macro's list
+    // empty. Do not turn unknown variables or failed include expansion into
+    // empty providers; the ordinary unresolved diagnostic remains otherwise.
+    if literal_configuration.issues.is_empty() {
+        let empty_copies = crate::copy_includes::collect_proven_empty(
+            &literal_joined,
+            &literal_scope,
+            &literal_states,
+            target,
+            &rel_dir,
+        );
+        if !empty_copies.is_empty()
+            && empty_copies.len()
+                == super::macro_invocations(&literal_joined)
+                    .iter()
+                    .filter(|invocation| invocation.name == "copy_includes")
+                    .count()
+        {
+            // Every source copy macro is now accounted for by this stronger
+            // proof; retain skipped diagnostics whenever any other call exists.
+            copy_scan.skipped.clear();
+        }
+        for declaration in empty_copies {
+            // The closed scope proves the value at macro expansion time;
+            // never let the legacy fallback borrow a later assignment.
+            copy_scan
+                .decls
+                .retain(|existing| existing.name != declaration.name);
+            copy_scan.decls.push(declaration);
+        }
+    }
+    let (literal_object_groups, literal_object_rejections) =
+        crate::literal_objects::collect_from_snapshot(
+            &literal_scope,
+            dirs,
+            root,
+            &rel_dir,
+            Some(&literal_states),
+            &literal_joined,
+        );
+    let literal_object_anchors = literal_object_source_anchors(
+        root,
+        &relative_path,
+        &content,
+        &literal_configuration,
+        &literal_joined,
+    );
+    // Keep partial capabilities visible without laundering them into real
+    // providers. Only the explicitly bound native scope may project roles.
+    let mut source_archive_projections = Vec::new();
+    let mut source_archive_commands = std::collections::BTreeMap::new();
+    let mut source_compile_projections = Vec::new();
+    let mut layered_header_projections = Vec::new();
+    let mut source_header_pipelines = Vec::new();
+    let mut source_directory_groups = std::collections::BTreeMap::new();
+    if let Some(context) = target.filter(|context| {
+        !context.make_include_bindings.is_empty() || !context.generated_make_templates.is_empty()
+    }) {
+        let (archives, archive_rejections) = crate::source_archive_rules::collect_from_snapshot(
+            &literal_joined,
+            &literal_scope,
+            dirs,
+            root,
+            &rel_dir,
+            Some(&literal_states),
+        );
+        let (compiles, compile_rejections) = crate::source_compile_rules::collect_from_snapshot(
+            &literal_joined,
+            &literal_scope,
+            dirs,
+            root,
+            &rel_dir,
+            Some(&literal_states),
+            &archives,
+        );
+        source_archive_projections = archives;
+        if !source_archive_projections.is_empty() {
+            match crate::source_archive_command::prove(&literal_joined, &literal_scope, dirs, root)
+            {
+                Ok(command) => {
+                    for archive in &source_archive_projections {
+                        source_archive_commands.insert(
+                            (archive.file.clone(), archive.owner.clone()),
+                            command.clone(),
+                        );
+                    }
+                }
+                Err(reason) => {
+                    for archive in &source_archive_projections {
+                        native_graph_errors.push(capability_diagnostic_with_owner(
+                            &relative_path,
+                            None,
+                            Some(&archive.owner),
+                            format!("Source archive command is unproven: {reason}"),
+                        ));
+                    }
+                }
+            }
+        }
+        source_compile_projections = compiles;
+        let (headers, header_rejections) = crate::layered_header_copies::collect(
+            &literal_joined,
+            &literal_scope,
+            dirs,
+            root,
+            &rel_dir,
+            context,
+            Some(&literal_states),
+        );
+        layered_header_projections = headers;
+        let (mut pipelines, pipeline_rejections) = crate::source_header_pipeline::collect(
+            &literal_joined,
+            &literal_scope,
+            dirs,
+            root,
+            &rel_dir,
+            Some(&literal_states),
+        );
+        for pipeline in &mut pipelines {
+            let (path, line) = rejection_source_location(
+                &relative_path,
+                literal_object_anchors.as_deref(),
+                pipeline.line,
+            );
+            pipeline.diagnostic_location = Some(aros_common::SourceLocation {
+                path: path.to_string_lossy().into_owned(),
+                line,
+                column: None,
+            });
+            let (path, line) = rejection_source_location(
+                &relative_path,
+                literal_object_anchors.as_deref(),
+                pipeline.sdk_rule_line,
+            );
+            pipeline.sdk_rule_location = Some(aros_common::SourceLocation {
+                path: path.to_string_lossy().into_owned(),
+                line,
+                column: None,
+            });
+        }
+        source_header_pipelines = pipelines;
+        let (directory_groups, directory_rejections) =
+            crate::source_directory_rules::collect_source_directory_groups(
+                &literal_joined,
+                &literal_scope,
+                dirs,
+                root,
+                &rel_dir,
+                &literal_states,
+            );
+        for group in directory_groups {
+            source_directory_groups.insert(
+                (
+                    relative_path.to_string_lossy().into_owned(),
+                    group.owner.clone(),
+                ),
+                group,
+            );
+        }
+        for rejection in pipeline_rejections {
+            let (path, line) = rejection_source_location(
+                &relative_path,
+                literal_object_anchors.as_deref(),
+                rejection.line,
+            );
+            native_graph_errors.push(capability_diagnostic_with_owner(
+                path,
+                line,
+                rejection.owner.as_deref(),
+                format!("Source header pipeline is unproven: {}", rejection.reason),
+            ));
+        }
+        // A local directory group is not a global `setup` target. Report
+        // refusal against its proven aggregate consumer, if one exists.
+        for rejection in directory_rejections {
+            for aggregate in &layered_header_projections {
+                if aggregate
+                    .unresolved_prerequisites
+                    .contains(&rejection.owner)
+                {
+                    let (path, line) = rejection_source_location(
+                        &relative_path,
+                        literal_object_anchors.as_deref(),
+                        rejection.source_line,
+                    );
+                    native_graph_errors.push(capability_diagnostic_with_owner(
+                        path,
+                        line,
+                        Some(&aggregate.owner),
+                        format!(
+                            "Source-local directory prerequisite {} is unproven: {}",
+                            rejection.owner, rejection.reason
+                        ),
+                    ));
+                }
+            }
+        }
+        let rejections = archive_rejections
+            .into_iter()
+            .map(|rejection| {
+                (
+                    Some(rejection.owner),
+                    rejection.line,
+                    format!(
+                        "Source archive is outside its closed capability: {}",
+                        rejection.reason
+                    ),
+                )
+            })
+            .chain(compile_rejections.into_iter().map(|rejection| {
+                (
+                    Some(rejection.owner),
+                    rejection.line,
+                    format!(
+                        "Source compile is outside its closed capability: {}",
+                        rejection.reason
+                    ),
+                )
+            }))
+            .chain(header_rejections.into_iter().map(|rejection| {
+                (
+                    rejection.owner,
+                    rejection.line,
+                    format!(
+                        "Layered header copies are outside their closed capability: {}",
+                        rejection.reason
+                    ),
+                )
+            }));
+        for (owner, line, message) in rejections {
+            let proofs = (owner.as_deref().is_none_or(|owner| owner == "<unknown>")
+                && literal_configuration.issues.is_empty())
+            .then(|| {
+                crate::source_rule_ownership::attribute_rejected_rule_owners(
+                    &literal_joined,
+                    &literal_scope,
+                    dirs,
+                    root,
+                    &rel_dir,
+                    Some(&literal_states),
+                    line,
+                )
+            })
+            .flatten();
+            let (path, line) =
+                rejection_source_location(&relative_path, literal_object_anchors.as_deref(), line);
+            native_graph_errors.extend(source_rejection_diagnostics(
+                path,
+                line,
+                owner.as_deref(),
+                message,
+                proofs,
+            ));
+        }
+    }
+    let literal_owners: std::collections::BTreeSet<_> = literal_object_groups
+        .iter()
+        .map(|group| group.owner.as_str())
+        .chain(
+            literal_object_rejections
+                .iter()
+                .map(|rejection| rejection.owner.as_str()),
+        )
+        .collect();
+    for rejection in sdk_object_rejections {
+        // A literal compiler recipe is a distinct capability, not a failed
+        // SDK compile/stage pair. Retain that capability's precise diagnostic.
+        if literal_owners.contains(rejection.owner.as_str()) {
+            continue;
+        }
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "SDK object producer is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    for rejection in literal_object_rejections {
+        // Diagnostic ownership is not producer admission. Preserve unknown
+        // identity unless the same complete source snapshot proves all owners
+        // and excludes unknown/dynamic alternative consumers. A resolved
+        // filesystem path is still not a MetaMake owner; try the same bounded
+        // source-consumer proof for every non-canonical owner spelling.
+        let ownership = rejected_rule_owner_proofs(
+            &rejection.owner,
+            literal_configuration.issues.is_empty(),
+            (&literal_joined, Some(&literal_states)),
+            &literal_scope,
+            dirs,
+            (root, &rel_dir),
+            rejection.line,
+        );
+        let (diagnostic_path, diagnostic_line) = rejection_source_location(
+            &relative_path,
+            literal_object_anchors.as_deref(),
+            rejection.line,
+        );
+        native_graph_errors.extend(source_rejection_diagnostics(
+            diagnostic_path,
+            diagnostic_line,
+            Some(&rejection.owner),
+            format!(
+                "literal object producer is outside its closed capability: {}",
+                rejection.reason
+            ),
+            ownership,
+        ));
+    }
     let (copy_directories, skipped_copy_directories) = copy_directories::collect(
         &invocations,
         &scope,
@@ -326,15 +1044,22 @@ pub(super) fn parse_mmakefile_impl(
         ) {
             Ok(declaration) => external_cmake.push(declaration),
             Err(reason) => {
-                let mmake = macro_arg(&invocation.args, "mmake")
+                let mmake_raw = macro_arg(&invocation.args, "mmake");
+                let mmake = mmake_raw
+                    .as_ref()
                     .map_or_else(String::new, |name| format!(" mmake={name}"));
+                let mmake_owner = mmake_raw
+                    .as_deref()
+                    .and_then(|raw| evaluate_name(raw, &expression_context).ok())
+                    .and_then(|name| exact_mmake_target(&name));
                 if matches!(
                     rel_dir.to_str(),
                     Some("compiler/cunit" | "workbench/classes/datatypes/heic")
                 ) {
-                    capability_errors.push(capability_diagnostic(
+                    capability_errors.push(capability_diagnostic_with_owner(
                         &relative_path,
                         Some(invocation.line + 1),
+                        mmake_owner.as_deref(),
                         format!("%build_with_cmake{mmake} no longer matches its closed capability: {reason}"),
                     ));
                 }
@@ -353,6 +1078,12 @@ pub(super) fn parse_mmakefile_impl(
         .iter()
         .filter(|invocation| invocation.name == "build_with_configure")
     {
+        let expression_context =
+            MakeExprContext::new(&scope, dirs, invocation.line, root, &rel_dir);
+        let mmake_owner = macro_arg(&invocation.args, "mmake")
+            .as_deref()
+            .and_then(|raw| evaluate_name(raw, &expression_context).ok())
+            .and_then(|name| exact_mmake_target(&name));
         match crate::capability::ahi::parse(root, invocation, &rel_dir, target) {
             Ok(Some(declaration)) => ahi_builds.push(declaration),
             Ok(None) => match crate::capability::grub2::parse(root, invocation, &rel_dir, target) {
@@ -370,9 +1101,10 @@ pub(super) fn parse_mmakefile_impl(
                                         | "workbench/network/WirelessManager/wpa_supplicant"
                                 )
                             ) {
-                                capability_errors.push(capability_diagnostic(
+                                capability_errors.push(capability_diagnostic_with_owner(
                                     &relative_path,
                                     Some(invocation.line + 1),
+                                    mmake_owner.as_deref(),
                                     format!("%build_with_configure{mmake} no longer matches its closed capability: {reason}"),
                                 ));
                             }
@@ -388,9 +1120,10 @@ pub(super) fn parse_mmakefile_impl(
                     let mmake = macro_arg(&invocation.args, "mmake")
                         .map_or_else(String::new, |name| format!(" mmake={name}"));
                     if !expected_grub_profile_exclusion(target) {
-                        capability_errors.push(capability_diagnostic(
+                        capability_errors.push(capability_diagnostic_with_owner(
                             &relative_path,
                             Some(invocation.line + 1),
+                            mmake_owner.as_deref(),
                             format!("%build_with_configure{mmake} no longer matches the closed GRUB2 capability: {reason}"),
                         ));
                     }
@@ -405,9 +1138,10 @@ pub(super) fn parse_mmakefile_impl(
                 let mmake = macro_arg(&invocation.args, "mmake")
                     .map_or_else(String::new, |name| format!(" mmake={name}"));
                 if !expected_ahi_profile_exclusion(target) {
-                    capability_errors.push(capability_diagnostic(
+                    capability_errors.push(capability_diagnostic_with_owner(
                         &relative_path,
                         Some(invocation.line + 1),
+                        mmake_owner.as_deref(),
                         format!("%build_with_configure{mmake} no longer matches the closed AHI capability: {reason}"),
                     ));
                 }
@@ -421,6 +1155,8 @@ pub(super) fn parse_mmakefile_impl(
     }
     let mut partial_source_lists: Vec<String> = Vec::new();
     let mut source_inventory_patterns: Vec<String> = Vec::new();
+    let mut source_inventory_needs = Vec::new();
+    let mut source_inventory_targets: Vec<crate::ast::InventoryTargetIdentity> = Vec::new();
     let mut skipped_client_archives: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).map_err(|error| {
@@ -430,1338 +1166,117 @@ pub(super) fn parse_mmakefile_impl(
         )
     })?;
 
-    // 1. Extract module definitions
-    for inv in invocations.iter().filter(|i| {
-        matches!(
-            i.name.as_str(),
-            "build_module" | "build_module_abi" | "build_module_library"
-        )
-    }) {
-        // The three spellings wrap the same %build_module_core, but the ABI
-        // form deliberately has no runtime compilation (make.tmpl:2828).
-        let Some(mmake_raw) = macro_arg(&inv.args, "mmake") else {
-            continue;
-        };
-        let Some(mod_raw) = macro_arg(&inv.args, "modname") else {
-            continue;
-        };
-        let vars = scope.snapshot(inv.line);
-        let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
-        let isa_link_options = declaration_global_link_options(
-            "TARGET_ISA_LDFLAGS",
-            &scope,
-            dirs,
-            root,
-            &rel_dir,
-            inv.line,
-        );
-        let driver_link_options =
-            declaration_global_link_options("USER_LDFLAGS", &scope, dirs, root, &rel_dir, inv.line);
-        let mut declaration_flags = declaration_flags_at(
-            &scope,
-            inv.line,
-            target,
-            &flag_set,
-            &opts_link_options,
-            &opts_spec_switches,
-        );
-        let mut declaration_includes = target.map_or_else(
-            || include_set.clone(),
-            |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
-        );
-        let mmake_name = sanitize_ident(&mmake_raw);
-        if let Err(reason) = apply_mesa_compile_contract(
-            &rel_dir,
-            &mmake_name,
-            target,
-            &mut declaration_flags,
-            &mut declaration_includes,
-        ) {
-            capability_errors.push(capability_diagnostic(
-                &relative_path,
-                Some(inv.line + 1),
-                format!(
-                    "%{} mmake={mmake_raw} no longer matches the Mesa compile capability: {reason}",
-                    inv.name
-                ),
-            ));
-            skipped_programs.push(format!(
-                "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 compile contract skipped: {reason}",
-                rel_dir.display(),
-                inv.line + 1,
-                inv.name
-            ));
-            continue;
-        }
-        let mod_name =
-            match mesa26::runtime_module_name(root, &rel_dir, &mmake_name, &mod_raw, target) {
-                Ok(Some(name)) => name,
-                Ok(None) => sanitize_ident(&mod_raw),
-                Err(reason) => {
-                    capability_errors.push(capability_diagnostic(
-                        &relative_path,
-                        Some(inv.line + 1),
-                        format!("Mesa runtime identity: {reason}"),
-                    ));
-                    continue;
-                }
-            };
-        let mod_type_owned = macro_arg(&inv.args, "modtype").unwrap_or_default();
-        let mod_type_str = mod_type_owned.as_str();
-        let rest = inv.args.as_str();
-        let is_abi = inv.name == "build_module_abi";
-
-        let module_type = if is_abi {
-            ModuleType::Abi
-        } else {
-            match mod_type_str {
-                "library" => ModuleType::Library,
-                "device" => ModuleType::Device,
-                "resource" => ModuleType::Resource,
-                "hidd" => ModuleType::Hidd,
-                "datatype" => ModuleType::Datatype,
-                "gadget" => ModuleType::Gadget,
-                "mcc" => ModuleType::Mcc,
-                _ => ModuleType::Custom,
-            }
-        };
-        let genmodule_only = is_explicit_genmodule_only(&inv.name, rest, mod_type_str);
-        let linklib_name = match macro_arg(rest, "linklibname") {
-            Some(raw) if !raw.is_empty() => match evaluate_name(&raw, &expression_context) {
-                Ok(name) => Some(name),
-                Err(reason) => {
-                    skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} linklibname={raw} is unresolved: {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    continue;
-                }
-            },
-            _ => None,
-        };
-
-        let arch_specific = match resolve_yes_argument(rest, "archspecific", &scope, dirs, inv.line)
-        {
-            Ok(value) => value,
-            Err(reason) => {
-                skipped_programs.push(format!(
-                    "{}:{}: %{} mmake={mmake_raw} {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                    inv.name
-                ));
-                continue;
-            }
-        };
-        let always_cxx_link =
-            match resolve_yes_argument(rest, "alwayscxxlink", &scope, dirs, inv.line) {
-                Ok(value) => value,
-                Err(reason) => {
-                    skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    continue;
-                }
-            };
-        let target_dir = match resolve_module_target_dir(
-            rest,
-            &scope,
-            dirs,
-            inv.line,
-            mod_type_str,
-            true,
-            arch_specific,
-        ) {
-            Ok(value) => value,
-            Err(reason) => {
-                skipped_programs.push(format!(
-                    "{}:{}: %{} mmake={mmake_raw} {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                    inv.name
-                ));
-                continue;
-            }
-        };
-        let mod_suffix = match resolve_module_suffix(rest, &scope, dirs, inv.line, mod_type_str) {
-            Ok(value) => value,
-            Err(reason) => {
-                skipped_programs.push(format!(
-                    "{}:{}: %{} mmake={mmake_raw} {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                    inv.name
-                ));
-                continue;
-            }
-        };
-        // An ABI skeleton has no implementation sources, and the one explicit
-        // genmodule-only library is implemented entirely by generated start/end
-        // files. Every other empty result keeps the existing strict source-list
-        // handling: unresolved lists may never turn into generated-only modules.
-        let sources = if is_abi || genmodule_only {
-            EvaluatedSources::default()
-        } else {
-            let mut sources = match mesa26::module_sources(root, &rel_dir, &mmake_name, target) {
-                Ok(Some(sources)) => sources,
-                Ok(None) => match evaluate_macro_sources(rest, &vars, &expression_context) {
-                    Ok(sources) => sources,
-                    Err(reason) => {
-                        skipped_programs.push(format!(
-                            "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} {reason}",
-                            rel_dir.display(),
-                            inv.line + 1,
-                            inv.name
-                        ));
-                        continue;
-                    }
-                },
-                Err(reason) => {
-                    capability_errors.push(capability_diagnostic(
-                        &relative_path,
-                        Some(inv.line + 1),
-                        format!("Mesa 26 module source closure: {reason}"),
-                    ));
-                    skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} Mesa 26 source closure rejected: {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    continue;
-                }
-            };
-            record_partial_source_lists(
-                &mut partial_source_lists,
-                &mut source_inventory_patterns,
-                &sources,
-                &rel_dir,
-                inv,
-                &mmake_raw,
-            );
-            if sources.is_empty() {
-                if sources.declared {
-                    skipped_programs.push(format!(
-                        "{}: %{} mmake={mmake_raw} modname={mod_raw} has an unresolved file list",
-                        rel_dir.display(),
-                        inv.name
-                    ));
-                    continue;
-                }
-                sources.c = wildcard_c_sources(parent_dir);
-                if sources.is_empty() {
-                    skipped_programs.push(format!(
-                        "{}: %{} mmake={mmake_raw} modname={mod_raw} declares no sources",
-                        rel_dir.display(),
-                        inv.name
-                    ));
-                    continue;
-                }
-            }
-            sources
-        };
-
-        let use_libs: Vec<String> = re_libs.captures(rest).map_or_else(Vec::new, |lcap| {
-            let libs_str = lcap
-                .get(1)
-                .or_else(|| lcap.get(2))
-                .map_or("", |m| m.as_str());
-            expand_file_list(libs_str, &vars)
-        });
-        let declared_mod_type = matches!(module_type, ModuleType::Abi | ModuleType::Custom)
-            .then(|| mod_type_owned.clone());
-
-        // `conffile=` names the genmodule config, and 81 of the 83 declarations
-        // that state one give a file whose stem is not modname:
-        // con_handler.conf for modname=con, VMM_Handler.conf for modname=VMM.
-        // Without carrying it, CMake derives `<modname>.conf`, finds nothing and
-        // generates no scaffolding at all -- silently, because a module with no
-        // config is a legitimate hand-written one.
-        let config_file = macro_arg(&inv.args, "conffile").and_then(|raw| {
-            let raw = raw.trim().trim_matches('"');
-            match evaluate_make_expr(raw, &expression_context) {
-                Ok(value) => {
-                    let value = value.trim().trim_matches('"').to_owned();
-                    if value.is_empty() || value.contains(char::is_whitespace) {
-                        skipped_programs.push(format!(
-                            "{}: %{} mmake={mmake_raw} conffile={raw} is not one path",
-                            rel_dir.display(),
-                            inv.name
-                        ));
-                        None
-                    } else if value.starts_with("${") || value.starts_with('/') {
-                        Some(value)
-                    } else {
-                        // Relative to the declaring directory, as Make reads it.
-                        Some(format!(
-                            "${{AROS_SOURCE_DIR}}/{}/{value}",
-                            rel_dir.display()
-                        ))
-                    }
-                }
-                Err(error) => {
-                    skipped_programs.push(format!(
-                        "{}: %{} mmake={mmake_raw} conffile={raw} cannot be \
-                         evaluated: {error}",
-                        rel_dir.display(),
-                        inv.name
-                    ));
-                    None
-                }
-            }
-        });
-        let config_override_arg = macro_arg(&inv.args, "confoverride");
-        let config_override_file = config_override_arg.as_ref().and_then(|raw| {
-            let raw = raw.trim().trim_matches('"');
-            match evaluate_make_expr(raw, &expression_context) {
-                Ok(value) => {
-                    let value = value.trim().trim_matches('"').to_owned();
-                    if value.is_empty() || value.contains(char::is_whitespace) {
-                        skipped_programs.push(format!(
-                            "{}: %{} mmake={mmake_raw} confoverride={raw} is not one path",
-                            rel_dir.display(),
-                            inv.name
-                        ));
-                        None
-                    } else if value.starts_with("${") || value.starts_with('/') {
-                        Some(value)
-                    } else {
-                        Some(format!(
-                            "${{AROS_SOURCE_DIR}}/{}/{value}",
-                            rel_dir.display()
-                        ))
-                    }
-                }
-                Err(error) => {
-                    skipped_programs.push(format!(
-                        "{}: %{} mmake={mmake_raw} confoverride={raw} cannot be \
-                         evaluated: {error}",
-                        rel_dir.display(),
-                        inv.name
-                    ));
-                    None
-                }
-            }
-        });
-        // An invalid override must not silently produce a module with the
-        // wrong allocated base type or resident priority.
-        if config_override_arg.is_some() && config_override_file.is_none() {
-            continue;
-        }
-
-        // Upstream creates the client archive when `<mod>_LINKLIB` is
-        // non-empty, and make.tmpl derives that from the file set, not from
-        // `linklibname=`:
-        //
-        //   config/make.tmpl:2270  _LINKLIB is empty exactly when
-        //                          _LINKLIBFILES, _LINKLIBAFILES,
-        //                          linklibfiles= and _ARCHNLIBFILES are all
-        //                          empty; linklibname= only renames it
-        //   tools/genmodule/writemakefile.c:78
-        //                          _LINKLIBFILES gets <mod>_getlibbase for
-        //                          every LIBRARY, <mod>_autoinit under
-        //                          OPTION_AUTOINIT and the stubs under
-        //                          OPTION_STUBS
-        //   tools/genmodule/config.c:797
-        //                          a LIBRARY defaults to OPTION_AUTOINIT,
-        //                          every other module type to NOAUTOINIT
-        //
-        // So every modtype=library module has a client archive, and so does
-        // any other module whose config states `options stubs` or
-        // `options autoinit` (rom/timer is the one such case in the tree).
-        // Keying it on linklibname= left 100 library archives unbuilt, which
-        // is what the symbol audit sees as undefined DOSBase, UtilityBase and
-        // the rest: the base is defined by AROS_LIBSET in <mod>_autoinit.c
-        // (compiler/include/aros/symbolsets.h:118), and that object lives in
-        // exactly this archive.
-        let source_path = |value: &str| {
-            value
-                .strip_prefix("${AROS_SOURCE_DIR}/")
-                .map(|relative| root.join(relative))
-                .or_else(|| {
-                    Path::new(value)
-                        .is_absolute()
-                        .then(|| Path::new(value).to_path_buf())
+    let capture_kobj_inputs = |inv: &Invocation, fallback_name: &str| {
+        target.map(|target| {
+            let expression_scope = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
+            let name = macro_arg(&inv.args, "modname")
+                .ok_or_else(|| "missing source modname".to_owned())
+                .and_then(|raw| {
+                    evaluate_make_expr(&raw, &expression_scope).map_err(|error| error.to_string())
+                });
+            let flavour = macro_arg(&inv.args, "flavour")
+                .map(|raw| {
+                    evaluate_make_expr(&raw, &expression_scope).map_err(|error| error.to_string())
                 })
-        };
-        let config_path = config_file.as_deref().and_then(source_path);
-        let override_path = config_override_file.as_deref().and_then(source_path);
-        let config_facts = config_path.map_or_else(
-            || read_genmodule_linklib_config(parent_dir, &mod_name, override_path.as_deref()),
-            |config_path| {
-                read_genmodule_linklib_config_files(&config_path, override_path.as_deref())
-            },
-        );
-        let config_relative_libraries = config_facts
-            .as_ref()
-            .map(|facts| facts.relative_libraries.clone())
-            .unwrap_or_default();
-        if module_type != ModuleType::Library {
-            if let Some(facts) = config_facts.as_ref() {
-                if facts.forces_client_archive {
-                    skipped_client_archives.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} modtype={mod_type_owned}: \
-                         config states `options stubs` or `options autoinit`, so upstream builds \
-                         lib{mod_name}.a; the generated client sources are only derived for \
-                         modtype=library",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                }
-            }
-        }
-        let genmodule_linklibs = if module_type == ModuleType::Library {
-            config_facts.map(
-                |GenmoduleConfigFacts {
-                     has_relative,
-                     relative_libraries,
-                     forces_client_archive,
-                 }| {
-                    let mut inputs_exact = true;
-                    let source_files = match evaluate_linklib_list(
-                        rest,
-                        "linklibfiles",
-                        &vars,
-                        &expression_context,
-                    ) {
-                        Ok(files) => files,
-                        Err(error) => {
-                            partial_source_lists.push(format!(
-                                "{}:{}: %{} mmake={mmake_raw} {error}",
-                                rel_dir.display(),
-                                inv.line + 1,
-                                inv.name
-                            ));
-                            inputs_exact = false;
-                            Vec::new()
-                        }
-                    };
-                    let object_sources = match evaluate_linklib_list(
-                        rest,
-                        "linklibobjs",
-                        &vars,
-                        &expression_context,
-                    ) {
-                        Ok(objects) => match map_linklib_object_sources(&objects, &sources.c) {
-                            Ok(mapped) => mapped,
-                            Err(error) => {
-                                partial_source_lists.push(format!(
-                                    "{}:{}: %{} mmake={mmake_raw} {error}",
-                                    rel_dir.display(),
-                                    inv.line + 1,
-                                    inv.name
-                                ));
-                                inputs_exact = false;
-                                Vec::new()
-                            }
-                        },
-                        Err(error) => {
-                            partial_source_lists.push(format!(
-                                "{}:{}: %{} mmake={mmake_raw} {error}",
-                                rel_dir.display(),
-                                inv.line + 1,
-                                inv.name
-                            ));
-                            inputs_exact = false;
-                            Vec::new()
-                        }
-                    };
-                    GenmoduleLinklibs {
-                        enabled: linklib_name.is_some()
-                            || forces_client_archive
-                            || module_type == ModuleType::Library
-                            || !source_files.is_empty()
-                            || !object_sources.is_empty(),
-                        has_relative,
-                        relative_libraries,
-                        source_files,
-                        object_sources,
-                        inputs_exact,
-                    }
+                .transpose();
+            let raw_uselibs = macro_arg(&inv.args, "uselibs");
+            let raw_funcinstr = macro_arg(&inv.args, "funcinstr");
+            let mut captured = crate::kobj_scoped_inputs::capture_kobj_scoped_inputs_for_module(
+                &joined,
+                inv.line,
+                crate::kobj_scoped_inputs::KobjModuleArgs {
+                    module_name: name.as_deref().unwrap_or(fallback_name),
+                    flavour: flavour.as_ref().ok().and_then(|value| value.as_deref()),
+                    raw_uselibs: raw_uselibs.as_deref(),
+                    raw_funcinstr: raw_funcinstr.as_deref(),
                 },
-            )
-        } else {
-            None
-        };
-
-        // All three %build_module* forms expand the implicit MetaMake
-        // aliases and architecture endpoints.  `genmodule_only` describes
-        // only how sources are materialised; using it as a guard here made
-        // ordinary sourceful modules lose their upstream prerequisite graph.
-        let include_set = match macro_arg(rest, "include_set") {
-            Some(raw) => {
-                let Some(rendered) = render_meta_token(&raw) else {
-                    skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} include_set={raw} contains an unmapped Make variable",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    continue;
-                };
-                rendered
-            }
-            None => "includes-all".to_owned(),
-        };
-        meta_rules.extend(implicit_module_meta_rules(
-            &mmake_name,
-            &mod_name,
-            &include_set,
-            &use_libs,
-            inv.name != "build_module_library",
-            inv.name != "build_module_abi",
-            is_abi || genmodule_only,
-        ));
-
-        targets.push(TargetDefinition {
-            mmake_name,
-            target_name: mod_name,
-            module_type,
-            genmodule_only,
-            empty_archive: false,
-            source_files: sources.c,
-            cxx_source_files: sources.cxx,
-            always_cxx_link,
-            no_startup: false,
-            detach: false,
-            objc_source_files: sources.objc,
-            asm_source_files: sources.asm,
-            use_libs,
-            dependencies: Vec::new(),
-            dir_path: rel_dir.clone(),
-            target_dir,
-            link_libs: Vec::new(),
-            variant_32bit: false,
-            declared_mod_type,
-            mod_suffix,
-            linklib_name,
-            config_file,
-            config_override_file,
-            genmodule_linklibs,
-            config_relative_libraries,
-            canonical_linklib_output: false,
-            canonical_linklib_eligible: false,
-            linklib_output_dir: None,
-            compiler_flags: Vec::new(),
-            include_dirs: {
-                let mut d = declaration_includes.dirs.clone();
-                d.extend(opts_include_dirs.iter().cloned());
-                d
-            },
-            arch_modules: declaration_includes.arch_modules.clone(),
-            arch_includes: opts_arch_includes.clone(),
-            defines: declaration_flags.defines,
-            undefines: declaration_flags.undefines,
-            compile_options: declaration_flags.compile_options,
-            link_options: declaration_flags.link_options,
-            spec_switches: declaration_flags.spec_switches.clone(),
-            driver_link_options: driver_link_options.clone(),
-            isa_link_options: isa_link_options.clone(),
-            arch_sources: Vec::new(),
-            arch_defines: arch_defines.clone(),
-            arch_compile_options: arch_compile_options.clone(),
-            arch_source_options: Vec::new(),
-        });
-    }
-
-    // 2. Extract program definitions
-    //
-    // %build_prog takes progname=/A and builds one executable from all its
-    // files (make.tmpl:1810). %build_progs takes files=/A and builds one per
-    // file (make.tmpl:1850). Both used to match the same regex, progname was
-    // never read, and every file became its own program: the four sources of
-    // `%build_prog progname=SysLog` came out as colorlist, hooks, main and str
-    // instead of one SysLog. Only %build_prog is handled here; %build_progs
-    // needs one mmake target to carry several executables, which the target
-    // model does not express yet, so it is reported instead of guessed at.
-    for inv in invocations.iter().filter(|i| i.name == "build_prog") {
-        let Some(mmake_raw) = macro_arg(&inv.args, "mmake") else {
-            continue;
-        };
-        let vars = scope.snapshot(inv.line);
-        let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
-        let isa_link_options = declaration_global_link_options(
-            "TARGET_ISA_LDFLAGS",
-            &scope,
-            dirs,
-            root,
-            &rel_dir,
-            inv.line,
-        );
-        let driver_link_options =
-            declaration_global_link_options("USER_LDFLAGS", &scope, dirs, root, &rel_dir, inv.line);
-        let declaration_flags = declaration_flags_at(
-            &scope,
-            inv.line,
-            target,
-            &flag_set,
-            &opts_link_options,
-            &opts_spec_switches,
-        );
-        let declaration_includes = target.map_or_else(
-            || include_set.clone(),
-            |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
-        );
-        let mmake_name = sanitize_ident(&mmake_raw);
-
-        // progname is declared /A, so a declaration without one is malformed
-        // rather than something to guess a name for.
-        let Some(prog_raw) = macro_arg(&inv.args, "progname") else {
-            skipped_programs.push(format!(
-                "{}: %build_prog mmake={mmake_raw} has no progname",
-                rel_dir.display()
-            ));
-            continue;
-        };
-        let prog_name = match evaluate_name(&prog_raw, &expression_context) {
-            Ok(name) => name,
-            Err(reason) => {
-                skipped_programs.push(format!(
-                    "{}:{}: %build_prog mmake={mmake_raw} progname={prog_raw} is unresolved: {reason}",
-                    rel_dir.display(),
-                    inv.line + 1
-                ));
-                continue;
-            }
-        };
-
-        let mut sources = match evaluate_macro_sources(&inv.args, &vars, &expression_context) {
-            Ok(sources) => sources,
-            Err(reason) => {
-                skipped_programs.push(format!(
-                    "{}:{}: %build_prog mmake={mmake_raw} progname={prog_raw} {reason}",
-                    rel_dir.display(),
-                    inv.line + 1
-                ));
-                continue;
-            }
-        };
-        record_partial_source_lists(
-            &mut partial_source_lists,
-            &mut source_inventory_patterns,
-            &sources,
-            &rel_dir,
-            inv,
-            &mmake_raw,
-        );
-        if sources.is_empty() {
-            if sources.declared {
-                // A list was given but its Make variables are unresolved.
-                // Falling back to the program name here would compile the
-                // wrong file, so report instead.
-                skipped_programs.push(format!(
-                    "{}: %build_prog mmake={mmake_raw} progname={prog_raw} has an unresolved file list",
-                    rel_dir.display()
-                ));
-                continue;
-            }
-            sources.c.push(prog_name.clone());
-        }
-
-        let use_libs =
-            macro_arg(&inv.args, "uselibs").map_or_else(Vec::new, |l| expand_file_list(&l, &vars));
-        let always_cxx_link =
-            match resolve_yes_argument(&inv.args, "alwayscxxlink", &scope, dirs, inv.line) {
-                Ok(value) => value,
-                Err(reason) => {
-                    skipped_programs.push(format!(
-                        "{}:{}: %build_prog mmake={mmake_raw} {reason}",
-                        rel_dir.display(),
-                        inv.line + 1
-                    ));
-                    continue;
-                }
-            };
-        let no_startup = match resolve_no_argument(&inv.args, "usestartup", &scope, dirs, inv.line)
-        {
-            Ok(value) => value,
-            Err(reason) => {
-                skipped_programs.push(format!(
-                    "{}:{}: %build_prog mmake={mmake_raw} {reason}",
-                    rel_dir.display(),
-                    inv.line + 1
-                ));
-                continue;
-            }
-        };
-        let detach = match resolve_yes_argument(&inv.args, "detach", &scope, dirs, inv.line) {
-            Ok(value) => value,
-            Err(reason) => {
-                skipped_programs.push(format!(
-                    "{}:{}: %build_prog mmake={mmake_raw} {reason}",
-                    rel_dir.display(),
-                    inv.line + 1
-                ));
-                continue;
-            }
-        };
-        let target_dir = match evaluate_output_directory(&inv.args, &expression_context) {
-            Ok(directory) => directory,
-            Err(reason) => {
-                unresolved_output_paths.push(format!(
-                    "{}:{}: %build_prog mmake={mmake_raw} {reason}",
-                    rel_dir.display(),
-                    inv.line + 1
-                ));
-                None
-            }
-        };
-
-        targets.push(TargetDefinition {
-            mmake_name,
-            target_name: prog_name,
-            module_type: ModuleType::Program,
-            genmodule_only: false,
-            empty_archive: false,
-            source_files: sources.c,
-            cxx_source_files: sources.cxx,
-            always_cxx_link,
-            no_startup,
-            detach,
-            objc_source_files: sources.objc,
-            asm_source_files: sources.asm,
-            use_libs,
-            dependencies: Vec::new(),
-            dir_path: rel_dir.clone(),
-            target_dir,
-            link_libs: Vec::new(),
-            variant_32bit: false,
-            declared_mod_type: None,
-            mod_suffix: None,
-            linklib_name: None,
-            config_file: None,
-            config_override_file: None,
-            genmodule_linklibs: None,
-            config_relative_libraries: Vec::new(),
-            canonical_linklib_output: false,
-            canonical_linklib_eligible: false,
-            linklib_output_dir: None,
-            compiler_flags: Vec::new(),
-            include_dirs: {
-                let mut d = declaration_includes.dirs.clone();
-                d.extend(opts_include_dirs.iter().cloned());
-                d
-            },
-            arch_modules: declaration_includes.arch_modules.clone(),
-            arch_includes: opts_arch_includes.clone(),
-            defines: declaration_flags.defines,
-            undefines: declaration_flags.undefines,
-            compile_options: declaration_flags.compile_options,
-            link_options: declaration_flags.link_options,
-            spec_switches: declaration_flags.spec_switches.clone(),
-            driver_link_options: driver_link_options.clone(),
-            isa_link_options: isa_link_options.clone(),
-            arch_sources: Vec::new(),
-            arch_defines: arch_defines.clone(),
-            arch_compile_options: arch_compile_options.clone(),
-            arch_source_options: Vec::new(),
-        });
-    }
-
-    // 2b. The remaining build macros.
-    //
-    // All four share the compile model and differ only in what they link:
-    // %build_prog one executable, %build_progs one per file, %build_linklib a
-    // static library, %build_module_simple a module without the genmodule
-    // chain. Only the link kind and the name argument change here.
-    for inv in &invocations {
-        let (module_type, name_arg) = match inv.name.as_str() {
-            "build_progs" => (ModuleType::ProgramGroup, None),
-            "build_linklib" => (ModuleType::LinkLib, Some("libname")),
-            "build_module_simple" => (ModuleType::SimpleModule, Some("modname")),
-            _ => continue,
-        };
-
-        let Some(mmake_raw) = macro_arg(&inv.args, "mmake") else {
-            continue;
-        };
-        let vars = scope.snapshot(inv.line);
-        let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
-        let isa_link_options = declaration_global_link_options(
-            "TARGET_ISA_LDFLAGS",
-            &scope,
-            dirs,
-            root,
-            &rel_dir,
-            inv.line,
-        );
-        let driver_link_options =
-            declaration_global_link_options("USER_LDFLAGS", &scope, dirs, root, &rel_dir, inv.line);
-        let mut declaration_flags = declaration_flags_at(
-            &scope,
-            inv.line,
-            target,
-            &flag_set,
-            &opts_link_options,
-            &opts_spec_switches,
-        );
-        let mut declaration_includes = target.map_or_else(
-            || include_set.clone(),
-            |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
-        );
-        let mmake_name = sanitize_ident(&mmake_raw);
-        let mesa20_capability_sources = match remaining_linklib_sources(
-            root,
-            &rel_dir,
-            &mmake_name,
-            target,
-        ) {
-            Ok(sources) => sources,
-            Err(reason) => {
-                capability_errors.push(capability_diagnostic(
-                        &relative_path,
-                        Some(inv.line + 1),
-                        format!(
-                            "%{} mmake={mmake_raw} no longer matches the Mesa archive capability: {reason}",
-                            inv.name
-                        ),
-                    ));
-                skipped_programs.push(format!(
-                    "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 archive capability skipped: {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                    inv.name
-                ));
-                continue;
-            }
-        };
-        let mesa20_capability_active = mesa20_capability_sources.is_some();
-        let mesa26_sources = match mesa26::archive_sources(root, &rel_dir, &mmake_name, target) {
-            Ok(sources) => sources,
-            Err(reason) => {
-                capability_errors.push(capability_diagnostic(
-                    &relative_path,
-                    Some(inv.line + 1),
-                    format!("Mesa 26 glapi capability: {reason}"),
-                ));
-                skipped_programs.push(format!(
-                    "{}:{}: Mesa 26 glapi linklib skipped: {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                ));
-                continue;
-            }
-        };
-        let mesa26_archive_active = mesa26_sources.is_some();
-        let nouveau_drm_capability_sources = match crate::capability::nouveau::drm_sources(
-            root,
-            &rel_dir,
-            &mmake_name,
-            target,
-        ) {
-            Ok(sources) => sources,
-            Err(reason) => {
-                capability_errors.push(capability_diagnostic(
-                        &relative_path,
-                        Some(inv.line + 1),
-                        format!(
-                            "%{} mmake={mmake_raw} no longer matches the Nouveau DRM archive capability: {reason}",
-                            inv.name
-                        ),
-                    ));
-                skipped_programs.push(format!(
-                    "{}:{}: %{} mmake={mmake_raw} Nouveau DRM archive capability skipped: {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                    inv.name
-                ));
-                continue;
-            }
-        };
-        let nouveau_drm_capability_active = nouveau_drm_capability_sources.is_some();
-        let nouveau_gallium_capability_sources = match crate::capability::nouveau::gallium_sources(
-            root,
-            &rel_dir,
-            &mmake_name,
-            target,
-        ) {
-            Ok(sources) => sources,
-            Err(reason) => {
-                capability_errors.push(capability_diagnostic(
-                    &relative_path,
-                    Some(inv.line + 1),
-                    format!(
-                        "%{} mmake={mmake_raw} no longer matches the Nouveau Gallium archive capability: {reason}",
-                        inv.name
-                    ),
-                ));
-                skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} Nouveau Gallium archive capability skipped: {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                continue;
-            }
-        };
-        let nouveau_gallium_capability_active = nouveau_gallium_capability_sources.is_some();
-        if let Err(reason) = apply_mesa_compile_contract(
-            &rel_dir,
-            &mmake_name,
-            target,
-            &mut declaration_flags,
-            &mut declaration_includes,
-        ) {
-            capability_errors.push(capability_diagnostic(
+                root,
                 &relative_path,
-                Some(inv.line + 1),
-                format!(
-                    "%{} mmake={mmake_raw} no longer matches the Mesa compile capability: {reason}",
-                    inv.name
-                ),
-            ));
-            skipped_programs.push(format!(
-                "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 compile contract skipped: {reason}",
-                rel_dir.display(),
-                inv.line + 1,
-                inv.name
-            ));
-            continue;
-        }
-        match crate::capability::nouveau::drm_compile_contract(&rel_dir, &mmake_name, target) {
-            Ok(Some(contract)) => {
-                declaration_flags.defines = contract.defines;
-                declaration_flags.undefines.clear();
-                declaration_flags.compile_options = contract.options;
-                declaration_flags.link_options.clear();
-                declaration_includes.dirs = contract.includes;
-                declaration_includes.arch_modules.clear();
-            }
-            Ok(None) => {}
-            Err(reason) => {
-                capability_errors.push(capability_diagnostic(
-                    &relative_path,
-                    Some(inv.line + 1),
-                    format!(
-                        "%{} mmake={mmake_raw} no longer matches the Nouveau DRM compile capability: {reason}",
-                        inv.name
-                    ),
-                ));
-                skipped_programs.push(format!(
-                    "{}:{}: %{} mmake={mmake_raw} Nouveau DRM compile contract skipped: {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                    inv.name
-                ));
-                continue;
-            }
-        }
-        match crate::capability::nouveau::gallium_compile_contract(&rel_dir, &mmake_name, target) {
-            Ok(Some(contract)) => {
-                declaration_flags.defines = contract.defines;
-                declaration_flags.undefines.clear();
-                declaration_flags.compile_options = contract.options;
-                declaration_flags.link_options.clear();
-                declaration_includes.dirs = contract.includes;
-                declaration_includes.arch_modules.clear();
-            }
-            Ok(None) => {}
-            Err(reason) => {
-                capability_errors.push(capability_diagnostic(
-                    &relative_path,
-                    Some(inv.line + 1),
-                    format!(
-                        "%{} mmake={mmake_raw} no longer matches the Nouveau Gallium compile capability: {reason}",
-                        inv.name
-                    ),
-                ));
-                skipped_programs.push(format!(
-                    "{}:{}: %{} mmake={mmake_raw} Nouveau Gallium compile contract skipped: {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                    inv.name
-                ));
-                continue;
-            }
-        }
-        let mesa26_empty_sse41 = mmake_name == sse41::MMAKE
-            && target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0")
-            && mesa26_archive_active;
-        let mesa_sse41_profile = (mmake_name == sse41::MMAKE
-            && !mesa26_empty_sse41
-            && sse41::validate_static_contract(root, &content).is_ok())
-        .then(|| sse41::profile(&rel_dir, target).ok().flatten())
-        .flatten();
-        let empty_archive = mesa26_empty_sse41 || mesa_sse41_profile == Some(false);
-        if mesa26_empty_sse41 {
-            let Ok(Some(contract)) = mesa26::compile_contract(&rel_dir, &mmake_name, target) else {
-                capability_errors.push(capability_diagnostic(
-                    &relative_path,
-                    Some(inv.line + 1),
-                    "Mesa 26 empty SSE4.1 compile contract is absent".to_owned(),
-                ));
-                continue;
-            };
-            declaration_flags.defines = contract.defines;
-            declaration_flags.undefines = contract.undefines;
-            declaration_flags.compile_options = contract.options;
-            declaration_flags.link_options.clear();
-            declaration_includes.dirs = contract.includes;
-            declaration_includes.arch_modules.clear();
-        }
-        if let Some(x86_64) = mesa_sse41_profile {
-            // The ordinary local-include scanner cannot adopt mesa.cfg for
-            // this file on a cold tree: the neighbouring full libmesa target
-            // still depends on the not-yet-fetched upstream inventory. Admit
-            // the exact declaration-local view only together with the
-            // capability and profile contract validated below.
-            declaration_flags.defines = sse41::defines(x86_64);
-            declaration_flags.undefines.clear();
-            declaration_flags.compile_options = sse41::compile_options(x86_64);
-            declaration_flags.link_options.clear();
-            declaration_includes.dirs = sse41::INCLUDES
-                .iter()
-                .map(|include| (*include).to_owned())
-                .collect();
-            declaration_includes.arch_modules.clear();
-        }
-
-        // %build_progs has no name of its own: each source file names its own
-        // executable, so the mmake id carries the group.
-        let target_name = match name_arg {
-            None => mmake_name.clone(),
-            Some(key) => {
-                let Some(raw) = macro_arg(&inv.args, key) else {
-                    skipped_programs.push(format!(
-                        "{}: %{} mmake={mmake_raw} has no {key}",
-                        rel_dir.display(),
-                        inv.name
-                    ));
-                    continue;
-                };
-                match evaluate_name(&raw, &expression_context) {
-                    Ok(name) => name,
-                    Err(reason) => {
-                        skipped_programs.push(format!(
-                            "{}:{}: %{} mmake={mmake_raw} {key}={raw} is unresolved: {reason}",
-                            rel_dir.display(),
-                            inv.line + 1,
-                            inv.name
-                        ));
-                        continue;
-                    }
-                }
-            }
-        };
-        if matches!(module_type, ModuleType::SimpleModule) {
-            // config/make.tmpl appends `<modname>_LDFLAGS` only to this bare
-            // module's link. Preserve that scope instead of forcing a
-            // file-global USER_LDFLAGS change onto neighbouring modules.
-            merge_named_link_flags(
-                &mut declaration_flags,
-                &scope,
-                inv.line,
-                &format!("{target_name}_LDFLAGS"),
+                dirs,
+                target,
+                &[],
             );
-        }
+            let issue = name.err().or_else(|| flavour.err()).or_else(|| {
+                (!skipped_local_make_includes.is_empty()).then(|| {
+                    format!(
+                        "unresolved local Make fragments: {}",
+                        skipped_local_make_includes.join("; ")
+                    )
+                })
+            });
+            if let Some(reason) = issue {
+                for input in [
+                    &mut captured.user_objects,
+                    &mut captured.defname_libs,
+                    &mut captured.user_ldflags,
+                    &mut captured.use_libs,
+                    &mut captured.kobj_ldflags,
+                    &mut captured.kernel_kobj_ldscript,
+                    &mut captured.funcinstr_libs,
+                    &mut captured.function_instrumentation,
+                ] {
+                    let (raw, source) = match input {
+                        crate::kobj_scoped_inputs::ScopedMakeWords::KnownEmpty { raw, source }
+                        | crate::kobj_scoped_inputs::ScopedMakeWords::Unresolved {
+                            raw,
+                            source,
+                            ..
+                        } => (raw.clone(), source.clone()),
+                        crate::kobj_scoped_inputs::ScopedMakeWords::Exact {
+                            raw, source, ..
+                        } => (Some(raw.clone()), source.clone()),
+                    };
+                    *input = crate::kobj_scoped_inputs::ScopedMakeWords::Unresolved {
+                        raw,
+                        reason: format!("KOBJ declaration scope is incomplete: {reason}"),
+                        source,
+                    };
+                }
+            }
+            captured
+        })
+    };
 
-        let resolved_generated_files = if module_type == ModuleType::LinkLib {
-            match macro_arg(&inv.args, "files") {
-                Some(files) => {
-                    match resolve_generated_linklib_sources(&files, &joined, &rel_dir, |name| {
-                        expression_context.safe_local_raw(name)
-                    }) {
-                        Ok(Some(generated)) => Some(generated.sources),
-                        Ok(None) => None,
-                        Err(reason) => {
-                            skipped_programs.push(format!(
-                                "{}:{}: %{} mmake={mmake_raw} {reason}",
-                                rel_dir.display(),
-                                inv.line + 1,
-                                inv.name
-                            ));
-                            continue;
-                        }
-                    }
-                }
-                None => None,
-            }
-        } else {
-            None
-        };
-        let capability_files = mesa_sse41_profile.map(sse41::sources);
-        let mut sources = if let Some(sources) = mesa26_sources {
-            sources
-        } else if let Some(sources) = mesa20_capability_sources {
-            sources
-        } else if let Some(sources) = nouveau_drm_capability_sources {
-            sources
-        } else if let Some(sources) = nouveau_gallium_capability_sources {
-            sources
-        } else {
-            match evaluate_macro_sources_with_files(
-                &inv.args,
-                &vars,
-                &expression_context,
-                capability_files
-                    .as_deref()
-                    .or(resolved_generated_files.as_deref()),
-            ) {
-                Ok(sources) => sources,
-                Err(reason) => {
-                    skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    continue;
-                }
-            }
-        };
-        record_partial_source_lists(
-            &mut partial_source_lists,
-            &mut source_inventory_patterns,
-            &sources,
-            &rel_dir,
-            inv,
-            &mmake_raw,
-        );
-        if sources.is_empty() && !empty_archive {
-            if sources.declared {
-                skipped_programs.push(format!(
-                    "{}: %{} mmake={mmake_raw} has an unresolved file list",
-                    rel_dir.display(),
-                    inv.name
-                ));
-                continue;
-            }
-            // %build_module_simple defaults files to every *.c in the
-            // directory. The others have no default, and %build_progs even
-            // declares files=/A, so a declaration without sources is
-            // malformed.
-            if matches!(module_type, ModuleType::SimpleModule) {
-                sources.c = wildcard_c_sources(parent_dir);
-            }
-            if sources.is_empty() {
-                skipped_programs.push(format!(
-                    "{}: %{} mmake={mmake_raw} declares no sources",
-                    rel_dir.display(),
-                    inv.name
-                ));
-                continue;
-            }
-        }
-
-        let use_libs =
-            macro_arg(&inv.args, "uselibs").map_or_else(Vec::new, |l| expand_file_list(&l, &vars));
-        let is_simple_module = matches!(module_type, ModuleType::SimpleModule);
-        let always_cxx_link = if is_simple_module {
-            match resolve_yes_argument(&inv.args, "alwayscxxlink", &scope, dirs, inv.line) {
-                Ok(value) => value,
-                Err(reason) => {
-                    skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    continue;
-                }
-            }
-        } else {
-            false
-        };
-        let declared_mod_type = if is_simple_module {
-            macro_arg(&inv.args, "modtype")
-        } else {
-            None
-        };
-        let is_program_group = matches!(module_type, ModuleType::ProgramGroup);
-        let no_startup = if is_program_group {
-            match resolve_no_argument(&inv.args, "usestartup", &scope, dirs, inv.line) {
-                Ok(value) => value,
-                Err(reason) => {
-                    skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    continue;
-                }
-            }
-        } else {
-            false
-        };
-        let detach = if is_program_group {
-            match resolve_yes_argument(&inv.args, "detach", &scope, dirs, inv.line) {
-                Ok(value) => value,
-                Err(reason) => {
-                    skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    continue;
-                }
-            }
-        } else {
-            false
-        };
-        let target_dir = if is_simple_module {
-            match resolve_module_target_dir(
-                &inv.args,
-                &scope,
-                dirs,
-                inv.line,
-                declared_mod_type.as_deref().unwrap_or_default(),
-                false,
-                false,
-            ) {
-                Ok(value) => value,
-                Err(reason) => {
-                    skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    continue;
-                }
-            }
-        } else if is_program_group {
-            match evaluate_output_directory(&inv.args, &expression_context) {
-                Ok(directory) => directory,
-                Err(reason) => {
-                    unresolved_output_paths.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let mod_suffix = if is_simple_module {
-            match resolve_module_suffix(
-                &inv.args,
-                &scope,
-                dirs,
-                inv.line,
-                declared_mod_type.as_deref().unwrap_or_default(),
-            ) {
-                Ok(value) => value,
-                Err(reason) => {
-                    skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} {reason}",
-                        rel_dir.display(),
-                        inv.line + 1,
-                        inv.name
-                    ));
-                    continue;
-                }
-            }
-        } else {
-            None
-        };
-        // The 32-bit flavour is told apart by where it writes, not by its
-        // name: libdir=$(GENDIR)/lib32 and objdir=.../32bit.
-        let variant_32bit = ["libdir", "objdir"].iter().any(|k| {
-            macro_arg(&inv.args, k).is_some_and(|v| v.contains("lib32") || v.contains("32bit"))
-        });
-        let canonical_linklib_eligible = matches!(module_type, ModuleType::LinkLib)
-            && macro_arg(&inv.args, "libdir").is_none()
-            && macro_arg(&inv.args, "compiler").is_none_or(|value| value == "target")
-            && !variant_32bit;
-        let canonical_linklib_output = canonical_linklib_eligible
-            && (all_sources_are_fetch_owned(&sources, &fetches)
-                || nouveau_drm_capability_active
-                || nouveau_gallium_capability_active);
-        let linklib_output_dir = if mesa26_archive_active {
-            Some(mesa26::PRIVATE_LIBDIR.to_owned())
-        } else if mesa_sse41_profile.is_some() || mesa20_capability_active {
-            Some(PRIVATE_LIBDIR.to_owned())
-        } else if matches!(module_type, ModuleType::LinkLib) {
-            macro_arg(&inv.args, "libdir").and_then(|raw| {
-                match evaluate_make_expr(&raw, &expression_context) {
-                    Ok(directory) if safe_build_tree_output_directory(&directory) => {
-                        Some(directory)
-                    }
-                    Ok(directory) => {
-                        unresolved_output_paths.push(format!(
-                            "{}:{}: %{} mmake={mmake_raw} libdir={raw} resolves outside the build tree ({directory})",
-                            rel_dir.display(),
-                            inv.line + 1,
-                            inv.name
-                        ));
-                        None
-                    }
-                    Err(reason) => {
-                        unresolved_output_paths.push(format!(
-                            "{}:{}: %{} mmake={mmake_raw} libdir={raw} is unresolved: {reason}",
-                            rel_dir.display(),
-                            inv.line + 1,
-                            inv.name
-                        ));
-                        None
-                    }
-                }
-            })
-        } else {
-            None
-        };
-
-        targets.push(TargetDefinition {
-            mmake_name,
-            target_name,
-            module_type,
-            genmodule_only: false,
-            empty_archive,
-            source_files: sources.c,
-            cxx_source_files: sources.cxx,
-            always_cxx_link,
-            no_startup,
-            detach,
-            objc_source_files: sources.objc,
-            asm_source_files: sources.asm,
-            use_libs,
-            dependencies: Vec::new(),
-            dir_path: rel_dir.clone(),
-            target_dir,
-            link_libs: Vec::new(),
-            variant_32bit,
-            declared_mod_type,
-            mod_suffix,
-            linklib_name: None,
-            config_file: None,
-            config_override_file: None,
-            genmodule_linklibs: None,
-            config_relative_libraries: Vec::new(),
-            canonical_linklib_output,
-            canonical_linklib_eligible,
-            linklib_output_dir,
-            compiler_flags: Vec::new(),
-            include_dirs: {
-                let mut d = declaration_includes.dirs.clone();
-                d.extend(opts_include_dirs.iter().cloned());
-                d
-            },
-            arch_modules: declaration_includes.arch_modules.clone(),
-            arch_includes: opts_arch_includes.clone(),
-            defines: declaration_flags.defines,
-            undefines: declaration_flags.undefines,
-            compile_options: declaration_flags.compile_options,
-            link_options: declaration_flags.link_options,
-            spec_switches: declaration_flags.spec_switches.clone(),
-            driver_link_options: driver_link_options.clone(),
-            isa_link_options: isa_link_options.clone(),
-            arch_sources: Vec::new(),
-            arch_defines: arch_defines.clone(),
-            arch_compile_options: arch_compile_options.clone(),
-            arch_source_options: Vec::new(),
-        });
-    }
+    // The three declaration passes run consecutively over one shared scope,
+    // appending to the same accumulators in declaration order.
+    let declaration_inputs = DeclarationInputs {
+        root,
+        dirs,
+        target,
+        rel_dir: &rel_dir,
+        relative_path: &relative_path,
+        parent_dir,
+        content: &content,
+        joined: &joined,
+        scope: &scope,
+        flag_set: &flag_set,
+        include_set: &include_set,
+        invocations: &invocations,
+        fetches: &fetches,
+        re_libs: &re_libs,
+        opts_arch_includes: &opts_arch_includes,
+        opts_include_dirs: &opts_include_dirs,
+        opts_link_options: &opts_link_options,
+        opts_spec_switches: &opts_spec_switches,
+        arch_defines: &arch_defines,
+        arch_compile_options: &arch_compile_options,
+        capture_kobj_inputs: &capture_kobj_inputs,
+    };
+    let mut declaration_outputs = DeclarationOutputs {
+        meta_rules: &mut meta_rules,
+        targets: &mut targets,
+        capability_errors: &mut capability_errors,
+        skipped_programs: &mut skipped_programs,
+        skipped_client_archives: &mut skipped_client_archives,
+        unresolved_output_paths: &mut unresolved_output_paths,
+        partial_source_lists: &mut partial_source_lists,
+        source_inventory_patterns: &mut source_inventory_patterns,
+        source_inventory_needs: &mut source_inventory_needs,
+        source_inventory_targets: &mut source_inventory_targets,
+    };
+    module_declarations::collect_modules(declaration_inputs, declaration_outputs.reborrow());
+    program_declarations::collect_programs(declaration_inputs, declaration_outputs.reborrow());
+    build_macro_declarations::collect_build_macros(declaration_inputs, declaration_outputs);
 
     // %build_module_macro is invoked five times but defined nowhere in the
     // tree. Four of the five sit under arch/.unmaintained or an architecture
@@ -1796,10 +1311,12 @@ pub(super) fn parse_mmakefile_impl(
         // The ordinary parser may have resolved part of this declaration, but
         // executable empty-archive support and the target-only ISA flag are
         // admitted as one atomic capability. Any drift removes the target.
+        let owners = unique_mmake_owners(&invocation_owners, &[sse41::MMAKE]).unwrap_or_default();
         targets.retain(|candidate| candidate.mmake_name != sse41::MMAKE);
-        capability_errors.push(capability_diagnostic(
+        capability_errors.extend(capability_diagnostics_for_targets(
             &relative_path,
             None,
+            owners,
             format!("Mesa SSE4.1 link library no longer matches its closed capability: {reason}"),
         ));
         skipped_programs.push(format!(
@@ -1819,11 +1336,17 @@ pub(super) fn parse_mmakefile_impl(
             // closed capability.  Do not leave a partially inferred target in
             // the graph when its recipe, inventory or canonical archive proof
             // has drifted.
+            let owners = targets
+                .iter()
+                .filter(|candidate| candidate.mmake_name == crate::capability::nouveau::DRM_MMAKE)
+                .map(|candidate| candidate.mmake_name.clone())
+                .collect::<Vec<_>>();
             targets
                 .retain(|candidate| candidate.mmake_name != crate::capability::nouveau::DRM_MMAKE);
-            capability_errors.push(capability_diagnostic(
+            capability_errors.extend(capability_diagnostics_for_targets(
                 &relative_path,
                 None,
+                owners,
                 format!(
                     "Nouveau DRM link library no longer matches its closed capability: {reason}"
                 ),
@@ -1846,12 +1369,20 @@ pub(super) fn parse_mmakefile_impl(
             // atomic with its checked source and flag contract rather than
             // leaving an inferred C-only or private-output approximation in
             // the graph.
+            let owners = targets
+                .iter()
+                .filter(|candidate| {
+                    candidate.mmake_name == crate::capability::nouveau::GALLIUM_MMAKE
+                })
+                .map(|candidate| candidate.mmake_name.clone())
+                .collect::<Vec<_>>();
             targets.retain(|candidate| {
                 candidate.mmake_name != crate::capability::nouveau::GALLIUM_MMAKE
             });
-            capability_errors.push(capability_diagnostic(
+            capability_errors.extend(capability_diagnostics_for_targets(
                 &relative_path,
                 None,
+                owners,
                 format!(
                     "Nouveau Gallium link library no longer matches its closed capability: {reason}"
                 ),
@@ -1870,6 +1401,7 @@ pub(super) fn parse_mmakefile_impl(
             relative_path: &relative_path,
             target,
             content: &content,
+            invocation_owners: &invocation_owners,
             targets: &mut targets,
             ownership_fetches: &ownership_fetches,
             capability_errors: &mut capability_errors,
@@ -1882,14 +1414,40 @@ pub(super) fn parse_mmakefile_impl(
     let flexcat_scan = collect_flexcat_source_rules(&content, root, &rel_dir, &scope, dirs);
     let ilbm_scan = collect_ilbm_sources(&content, root, &rel_dir, &scope, dirs);
 
-    post_processing::collect_meta_rules_and_apply_llvm(
+    let mut make_meta_providers = Vec::new();
+    let implicit_meta_rule_count = meta_rules.len();
+    native_graph_errors.extend(post_processing::collect_meta_rules_and_apply_llvm(
         &content,
         &rel_dir,
         target,
         &mut targets,
         &mut meta_rules,
         &mut skipped_meta_rules,
+        &mut make_meta_providers,
+    ));
+    // This pass appends only handwritten #MM/#MM- declarations. Keep their
+    // edge origin even when their dependencies duplicate generated aliases.
+    let explicit_meta_rules = meta_rules[implicit_meta_rule_count..].to_vec();
+    let sfd_header_scan = crate::sfd_header_rules::collect_sfd_header_rules_with_context(
+        &joined,
+        root,
+        &rel_dir,
+        &scope,
+        dirs,
+        copy_directory_line_states,
+        &make_meta_providers,
     );
+    for rejection in sfd_header_scan.rejected {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "SFD header rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
 
     // %rule_link_binary needs the file's targets, to check an explicit mmake=,
     // and the %build_archspecific object roots, which is how the reference
@@ -1909,6 +1467,26 @@ pub(super) fn parse_mmakefile_impl(
         .collect();
     let (host_generated_headers, skipped_host_generated_headers) =
         crate::host_generated_headers::collect_host_generated_headers(&content, &rel_dir);
+    let (host_header_aggregates, host_aggregate_rejections) =
+        crate::host_header_aggregates::collect(
+            &joined,
+            &rel_dir,
+            &scope,
+            dirs,
+            root,
+            copy_directory_line_states,
+        );
+    for rejection in host_aggregate_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            None,
+            Some(&rejection.owner),
+            format!(
+                "host-header aggregate is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
     let (hidd_stubs, skipped_hidd_stubs) =
         crate::hidd_stubs::collect_hidd_stubs(&content, &scope, dirs, root, &rel_dir);
     let (binary_objects, skipped_binary_objects) = crate::binary_objects::collect_binary_objects(
@@ -1926,8 +1504,88 @@ pub(super) fn parse_mmakefile_impl(
         &python_outputs,
     );
 
-    Ok(ParsedMmakefile {
+    let sdk_program_outputs = dirs
+        .expand("$(AROS_DEVELOPER)/bin")
+        .map(|bin| {
+            let mut outputs = Vec::new();
+            for target in &targets {
+                if target.module_type == ModuleType::Program
+                    && target.target_dir.as_ref() == Some(&bin)
+                {
+                    outputs.push(crate::graph::SdkProgramOutput {
+                        owner: target.mmake_name.clone(),
+                        output: format!("${{AROS_DEVELOPER_BIN_DIR}}/{}", target.target_name),
+                        directory: target.dir_path.clone(),
+                    });
+                }
+            }
+            for target in &source_inventory_targets {
+                if target.module_type == ModuleType::Program
+                    && target.target_dir.as_ref() == Some(&bin)
+                {
+                    outputs.push(crate::graph::SdkProgramOutput {
+                        owner: target.mmake_name.clone(),
+                        output: format!("${{AROS_DEVELOPER_BIN_DIR}}/{}", target.target_name),
+                        directory: target.dir_path.clone(),
+                    });
+                }
+            }
+            outputs.sort_by(|a, b| (&a.owner, &a.output).cmp(&(&b.owner, &b.output)));
+            outputs.dedup();
+            outputs
+        })
+        .unwrap_or_default();
+    // The scope joins logical values but retains physical source line ids.
+    // Neither inlined input positions nor ambient values qualify an effect.
+    let effect_scan = crate::arch_endpoint_effects::collect_source_arch_endpoint_effects(
+        &content,
+        &relative_path,
+        root,
+        target,
+    )
+    .map_err(|message| aros_common::ArosError::Configuration {
+        file: relative_path.display().to_string(),
+        message,
+    })?;
+    let (assembly_headers, assembly_header_rejections) = target
+        .filter(|context| {
+            !context.make_include_bindings.is_empty()
+                || !context.generated_make_templates.is_empty()
+        })
+        .map(|context| {
+            crate::assembly_headers::collect_from_snapshot(&content, context, dirs, root, &rel_dir)
+        })
+        .unwrap_or_default();
+    let mut parsed = ParsedMmakefile {
+        assembly_headers,
+        assembly_header_rejections,
+        arch_endpoint_effects: effect_scan.effects,
+        arch_endpoint_rejections: effect_scan.rejected,
+        source_sha256: Some(source_sha256.as_str().to_owned()),
+        disabled_meta_owners,
+        host_header_aggregates,
+        directory_setups,
+        genmodule_header_rules: genmodule_header_scan.declarations,
+        genmodule_writefiles_rules: genmodule_writefiles_scan.declarations,
+        host_file_generators: Vec::new(),
+        host_header_rules,
+        sdk_text_rules,
+        sfd_header_rules: sfd_header_scan.declarations,
+        source_text_rules,
+        source_value_rules,
+        sdk_file_copies,
+        sdk_asset_rules,
+        sdk_program_outputs,
+        sdk_object_groups,
+        literal_object_groups,
+        source_archive_projections,
+        source_archive_commands,
+        source_compile_projections,
+        layered_header_projections,
+        source_header_pipelines,
+        source_directory_groups,
         capability_errors,
+        native_graph_errors,
         targets,
         external_cmake,
         configure_builds,
@@ -1940,6 +1598,8 @@ pub(super) fn parse_mmakefile_impl(
         ilbm_sources: ilbm_scan.declarations,
         skipped_ilbm_sources: ilbm_scan.skipped,
         meta_rules,
+        explicit_meta_rules,
+        make_meta_providers,
         icon_targets: icon_scan.targets,
         icons: icon_scan.sets,
         skipped_icons: icon_scan.skipped,
@@ -1976,9 +1636,38 @@ pub(super) fn parse_mmakefile_impl(
         skipped_programs,
         partial_source_lists,
         source_inventory_patterns,
+        source_inventory_needs,
+        source_inventory_targets,
         skipped_client_archives,
         unresolved_output_paths,
         packages,
         skipped_packages,
-    })
+    };
+    if let Some(target) = target {
+        for declaration in target
+            .host_file_generators
+            .iter()
+            .filter(|declaration| Path::new(&declaration.recipe) == relative_path)
+        {
+            match crate::host_c_file_rules::validate_source_rule(
+                &joined, root, &rel_dir, declaration, copy_directory_line_states,
+            ) {
+                Ok(()) => parsed.host_file_generators.push(declaration.clone()),
+                Err(reason) => parsed.native_graph_errors.push(capability_diagnostic_with_owner(
+                    &relative_path, None, Some(&declaration.owner),
+                    format!("source-owned host-C file generator is outside its closed capability: {reason}"),
+                )),
+            }
+        }
+    }
+    for rejection in crate::native_meta_providers::validate(&parsed, target) {
+        parsed
+            .native_graph_errors
+            .push(source_meta_provider_diagnostic(
+                &relative_path,
+                &rejection.owner,
+                rejection.reason,
+            ));
+    }
+    Ok(parsed)
 }

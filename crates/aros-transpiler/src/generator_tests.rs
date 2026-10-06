@@ -12,6 +12,97 @@ use crate::testing::TempTree;
 use std::fs;
 
 #[test]
+fn literal_object_generation_preserves_order_and_shared_ownership() {
+    use crate::literal_objects::{LiteralObjectDecl, LiteralObjectGroupDecl};
+    let object = LiteralObjectDecl {
+        source: "${AROS_SOURCE_DIR}/compiler/local/entry.c".into(),
+        output: "${AROS_BUILD_DIR}/gen/compiler/local/entry.o".into(),
+        language: "C".into(),
+        arguments: vec!["-DX=1".into(), "-UX".into(), "-DX=2".into(), "-DX=2".into()],
+        line: 1,
+    };
+    let mut graph = DependencyGraph::new();
+    for owner in ["entry-all", "entry-quick"] {
+        graph.literal_object_groups.push(LiteralObjectGroupDecl {
+            owner: owner.into(),
+            file: "compiler/local/mmakefile.src".into(),
+            line: 5,
+            objects: vec![object.clone()],
+        });
+    }
+    let generated = generate_cmake(&graph);
+    assert_eq!(generated.matches("aros_compile_literal_object(").count(), 1);
+    assert_eq!(generated.matches("aros_literal_object_group(").count(), 2);
+    assert!(
+        generated.contains("\"-DX=1\"\n        \"-UX\"\n        \"-DX=2\"\n        \"-DX=2\""),
+        "{generated}"
+    );
+    assert!(!generated.contains("${AROS_SOURCE_DIR}/${AROS_SOURCE_DIR}"));
+    graph.literal_object_groups[1].objects[0]
+        .arguments
+        .push("-g".into());
+    assert!(generate_cmake(&graph).contains("Conflicting literal object ownership"));
+    graph.literal_object_groups[1].objects[0] = object.clone();
+    graph.literal_object_groups[1].objects[0].output = object.output.to_ascii_uppercase();
+    assert!(generate_cmake(&graph).contains("Conflicting literal object ownership"));
+}
+
+#[test]
+fn sdk_objects_share_one_owner_but_conflicting_outputs_fail_without_selection() {
+    use crate::sdk_objects::{SdkObjectDecl, SdkObjectGroupDecl};
+    let object = SdkObjectDecl {
+        source: "compiler/local/start.c".into(),
+        intermediate: "${AROS_GENERATED_DIR}/compiler/local/start.o".into(),
+        output: "${AROS_DEVELOPER_LIB_DIR}/start.o".into(),
+        language: "C".into(),
+        defines: vec!["FEATURE=1".into()],
+        undefines: vec![],
+        options: vec!["-Wall".into()],
+        includes: vec!["${AROS_SOURCE_DIR}/compiler/local".into()],
+        line: 12,
+    };
+    let mut graph = DependencyGraph::new();
+    for owner in ["sdk-all", "sdk-quick"] {
+        graph.sdk_object_groups.push(SdkObjectGroupDecl {
+            owner: owner.into(),
+            file: "compiler/local/mmakefile.src".into(),
+            line: 8,
+            objects: vec![object.clone()],
+        });
+    }
+    let cmake = generate_cmake(&graph);
+    assert_eq!(cmake.matches("aros_compile_sdk_object(").count(), 1);
+    assert_eq!(cmake.matches("aros_sdk_object_group(").count(), 2);
+    assert!(cmake.contains("DEFINES\n        \"FEATURE=1\""));
+    assert!(cmake.contains("SOURCE \"${AROS_SOURCE_DIR}/compiler/local/start.c\""));
+    assert!(
+        cmake.find("aros_compile_sdk_object(").unwrap()
+            < cmake.find("aros_sdk_object_group(").unwrap()
+    );
+
+    // The real source collector already renders this configured root. Do not
+    // prepend it a second time as happened with source-relative-only fixtures.
+    for group in &mut graph.sdk_object_groups {
+        group.objects[0].source = "${AROS_SOURCE_DIR}/compiler/local/start.c".into();
+    }
+    let configured = generate_cmake(&graph);
+    assert!(configured.contains("SOURCE \"${AROS_SOURCE_DIR}/compiler/local/start.c\""));
+    assert!(!configured.contains("${AROS_SOURCE_DIR}/${AROS_SOURCE_DIR}"));
+
+    graph.sdk_object_groups[1].objects[0]
+        .defines
+        .push("OTHER=1".into());
+    let refused = generate_cmake(&graph);
+    assert!(refused.starts_with("message(FATAL_ERROR "));
+    assert!(refused.contains("Conflicting SDK object ownership"));
+    assert!(!refused.contains("aros_compile_sdk_object("));
+
+    graph.sdk_object_groups[1].objects[0] = object;
+    graph.sdk_object_groups[1].objects[0].output = "${AROS_DEVELOPER_LIB_DIR}/START.o".into();
+    assert!(generate_cmake(&graph).starts_with("message(FATAL_ERROR "));
+}
+
+#[test]
 fn program_startup_opt_out_is_preserved_in_generated_cmake() {
     let tree = TempTree::new();
     let module = tree.0.join("workbench/example");
@@ -62,6 +153,126 @@ fn program_startup_opt_out_is_preserved_in_generated_cmake() {
     assert!(!default.contains("NO_STARTUP"));
     assert!(custom.contains("NO_STARTUP"));
     assert!(grouped.contains("NO_STARTUP"));
+}
+
+#[test]
+fn module_macro_metadata_precedes_each_concrete_builder_without_inference() {
+    let tree = TempTree::new();
+    let module = tree.0.join("arch/all-pc/module-forms");
+    fs::create_dir_all(&module).unwrap();
+    for source in ["full", "runtime", "simple", "program"] {
+        fs::write(module.join(format!("{source}.c")), "").unwrap();
+    }
+    for source in ["extra_cpp.cpp", "extra_objc.m", "extra_asm.S"] {
+        fs::write(module.join(source), "").unwrap();
+    }
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=full modname=full modtype=library files=full cxxfiles=extra_cpp objcfiles=extra_objc asmfiles=extra_asm\n\
+         %build_module_library mmake=runtime modname=runtime modtype=library files=runtime\n\
+         %build_module_abi mmake=abi modname=abi modtype=library\n\
+         %build_module_simple mmake=simple modname=simple modtype=library files=simple\n\
+         %build_prog mmake=program progname=program files=program\n",
+    )
+    .unwrap();
+    let parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    assert!(
+        parsed.skipped_programs.is_empty(),
+        "{:?}",
+        parsed.skipped_programs
+    );
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        graph.add_target(target);
+    }
+
+    let cmake = generate_cmake(&graph);
+    for expected in [
+        "aros_record_module_macro(OWNER full FORM full)\naros_add_library(\n    TARGET full\n    MMAKE_ID full\n",
+        "aros_record_module_macro(OWNER runtime FORM runtime-only)\naros_add_library(\n    TARGET runtime\n    MMAKE_ID runtime\n",
+        "aros_record_module_macro(OWNER abi FORM abi-only)\naros_add_module_abi(\n    TARGET abi\n    MMAKE_ID abi\n",
+        "aros_record_module_macro(OWNER simple FORM simple)\naros_add_module_simple(\n    TARGET simple\n    MMAKE_ID simple\n",
+    ] {
+        assert!(
+            cmake.contains(expected),
+            "missing adjacent builder metadata:\n{expected}\n{cmake}"
+        );
+    }
+    assert!(
+        cmake.contains("aros_add_program(\n    TARGET program\n    MMAKE_ID program\n"),
+        "ordinary target builder disappeared:\n{cmake}"
+    );
+    assert!(
+        !cmake.contains("aros_record_module_macro(OWNER program"),
+        "ordinary program acquired module-macro metadata:\n{cmake}"
+    );
+    for owner in ["full", "runtime", "simple"] {
+        assert!(cmake.contains(&format!(
+            ")\naros_record_module_kobj_sources(\n    OWNER {owner}\n"
+        )));
+    }
+    for owner in ["abi", "program"] {
+        assert!(!cmake.contains(&format!(
+            "aros_record_module_kobj_sources(\n    OWNER {owner}\n"
+        )));
+    }
+    let full_groups = cmake
+        .split("aros_record_module_kobj_sources(\n    OWNER full\n")
+        .nth(1)
+        .unwrap()
+        .split(")\n")
+        .next()
+        .unwrap();
+    for expected in [
+        "    SOURCES \"full\"\n",
+        "    CXX_SOURCES \"extra_cpp\"\n",
+        "    OBJC_SOURCES \"extra_objc\"\n",
+        "    ASM_SOURCES \"extra_asm\"\n",
+    ] {
+        assert!(full_groups.contains(expected), "{full_groups}");
+    }
+}
+
+#[test]
+fn native_kobj_scope_json_preserves_uncertainty_and_literal_make_references() {
+    let tree = TempTree::new();
+    fs::write(tree.0.join("body.c"), "int body;\n").unwrap();
+    let file = tree.0.join("mmakefile.src");
+    fs::write(
+        &file,
+        "USER_LDFLAGS := -static -static\n\
+         USER_OBJS = ${MISSING_OBJECT}\n\
+         ifeq ($(UNKNOWN_SELECTION),yes)\nUSER_OBJS += unknown.o\nendif\n\
+         %build_module_simple mmake=fixture modname=fixture modtype=library files=body\n",
+    )
+    .unwrap();
+    let parsed = crate::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &crate::testing::target_context("x86_64", "pc", ""),
+    )
+    .unwrap();
+    let inputs = parsed.targets[0].kobj_scoped_inputs.as_ref().unwrap();
+    let exact_json = serde_json::to_string(inputs).unwrap();
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        graph.add_target(target);
+    }
+    let cmake = generate_cmake(&graph);
+    let expected = format!(
+        "aros_record_module_kobj_inputs(\n    OWNER fixture\n    JSON {}\n)",
+        super::cmake_literal_arg(&exact_json),
+    );
+    assert!(cmake.contains(&expected), "{cmake}");
+    assert!(expected.contains("unresolved"));
+    assert!(expected.contains("\\${MISSING_OBJECT}"));
+    assert!(expected.contains("-static\\\",\\\"-static"));
+    assert!(
+        cmake.find("aros_record_module_kobj_sources(\n    OWNER fixture")
+            < cmake.find("aros_record_module_kobj_inputs(\n    OWNER fixture")
+    );
 }
 
 #[test]
@@ -280,6 +491,7 @@ fn unixio_public_header_is_the_exact_foreign_arch_exception() {
         patterns: vec!["*.h".to_owned()],
         excludes: Vec::new(),
         flatten: true,
+        proven_empty: false,
     }]);
 
     let cmake = generate_cmake(&graph);

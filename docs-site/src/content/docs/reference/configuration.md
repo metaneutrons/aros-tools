@@ -61,6 +61,13 @@ that every named driver works. `bootloader` is another target-level field:
 when absent it defaults to `grub2gfx` for platform `pc` and an empty value for
 other platforms. An explicit value overrides that rule.
 
+`toolchain_profile` optionally selects a separate compiler/runtime profile.
+Without it, the compiler profile has the same name as the target preset.
+Compatible board presets can explicitly select the same compiler profile;
+their platform/BSP and source ABI contracts remain independent. The selected
+lock or local manifest must match that compiler profile, triple and ABI.
+This does not make a compiler archive a complete board SDK.
+
 The embedded host LLVM declaration has asset names but no SHA-256 values.
 Managed host-compiler installation requires reviewed digest-bearing metadata.
 
@@ -109,7 +116,7 @@ the command does not continue searching a lower-priority location.
 
 | Variable | Effect |
 | --- | --- |
-| `AROS_OFFLINE` | Set to `1` to forbid network access and require verified local content |
+| `AROS_OFFLINE` | Set to `true` to forbid network access and require verified local content; `false` leaves it disabled |
 | `AROS_FETCH_OFFLINE` | Standalone `aros-fetch` equivalent of offline mode |
 | `AROS_FETCH_REQUIRE_CHECKSUMS` | Set to `1` to reject third-party AROS sources without SHA-256 |
 | `AROS_UPSTREAM_URL` | Expected canonical URL for `aros source sync`; an explicit `--upstream` wins |
@@ -200,6 +207,10 @@ configuration, and may be compiled out or inert in release builds:
 - `AROS_TEST_LOG_FAIL_EVENT`
 - `AROS_GUARD_TEST_BUSY`, `AROS_GUARD_TEST_PATH`
 - `AROS_PROCESS_TEST_ESCAPE_PID`, `AROS_PROCESS_TEST_ESCAPE_STYLE`
+- `AROS_P4_SOURCE`, `AROS_P4_SOURCE_ROOT`, `AROS_TEST_CODESETS_INPUT`, `AROS_TEST_GENMF_REFERENCE_MANIFEST_SHA256`, `AROS_TEST_GENMF_REFERENCE_OUTPUTS_SHA256`, `AROS_TEST_GENMF_REFERENCE_ROOT`, `AROS_TEST_GNU_SED`, `AROS_TEST_LIBPNG_PREBUILT`, `AROS_TEST_P4_SOURCE`, `AROS_TEST_P4_SOURCE_EXPECTED_HEAD`, `AROS_TEST_P4_SOURCE_ROOT`, `AROS_TEST_PORTS_DIR` (source and reference trees read by source-coupled tests)
+- `AROS_RV32_COMPILER_PREFIX`, `AROS_RV3_COMPILER_EVIDENCE_PARENT`, `AROS_RV3_LOCAL_RV32_COMPILER`, `AROS_RV3_SOURCE_IDENTITY_OUTPUT`, `AROS_RV3_TARGET_CONTRACT` (local rv3 compiler and source-identity probes)
+- `AROS_TEST_ESP_IMAGE`, `AROS_TEST_ESP_PARTITION`, `AROS_TEST_ESP_PARTITION_EVIDENCE_PARENT`, `AROS_TEST_ESP_PARTITION_SOURCE`, `AROS_TEST_NATIVE_CONTRACT_SHA256`, `AROS_TEST_NATIVE_MEDIA_BOOTLOADER_SHA256`, `AROS_TEST_NATIVE_MEDIA_CONTRACT_SHA256`, `AROS_TEST_NATIVE_MEDIA_INPUTS`, `AROS_TEST_NATIVE_MEDIA_INPUTS_SHA256`, `AROS_TEST_NATIVE_MEDIA_WORK_PARENT`, `AROS_TEST_NATIVE_PARTITION_EVIDENCE_PARENT`, `AROS_TEST_VENDOR_ARCHIVE_CACHE`, `AROS_TEST_VENDOR_PYTHON`, `AROS_TEST_VENDOR_PYTHON_PREFIX`, `AROS_TEST_VENDOR_PYTHON_VERSION`, `AROS_TEST_VENDOR_SOURCE_PARENT`, `AROS_TEST_VENDOR_WHEEL_ROOT`, `AROS_TEST_VENDOR_WORK_PARENT` (native media, partition and vendor-input probes)
+- `AROS_TEST_NOFOLLOW_FIFO`, `AROS_TEST_NOFOLLOW_FIFO_READER` (no-follow publication probes)
 
 The guard, process-escape, Cargo-vendor credential-isolation and
 final-log-failure names are used only by
@@ -213,6 +224,14 @@ The toolchain lock is always `<checkout>/aros-toolchains.lock.toml`, and an
 unlocked local cross-toolchain is selected only with the explicit `--local` or
 `--toolchain-dir` command-line option. There are no hidden environment
 variables that replace either selection.
+
+Development builds also recognize an explicit `toolchain-local.json` GNU
+compiler descriptor alongside an inventory-bound `toolchain-tools.json` v3
+layout. Its `local-byte-verified` identity has no release ID or producer
+provenance. Selection verifies the complete prefix and compiler roles;
+CMake independently checks the admitted descriptor and payload. A release
+manifest cannot coexist with this descriptor. This experimental local path
+does not establish SDK completeness, a native board build or media readiness.
 
 ## Precedence and inspection
 

@@ -1,9 +1,88 @@
 //! Tests for the embedded engine and its placement.
 
+#[cfg(unix)]
+#[path = "local_gnu_tests.rs"]
+mod local_gnu_tests;
+
+#[cfg(unix)]
+#[path = "toolchain_identity_tests.rs"]
+mod toolchain_identity_tests;
+
+#[test]
+fn sdk_text_first_match_preserves_gnu_sed_semantics_and_source_binding() {
+    let directory = tempfile::tempdir().expect("SDK text differential fixture");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("exact embedded engine");
+    let output = Command::new("cmake")
+        .arg("-P")
+        .arg(engine.join("tests/SdkTextFirstMatchTest.cmake"))
+        .output()
+        .expect("run SDK text differential fixture");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 use super::{api_version, digest, file, file_count, materialize, paths, STAMP_FILE};
 use std::fmt::Write as _;
 use std::fs;
 use std::process::Command;
+
+#[test]
+fn source_archives_preserve_order_and_refuse_unowned_members() {
+    let directory = tempfile::tempdir().expect("source archive fixture");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize current engine");
+    let output = Command::new("cmake")
+        .arg("-P")
+        .arg(engine.join("tests/SourceArchivesTest.cmake"))
+        .output()
+        .expect("run source archive fixture");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn sdk_asset_rules_bind_exact_producers_and_reject_unsafe_publication() {
+    let directory = tempfile::tempdir().expect("SDK asset fixture");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize current engine");
+    let output = Command::new("cmake")
+        .arg("-P")
+        .arg(engine.join("tests/SdkAssetRulesTest.cmake"))
+        .output()
+        .expect("run SDK asset fixture");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn sealed_host_c_file_generator_preserves_native_input_and_output_contracts() {
+    let directory = tempfile::tempdir().expect("host-C generator fixture");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize current engine");
+    let output = Command::new("cmake")
+        .arg("-P")
+        .arg(engine.join("tests/HostCFileGeneratorTest.cmake"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 #[test]
 fn the_engine_is_embedded_whole() {
@@ -44,6 +123,30 @@ fn the_api_version_comes_from_the_engine() {
         })
         .expect("a version in the engine file");
     assert_eq!(api_version(), expected);
+
+    let directory = tempfile::tempdir().expect("version contract directory");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("exact embedded version implementation");
+    let script = directory.path().join("require-version.cmake");
+    let run = |required: u32| {
+        fs::write(
+            &script,
+            format!(
+                "include(\"{}/EngineVersion.cmake\")\naros_require_engine_api_version({required})\n",
+                engine.display()
+            ),
+        )
+        .expect("version probe script");
+        Command::new("cmake")
+            .arg("-P")
+            .arg(&script)
+            .output()
+            .expect("version contract probe")
+    };
+    assert!(run(expected).status.success());
+    let old = run(expected.saturating_sub(1));
+    assert!(!old.status.success(), "older generated graph was accepted");
+    assert!(String::from_utf8_lossy(&old.stderr).contains("Regenerate the graph"));
 }
 
 #[test]
@@ -74,6 +177,29 @@ fn transpiler_invocations_carry_explicit_upstream_selectors() {
             "{flag} must reach both transpiler passes and invocation recording"
         );
     }
+}
+
+#[test]
+fn cold_source_preparation_never_substitutes_for_the_full_graph_export() {
+    let cmake = file("CMakeLists.txt").expect("engine CMakeLists.txt");
+    assert_eq!(cmake.matches("\"--source-inventory-only\"").count(), 1);
+    let prepare = cmake.find("\"--source-inventory-only\"").unwrap();
+    let fetch = cmake.find("aros_fetch_source_inventory(").unwrap();
+    let full = cmake[fetch..].find("execute_process(").unwrap() + fetch;
+    let include = cmake
+        .find("include(\"${GENERATED_TARGETS_CMAKE}\")")
+        .unwrap();
+    assert!(prepare < fetch && fetch < full && full < include);
+    // The full export is unconditional, including warm trees with no fetches.
+    assert!(cmake[fetch..full].contains("endforeach()\nendif()\nif(AROS_NATIVE_BUILD_CONTRACT OR AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)"));
+    assert!(cmake[..prepare].ends_with(
+        "if(AROS_NATIVE_BUILD_CONTRACT)\n    list(APPEND _aros_inventory_prepare_args "
+    ));
+    assert!(cmake[prepare..fetch]
+        .contains("NOT AROS_NATIVE_BUILD_CONTRACT AND NOT EXISTS \"${GENERATED_TARGETS_CMAKE}\""));
+    assert!(cmake[full..include]
+        .contains("NOT TRANSPILER_RES EQUAL 0 OR NOT EXISTS \"${GENERATED_TARGETS_CMAKE}\""));
+    assert!(cmake[full..include].contains("Fetched source inventories remain unresolved"));
 }
 
 #[test]
@@ -658,6 +784,41 @@ fn run_cmake_script(script: &std::path::Path) {
 }
 
 #[test]
+fn developer_library_file_copies_preserve_bytes_and_refuse_changed_contracts() {
+    run_embedded_kobj_contract_test("DeveloperLibCopyTest.cmake");
+}
+
+#[test]
+fn sdk_fd_file_copies_keep_the_existing_local_and_fetch_contracts() {
+    run_embedded_kobj_contract_test("SdkFileCopiesTest.cmake");
+}
+
+#[test]
+fn developer_bin_and_manual_copies_preserve_the_closed_copy_contract() {
+    run_embedded_kobj_contract_test("DeveloperAssetCopiesTest.cmake");
+}
+
+#[test]
+fn empty_header_copy_requires_explicit_proof_and_preserves_arch_selection() {
+    run_embedded_kobj_contract_test("EmptyHeaderCopyTest.cmake");
+}
+
+#[test]
+fn generated_header_inputs_require_exact_producers_and_safe_runtime_paths() {
+    run_embedded_kobj_contract_test("GeneratedHeaderInputTest.cmake");
+}
+
+#[test]
+fn source_declared_sdk_objects_compile_stage_and_refuse_unsafe_outputs() {
+    run_embedded_kobj_contract_test("SdkObjectsTest.cmake");
+}
+
+#[test]
+fn literal_objects_preserve_command_order_and_refuse_unsafe_outputs() {
+    run_embedded_kobj_contract_test("LiteralObjectsTest.cmake");
+}
+
+#[test]
 fn demos_images_are_generated_before_their_consumer_compiles() {
     let directory = tempfile::tempdir().expect("temp dir");
     let engine = directory.path().join("engine");
@@ -1092,6 +1253,73 @@ fn pc_boot_iso_verifier_rejects_data_iso_and_accepts_boot_catalog() {
     assert!(
         output.status.success(),
         "valid boot catalog was rejected:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn source_module_kobj_inputs_preserve_known_and_unknown_scope() {
+    run_embedded_kobj_contract_test("ModuleKobjInputsTest.cmake");
+}
+
+#[test]
+fn module_header_projection_never_creates_runtime_or_archive_targets() {
+    run_embedded_kobj_contract_test("ModuleHeadersOnlyTest.cmake");
+}
+
+#[test]
+fn sfd_headers_bind_sources_and_reject_mutation_without_output_loss() {
+    run_embedded_kobj_contract_test("SfdHeadersTest.cmake");
+}
+
+#[test]
+fn source_values_match_gnu_sed_and_reject_changed_or_unsafe_inputs() {
+    run_embedded_kobj_contract_test("SourceValueRuleTest.cmake");
+}
+
+#[test]
+fn native_kobj_rejects_changed_inputs_and_failed_publication() {
+    run_embedded_kobj_contract_test("NativeKobjTest.cmake");
+}
+
+/// `PATH` with the workspace's built executables first.
+///
+/// An engine configure that finds `ld.lld` also requires `aros-collect`. The
+/// test executable sits in `target/<profile>/deps`; the tools the workspace
+/// test run built sit one level up. Without this, such a host fails these
+/// fixtures only because the suite is not installed.
+fn path_with_workspace_tools() -> std::ffi::OsString {
+    let mut directories = Vec::new();
+    if let Some(tools) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent()?.parent().map(std::path::Path::to_path_buf))
+    {
+        directories.push(tools);
+    }
+    directories.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(directories).expect("PATH entries without separators")
+}
+
+fn run_embedded_kobj_contract_test(script: &str) {
+    let directory = tempfile::tempdir().expect("fresh KOBJ test directory");
+    let engine = directory.path().join("engine");
+    let build = directory.path().join("build");
+    materialize(&engine).expect("materialize exact embedded engine");
+    let output = Command::new("cmake")
+        .current_dir(directory.path())
+        .env("PATH", path_with_workspace_tools())
+        .arg(format!("-DENGINE_DIR={}", engine.display()))
+        .arg(format!("-DTEST_BINARY_DIR={}", build.display()))
+        .arg("-P")
+        .arg(engine.join("tests").join(script))
+        .output()
+        .expect("run embedded KOBJ contract test");
+    assert!(
+        output.status.success(),
+        "{script} failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }

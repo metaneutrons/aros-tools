@@ -53,7 +53,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
         } => crate::toolchain_producer::run(args).await,
         Commands::Toolchain {
             command: ToolchainCommands::MetaMakeFetch(args),
-        } => crate::toolchain_fetch_bridge::run(&args),
+        } => crate::toolchain_fetch_bridge::run(&args).await,
         Commands::Toolchain {
             command: ToolchainCommands::Inventory(args),
         } => crate::toolchain_management::inventory(args),
@@ -73,7 +73,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             toolchain_command(required_repo(repo_root)?, command).await
         }
         Commands::Board { command } => board_command(command, repo_root).await,
-        Commands::Image { command } => image::run(command),
+        Commands::Image { command } => image::run(command).await,
         Commands::Source { command } => source_command(command, repo_root),
         Commands::Install { source_bin, prefix } => install_suite(source_bin, prefix),
         Commands::Build {
@@ -498,7 +498,9 @@ async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Resu
         ToolchainCommands::Plan(args) => return crate::toolchain_plan::run(args),
         ToolchainCommands::Build(args) => return crate::toolchain_build::run(args).await,
         ToolchainCommands::Producer(args) => return crate::toolchain_producer::run(args).await,
-        ToolchainCommands::MetaMakeFetch(args) => return crate::toolchain_fetch_bridge::run(&args),
+        ToolchainCommands::MetaMakeFetch(args) => {
+            return crate::toolchain_fetch_bridge::run(&args).await;
+        }
         ToolchainCommands::Inventory(args) => crate::toolchain_management::inventory(args)?,
         ToolchainCommands::Import(args) => crate::toolchain_management::import(args)?,
         ToolchainCommands::Register(args) => crate::toolchain_management::register(args)?,
