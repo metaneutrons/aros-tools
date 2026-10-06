@@ -495,6 +495,11 @@ pub struct TargetContext {
     /// Selected architecture flag producers that could not be proved. A
     /// consumer must not silently use only the successful subset.
     pub native_arch_include_errors: Vec<String>,
+    /// Set only after every sealed recipe was scanned without an applicable
+    /// rejection and no rule outside the two reviewed macros touches include
+    /// flag files: an architecture include lookup without providers is then
+    /// proved empty, as Make's wildcard finds nothing.
+    pub native_arch_include_catalog_closed: bool,
     /// Hash-bound source exports; admitted only after matching their recipes.
     pub host_file_generators: Vec<aros_common::native_host_generator::NativeHostFileGenerator>,
     /// Source configuration fallback values, never board-name-specific logic.

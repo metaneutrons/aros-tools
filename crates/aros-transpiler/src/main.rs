@@ -423,6 +423,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     .then(|| TargetContext {
         native_arch_include_effects: Vec::new(),
         native_arch_include_errors: Vec::new(),
+        native_arch_include_catalog_closed: false,
         host_file_generators: Vec::new(),
         make_variables: std::collections::BTreeMap::new(),
         make_include_bindings: std::collections::BTreeMap::new(),

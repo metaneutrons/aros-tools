@@ -358,11 +358,29 @@ fn prepare_native_scope(
             })
             .collect::<Vec<_>>();
         if providers.is_empty() {
-            return Err(format!(
-                "active `%get_archincludes modname={}` at physical source line {} has no matching source-proved providers in `{maindir}`",
-                request.modname,
-                source_line + 1
-            ));
+            if !target.native_arch_include_catalog_closed {
+                return Err(format!(
+                    "active `%get_archincludes modname={}` at physical source line {} has no matching source-proved providers in `{maindir}`",
+                    request.modname,
+                    source_line + 1
+                ));
+            }
+            // Make's wildcard finds no flag file, so the macro adds nothing and
+            // the variable expands empty. An empty append expresses that as long
+            // as the recipe never asks whether the variable is defined.
+            if tests_definition(&original_joined, &request.includeflag) {
+                return Err(format!(
+                    "`%get_archincludes` at physical source line {} finds no flag file, and {} is tested for definition, which an empty value cannot express",
+                    source_line + 1,
+                    request.includeflag
+                ));
+            }
+            replace_joined_line(
+                &mut joined,
+                scope_line,
+                &format!("{} +=", request.includeflag),
+            )?;
+            continue;
         }
         providers.sort_by(|left, right| left.0.cmp(right.0));
         let mut generated_files = BTreeSet::new();
@@ -510,6 +528,21 @@ fn safe_arch_maindir(maindir: &str) -> bool {
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
         && !maindir.contains(['$', '\\'])
+}
+
+/// Whether a recipe distinguishes an undefined variable from an empty one.
+fn tests_definition(source: &str, name: &str) -> bool {
+    source.lines().any(|line| {
+        let line = strip_make_comment(line).trim();
+        ["ifdef", "ifndef", "else ifdef", "else ifndef"]
+            .iter()
+            .any(|directive| {
+                line.strip_prefix(directive)
+                    .is_some_and(|rest| rest.split_whitespace().next() == Some(name))
+            })
+            || line.contains(&format!("$(origin {name})"))
+            || line.contains(&format!("$(flavor {name})"))
+    })
 }
 
 fn replace_joined_line(
