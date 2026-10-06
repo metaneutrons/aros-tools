@@ -2,6 +2,8 @@
 # successful completion. Paths are rechecked at build time in case a symlink
 # was introduced after CMake generation.
 
+cmake_minimum_required(VERSION 3.22)
+
 foreach(_required HOST_HEADER_PRIMARY HOST_HEADER_SDK HOST_HEADER_BINARY_ROOT
                   HOST_HEADER_GENINC_ROOT HOST_HEADER_SDK_ROOT)
     if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")

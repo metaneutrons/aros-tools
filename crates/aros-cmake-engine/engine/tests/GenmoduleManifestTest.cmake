@@ -420,8 +420,11 @@ foreach(_unsafe "../escape" "path/name" "name;extra" "name extra" "\${escape}")
         -P "${CMAKE_CURRENT_LIST_FILE}"
         RESULT_VARIABLE _unsafe_result OUTPUT_VARIABLE _unsafe_stdout
         ERROR_VARIABLE _unsafe_stderr TIMEOUT 30)
+    # CMake wraps long messages at 80 columns, so the break falls inside the
+    # phrase for some working-directory lengths.
+    string(REGEX REPLACE "[ \t\r\n]+" " " _unsafe_text "${_unsafe_stdout} ${_unsafe_stderr}")
     if(_unsafe_result EQUAL 0 OR
-       NOT "${_unsafe_stdout}\n${_unsafe_stderr}" MATCHES "unsafe genmodule includename")
+       NOT _unsafe_text MATCHES "unsafe genmodule includename")
         message(FATAL_ERROR "unsafe includename '${_unsafe}' was not refused: ${_unsafe_stderr}")
     endif()
 endforeach()

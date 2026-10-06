@@ -52,10 +52,18 @@ if(EXISTS "${_root}" OR IS_SYMLINK "${_root}")
 endif()
 file(MAKE_DIRECTORY "${_root}")
 
+# The SDK bootstrap asks the host C compiler for `-target`, which clang
+# accepts and a GNU `cc` does not.
+find_program(_native_package_clang NAMES clang)
+if(NOT _native_package_clang)
+    message(FATAL_ERROR "NativePackagePublicationTest requires clang")
+endif()
+
 function(_native_package_configure case_name expect_success expected_message out_build)
     set(_build "${_root}/${case_name}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}" -G Ninja
+            "-DCMAKE_C_COMPILER=${_native_package_clang}"
             "-DAROS_ENGINE_DIR=${_engine}"
             "-DNATIVE_PACKAGE_CASE=${case_name}"
             ${ARGN}
