@@ -96,7 +96,11 @@ _aros_needs_header(linklibs-softfloat "${_softfloat_platform_h}")
 # header needs a re-configure.
 set(_mui_header "${CMAKE_BINARY_DIR}/GENINCDIR/libraries/mui.h")
 set(_mui_dir "${AROS_SOURCE_DIR}/workbench/libs/muimaster")
-if(EXISTS "${_mui_dir}/buildincludes.c" AND NOT EXISTS "${_mui_header}")
+# Native source contracts select the source-owned header producer through the
+# transpiled dependency graph. Skip only this older configure-time fallback;
+# neither a board name nor the absence of a GUI disables required SDK headers.
+if(NOT AROS_NATIVE_BUILD_CONTRACT AND
+   EXISTS "${_mui_dir}/buildincludes.c" AND NOT EXISTS "${_mui_header}")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/GENINCDIR/libraries")
     set(_mui_tool "${AROS_HOST_TOOL_DIR}/buildincludes")
     execute_process(
@@ -135,11 +139,16 @@ endif()
 # 81 headers, and the directory structure has to survive, since consumers write
 # <netinet/in.h> and <proto/socket.h>. The pattern list is the one the
 # mmakefile's WILDCARD call names; no FLATTEN, so the subdirectories are kept.
-aros_copy_includes(
-    DEST "."
-    SOURCE "workbench/network/common/include"
-    PATTERNS "*.h" "arpa/*.h" "bsdsocket/*.h" "clib/*.h" "defines/*.h"
-             "libraries/*.h" "net/*.h" "netinet/*.h" "proto/*.h" "sys/*.h")
+if(NOT AROS_NATIVE_BUILD_CONTRACT)
+    # Native graphs own the exact finite source pattern rule and its single
+    # destination. Keep this broad historical bootstrap only for non-native
+    # callers; it must not publish extra mirrors behind a source contract.
+    aros_copy_includes(
+        DEST "."
+        SOURCE "workbench/network/common/include"
+        PATTERNS "*.h" "arpa/*.h" "bsdsocket/*.h" "clib/*.h" "defines/*.h"
+                 "libraries/*.h" "net/*.h" "netinet/*.h" "proto/*.h" "sys/*.h")
+endif()
 
 # -----------------------------------------------------------------------------
 # The vendored Boost subset

@@ -251,6 +251,9 @@ mod tests {
             float_abi: None,
             transpiler,
             bootloader: None,
+            bootstrap_abi: None,
+            native_build_contract: None,
+            toolchain_profile: None,
         }
     }
 

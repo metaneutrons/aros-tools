@@ -22,6 +22,9 @@ Native GNU lifecycle fixtures also require GNU Make 4.0 or newer, bison, flex,
 patch and pkg-config. On macOS, Homebrew's `make` formula provides `gmake`;
 Apple's Make 3.81 is rejected. CI installs these test prerequisites explicitly
 rather than relying on a particular runner image.
+Source-value parity fixtures require GNU sed as an independent test oracle;
+install Homebrew's `gnu-sed` on macOS (`gsed`). Native extraction itself does
+not execute sed or depend on it.
 Source-contract tests need the immutable AROS-NX revision named in
 `contracts/aros-source-v1.toml`; do not substitute a moving branch or infer a
 neighboring checkout.
@@ -98,7 +101,9 @@ Darwin/arm64**; Linux explicitly reports that host-qualified omission. A green
 Linux CI run alone is therefore not the complete macOS/GRUB evidence. The
 explicit `test`/`all` gate discovers every `*Test.cmake`, so newly added fixtures
 cannot silently fall out of the integration inventory. `clang`, `cmake` and
-`ninja` are required. The local invocation is:
+`ninja` are required; the native-core fixture also needs `ld.lld`, and the
+module source-group fixture needs a host compiler that builds Objective-C
+(`gobjc` on Debian and Ubuntu). The local invocation is:
 
 ```sh
 AROS_TEST_SOURCE_ROOT=/absolute/path/to/current/AROS-NX \

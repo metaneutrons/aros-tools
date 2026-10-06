@@ -1,0 +1,1 @@
+fixture input bound by SHA-256

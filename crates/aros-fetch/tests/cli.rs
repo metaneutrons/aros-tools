@@ -82,6 +82,81 @@ fn legacy_contract_fetches_verifies_and_extracts_local_archive() {
 }
 
 #[test]
+fn source_publication_preserves_unicode_test_names_and_receipt_reuse() {
+    let root = tempfile::tempdir().unwrap();
+    let physical_root = root.path().canonicalize().unwrap();
+    let origin = physical_root.join("origin");
+    let destination = physical_root.join("ports");
+    let cache = physical_root.join("cache");
+    fs::create_dir(&origin).unwrap();
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("preexisting"), b"preserved").unwrap();
+    let archive_path = origin.join("fixture.tar.gz");
+    let mut archive = tar::Builder::new(GzEncoder::new(
+        File::create(&archive_path).unwrap(),
+        Compression::default(),
+    ));
+    let content = b"compiler Unicode test\n";
+    let mut header = tar::Header::new_gnu();
+    header.set_size(content.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive
+        .append_data(&mut header, "gcc/testsuite/你好.d", &content[..])
+        .unwrap();
+    archive.into_inner().unwrap().finish().unwrap();
+    let digest = sha256_file(&archive_path).unwrap().digest;
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_aros-fetch"))
+            .args([
+                "--archive",
+                "fixture",
+                "--suffixes",
+                "tar.gz",
+                "--archive-origins",
+            ])
+            .arg(&origin)
+            .args([
+                "--checksums",
+                &format!("fixture.tar.gz=sha256:{digest}"),
+                "--location",
+            ])
+            .arg(&cache)
+            .arg("--destination")
+            .arg(&destination)
+            .arg("--base")
+            .arg(&destination)
+            .output()
+            .unwrap()
+    };
+    let first = run();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        fs::read(destination.join("gcc/testsuite/你好.d")).unwrap(),
+        content
+    );
+    assert_eq!(
+        fs::read(destination.join("preexisting")).unwrap(),
+        b"preserved"
+    );
+    let payload = aros_common::measure_tree_content_cas(&destination).unwrap();
+    let second = run();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        aros_common::measure_tree_content_cas(&destination).unwrap(),
+        payload
+    );
+}
+
+#[test]
 fn logging_precedence_distinguishes_file_only_from_explicit_off() {
     let root = tempfile::tempdir().unwrap();
     let run = |log: &std::path::Path, level: Option<&str>, environment_off: bool| {
@@ -1058,7 +1133,7 @@ fn local_patch_change_before_commit_fails_completion_revalidation() {
 }
 
 #[test]
-fn tar_hardlink_archive_is_rejected_before_publication() {
+fn tar_escaping_hardlink_archive_is_rejected_before_publication() {
     let root = tempfile::tempdir().unwrap();
     let origin = root.path().join("hardlink-origin");
     fs::create_dir(&origin).unwrap();
@@ -1076,7 +1151,7 @@ fn tar_hardlink_archive_is_rejected_before_publication() {
     hardlink.set_entry_type(tar::EntryType::Link);
     hardlink.set_size(0);
     hardlink.set_mode(0o644);
-    hardlink.set_link_name("bomb-src/value").unwrap();
+    hardlink.set_link_name("../escaped").unwrap();
     hardlink.set_cksum();
     archive
         .append_data(&mut hardlink, "bomb-src/alias", std::io::empty())
@@ -1102,7 +1177,7 @@ fn tar_hardlink_archive_is_rejected_before_publication() {
         .unwrap();
     assert!(!output.status.success());
     assert!(!destination.join("bomb-src").exists());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("hard link"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("contained relative path"));
 }
 
 #[test]

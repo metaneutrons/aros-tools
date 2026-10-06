@@ -1,6 +1,7 @@
 use crate::arch_sources::collect_arch_sources;
 use crate::ast::{
-    GenmoduleLinklibs, MetaTargetRule, ModuleType, ParsedMmakefile, TargetDefinition,
+    GenmoduleLinklibs, MetaTargetRule, ModuleType, ParsedMmakefile, SourceInventoryNeed,
+    TargetDefinition,
 };
 use crate::capability::literal_defines::safe_build_tree_output_directory;
 use crate::capability::mesa::{
@@ -38,18 +39,19 @@ use crate::sources::{
     expand_file_list, map_linklib_object_sources, EvaluatedSources,
 };
 use aros_common::{read_source, Result};
-use aros_common::{Diagnostic, DiagnosticCode, DiagnosticStage, SourceLocation};
+use aros_common::{Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage, SourceLocation};
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::LazyLock;
 
-/// One non-empty #MM rule. Horizontal whitespace is intentional: `\s*` also
+/// One explicit #MM rule, including a zero-prerequisite virtual declaration.
+/// Horizontal whitespace is intentional: `\s*` also
 /// consumes a newline, so an empty `#MM setup-ppc :` used to steal the next
 /// ordinary Make rule and manufacture `setup-ppc -> setup-ppc` self-cycles.
 pub(crate) static META_RULE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^#MM-?[ \t]+([^ \t\r\n:]+)[ \t]*:[ \t]*([^\r\n]+)").unwrap());
+    LazyLock::new(|| Regex::new(r"(?m)^#MM-?[ \t]+([^ \t\r\n:]+)[ \t]*:[ \t]*([^\r\n]*)").unwrap());
 static CONTINUATION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\\[ \t]*\r?\n[ \t]*").unwrap());
 
@@ -78,6 +80,17 @@ pub(crate) fn sanitize_ident(s: &str) -> String {
 /// would still be unreachable. Only variables with an unambiguous counterpart
 /// are translated; callers report every other dynamic token.
 fn render_meta_token(raw: &str) -> Option<String> {
+    render_meta_token_with(raw, &std::collections::BTreeMap::new())
+}
+
+/// Like [`render_meta_token`], with a selected native policy's project
+/// globals for variables outside the fixed selector mapping. A global
+/// substitutes its literal single-word value; an empty value contributes
+/// nothing, as in MetaMake's word list.
+pub(crate) fn render_meta_token_with(
+    raw: &str,
+    globals: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
     let mut out = String::new();
     let mut rest = raw.trim();
     while let Some(start) = rest.find("$(") {
@@ -97,7 +110,17 @@ fn render_meta_token(raw: &str) -> Option<String> {
             "AROS_TARGET_VARIANT" => "AROS_TARGET_VARIANT",
             "AROS_TARGET_ICONSET" => "AROS_TARGET_ICONSET",
             "AROS_TARGET_CPU32" => "AROS_TARGET_CPU32",
-            _ => return None,
+            _ => {
+                let value = globals.get(name)?;
+                if value.contains(|character: char| {
+                    character.is_whitespace() || matches!(character, '$' | '(' | ')')
+                }) {
+                    return None;
+                }
+                out.push_str(&sanitize_ident(value));
+                rest = &after[end + 1..];
+                continue;
+            }
         };
         out.push_str("${");
         out.push_str(cmake_name);
@@ -331,20 +354,31 @@ fn evaluate_output_directory(
 fn record_partial_source_lists(
     output: &mut Vec<String>,
     source_inventory_patterns: &mut Vec<String>,
+    source_inventory_needs: &mut Vec<SourceInventoryNeed>,
     sources: &EvaluatedSources,
-    relative_dir: &Path,
+    recipe: &Path,
     invocation: &Invocation,
     mmake: &str,
 ) {
+    let owner_mmake = sanitize_ident(mmake);
     for pattern in &sources.deferred_wildcards {
         if !source_inventory_patterns.contains(pattern) {
             source_inventory_patterns.push(pattern.clone());
+        }
+        let need = SourceInventoryNeed {
+            pattern: pattern.clone(),
+            owner_mmake: owner_mmake.clone(),
+            recipe: recipe.to_path_buf(),
+            line: invocation.line + 1,
+        };
+        if !source_inventory_needs.contains(&need) {
+            source_inventory_needs.push(need);
         }
     }
     output.extend(sources.diagnostics.iter().map(|diagnostic| {
         format!(
             "{}:{}: %{} mmake={mmake} {diagnostic}",
-            relative_dir.display(),
+            recipe.parent().unwrap_or_else(|| Path::new("")).display(),
             invocation.line + 1,
             invocation.name
         )
@@ -441,6 +475,31 @@ pub fn join_continuations(content: &str) -> String {
     CONTINUATION_RE.replace_all(content, " ").into_owned()
 }
 
+/// Joins like [`join_continuations`] and also returns, for every joined line,
+/// the zero-based physical line on which it starts.
+///
+/// The text is produced by [`join_continuations`] itself, so both views are
+/// byte-identical and positional lookups agree.
+pub(crate) fn join_continuations_with_origins(content: &str) -> (String, Vec<usize>) {
+    let joined = join_continuations(content);
+    let continued_newlines = CONTINUATION_RE
+        .find_iter(content)
+        .filter_map(|matched| {
+            content[matched.range()]
+                .find('\n')
+                .map(|offset| matched.start() + offset)
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let mut origins = vec![0];
+    for (physical, (offset, _)) in content.match_indices('\n').enumerate() {
+        if !continued_newlines.contains(&offset) {
+            origins.push(physical + 1);
+        }
+    }
+    origins.truncate(joined.lines().count());
+    (joined, origins)
+}
+
 /// Concrete target values available while scanning Make conditionals.
 ///
 /// Every field is optional on purpose.  An omitted value is not the same as an
@@ -450,6 +509,40 @@ pub fn join_continuations(content: &str) -> String {
 /// context retain the conservative, target-agnostic parser behaviour.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TargetContext {
+    /// Source-derived architecture flag files for native header compilation.
+    /// The native owner projection independently seals and replays these;
+    /// neither generated flag files nor environment values are admitted.
+    pub native_arch_include_effects: Vec<crate::arch_endpoint_effects::ArchEndpointEffect>,
+    /// Selected architecture flag producers that could not be proved. A
+    /// consumer must not silently use only the successful subset.
+    pub native_arch_include_errors: Vec<String>,
+    /// Set only after every sealed recipe was scanned without an applicable
+    /// rejection and no rule outside the two reviewed macros touches include
+    /// flag files: an architecture include lookup without providers is then
+    /// proved empty, as Make's wildcard finds nothing.
+    pub native_arch_include_catalog_closed: bool,
+    /// The selected contract's declaration that `compiler=kernel`
+    /// architecture sources build in the target compiler role.
+    pub native_kernel_sources_in_target_role: bool,
+    /// The selected MetaMake policy's project globals. #MM names use them
+    /// where the fixed selector mapping has no placeholder; empty without a
+    /// native selection.
+    pub native_metamake_globals: std::collections::BTreeMap<String, String>,
+    /// Hash-bound source exports; admitted only after matching their recipes.
+    pub host_file_generators: Vec<aros_common::native_host_generator::NativeHostFileGenerator>,
+    /// Source configuration fallback values, never board-name-specific logic.
+    /// Presence, including an empty string, means known; absence is unknown.
+    pub make_variables: std::collections::BTreeMap<String, String>,
+    /// Explicit native configuration projections, original source-relative
+    /// include -> replacement source-relative Make fragment. The CLI fills
+    /// this only from the validated source contract; no implicit discovery.
+    pub make_include_bindings: std::collections::BTreeMap<String, String>,
+    /// Profile-bound, sealed Make templates; generated build-tree files are
+    /// never inputs to native source parsing.
+    pub generated_make_templates: std::collections::BTreeMap<
+        String,
+        aros_common::native_make_template::ResolvedGeneratedMakeTemplate,
+    >,
     pub cpu: Option<String>,
     pub platform: Option<String>,
     pub family: Option<String>,
@@ -478,17 +571,29 @@ impl TargetContext {
         self.value(name)
     }
 
+    /// MetaMake's compound `AROS_TARGET_PLATFORM`, derived as configure.in
+    /// derives it: `<machine>-<cpu>`, except that a variant replaces the
+    /// machine on every platform but `pc` (an esp32p4 `smp` build is
+    /// `smp-riscv`). An unknown variant leaves the value unknown.
+    #[must_use]
+    pub fn legacy_platform(&self) -> Option<String> {
+        let platform = self.platform.as_deref()?;
+        let cpu = self.cpu.as_deref()?;
+        let variant = self.variant.as_deref()?;
+        Some(if variant.is_empty() || platform == "pc" {
+            format!("{platform}-{cpu}")
+        } else {
+            format!("{variant}-{cpu}")
+        })
+    }
+
     pub(crate) fn value(&self, name: &str) -> Option<String> {
         match name {
             "AROS_TARGET_CPU" | "CPU" => self.cpu.clone(),
             // Historic MetaMake calls the machine ARCH.  Its
             // AROS_TARGET_PLATFORM is instead the compound machine/CPU name.
             "AROS_TARGET_ARCH" | "ARCH" => self.platform.clone(),
-            "AROS_TARGET_PLATFORM" => Some(format!(
-                "{}-{}",
-                self.platform.as_deref()?,
-                self.cpu.as_deref()?
-            )),
+            "AROS_TARGET_PLATFORM" => self.legacy_platform(),
             "AROS_TARGET_FAMILY" | "FAMILY" => self.family.clone(),
             "AROS_TARGET_VARIANT" => self.variant.clone(),
             "AROS_TOOLCHAIN" => self.toolchain.clone(),
@@ -500,7 +605,7 @@ impl TargetContext {
             "TARGET_LLVM_RUNTIMES_STYLE" => self.target_llvm_runtimes_style.clone(),
             "TARGET_RUST" => self.target_rust.clone(),
             "TARGET_RUST_VER" => self.target_rust_ver.clone(),
-            _ => None,
+            _ => self.make_variables.get(name).cloned(),
         }
     }
 }
@@ -825,6 +930,82 @@ fn capability_diagnostic(
     )
 }
 
+/// Adds an exact MetaMake owner to a capability diagnostic when the caller has
+/// proved that the supplied identifier is concrete. Dynamic Make expressions
+/// and values that would be changed by `sanitize_ident` remain unowned.
+fn capability_diagnostic_for_target(
+    relative_path: &Path,
+    line: Option<usize>,
+    target: &str,
+    message: impl Into<String>,
+) -> Diagnostic {
+    let mut diagnostic = capability_diagnostic(relative_path, line, message);
+    if let Some(target) = exact_mmake_target(target) {
+        diagnostic = diagnostic.with_context(DiagnosticContext {
+            target: Some(target),
+            ..DiagnosticContext::default()
+        });
+    }
+    diagnostic
+}
+
+/// Creates one capability diagnostic per distinct, concrete MetaMake owner.
+/// A capability with no provable target keeps the original unowned diagnostic.
+fn capability_diagnostics_for_targets(
+    relative_path: &Path,
+    line: Option<usize>,
+    targets: impl IntoIterator<Item = String>,
+    message: impl Into<String>,
+) -> Vec<Diagnostic> {
+    let owners = targets
+        .into_iter()
+        .filter_map(|target| exact_mmake_target(&target))
+        .collect::<BTreeSet<_>>();
+    let message = message.into();
+    if owners.is_empty() {
+        return vec![capability_diagnostic(relative_path, line, message)];
+    }
+    owners
+        .iter()
+        .map(|target| {
+            capability_diagnostic_for_target(relative_path, line, target, message.clone())
+        })
+        .collect()
+}
+
+/// Returns owners only when every required declaration appeared exactly once
+/// in the pre-admission invocation registry.
+fn unique_mmake_owners(
+    registry: &BTreeMap<String, usize>,
+    required: &[&str],
+) -> Option<Vec<String>> {
+    if required.is_empty() {
+        return None;
+    }
+    required
+        .iter()
+        .map(|owner| (registry.get(*owner) == Some(&1)).then(|| (*owner).to_owned()))
+        .collect()
+}
+
+/// Returns an owner only when the input is already a concrete, canonical
+/// MetaMake identifier. In particular, do not turn unresolved Make syntax or
+/// punctuation into a different owner through `sanitize_ident`.
+fn exact_mmake_target(raw: &str) -> Option<String> {
+    if raw.is_empty()
+        || raw.trim() != raw
+        || raw.contains("$(")
+        || raw.contains("${")
+        || !raw
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '_' | '-' | '.'))
+        || sanitize_ident(raw) != raw
+    {
+        return None;
+    }
+    Some(raw.to_owned())
+}
+
 fn expected_grub_profile_exclusion(target: Option<&TargetContext>) -> bool {
     target.is_some_and(|target| {
         matches!(
@@ -887,8 +1068,71 @@ fn expected_ahi_profile_exclusion(target: Option<&TargetContext>) -> bool {
 
 #[path = "parser_pipeline.rs"]
 mod pipeline;
+pub(crate) use pipeline::architecture_scope_positions;
 use pipeline::parse_mmakefile_impl;
 
 #[cfg(test)]
 #[path = "parser_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod source_inventory_tests {
+    use super::parse_mmakefile_with_dirs;
+    use crate::ast::{ModuleMacroForm, ModuleType};
+    use crate::dirs::DirVars;
+    use crate::testing::TempTree;
+    use std::fs;
+
+    #[test]
+    fn deferred_module_keeps_selection_identity_but_is_not_a_compile_target() {
+        let tree = TempTree::new();
+        let directory = tree.0.join("workbench/libs/cold-zstd");
+        fs::create_dir_all(&directory).unwrap();
+        let recipe = directory.join("mmakefile.src");
+        fs::write(
+            &recipe,
+            "%build_module mmake=workbench-libs-cold-zstd modname=zstd modtype=library files=\"$(wildcard ${AROS_PORTS_DIR}/zstd/*.c)\" uselibs=posixc\n",
+        )
+        .unwrap();
+
+        let parsed = parse_mmakefile_with_dirs(&recipe, &tree.0, &DirVars::load(&tree.0)).unwrap();
+
+        assert!(
+            parsed.targets.is_empty(),
+            "cold declaration became a compile target"
+        );
+        let [identity] = parsed.source_inventory_targets.as_slice() else {
+            panic!(
+                "expected one inventory identity, got {:?}",
+                parsed.source_inventory_targets
+            );
+        };
+        assert_eq!(identity.mmake_name, "workbench-libs-cold-zstd");
+        assert_eq!(identity.target_name, "zstd");
+        assert_eq!(identity.module_type, ModuleType::Library);
+        assert_eq!(identity.module_macro, Some(ModuleMacroForm::Full));
+        assert_eq!(identity.use_libs, ["posixc"]);
+        assert!(parsed
+            .meta_rules
+            .iter()
+            .any(|rule| { rule.name == "workbench-libs-cold-zstd" }));
+
+        let [need] = parsed.source_inventory_needs.as_slice() else {
+            panic!(
+                "expected one typed inventory need, got {:?}",
+                parsed.source_inventory_needs
+            );
+        };
+        assert_eq!(need.pattern, "${AROS_PORTS_DIR}/zstd/*.c");
+        assert_eq!(need.owner_mmake, "workbench-libs-cold-zstd");
+        assert_eq!(
+            need.recipe,
+            std::path::Path::new("workbench/libs/cold-zstd/mmakefile.src")
+        );
+        assert_eq!(need.line, 1);
+        assert_eq!(
+            parsed.source_inventory_patterns.as_slice(),
+            std::slice::from_ref(&need.pattern)
+        );
+    }
+}

@@ -83,9 +83,10 @@ pub fn install(
         "collector": tuple_collector_relative.to_string_lossy(),
         "nm": format!("{triple}-nm"),
         "objcopy": format!("{triple}-objcopy"),
+        "objdump": format!("{triple}-objdump"),
     });
     let layout_bytes = serde_json::to_vec(&json!({
-        "schema": "aros-toolchain-tools-v2",
+        "schema": "aros-toolchain-tools-v3",
         "compiler": identity,
         "target_triple": triple,
         "tools": tools,
@@ -109,7 +110,7 @@ pub fn install(
 
     // These are selected as invocation-local linker/strip paths in the
     // adjacent tuple collector manifest, independently of the root-prefixed
-    // roles declared in the ten-role tools contract.
+    // roles declared in the eleven-role tools contract.
     require_regular_executable(
         &prefix.join(&tuple_bin_directory).join("ld"),
         "GNU tuple linker",
@@ -133,14 +134,14 @@ pub fn install(
     require_absent(&root_collector_manifest, "GNU prefixed collector manifest")?;
     require_absent(&layout_path, "GNU toolchain tools contract")?;
 
-    // This proves all ten declared roles are present, executable and rooted in
+    // This proves all eleven declared roles are present, executable and rooted in
     // the selected prefix before any collector or manifest staging file exists.
     let resolved = layout.resolve_tools(prefix).map_err(|_| {
         ContractError::collector("GNU toolchain is missing a declared executable role")
     })?;
-    if resolved.len() != 10 {
+    if resolved.len() != 11 {
         return Err(ContractError::collector(
-            "GNU toolchain tools contract does not resolve exactly ten roles",
+            "GNU toolchain tools contract does not resolve exactly eleven roles",
         ));
     }
 
@@ -181,9 +182,9 @@ pub fn install(
     let resolved = persisted_layout
         .resolve_tools(prefix)
         .map_err(|_| ContractError::collector("persisted GNU toolchain role is unavailable"))?;
-    if resolved.len() != 10 {
+    if resolved.len() != 11 {
         return Err(ContractError::collector(
-            "persisted GNU toolchain tools contract does not resolve exactly ten roles",
+            "persisted GNU toolchain tools contract does not resolve exactly eleven roles",
         ));
     }
 
@@ -446,7 +447,7 @@ mod tests {
         fs::create_dir_all(prefix.join(&triple).join("bin")).unwrap();
         fs::create_dir_all(target.join("release")).unwrap();
         for role in [
-            "gcc", "g++", "as", "ld", "ar", "ranlib", "strip", "nm", "objcopy",
+            "gcc", "g++", "as", "ld", "ar", "ranlib", "strip", "nm", "objcopy", "objdump",
         ] {
             executable(
                 &prefix.join(format!("{triple}-{role}")),
@@ -584,7 +585,17 @@ mod tests {
                     &fixture.triple,
                 )
                 .unwrap();
-            assert_eq!(layout.resolve_tools(&fixture.prefix).unwrap().len(), 10);
+            assert!(layout.has_objdump_role());
+            let tools_document: Value = serde_json::from_slice(
+                &fs::read(fixture.prefix.join(TOOLCHAIN_TOOLS_FILE)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(tools_document["schema"], "aros-toolchain-tools-v3");
+            assert_eq!(
+                tools_document["tools"]["objdump"],
+                format!("{}-objdump", fixture.triple)
+            );
+            assert_eq!(layout.resolve_tools(&fixture.prefix).unwrap().len(), 11);
         }
     }
 
@@ -697,6 +708,34 @@ mod tests {
 
     #[test]
     fn missing_role_fails_before_overwriting_existing_collectors() {
+        for role in ["objcopy", "objdump"] {
+            let fixture = fixture(64);
+            let tuple_collector = fixture
+                .prefix
+                .join(&fixture.triple)
+                .join("bin/collect-aros");
+            let root_collector = fixture
+                .prefix
+                .join(format!("{}-collect-aros", fixture.triple));
+            let tuple_before = fs::read(&tuple_collector).unwrap();
+            let root_before = fs::read(&root_collector).unwrap();
+            fs::remove_file(fixture.prefix.join(format!("{}-{role}", fixture.triple))).unwrap();
+
+            assert!(install(
+                &fixture.target,
+                &fixture.prefix,
+                &fixture.lock,
+                &fixture.profile
+            )
+            .is_err());
+            assert_eq!(fs::read(tuple_collector).unwrap(), tuple_before);
+            assert_eq!(fs::read(root_collector).unwrap(), root_before);
+            assert_no_manifests(&fixture);
+        }
+    }
+
+    #[test]
+    fn objdump_symlink_escape_fails_before_replacing_collectors_or_publishing_manifests() {
         let fixture = fixture(64);
         let tuple_collector = fixture
             .prefix
@@ -707,7 +746,11 @@ mod tests {
             .join(format!("{}-collect-aros", fixture.triple));
         let tuple_before = fs::read(&tuple_collector).unwrap();
         let root_before = fs::read(&root_collector).unwrap();
-        fs::remove_file(fixture.prefix.join(format!("{}-objcopy", fixture.triple))).unwrap();
+        let external_objdump = fixture.temporary.path().join("external-objdump");
+        executable(&external_objdump, b"preserve external objdump");
+        let declared_objdump = fixture.prefix.join(format!("{}-objdump", fixture.triple));
+        fs::remove_file(&declared_objdump).unwrap();
+        symlink(&external_objdump, &declared_objdump).unwrap();
 
         assert!(install(
             &fixture.target,
@@ -716,8 +759,12 @@ mod tests {
             &fixture.profile
         )
         .is_err());
-        assert_eq!(fs::read(tuple_collector).unwrap(), tuple_before);
-        assert_eq!(fs::read(root_collector).unwrap(), root_before);
+        assert_eq!(fs::read(&tuple_collector).unwrap(), tuple_before);
+        assert_eq!(fs::read(&root_collector).unwrap(), root_before);
+        assert_eq!(
+            fs::read(&external_objdump).unwrap(),
+            b"preserve external objdump"
+        );
         assert_no_manifests(&fixture);
     }
 

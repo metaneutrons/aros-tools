@@ -1,10 +1,47 @@
 //! Link-library, default-link-set, and package resolution.
 
 use super::{
-    arch_compatible, arch_of, has_public_link_archive, needs_canonical_link_archive,
-    raw_link_archive_visible, runtime_name, target_runtime_name, DefaultLinkSet, DependencyGraph,
-    ModuleType, ResolvedDefaultLinkItem, ResolvedPackageMember, TargetDefinition,
+    arch_compatible, arch_of, has_public_link_archive, inventory_runtime_name,
+    needs_canonical_link_archive, raw_link_archive_visible, runtime_name, target_runtime_name,
+    DefaultLinkSet, DependencyGraph, ModuleType, ResolvedDefaultLinkItem, ResolvedPackageMember,
+    TargetDefinition,
 };
+
+fn known_meta_endpoint(graph: &DependencyGraph, name: &str) -> bool {
+    graph.meta_targets.contains_key(name)
+        || graph.make_meta_providers.contains(name)
+        || graph.targets.contains_key(name)
+        || graph.fetches.iter().any(|fetch| fetch.name == name)
+        || graph
+            .external_cmake
+            .iter()
+            .any(|build| build.mmake_name == name || build.provider_target == name)
+        || graph
+            .configure_builds
+            .iter()
+            .any(|build| build.mmake_name == name || build.provider_target.as_deref() == Some(name))
+        || graph
+            .default_link_set
+            .iter()
+            .any(|item| item.archive == name)
+}
+
+fn implicit_uselib_consumers(target: &TargetDefinition) -> Vec<String> {
+    use crate::ast::ModuleMacroForm;
+
+    match target.module_macro {
+        Some(ModuleMacroForm::Full) => {
+            vec![
+                target.mmake_name.clone(),
+                format!("{}-kobj", target.mmake_name),
+            ]
+        }
+        Some(ModuleMacroForm::RuntimeOnly) => vec![format!("{}-kobj", target.mmake_name)],
+        Some(ModuleMacroForm::AbiOnly) => vec![target.mmake_name.clone()],
+        // The simple-module path does not call implicit_module_meta_rules.
+        Some(ModuleMacroForm::Simple) | None => Vec::new(),
+    }
+}
 
 impl DependencyGraph {
     pub fn add_packages(&mut self, decls: Vec<crate::packages::PackageDecl>) {
@@ -142,6 +179,18 @@ impl DependencyGraph {
                     declaration.provider_target.clone(),
                 ));
         }
+        for archive in &self.source_archives {
+            if let Some(name) = archive
+                .archive_basename()
+                .strip_prefix("lib")
+                .and_then(|name| name.strip_suffix(".a"))
+            {
+                by_name
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push((archive.declaration.owner.clone(), archive.provider_target()));
+            }
+        }
         for declaration in &self.configure_builds {
             if let (Some(library), Some(provider)) = (
                 declaration.provided_library.as_ref(),
@@ -159,7 +208,11 @@ impl DependencyGraph {
         let mut promote_canonical = Vec::new();
         let mut link_option_edges = Vec::new();
         let mut rejected_link_options = Vec::new();
+        let mut resolved_typed_uselibs = Vec::new();
         for (mmake, target) in &self.targets {
+            if target.module_type == ModuleType::ModuleHeaders {
+                continue;
+            }
             let mut ids = Vec::new();
             let mut requested = target.use_libs.clone();
             requested.extend(
@@ -212,10 +265,14 @@ impl DependencyGraph {
                         let candidates: Vec<&(String, String)> = c
                             .iter()
                             .filter(|(declaration, _)| {
-                                !raw_link
-                                    || self.targets.get(declaration).is_some_and(|provider| {
-                                        raw_link_archive_visible(provider, target)
-                                    })
+                                declaration != mmake
+                                    && (!raw_link
+                                        || self.targets.get(declaration).is_some_and(|provider| {
+                                            raw_link_archive_visible(provider, target)
+                                        })
+                                        || self.source_archives.iter().any(|archive| {
+                                            archive.declaration.owner == *declaration
+                                        }))
                             })
                             .collect();
                         if candidates.is_empty() {
@@ -288,9 +345,12 @@ impl DependencyGraph {
 
                         let id = selected.1.clone();
                         if explicitly_linked.contains(name) && !ids.contains(&id) {
-                            ids.push(id);
+                            ids.push(id.clone());
                         } else if raw_link {
-                            link_option_edges.push((mmake.clone(), id));
+                            link_option_edges.push((mmake.clone(), id.clone()));
+                        }
+                        if target.use_libs.contains(name) {
+                            resolved_typed_uselibs.push((mmake.clone(), name.clone(), id));
                         }
                         let provider = self.targets.get(&selected.0);
                         if raw_link
@@ -349,6 +409,35 @@ impl DependencyGraph {
                 .or_default()
                 .insert(provider);
         }
+        resolved_typed_uselibs.sort();
+        resolved_typed_uselibs.dedup();
+        for (mmake, name, archive) in resolved_typed_uselibs {
+            let generated_spelling = format!("linklibs-{name}");
+            // These exact base/KOBJ dependencies are the only generated
+            // library-spelling edges that can be rebound from the typed
+            // uselib resolution. A source-owned endpoint with the generated
+            // spelling remains authoritative, even when it is not the archive
+            // selected for this declaration.
+            if known_meta_endpoint(self, &generated_spelling) {
+                continue;
+            }
+            let Some(target) = self.targets.get(&mmake) else {
+                continue;
+            };
+            for consumer in implicit_uselib_consumers(target) {
+                let explicitly_declared =
+                    self.explicit_meta_edges.iter().any(|(owner, dependency)| {
+                        owner == &consumer && dependency == &generated_spelling
+                    });
+                if !explicitly_declared {
+                    if let Some(dependencies) = self.meta_targets.get_mut(&consumer) {
+                        if dependencies.remove(&generated_spelling) {
+                            dependencies.insert(archive.clone());
+                        }
+                    }
+                }
+            }
+        }
         unresolved
     }
 
@@ -381,27 +470,46 @@ impl DependencyGraph {
                         && has_public_link_archive(target)
                 })
                 .collect();
-            if candidates.is_empty() {
+            let source_archives = self
+                .source_archives
+                .iter()
+                .filter(|archive| archive.library_name() == item.name)
+                .collect::<Vec<_>>();
+            if candidates.is_empty() && source_archives.is_empty() {
                 unresolved.push(format!(
                     "-l{} has no declaration publishing lib{}.a",
                     item.name, item.name
                 ));
                 continue;
             }
-            if candidates.len() > 1 {
+            if candidates.len() + source_archives.len() > 1 {
                 // The usual duplicate is the 32-bit bootstrap flavour of the
                 // same archive; the spec means the native one.
                 candidates.retain(|(_, target)| !target.variant_32bit);
             }
-            if candidates.len() != 1 {
+            if candidates.len() + source_archives.len() != 1 {
                 let mut declarations: Vec<&str> =
                     candidates.iter().map(|(mmake, _)| mmake.as_str()).collect();
+                declarations.extend(
+                    source_archives
+                        .iter()
+                        .map(|archive| archive.declaration.owner.as_str()),
+                );
                 declarations.sort_unstable();
                 unresolved.push(format!(
                     "-l{} is ambiguous ({})",
                     item.name,
                     declarations.join(", ")
                 ));
+                continue;
+            }
+            if let Some(archive) = source_archives.first() {
+                resolved.push(ResolvedDefaultLinkItem {
+                    name: item.name.clone(),
+                    archive: archive.provider_target(),
+                    require_absent: item.require_absent.clone(),
+                    require_present: item.require_present.clone(),
+                });
                 continue;
             }
             let (mmake, provider) = candidates[0];
@@ -442,6 +550,17 @@ impl DependencyGraph {
         for (mmake, target) in &self.targets {
             if let Some(runtime) = target_runtime_name(target) {
                 by_runtime.entry(runtime).or_default().push(mmake.as_str());
+            }
+        }
+        // Preparation can resolve declared package membership without
+        // inventing a source-less compilation target. The full exporter
+        // never installs these pending identities into its graph.
+        for target in &self.inventory_targets {
+            if let Some(runtime) = inventory_runtime_name(target) {
+                by_runtime
+                    .entry(runtime)
+                    .or_default()
+                    .push(&target.mmake_name);
             }
         }
         for ids in by_runtime.values_mut() {
@@ -510,7 +629,17 @@ impl DependencyGraph {
                     candidates
                         .into_iter()
                         .filter(|id| {
-                            let cand = self.targets.get(*id).and_then(|t| arch_of(&t.dir_path));
+                            let cand = self
+                                .targets
+                                .get(*id)
+                                .map(|t| &t.dir_path)
+                                .or_else(|| {
+                                    self.inventory_targets
+                                        .iter()
+                                        .find(|t| t.mmake_name == *id)
+                                        .map(|t| &t.dir_path)
+                                })
+                                .and_then(|directory| arch_of(directory));
                             arch_compatible(cand.as_ref(), decl_arch.as_ref())
                         })
                         .collect()

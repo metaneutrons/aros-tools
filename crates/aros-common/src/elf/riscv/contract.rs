@@ -63,6 +63,8 @@ pub enum ArtifactRole {
     CompilationUnit,
     /// An AROS application linked as a relocatable ELF with AROS ABI marking.
     ArosRelocatable,
+    /// A source-script raw kernel link, not a relocatable AROS module.
+    NativeCore,
 }
 
 impl TargetContract {
@@ -217,7 +219,14 @@ impl TargetContract {
             "RISC-V target machine mismatch"
         );
         ensure!(object.class == class, "RISC-V target ELF width mismatch");
-        ensure!(object.kind == 1, "RISC-V artifact is not a relocatable ELF");
+        if role == ArtifactRole::NativeCore {
+            ensure!(
+                object.kind == 2,
+                "RISC-V native core is not an executable ELF"
+            );
+        } else {
+            ensure!(object.kind == 1, "RISC-V artifact is not a relocatable ELF");
+        }
         ensure!(
             object.flags & super::FLOAT_ABI_MASK == float_flags,
             "RISC-V floating-point ABI mismatch"
@@ -294,6 +303,29 @@ mod tests {
             "abi": if class == 1 {"ilp32"} else {"lp64"}, "code_model": "medany",
             "architecture": if class == 1 {"rv32i2p1"} else {"rv64i2p1"},
             "unaligned_access": false, "atomic_abi": 0, "x3_reg_usage": 0})
+    }
+
+    #[test]
+    fn raw_native_core_is_exec_without_weakening_module_link_contract() {
+        let selected = TargetContract::parse(&serde_json::to_vec(&contract(1)).unwrap()).unwrap();
+        let mut bytes = super::super::tests::object(1);
+        bytes[0x10..0x12].copy_from_slice(&2_u16.to_le_bytes());
+        selected.verify(&bytes, ArtifactRole::NativeCore).unwrap();
+        assert!(selected
+            .verify(&bytes, ArtifactRole::ArosRelocatable)
+            .is_err());
+        assert!(selected
+            .verify(&bytes, ArtifactRole::CompilationUnit)
+            .is_err());
+        bytes[0x10..0x12].copy_from_slice(&1_u16.to_le_bytes());
+        assert!(selected.verify(&bytes, ArtifactRole::NativeCore).is_err());
+        selected
+            .verify(&bytes, ArtifactRole::CompilationUnit)
+            .unwrap();
+        bytes[0x24] = 4;
+        assert!(selected
+            .verify(&bytes, ArtifactRole::CompilationUnit)
+            .is_err());
     }
 
     #[test]

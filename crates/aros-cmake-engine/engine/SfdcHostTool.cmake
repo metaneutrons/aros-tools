@@ -241,5 +241,6 @@ function(aros_build_host_sfdc)
         VERBATIM
         COMMAND_EXPAND_LISTS)
     add_custom_target(host-sfdc DEPENDS "${_output_lexical}")
+    set_property(TARGET host-sfdc PROPERTY AROS_SFDC_OUTPUT_SHA256 "${_output_sha256}")
     set(AROS_HOST_SFDC "${_output_lexical}" PARENT_SCOPE)
 endfunction()

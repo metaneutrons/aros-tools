@@ -1,14 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
 
-if(AROS_GENMODULE_MANIFEST_UNSUPPORTED_PROBE)
+if(AROS_GENMODULE_MANIFEST_UNSUPPORTED_PROBE OR AROS_GENMODULE_MANIFEST_INCLUDE_PROBE)
     include("${AROS_GENMODULE_MANIFEST_MODULE}")
     aros_genmodule_writefiles_manifest(_unsupported
         CONFIG "${AROS_GENMODULE_MANIFEST_CONFIG}"
         MODULE unsupported
-        MODTYPE hook
+        MODTYPE "${AROS_GENMODULE_MANIFEST_PROBE_TYPE}"
         GEN_DIR "${AROS_GENMODULE_MANIFEST_GEN_DIR}"
         STUB_DIR "${AROS_GENMODULE_MANIFEST_STUB_DIR}")
-    message(FATAL_ERROR "unsupported include policy unexpectedly succeeded")
+    message(FATAL_ERROR "invalid manifest probe unexpectedly succeeded")
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
@@ -212,6 +212,7 @@ set(_unsupported_probe_root
 execute_process(
     COMMAND "${CMAKE_COMMAND}"
         "-DAROS_GENMODULE_MANIFEST_UNSUPPORTED_PROBE=ON"
+        "-DAROS_GENMODULE_MANIFEST_PROBE_TYPE=hook"
         "-DAROS_GENMODULE_MANIFEST_MODULE=${CMAKE_CURRENT_LIST_DIR}/../GenmoduleManifest.cmake"
         "-DAROS_GENMODULE_MANIFEST_CONFIG=${_source_root}/workbench/libs/gl/gl.conf"
         "-DAROS_GENMODULE_MANIFEST_GEN_DIR=${_unsupported_probe_root}/gen"
@@ -378,5 +379,55 @@ if(NOT _zstd_LINKLIB_DEFINES STREQUAL
     message(FATAL_ERROR
         "zstd: unexpected client definitions ${_zstd_LINKLIB_DEFINES}")
 endif()
+
+set(_name_probe_root "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/genmodule-include-name")
+file(MAKE_DIRECTORY "${_name_probe_root}")
+set(_name_base "${_name_probe_root}/base.conf")
+set(_name_override "${_name_probe_root}/override.conf")
+file(WRITE "${_name_base}"
+    "##begin config\nincludename base_headers\n##end config\n")
+file(WRITE "${_name_override}"
+    "##begin config\nincludename override_headers\n##end config\n"
+    "##begin functionlist\nLONG Example(void)\n##end functionlist\n")
+aros_genmodule_writefiles_manifest(_name_base_manifest
+    CONFIG "${_name_base}" MODULE name_probe MODTYPE resource
+    GEN_DIR "${_name_probe_root}/gen" STUB_DIR "${_name_probe_root}/stubs")
+if(NOT _name_base_manifest_INCLUDE_NAME STREQUAL "base_headers" OR
+   _name_base_manifest_HAS_FUNCTIONS)
+    message(FATAL_ERROR "base include-name/function facts are not source-equivalent")
+endif()
+aros_genmodule_writefiles_manifest(_name_override_manifest
+    CONFIG "${_name_base}" CONFIG_OVERRIDE "${_name_override}"
+    MODULE name_probe MODTYPE resource
+    GEN_DIR "${_name_probe_root}/gen" STUB_DIR "${_name_probe_root}/stubs")
+if(NOT _name_override_manifest_INCLUDE_NAME STREQUAL "override_headers" OR
+   NOT _name_override_manifest_HAS_FUNCTIONS)
+    message(FATAL_ERROR "override include-name/function facts were not applied")
+endif()
+if(NOT _zstd_INCLUDE_NAME STREQUAL "zstd" OR NOT _zstd_HAS_FUNCTIONS)
+    message(FATAL_ERROR "default include-name/function facts are not source-equivalent")
+endif()
+foreach(_unsafe "../escape" "path/name" "name;extra" "name extra" "\${escape}")
+    file(WRITE "${_name_base}"
+        "##begin config\nincludename ${_unsafe}\n##end config\n")
+    execute_process(COMMAND "${CMAKE_COMMAND}"
+        -DAROS_GENMODULE_MANIFEST_INCLUDE_PROBE=ON
+        -DAROS_GENMODULE_MANIFEST_PROBE_TYPE=resource
+        "-DAROS_GENMODULE_MANIFEST_MODULE=${CMAKE_CURRENT_LIST_DIR}/../GenmoduleManifest.cmake"
+        "-DAROS_GENMODULE_MANIFEST_CONFIG=${_name_base}"
+        "-DAROS_GENMODULE_MANIFEST_GEN_DIR=${_name_probe_root}/gen"
+        "-DAROS_GENMODULE_MANIFEST_STUB_DIR=${_name_probe_root}/stubs"
+        -P "${CMAKE_CURRENT_LIST_FILE}"
+        RESULT_VARIABLE _unsafe_result OUTPUT_VARIABLE _unsafe_stdout
+        ERROR_VARIABLE _unsafe_stderr TIMEOUT 30)
+    # CMake wraps long messages at 80 columns, so the break falls inside the
+    # phrase for some working-directory lengths.
+    string(REGEX REPLACE "[ \t\r\n]+" " " _unsafe_text "${_unsafe_stdout} ${_unsafe_stderr}")
+    if(_unsafe_result EQUAL 0 OR
+       NOT _unsafe_text MATCHES "unsafe genmodule includename")
+        message(FATAL_ERROR "unsafe includename '${_unsafe}' was not refused: ${_unsafe_stderr}")
+    endif()
+endforeach()
+file(REMOVE_RECURSE "${_name_probe_root}")
 
 message(STATUS "genmodule writefiles manifest test passed")

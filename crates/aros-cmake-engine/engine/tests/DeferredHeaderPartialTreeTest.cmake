@@ -42,5 +42,19 @@ file(READ "${_build}/SDK/include/zlib.h" _staged)
 if(NOT _staged STREQUAL "#define FIXTURE_HEADER_VALUE 42\n")
     message(FATAL_ERROR "staged header does not match the completed fetch")
 endif()
+set(_ambiguous_build "${_build}-ambiguous")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_ambiguous_build}" -G Ninja
+        "-DCMAKE_C_COMPILER=${_clang}" "-DAMBIGUOUS_FETCH_OWNER=ON"
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
+    RESULT_VARIABLE _ambiguous_result
+    OUTPUT_VARIABLE _ambiguous_stdout
+    ERROR_VARIABLE _ambiguous_stderr)
+if(_ambiguous_result EQUAL 0 OR NOT _ambiguous_stderr MATCHES "ambiguous fetch owners")
+    message(FATAL_ERROR "ambiguous fetched-header owners did not fail closed\n${_ambiguous_stdout}\n${_ambiguous_stderr}")
+endif()
+file(REMOVE_RECURSE "${_ambiguous_build}")
 file(REMOVE_RECURSE "${_build}")
 message(STATUS "partial fetched-header staging test passed")

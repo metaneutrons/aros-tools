@@ -23,6 +23,7 @@ fn identical_header_copies_keep_each_distinct_mmake_owner() {
         patterns: vec!["gl.h".to_owned()],
         excludes: Vec::new(),
         flatten: true,
+        proven_empty: false,
     };
     let mut second = first.clone();
     second.name = "second-includes".to_owned();
@@ -189,6 +190,371 @@ fn package_graph(target_file: &str, package_file: &str, kind: &str, name: &str) 
         arch: String::new(),
     }]);
     graph
+}
+
+fn punctuated_uselib_fixture(source: &str, source_stems: &[&str]) -> (TempTree, DependencyGraph) {
+    let tree = TempTree::new();
+    for stem in source_stems {
+        fs::write(tree.0.join(format!("{stem}.c")), "int fixture;\n").unwrap();
+    }
+    let file = tree.0.join("mmakefile.src");
+    fs::write(&file, source).unwrap();
+    let parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    assert!(
+        parsed.skipped_programs.is_empty(),
+        "{:#?}",
+        parsed.skipped_programs
+    );
+
+    let mut graph = DependencyGraph::new();
+    for mut target in parsed.targets {
+        if target.module_type == ModuleType::LinkLib {
+            // The fixture models a provider that already publishes its
+            // canonical archive spelling; uselib edge correction must retain it.
+            target.canonical_linklib_output = true;
+            target.canonical_linklib_eligible = true;
+        }
+        graph.add_target(target);
+    }
+    for rule in parsed.meta_rules {
+        graph.add_meta_rule(rule);
+    }
+    for rule in parsed.explicit_meta_rules {
+        graph.add_explicit_meta_rule(rule);
+    }
+    graph.make_meta_providers.extend(parsed.make_meta_providers);
+    (tree, graph)
+}
+
+fn runtime_and_implementation_archive_fixture() -> (TempTree, DependencyGraph) {
+    let (tree, mut graph) = punctuated_uselib_fixture(
+        "%build_linklib mmake=runtime-owner libname=shared files=runtime\n\
+         %build_linklib mmake=implementation-owner libname=shared files=implementation\n",
+        &["runtime", "implementation"],
+    );
+    let runtime = graph.targets.get_mut("runtime-owner").unwrap();
+    runtime.module_type = ModuleType::Library;
+    runtime.canonical_linklib_output = false;
+    runtime.canonical_linklib_eligible = false;
+    runtime.linklib_name = Some("shared-client".into());
+    runtime.use_libs = vec!["shared".into()];
+    runtime.genmodule_linklibs = Some(crate::ast::GenmoduleLinklibs {
+        enabled: true,
+        has_relative: false,
+        relative_libraries: Vec::new(),
+        source_files: Vec::new(),
+        object_sources: Vec::new(),
+        inputs_exact: true,
+    });
+    (tree, graph)
+}
+
+#[test]
+fn runtime_cannot_consume_its_own_client_archive() {
+    let (_tree, mut graph) = runtime_and_implementation_archive_fixture();
+    let failures = graph
+        .resolve_inventory_link_edges(&TargetContext::default())
+        .unwrap();
+    assert!(failures.is_empty(), "{failures:#?}");
+    assert_eq!(
+        graph.targets["runtime-owner"].link_libs,
+        ["implementation-owner"]
+    );
+    let failures = graph.resolve_use_libs();
+    assert!(failures.is_empty(), "{failures:#?}");
+    assert_eq!(
+        graph.targets["runtime-owner"].link_libs,
+        ["implementation-owner"]
+    );
+
+    graph.targets.remove("implementation-owner");
+    let failures = graph
+        .resolve_inventory_link_edges(&TargetContext::default())
+        .unwrap();
+    assert!(failures
+        .iter()
+        .any(|failure| failure.message.contains("found 0")));
+    assert!(!graph.resolve_use_libs().is_empty());
+}
+
+#[test]
+fn excluding_a_self_client_does_not_resolve_two_real_archive_providers() {
+    let (_tree, mut graph) = runtime_and_implementation_archive_fixture();
+    let mut duplicate = graph.targets["implementation-owner"].clone();
+    duplicate.mmake_name = "another-implementation".into();
+    graph.add_target(duplicate);
+    let failures = graph
+        .resolve_inventory_link_edges(&TargetContext::default())
+        .unwrap();
+    assert!(failures
+        .iter()
+        .any(|failure| failure.message.contains("found 2")));
+    assert!(graph
+        .resolve_use_libs()
+        .iter()
+        .any(|failure| failure.contains("ambiguous")));
+}
+
+#[test]
+fn native_runtime_selection_does_not_emit_unrequested_client_archives() {
+    let (_tree, mut graph) = runtime_and_implementation_archive_fixture();
+    assert!(!crate::generate_cmake(&graph).contains("NO_CLIENT_ARCHIVES"));
+    let selected = ["runtime-owner".into(), "implementation-owner".into()]
+        .into_iter()
+        .collect();
+    graph
+        .retain_native_selection(&selected, &TargetContext::default())
+        .unwrap();
+    let generated = crate::generate_cmake(&graph);
+    assert!(generated.contains("NO_CLIENT_ARCHIVES"), "{generated}");
+    assert!(
+        generated.contains("GENMODULE_LINKLIBS"),
+        "ABI header support remains declared"
+    );
+    graph
+        .native_selected_client_archives
+        .as_mut()
+        .unwrap()
+        .insert("runtime-owner-linklib".into());
+    assert!(!crate::generate_cmake(&graph).contains("NO_CLIENT_ARCHIVES"));
+}
+
+#[test]
+fn selected_client_archive_retains_source_selector_spelling() {
+    let (_tree, mut graph) = runtime_and_implementation_archive_fixture();
+    let mut runtime = graph.targets.remove("runtime-owner").unwrap();
+    runtime.mmake_name = "runtime-${AROS_TARGET_CPU}".into();
+    graph.add_target(runtime);
+    let context = TargetContext {
+        cpu: Some("riscv".into()),
+        ..Default::default()
+    };
+    let selected = [
+        "runtime-riscv".into(),
+        "runtime-riscv-linklib".into(),
+        "implementation-owner".into(),
+    ]
+    .into_iter()
+    .collect();
+    graph.retain_native_selection(&selected, &context).unwrap();
+    assert!(graph
+        .native_selected_client_archives
+        .as_ref()
+        .unwrap()
+        .contains("runtime-${AROS_TARGET_CPU}-linklib"));
+    assert!(!crate::generate_cmake(&graph).contains("NO_CLIENT_ARCHIVES"));
+}
+
+#[test]
+fn inventory_external_archives_require_typed_uselibs_not_raw_link_options() {
+    for pending in [false, true] {
+        for raw in [false, true] {
+            let (_tree, mut graph) = punctuated_uselib_fixture(
+                "%build_module mmake=consumer-id modname=consumer modtype=library files=consumer uselibs=external-proof\n",
+                &["consumer"],
+            );
+            if raw {
+                graph.targets.get_mut("consumer-id").unwrap().link_options =
+                    vec!["-lexternal-proof".to_owned()];
+            }
+            if pending {
+                let target = graph.targets.remove("consumer-id").unwrap();
+                graph.inventory_targets.push((&target).into());
+            }
+            graph.external_cmake.push(crate::ast::ExternalCMakeDecl {
+                mmake_name: "external-build".to_owned(),
+                source_dir: "${AROS_PORTS_DIR}/external-proof".to_owned(),
+                binary_dir: "${AROS_BUILD_DIR}/external-proof".to_owned(),
+                install_prefix: "${AROS_BUILD_DIR}/external-proof/install".to_owned(),
+                fetch_target: "external-fetch".to_owned(),
+                local_patch_files: Vec::new(),
+                provided_library: "external-proof".to_owned(),
+                provider_target: "external-archive".to_owned(),
+                library_products: vec!["libexternal-proof.a".to_owned()],
+                header_products: Vec::new(),
+                auxiliary_products: Vec::new(),
+                public_include_dirs: Vec::new(),
+                options: Vec::new(),
+                build_targets: Vec::new(),
+                install_components: Vec::new(),
+                library_group: false,
+                host_tools: Vec::new(),
+                compile_defines: Vec::new(),
+                dir_path: "compiler/external-proof".into(),
+            });
+            let diagnostics = graph
+                .resolve_inventory_link_edges(&TargetContext::default())
+                .unwrap();
+            if raw {
+                assert_eq!(diagnostics.len(), 1, "pending={pending}: {diagnostics:?}");
+                assert!(diagnostics[0].message.contains("found 0"));
+            } else {
+                assert!(diagnostics.is_empty(), "pending={pending}: {diagnostics:?}");
+                let links = if pending {
+                    &graph.inventory_targets[0].link_libs
+                } else {
+                    &graph.targets["consumer-id"].link_libs
+                };
+                assert!(links.iter().any(|link| link == "external-archive"));
+            }
+            if !pending {
+                assert_eq!(graph.resolve_use_libs().is_empty(), !raw);
+            }
+        }
+    }
+}
+
+#[test]
+fn resolved_punctuated_uselib_edges_reach_the_archive_producer() {
+    let (_tree, mut graph) = punctuated_uselib_fixture(
+        "%build_module mmake=consumer-id modname=consumer modtype=library files=consumer uselibs=widget.static\n\
+         %build_linklib mmake=linklibs-widget-static libname=widget.static files=archive\n",
+        &["consumer", "archive"],
+    );
+    graph.add_meta_rule(MetaTargetRule {
+        name: "unrelated-raw-consumer".to_owned(),
+        dependencies: vec!["linklibs-widget.static".to_owned()],
+    });
+
+    let unresolved = graph.resolve_use_libs();
+    assert!(unresolved.is_empty(), "{unresolved:#?}");
+    assert_eq!(
+        graph.targets["consumer-id"].link_libs,
+        ["linklibs-widget-static"]
+    );
+    for consumer in ["consumer-id", "consumer-id-kobj"] {
+        let dependencies = &graph.meta_targets[consumer];
+        assert!(
+            !dependencies.contains("linklibs-widget.static"),
+            "{consumer}"
+        );
+        assert!(
+            dependencies.contains("linklibs-widget-static"),
+            "{consumer}"
+        );
+    }
+    assert!(graph.targets["linklibs-widget-static"].canonical_linklib_output);
+    assert!(graph.meta_targets["unrelated-raw-consumer"].contains("linklibs-widget.static"));
+}
+
+#[test]
+fn punctuated_uselib_raw_meta_edge_is_preserved_while_kobj_edge_is_rebound() {
+    let (_tree, mut graph) = punctuated_uselib_fixture(
+        "%build_module mmake=consumer-id modname=consumer modtype=library files=consumer uselibs=widget.static\n\
+         %build_linklib mmake=linklibs-widget-static libname=widget.static files=archive\n",
+        &["consumer", "archive"],
+    );
+    graph.add_explicit_meta_rule(MetaTargetRule {
+        name: "consumer-id".to_owned(),
+        dependencies: vec!["linklibs-widget.static".to_owned()],
+    });
+
+    let unresolved = graph.resolve_use_libs();
+    assert!(unresolved.is_empty(), "{unresolved:#?}");
+    assert!(graph.meta_targets["consumer-id"].contains("linklibs-widget.static"));
+    assert!(!graph.meta_targets["consumer-id"].contains("linklibs-widget-static"));
+    assert!(!graph.meta_targets["consumer-id-kobj"].contains("linklibs-widget.static"));
+    assert!(graph.meta_targets["consumer-id-kobj"].contains("linklibs-widget-static"));
+}
+
+#[test]
+fn punctuated_uselib_matching_selector_meta_edge_is_bound_before_selection() {
+    let (_tree, mut graph) = punctuated_uselib_fixture(
+        "%build_module mmake=consumer-id modname=consumer modtype=library files=consumer uselibs=widget.static\n\
+         %build_linklib mmake=linklibs-widget-static libname=widget.static files=archive\n\
+         #MM- consumer-id : linklibs-$(AROS_TARGET_CPU)\n",
+        &["consumer", "archive"],
+    );
+    graph.bind_explicit_meta_provenance(&TargetContext {
+        cpu: Some("widget.static".into()),
+        ..TargetContext::default()
+    });
+    assert!(graph.resolve_use_libs().is_empty());
+    assert!(graph.meta_targets["consumer-id"].contains("linklibs-widget.static"));
+    assert!(graph.meta_targets["consumer-id"].contains("linklibs-${AROS_TARGET_CPU}"));
+    assert!(!graph.meta_targets["consumer-id"].contains("linklibs-widget-static"));
+    assert!(graph.meta_targets["consumer-id-kobj"].contains("linklibs-widget-static"));
+}
+
+#[test]
+fn punctuated_uselib_unrelated_selector_does_not_block_generated_archive_binding() {
+    let (_tree, mut graph) = punctuated_uselib_fixture(
+        "%build_module mmake=consumer-id modname=consumer modtype=library files=consumer uselibs=widget.static\n\
+         %build_linklib mmake=linklibs-widget-static libname=widget.static files=archive\n\
+         %build_linklib mmake=linklibs-riscv libname=riscv files=archive\n\
+         #MM- consumer-id : linklibs-$(AROS_TARGET_CPU)\n",
+        &["consumer", "archive"],
+    );
+    graph.bind_explicit_meta_provenance(&TargetContext {
+        cpu: Some("riscv".into()),
+        ..TargetContext::default()
+    });
+    assert!(graph.resolve_use_libs().is_empty());
+    assert!(!graph.meta_targets["consumer-id"].contains("linklibs-widget.static"));
+    assert!(graph.meta_targets["consumer-id"].contains("linklibs-widget-static"));
+    assert!(graph.meta_targets["consumer-id"].contains("linklibs-${AROS_TARGET_CPU}"));
+    assert!(graph
+        .explicit_meta_edges
+        .contains(&("consumer-id".into(), "linklibs-riscv".into())));
+}
+
+#[test]
+fn punctuated_uselib_ambiguous_and_missing_providers_keep_the_generated_edge() {
+    let (_tree, mut ambiguous) = punctuated_uselib_fixture(
+        "%build_module mmake=consumer-id modname=consumer modtype=library files=consumer uselibs=widget.static\n\
+         %build_linklib mmake=linklibs-widget-static libname=widget.static files=archive-one\n\
+         %build_linklib mmake=linklibs-widget-alt libname=widget.static files=archive-two\n",
+        &["consumer", "archive-one", "archive-two"],
+    );
+    let unresolved = ambiguous.resolve_use_libs();
+    assert_eq!(unresolved.len(), 1, "{unresolved:#?}");
+    assert!(unresolved[0].contains("consumer-id uselibs=widget.static is ambiguous"));
+    assert!(ambiguous.targets["consumer-id"].link_libs.is_empty());
+    for consumer in ["consumer-id", "consumer-id-kobj"] {
+        assert!(ambiguous.meta_targets[consumer].contains("linklibs-widget.static"));
+        assert!(!ambiguous.meta_targets[consumer].contains("linklibs-widget-static"));
+    }
+
+    let (_tree, mut missing) = punctuated_uselib_fixture(
+        "%build_module mmake=consumer-id modname=consumer modtype=library files=consumer uselibs=widget.static\n",
+        &["consumer"],
+    );
+    let unresolved = missing.resolve_use_libs();
+    assert_eq!(unresolved.len(), 1, "{unresolved:#?}");
+    assert!(unresolved[0].contains("consumer-id uselibs=widget.static has no link library"));
+    assert!(missing.targets["consumer-id"].link_libs.is_empty());
+    for consumer in ["consumer-id", "consumer-id-kobj"] {
+        assert!(missing.meta_targets[consumer].contains("linklibs-widget.static"));
+        assert!(!missing.meta_targets[consumer].contains("linklibs-widget-static"));
+    }
+}
+
+#[test]
+fn known_punctuated_uselib_spelling_endpoint_is_preserved() {
+    let (_tree, mut graph) = punctuated_uselib_fixture(
+        "%build_module mmake=consumer-id modname=consumer modtype=library files=consumer uselibs=widget.static\n\
+         %build_linklib mmake=linklibs-widget-static libname=widget.static files=archive\n",
+        &["consumer", "archive"],
+    );
+    graph.add_meta_rule(MetaTargetRule {
+        name: "linklibs-widget.static".to_owned(),
+        dependencies: vec!["source-owned-endpoint".to_owned()],
+    });
+    graph
+        .make_meta_providers
+        .insert("linklibs-widget.static".to_owned());
+
+    let unresolved = graph.resolve_use_libs();
+    assert!(unresolved.is_empty(), "{unresolved:#?}");
+    assert_eq!(
+        graph.targets["consumer-id"].link_libs,
+        ["linklibs-widget-static"]
+    );
+    for consumer in ["consumer-id", "consumer-id-kobj"] {
+        assert!(graph.meta_targets[consumer].contains("linklibs-widget.static"));
+        assert!(!graph.meta_targets[consumer].contains("linklibs-widget-static"));
+    }
+    assert!(graph.meta_targets["linklibs-widget.static"].contains("source-owned-endpoint"));
 }
 
 #[test]
@@ -881,9 +1247,9 @@ fn define_header_without_a_concrete_provider_stays_unresolved() {
 
     let unresolved = graph.resolve_define_headers();
     assert_eq!(
-            unresolved,
-            ["example/options.mk:7: example-options provider missing-provider has no concrete target"]
-        );
+        unresolved,
+        ["example/options.mk:7: example-options provider missing-provider has no concrete target"]
+    );
     assert!(graph.meta_targets.is_empty());
     assert!(graph.define_headers[0].consumers.is_empty());
 }
@@ -1207,8 +1573,10 @@ fn real_tree_packages_resolve_to_exact_runtime_files() {
     files.sort();
 
     let mut graph = DependencyGraph::new();
+    let mut skipped_packages = Vec::new();
     for file in files {
         let parsed = parse_mmakefile_with_dirs_and_context(&file, &root, &dirs, &target).unwrap();
+        skipped_packages.extend(parsed.skipped_packages);
         for target in parsed.targets {
             graph.add_target(target);
         }
@@ -1239,7 +1607,18 @@ fn real_tree_packages_resolve_to_exact_runtime_files() {
         .iter()
         .filter(|package| package.is_kickstart)
         .collect();
-    assert_eq!(packages.len(), 17);
+    // Two source declarations are not closed: Efika spells PKG_HIDDS as
+    // PKD_HIDDS, and i386 leaves LEGACY_RSRCS undefined. Previously partial
+    // packages hid these defects; require explicit refusal rather than infer
+    // absent members. The valid x86-64 deferred path must still be retained.
+    assert_eq!(skipped_packages.len(), 2, "{skipped_packages:#?}");
+    assert!(skipped_packages
+        .iter()
+        .any(|reason| reason.contains("kernel-package-efika-arm") && reason.contains("PKD_HIDDS")));
+    assert!(skipped_packages
+        .iter()
+        .any(|reason| reason.contains("kernel-legacy-pc-i386") && reason.contains("LEGACY_RSRCS")));
+    assert_eq!(packages.len(), 15);
     assert_eq!(kickstarts.len(), 4);
     assert_eq!(
         packages
@@ -1247,7 +1626,8 @@ fn real_tree_packages_resolve_to_exact_runtime_files() {
             .map(|package| package.resolved.len())
             .sum::<usize>(),
         // Vanilla's PC VMD HIDD adds one member to the x86-64 BSP.
-        411
+        // Each formerly partial source declaration contributed two members.
+        407
     );
     for (package_name, expected_members) in [
         ("kernel-package-fs", &["pfs3-handler"][..]),

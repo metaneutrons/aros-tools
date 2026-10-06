@@ -46,6 +46,74 @@ fn bounded_regular_reader_rejects_an_oversized_control_document() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn nofollow_regular_readers_refuse_a_fifo_without_waiting_for_a_writer() {
+    let temporary = tempfile::tempdir().unwrap();
+    let fifo = temporary.path().join("raced-input.csv");
+    // macOS does not expose mkfifoat through rustix; use the POSIX utility
+    // only to create this private test fixture, never in artifact production.
+    let mut create_fifo = std::process::Command::new(which::which("mkfifo").unwrap());
+    create_fifo.arg(&fifo);
+    let created =
+        crate::run_output_with_timeout(&mut create_fifo, 4096, std::time::Duration::from_secs(5))
+            .unwrap();
+    assert!(
+        !created.timed_out && created.status.success(),
+        "{created:?}"
+    );
+    // A child deadline makes regression safe: removing NONBLOCK must fail
+    // this test instead of permanently hanging the test harness.
+    let outputs = ["open", "bounded", "unbounded"]
+        .into_iter()
+        .map(|reader| {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "publication::publication_tests::nofollow_fifo_probe_child",
+                    "--nocapture",
+                ])
+                .env("AROS_TEST_NOFOLLOW_FIFO", &fifo)
+                .env("AROS_TEST_NOFOLLOW_FIFO_READER", reader);
+            let output =
+                crate::run_output_with_timeout(&mut child, 4096, std::time::Duration::from_secs(5))
+                    .unwrap();
+            (reader, output)
+        })
+        .collect::<Vec<_>>();
+    for (reader, output) in outputs {
+        assert!(
+            !output.timed_out,
+            "{reader} regular-file read blocked on a FIFO"
+        );
+        assert!(output.status.success(), "{reader}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(output.stdout.exact_bytes().unwrap()).contains("1 passed"),
+            "{reader} child probe was not selected: {output:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn nofollow_fifo_probe_child() {
+    let Some(path) = std::env::var_os("AROS_TEST_NOFOLLOW_FIFO") else {
+        return;
+    };
+    let error = match std::env::var("AROS_TEST_NOFOLLOW_FIFO_READER")
+        .expect("the parent selects a regular-file reader")
+        .as_str()
+    {
+        "open" => open_regular_file_nofollow(Path::new(&path)).unwrap_err(),
+        "bounded" => measure_regular_file_bounded(Path::new(&path), 1024).unwrap_err(),
+        "unbounded" => measure_regular_file(Path::new(&path)).unwrap_err(),
+        reader => panic!("unknown regular-file reader probe: {reader}"),
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("not a regular file"));
+}
+
 // The advisory-lock tests below must not run beside a test that spawns a
 // child. A spawned child inherits this process's descriptors for the window
 // between fork and exec, and an inherited flock descriptor keeps the lock alive
@@ -1191,6 +1259,96 @@ fn prepared_source_tree_preserves_non_ascii_source_names_without_weakening_outpu
 
 #[cfg(unix)]
 #[test]
+fn prepared_source_exchange_preserves_unicode_but_generated_exchange_remains_strict() {
+    let root = tempfile::tempdir().unwrap();
+    let staging = root.path().join("staging");
+    let destination = root.path().join("published");
+    std::fs::create_dir_all(staging.join("gcc/testsuite")).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(destination.join("old"), b"previous tree").unwrap();
+    std::fs::write(staging.join("gcc/testsuite/你好.d"), b"source fixture").unwrap();
+    let expected = measure_tree_content_cas(&destination).unwrap();
+
+    let error = exchange_prepared_tree_if_unchanged(&staging, &destination, &expected).unwrap_err();
+    assert_eq!(
+        publication_failure_class(&error),
+        PublicationFailureClass::UnsafeTarget
+    );
+    assert_eq!(
+        std::fs::read(destination.join("old")).unwrap(),
+        b"previous tree"
+    );
+
+    exchange_prepared_source_tree_if_unchanged(&staging, &destination, &expected).unwrap();
+    assert_eq!(
+        std::fs::read(destination.join("gcc/testsuite/你好.d")).unwrap(),
+        b"source fixture"
+    );
+    assert_eq!(
+        std::fs::read(staging.join("old")).unwrap(),
+        b"previous tree"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_source_exchange_rejects_changed_destination_and_unsafe_names() {
+    for name in ["你好.d", "unsafe\\name", "unsafe\nname"] {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let destination = root.path().join("published");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(staging.join(name), b"new").unwrap();
+        std::fs::write(destination.join("old"), b"previous").unwrap();
+        let expected = measure_tree_content_cas(&destination).unwrap();
+        std::fs::write(destination.join("old"), b"concurrent change").unwrap();
+        assert!(
+            exchange_prepared_source_tree_if_unchanged(&staging, &destination, &expected).is_err()
+        );
+        assert_eq!(
+            std::fs::read(destination.join("old")).unwrap(),
+            b"concurrent change"
+        );
+        if name != "你好.d" {
+            let current = measure_tree_content_cas(&destination).unwrap();
+            assert!(
+                exchange_prepared_source_tree_if_unchanged(&staging, &destination, &current)
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(staging.join(name)).unwrap(), b"new");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_source_exchange_rejects_unicode_casefold_collisions() {
+    for (first, second) in [("Ä.d", "ä.d"), ("café.d", "cafe\u{301}.d")] {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let destination = root.path().join("published");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(staging.join(first), b"one").unwrap();
+        std::fs::write(staging.join(second), b"two").unwrap();
+        if std::fs::read_dir(&staging).unwrap().count() != 2 {
+            continue;
+        }
+        std::fs::write(destination.join("old"), b"preserved").unwrap();
+        let expected = measure_tree_content_cas(&destination).unwrap();
+        assert!(
+            exchange_prepared_source_tree_if_unchanged(&staging, &destination, &expected).is_err()
+        );
+        assert_eq!(
+            std::fs::read(destination.join("old")).unwrap(),
+            b"preserved"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn prepared_source_tree_rejects_unsafe_separator_names() {
     let root = tempfile::tempdir().unwrap();
     let staging = root.path().join("staging");
@@ -1919,4 +2077,45 @@ fn bounded_snapshot_refuses_a_tree_that_exceeds_its_entry_budget() {
     let error = measure_tree_content_cas_bounded(&tree, TreeTraversalLimits::new(1, 1024).unwrap())
         .unwrap_err();
     assert!(error.to_string().contains("entry traversal limit"));
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_metadata_exception_binds_every_other_name_kind_mode_and_byte() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("tree");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("index"), b"before").unwrap();
+    std::fs::write(root.join("source"), b"source").unwrap();
+    let limits = TreeTraversalLimits::new(100, 1024).unwrap();
+    let before = measure_tree_content_cas_bounded(&root, limits).unwrap();
+    let check = || {
+        let after = measure_tree_content_cas_bounded(&root, limits).unwrap();
+        before.matches_content_except_regular_file(&after, "index")
+    };
+    std::fs::write(root.join("index"), b"changed content and length").unwrap();
+    assert!(check());
+    std::fs::write(root.join("source"), b"changed source").unwrap();
+    assert!(!check());
+    std::fs::write(root.join("source"), b"source").unwrap();
+    std::fs::write(root.join("added"), b"new").unwrap();
+    assert!(!check());
+    std::fs::remove_file(root.join("added")).unwrap();
+    let mode = std::fs::metadata(root.join("index"))
+        .unwrap()
+        .permissions()
+        .mode();
+    std::fs::set_permissions(
+        root.join("index"),
+        std::fs::Permissions::from_mode(mode ^ 0o100),
+    )
+    .unwrap();
+    assert!(!check());
+    std::fs::remove_file(root.join("index")).unwrap();
+    assert!(!check());
+    symlink("source", root.join("index")).unwrap();
+    assert!(!check());
+    let after = measure_tree_content_cas_bounded(&root, limits).unwrap();
+    assert!(!before.matches_content_except_regular_file(&after, "missing"));
 }

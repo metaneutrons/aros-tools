@@ -42,10 +42,12 @@ the source's generated rules. Mako and MarkupSafe are mandatory locked Python
 imports. A selected source that also needs PyYAML must declare its `yaml` import
 and exact archive/version in the lock; ambient Python packages are not accepted.
 GCC's format lists are narrowed to exactly one hash-verified lock entry before
-the source-owned fetch helper runs, never used as transport fallbacks. GNU
+the native Rust fetch bridge runs, never used as transport fallbacks. GNU
 cache subdirectories are stamp namespaces, not alternative source locations.
-Both compiler families hand the helper a private verified source copy and
-enforce offline checksum validation. LLVM keeps its two-package Python closure.
+Both compiler families give the Rust fetcher a private verified source copy and
+enforce offline checksum validation. The bridge translates the source's
+MetaMake fetch arguments without executing its `fetch.sh`; patch paths must
+remain inside the measured source snapshot. LLVM keeps its two-package Python closure.
 
 ## Prepare exact inputs
 
@@ -168,6 +170,29 @@ For GNU builds, configure records host compiler prefix maps in `HOST_*FLAGS`.
 The compiler-build process does not export `CFLAGS` or `CXXFLAGS`: MetaMake
 owns the target ISA flags, which must not reach host-built Binutils or GCC.
 LLVM builds retain their existing compiler environment.
+Compiler caching defaults to `off`, including release qualification. To reuse
+host C/C++ compilation during local development, prepare a managed local
+namespace and add `--compiler-cache sccache` (or `ccache`) to the build command:
+
+```sh
+aros cache compiler prepare --backend sccache
+# Add to the toolchain build invocation above:
+# --compiler-cache sccache
+```
+
+`--compiler-cache auto` selects a prepared local sccache namespace first, then
+ccache, or remains off. An explicit `--compiler-cache-dir DIR` requires an
+explicit backend and an already prepared namespace outside all producer roots.
+Offline execution remains mandatory; ambient cache settings and remote storage
+are not imported. The compiler phase receives controlled host C/C++ launchers;
+target runtime compilation, assembly, linking and the Rust collector are not
+cached by this integration. Receipts bind the backend executable, host
+compilers and local configuration. Resume requires the same bindings and
+unchanged launchers. Use `--compiler-cache off` for independent A/B builds.
+On Unix, sccache needs short paths for both its managed socket and the startup
+socket below the owned work directory. An oversized path is rejected before
+configure; select shorter roots or use ccache instead.
+
 GNU configure and MetaMake also resolve recursive `make` through a private
 alias to the exact preflight-selected GNU Make, rather than a second executable
 found elsewhere on the host PATH.

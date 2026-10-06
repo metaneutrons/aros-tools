@@ -32,6 +32,38 @@ pub(super) struct TreeNodeSnapshot {
 }
 
 impl TreeContentCas {
+    /// Whether this snapshot contains any symbolic links.
+    #[must_use]
+    pub fn has_symlinks(&self) -> bool {
+        self.entries.values().any(|entry| entry.snapshot.kind == 3)
+    }
+
+    /// Compare portable tree content while permitting byte/size changes in one
+    /// exact regular file. Names, node kinds and modes remain immutable, even
+    /// for that file. Missing, link, directory or renamed exceptions fail.
+    /// This is for explicitly mutable producer metadata, not input validation.
+    #[must_use]
+    pub fn matches_content_except_regular_file(&self, other: &Self, relative: &str) -> bool {
+        let key = relative.as_bytes();
+        let (Some(left), Some(right)) = (self.entries.get(key), other.entries.get(key)) else {
+            return false;
+        };
+        if left.snapshot.kind != 1
+            || right.snapshot.kind != 1
+            || left.snapshot.mode != right.snapshot.mode
+            || self.entries.len() != other.entries.len()
+        {
+            return false;
+        }
+        self.entries.iter().all(|(path, before)| {
+            other.entries.get(path).is_some_and(|after| {
+                before.snapshot.kind == after.snapshot.kind
+                    && before.snapshot.mode == after.snapshot.mode
+                    && (path.as_slice() == key || before.content == after.content)
+            })
+        })
+    }
+
     /// Number of filesystem objects below the measured root.
     #[must_use]
     pub fn entry_count(&self) -> usize {

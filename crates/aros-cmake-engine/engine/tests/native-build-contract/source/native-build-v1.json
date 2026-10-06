@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "profile": "esp32p4-d1001",
+  "board": "d1001",
+  "source_baseline": "763a536f26a5e94176c821d48cedbcbff03b4189",
+  "qualification": "experimental-unqualified",
+  "inputs": [
+    {
+      "path": "native-contract-input.txt",
+      "sha256": "4525dca729f5efec3b68b0ac14b4bbadc7533934175a55a99bc0f642f9b5b9b4"
+    }
+  ],
+  "abi": {
+    "source_cpu": "riscv",
+    "target_triple": "riscv-aros",
+    "isa": "rv32imafc_zicsr_zifencei_zaamo_zalrsc",
+    "abi": "ilp32f",
+    "code_model": "medany",
+    "flavour": "standalone",
+    "platform_smp": false,
+    "use_mmu": false
+  },
+  "core": {
+    "recipe": "native-contract-input.txt",
+    "linker_script": "native-contract-input.txt",
+    "resources": ["kernel", "task"],
+    "libraries": ["exec", "debug"],
+    "devices": ["timer", "flashdisk"],
+    "link_libraries": ["exec", "arossupport", "autoinit", "libinit", "amiga", "stdc.static"],
+    "compiler_runtime_role": "libgcc",
+    "residency_check": "native-contract-input.txt",
+    "residency_policy": {
+      "algorithm": "riscv32-xip-v1", "section": ".sramtext",
+      "flash_start": 1073741824, "flash_end": 1140850688,
+      "sram_start": 1341128704, "sram_end": 1341652992
+    }
+  },
+  "package": {
+    "recipe": "native-contract-input.txt",
+    "format": "aros-pkg-v1",
+    "target": "kernel-package-esp32p4-riscv",
+    "limit_from_board": "P4_BOARD_PKG_LIMIT"
+  },
+  "media": {
+    "chip": "esp32p4",
+    "board_rules": "native-contract-input.txt",
+    "partition_table": "native-contract-input.txt",
+    "core_partition": "ota_0",
+    "package_partition": "arosbsp",
+    "development_volume_offset_from_board": "P4_BOARD_FLASHDISK_OFFSET",
+    "bootloader_configuration": "native-contract-input.txt",
+    "bootloader_patch": "native-contract-input.txt",
+    "idf_version": "6.0.1"
+  }
+}

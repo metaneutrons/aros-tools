@@ -216,11 +216,11 @@ jobs:
           set -euo pipefail
           if [[ "$RUNNER_OS" == Linux ]]; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq xorriso make bison flex patch pkg-config ninja-build
+            sudo apt-get install -y -qq xorriso make bison flex patch pkg-config ninja-build lld gobjc
           else
             # The GNU lifecycle fixtures require GNU Make >=4, not Apple's 3.81.
             # Homebrew's make formula exposes the selected executable as gmake.
-            brew install xorriso make bison flex pkg-config ninja
+            brew install xorriso make bison flex pkg-config ninja gnu-sed
             gmake --version
           fi
           xorriso -version

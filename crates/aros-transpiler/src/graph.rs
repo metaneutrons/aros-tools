@@ -16,6 +16,18 @@ use aros_common::{ArosError, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
+#[path = "graph_plain_headers.rs"]
+mod plain_headers;
+#[path = "graph_sdk_assets.rs"]
+mod sdk_assets;
+#[path = "graph_source_archives.rs"]
+mod source_archives;
+#[path = "graph_source_headers.rs"]
+mod source_headers;
+pub use sdk_assets::SdkProgramOutput;
+pub(crate) use source_archives::private_source_object_owner;
+pub(crate) use source_headers::private_source_directory_owner;
+
 /// A script-generated file bound to the targets that consume it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedScriptOutput {
@@ -39,7 +51,61 @@ pub struct ResolvedScriptOutput {
 /// Dependency Graph for parallel target building and cycle detection.
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
+    pub assembly_headers: Vec<crate::assembly_headers::AssemblyHeaderDecl>,
+    pub arch_endpoint_effects: Vec<crate::arch_endpoint_effects::ArchEndpointEffect>,
+    /// Selected client archive endpoints in their source declaration spelling,
+    /// after concrete selector resolution. None keeps whole-tree export unchanged.
+    pub native_selected_client_archives: Option<BTreeSet<String>>,
+    pub sdk_asset_rules: Vec<crate::sdk_asset_rules::SdkAssetRuleDecl>,
+    pub sdk_program_outputs: Vec<SdkProgramOutput>,
+    /// Native source-owned host-header aggregates, including exact mirror policy.
+    pub host_header_aggregates: Vec<crate::host_header_aggregates::HostHeaderAggregateDecl>,
+    /// Source-owned directory preparation, not inferred empty aliases.
+    pub directory_setups: Vec<crate::directory_setup::DirectorySetupDecl>,
+    /// Closed header-stamp rules with explicit genmodule outputs.
+    pub genmodule_header_rules: Vec<crate::genmodule_header_rules::GenmoduleHeaderRuleDecl>,
+    /// Named source-owned GENMODULE writefiles producers.
+    pub genmodule_writefiles_rules:
+        Vec<crate::genmodule_writefiles_rules::GenmoduleWritefilesRuleDecl>,
+    pub host_file_generators: Vec<aros_common::native_host_generator::NativeHostFileGenerator>,
+    pub host_file_generator_source_digests: std::collections::BTreeMap<String, String>,
+    /// Named host-tool/header aggregates and their directory setup endpoints.
+    pub host_header_rules: Vec<crate::host_header_rules::HostHeaderRuleDecl>,
+    /// SDK text outputs owned by concrete source recipes and fetch inputs.
+    pub sdk_text_rules: Vec<crate::sdk_text_rules::SdkTextRuleDecl>,
+    /// Source-owned SDK headers generated from local SFD descriptions.
+    pub sfd_header_rules: Vec<crate::sfd_header_rules::SfdHeaderRuleDecl>,
+    /// Complete multi-output text products with source/fetch ownership.
+    pub source_text_rules: Vec<crate::source_text_rules::SourceTextRuleDecl>,
+    /// Local source-value products, not guessed constants or shell execution.
+    pub source_value_rules: Vec<crate::source_value_rules::SourceValueRuleDecl>,
+    pub sdk_file_copies: Vec<crate::sdk_file_copies::SdkFileCopyDecl>,
+    pub sdk_object_groups: Vec<crate::sdk_objects::SdkObjectGroupDecl>,
+    pub literal_object_groups: Vec<crate::literal_objects::LiteralObjectGroupDecl>,
+    /// Diagnostic/source provenance only; these are intentionally absent from
+    /// native provider registries until all file prerequisites are bound.
+    pub source_archive_projections: Vec<crate::source_archive_rules::SourceArchiveDecl>,
+    pub source_archive_commands: std::collections::BTreeMap<
+        (String, String),
+        crate::source_archive_command::SourceArchiveCommand,
+    >,
+    /// Complete, typed ordinary archives; diagnostic projections remain
+    /// separate and cannot enter this collection by path matching alone.
+    pub source_archives: Vec<crate::source_archive_binding::BoundSourceArchive>,
+    pub source_compile_projections: Vec<crate::source_compile_rules::SourceCompileGroupDecl>,
+    pub layered_header_projections: Vec<crate::layered_header_copies::LayeredHeaderCopyDecl>,
+    pub source_header_pipelines: Vec<crate::source_header_pipeline::SourceHeaderPipelineDecl>,
+    pub source_directory_groups: std::collections::BTreeMap<
+        (String, String),
+        crate::source_directory_rules::SourceDirectoryGroupDecl,
+    >,
+    /// Only complete source-owned copy aggregates, with every local
+    /// prerequisite bound to a concrete producer, are executable providers.
+    pub source_layered_headers: Vec<crate::layered_header_copies::LayeredHeaderCopyDecl>,
     pub targets: HashMap<String, TargetDefinition>,
+    /// Source-declaration identities admitted only by inventory preparation.
+    /// These are never compilation targets and are never rendered as a graph.
+    pub inventory_targets: Vec<crate::ast::InventoryTargetIdentity>,
     /// The compiler spec's default link set, resolved to concrete archive
     /// targets in spec order. Empty until `resolve_default_link_set` runs.
     pub default_link_set: Vec<ResolvedDefaultLinkItem>,
@@ -74,6 +140,12 @@ pub struct DependencyGraph {
     /// Strictly capability-checked fetched Python output groups.
     pub python_outputs: Vec<PythonOutputsDecl>,
     pub meta_targets: HashMap<String, HashSet<String>>,
+    /// Exact source-written edges, including duplicates of implicit aliases.
+    /// Typed library resolution must not overwrite a handwritten prerequisite.
+    pub explicit_meta_edges: HashSet<(String, String)>,
+    /// Source-declared nonvirtual providers, merged by union: one real Make
+    /// provider prevents an empty virtual declaration from proving a no-op.
+    pub make_meta_providers: HashSet<String>,
     /// Every unique `%build_icons` mmake id. This is separate from `targets`:
     /// icons are generated runtime resources, not compiled modules.
     pub icon_targets: HashMap<String, IconTarget>,
@@ -152,7 +224,9 @@ fn define_header_compile_targets(mmake: &str, target: &TargetDefinition) -> Vec<
         // These declarations materialise only utility/package orchestration
         // under their mmake id. An ABI's compiling target is its generated
         // client archive and does not consume the declaration's `uselibs`.
-        ModuleType::Abi | ModuleType::Package | ModuleType::Custom => Vec::new(),
+        ModuleType::Abi | ModuleType::ModuleHeaders | ModuleType::Package | ModuleType::Custom => {
+            Vec::new()
+        }
         _ => vec![mmake.to_owned()],
     }
 }
@@ -239,7 +313,7 @@ fn catalog_compile_target_for_source(target: &TargetDefinition, source: &str) ->
         ModuleType::ProgramGroup => Path::new(source)
             .file_stem()
             .map(|stem| format!("{}-{}", target.mmake_name, stem.to_string_lossy())),
-        ModuleType::Abi | ModuleType::Package => None,
+        ModuleType::Abi | ModuleType::ModuleHeaders | ModuleType::Package => None,
         _ => Some(target.mmake_name.clone()),
     }
 }
@@ -280,23 +354,46 @@ fn arch_compatible(candidate: Option<&(String, String)>, ctx: Option<&(String, S
 /// resolution match an authoritative filename rather than a potentially
 /// same-named module of another kind.
 fn target_runtime_name(target: &TargetDefinition) -> Option<String> {
+    declaration_runtime_name(
+        &target.module_type,
+        &target.target_name,
+        target.mod_suffix.as_deref(),
+        target.declared_mod_type.as_deref(),
+    )
+}
+
+fn inventory_runtime_name(target: &crate::ast::InventoryTargetIdentity) -> Option<String> {
+    declaration_runtime_name(
+        &target.module_type,
+        &target.target_name,
+        target.mod_suffix.as_deref(),
+        target.declared_mod_type.as_deref(),
+    )
+}
+
+fn declaration_runtime_name(
+    module_type: &ModuleType,
+    name: &str,
+    mod_suffix: Option<&str>,
+    declared_mod_type: Option<&str>,
+) -> Option<String> {
     // An ABI skeleton publishes headers and a static link stub, not a runtime
     // module. Its declared modtype must therefore never make it eligible for a
     // package member such as `library=foo`.
-    if matches!(target.module_type, ModuleType::Abi) {
+    if matches!(module_type, ModuleType::Abi | ModuleType::ModuleHeaders) {
         return None;
     }
-    if let Some(suffix) = target.mod_suffix.as_deref() {
-        return Some(runtime_name(suffix, &target.target_name));
+    if let Some(suffix) = mod_suffix {
+        return Some(runtime_name(suffix, name));
     }
-    if let Some(declared) = target.declared_mod_type.as_deref() {
+    if let Some(declared) = declared_mod_type {
         return match declared {
-            "printer" => Some(target.target_name.clone()),
-            "usbclass" | "btclass" => Some(runtime_name("class", &target.target_name)),
-            kind => Some(runtime_name(kind, &target.target_name)),
+            "printer" => Some(name.to_owned()),
+            "usbclass" | "btclass" => Some(runtime_name("class", name)),
+            kind => Some(runtime_name(kind, name)),
         };
     }
-    let kind = match target.module_type {
+    let kind = match module_type {
         ModuleType::Library => "library",
         ModuleType::Device => "device",
         ModuleType::Resource => "resource",
@@ -306,7 +403,22 @@ fn target_runtime_name(target: &TargetDefinition) -> Option<String> {
         ModuleType::Mcc => "mcc",
         _ => return None,
     };
-    Some(runtime_name(kind, &target.target_name))
+    Some(runtime_name(kind, name))
+}
+
+fn inventory_has_public_link_archive(target: &crate::ast::InventoryTargetIdentity) -> bool {
+    match target.module_type {
+        ModuleType::Abi => true,
+        ModuleType::Library => {
+            target.genmodule_only
+                || target
+                    .genmodule_linklibs
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.enabled)
+        }
+        ModuleType::LinkLib => target.canonical_linklib_output || target.canonical_linklib_eligible,
+        _ => false,
+    }
 }
 
 /// Whether a raw `-l<name>` consumer can find this declaration's archive in
@@ -376,6 +488,8 @@ pub struct ResolvedDefaultLinkItem {
     pub require_present: Vec<String>,
 }
 
+#[path = "graph_audit.rs"]
+mod audit;
 #[path = "graph_generated.rs"]
 mod generated;
 #[path = "graph_inventory.rs"]
@@ -384,6 +498,11 @@ mod inventory;
 mod linking;
 #[path = "graph_meta.rs"]
 mod meta;
+#[path = "graph_selection.rs"]
+mod selection;
+pub(crate) use selection::endpoint as native_endpoint;
+
+pub use audit::NativeGraphAudit;
 
 #[cfg(test)]
 #[path = "graph_tests.rs"]

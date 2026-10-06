@@ -1,6 +1,19 @@
 //! Durable no-clobber tree staging, recovery, and prepared-tree syncing.
 
 use super::*;
+use std::io::Read as _;
+use unicode_normalization::UnicodeNormalization;
+
+mod measure;
+mod private;
+
+pub(super) use self::measure::{
+    measure_source_tree_content_cas_bounded, stable_measure_tree_content_at,
+    stable_measure_tree_content_at_bounded,
+};
+pub(in crate::publication) use self::private::validate_private_directory_nofollow;
+pub(super) use self::private::{validate_private_ancestor_chain, validate_private_regular_file};
+use self::{measure::directory_entry_names_from_keys, private::validate_private_removal_boundary};
 
 pub(in crate::publication) fn publish_prepared_tree_noclobber(
     staging: &Path,
@@ -255,208 +268,6 @@ pub(in crate::publication) fn remove_tree_from_snapshot_nofollow(
     }
     rfs::unlinkat(&parent.fd, Path::new(&parent.leaf), AtFlags::REMOVEDIR)?;
     rfs::fsync(&parent.fd)?;
-    Ok(())
-}
-
-/// Prove that destructive cleanup is confined to a non-shared Unix namespace.
-///
-/// Descriptor-relative traversal prevents symlink escapes, while this check
-/// prevents a group or world principal from modifying an otherwise verified
-/// path through a writable ancestor or payload object. Sticky ancestors such
-/// as `/tmp` are permitted because they protect entries owned by the store
-/// owner; writable directories inside the managed tree are never permitted.
-/// POSIX cannot express an identity-bound unlink; callers therefore use this
-/// as the explicit trust boundary for the short revalidation-to-unlink
-/// interval.
-fn validate_private_removal_boundary(
-    target: &Path,
-    directory: &OwnedFd,
-    limits: TreeTraversalLimits,
-) -> std::io::Result<()> {
-    validate_private_ancestor_chain(target)?;
-    let mut budget = TreeMeasurementBudget::bounded(limits);
-    validate_private_tree(directory, target, &mut budget)
-}
-
-pub(super) fn validate_private_ancestor_chain(target: &Path) -> std::io::Result<()> {
-    let parent = target.parent().ok_or_else(|| {
-        std::io::Error::new(
-            ErrorKind::InvalidInput,
-            format!("tree removal target '{}' has no parent", target.display()),
-        )
-    })?;
-    let mut directory = rfs::open(
-        "/",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
-    validate_private_ancestor_directory(&rfs::fstat(&directory)?, Path::new("/"))?;
-    let mut display = PathBuf::from("/");
-    for component in parent.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => {
-                let next = rfs::openat(
-                    &directory,
-                    Path::new(name),
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )?;
-                display.push(name);
-                validate_private_ancestor_directory(&rfs::fstat(&next)?, &display)?;
-                directory = next;
-            }
-            Component::Prefix(_) | Component::CurDir | Component::ParentDir => {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidInput,
-                    format!(
-                        "tree removal target '{}' is not absolute and normalized",
-                        target.display()
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(in crate::publication) fn validate_private_directory_nofollow(
-    path: &Path,
-) -> std::io::Result<()> {
-    validate_private_ancestor_chain(path)?;
-    let directory = rfs::open(
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
-    validate_private_directory(&rfs::fstat(&directory)?, path)
-}
-
-fn validate_private_tree(
-    directory: &OwnedFd,
-    display_path: &Path,
-    budget: &mut TreeMeasurementBudget,
-) -> std::io::Result<()> {
-    let root = rfs::fstat(directory)?;
-    validate_private_directory(&root, display_path)?;
-    let root_identity = identity_from_stat(&root);
-    let names = directory_entry_names_with_budget(directory, budget)?;
-    for name in names {
-        let path = display_path.join(&name);
-        let stat = rfs::statat(directory, Path::new(&name), AtFlags::SYMLINK_NOFOLLOW)?;
-        let file_type = rfs::FileType::from_raw_mode(stat.st_mode);
-        if file_type.is_file() {
-            validate_private_regular_file(&stat, &path)?;
-            continue;
-        }
-        if file_type.is_symlink() {
-            continue;
-        }
-        if !file_type.is_dir() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "refusing to remove unsupported filesystem object '{}'",
-                    path.display()
-                ),
-            ));
-        }
-        let child = rfs::openat(
-            directory,
-            Path::new(&name),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?;
-        if identity_from_stat(&rfs::fstat(&child)?) != identity_from_stat(&stat) {
-            return Err(std::io::Error::other(format!(
-                "directory '{}' changed while checking its removal trust boundary",
-                path.display()
-            )));
-        }
-        validate_private_tree(&child, &path, budget)?;
-    }
-    if identity_from_stat(&rfs::fstat(directory)?) != root_identity {
-        return Err(std::io::Error::other(format!(
-            "directory '{}' changed while checking its removal trust boundary",
-            display_path.display()
-        )));
-    }
-    Ok(())
-}
-
-fn validate_private_directory(stat: &rfs::Stat, path: &Path) -> std::io::Result<()> {
-    if !rfs::FileType::from_raw_mode(stat.st_mode).is_dir() {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidInput,
-            format!("removal boundary '{}' is not a directory", path.display()),
-        ));
-    }
-    validate_not_group_or_world_writable(stat, path, "directory")
-}
-
-/// Validate an ancestor outside the managed tree.
-///
-/// A sticky directory can be writable without allowing another non-privileged
-/// principal to rename or remove the store owner's entry. This admits standard
-/// private temporary paths below `/tmp`, while `validate_private_tree` still
-/// rejects every writable directory that is part of the managed envelope.
-fn validate_private_ancestor_directory(stat: &rfs::Stat, path: &Path) -> std::io::Result<()> {
-    if !rfs::FileType::from_raw_mode(stat.st_mode).is_dir() {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidInput,
-            format!("removal ancestor '{}' is not a directory", path.display()),
-        ));
-    }
-    #[allow(
-        clippy::useless_conversion,
-        reason = "rustix mode_t width differs between supported Unix targets"
-    )]
-    let mode = u32::from(stat.st_mode);
-    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
-        return Err(std::io::Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "refusing to remove through ancestor '{}' because it is group- or world-writable without the sticky bit",
-                path.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_private_regular_file(stat: &rfs::Stat, path: &Path) -> std::io::Result<()> {
-    validate_not_group_or_world_writable(stat, path, "regular file")?;
-    if stat.st_nlink != 1 {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "refusing to remove multiply linked regular file '{}'; its content may be reachable outside the managed tree",
-                path.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_not_group_or_world_writable(
-    stat: &rfs::Stat,
-    path: &Path,
-    kind: &str,
-) -> std::io::Result<()> {
-    #[allow(
-        clippy::useless_conversion,
-        reason = "rustix mode_t width differs between supported Unix targets"
-    )]
-    let mode = u32::from(stat.st_mode);
-    if mode & 0o022 != 0 {
-        return Err(std::io::Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "refusing to remove {kind} '{}' because it is group- or world-writable",
-                path.display()
-            ),
-        ));
-    }
     Ok(())
 }
 
@@ -1440,7 +1251,7 @@ pub(super) fn sync_prepared_tree(
                 let fd = rfs::openat(
                     directory,
                     Path::new(name),
-                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                     Mode::empty(),
                 )?;
                 let opened = prepared_snapshot(&rfs::fstat(&fd)?)?;
@@ -1574,7 +1385,7 @@ fn preserved_source_name_collision_key(name: &OsStr) -> std::io::Result<Vec<u8>>
 
     if let Some(name) = name.to_str() {
         return Ok(name
-            .chars()
+            .nfc()
             .flat_map(char::to_lowercase)
             .collect::<String>()
             .into_bytes());
@@ -1645,172 +1456,19 @@ fn tree_node_snapshot(stat: &rfs::Stat) -> std::io::Result<TreeNodeSnapshot> {
     })
 }
 
-fn measure_tree_content_at(
-    directory: &OwnedFd,
-    display_path: &Path,
-    prefix: &[u8],
-    budget: &mut TreeMeasurementBudget,
-) -> std::io::Result<BTreeMap<Vec<u8>, TreeContentEntry>> {
-    let directory_before = rfs::fstat(directory)?;
-    let directory_identity = identity_from_stat(&directory_before);
-    let names = directory_entry_names_with_budget(directory, budget)?;
-    let mut entries = BTreeMap::new();
-    for name in names {
-        let name_bytes = name.as_bytes();
-        if name_bytes.contains(&b'/') || name_bytes.is_empty() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "tree contains an invalid filesystem component",
-            ));
-        }
-        let mut relative = prefix.to_owned();
-        if !relative.is_empty() {
-            relative.push(b'/');
-        }
-        relative.extend_from_slice(name_bytes);
-        let child_display = display_path.join(&name);
-        let stat_before = rfs::statat(directory, Path::new(&name), AtFlags::SYMLINK_NOFOLLOW)?;
-        let prepared = prepared_snapshot(&stat_before)?;
-        let snapshot = tree_node_snapshot(&stat_before)?;
-        let content = match prepared.kind {
-            PreparedNodeKind::File => {
-                budget.reserve_regular_file_bytes(prepared.size, &child_display)?;
-                let fd = rfs::openat(
-                    directory,
-                    Path::new(&name),
-                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )?;
-                if prepared_snapshot(&rfs::fstat(&fd)?)? != prepared {
-                    return Err(std::io::Error::other(format!(
-                        "tree file '{}' changed before hashing",
-                        child_display.display()
-                    )));
-                }
-                let mut file = std::fs::File::from(fd);
-                let digest = sha256_reader(&mut file)?.digest;
-                if prepared_snapshot(&rfs::fstat(&file)?)? != prepared {
-                    return Err(std::io::Error::other(format!(
-                        "tree file '{}' changed while hashing",
-                        child_display.display()
-                    )));
-                }
-                Some(digest)
-            }
-            PreparedNodeKind::Symlink => {
-                let target = rfs::readlinkat(directory, Path::new(&name), Vec::new())?;
-                if prepared_snapshot(&rfs::statat(
-                    directory,
-                    Path::new(&name),
-                    AtFlags::SYMLINK_NOFOLLOW,
-                )?)? != prepared
-                {
-                    return Err(std::io::Error::other(format!(
-                        "tree link '{}' changed while hashing",
-                        child_display.display()
-                    )));
-                }
-                Some(sha256_bytes(target.as_bytes()))
-            }
-            PreparedNodeKind::Directory => {
-                let fd = rfs::openat(
-                    directory,
-                    Path::new(&name),
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )?;
-                if prepared_snapshot(&rfs::fstat(&fd)?)? != prepared {
-                    return Err(std::io::Error::other(format!(
-                        "tree directory '{}' changed before traversal",
-                        child_display.display()
-                    )));
-                }
-                let children = measure_tree_content_at(&fd, &child_display, &relative, budget)?;
-                if prepared_snapshot(&rfs::fstat(&fd)?)? != prepared {
-                    return Err(std::io::Error::other(format!(
-                        "tree directory '{}' changed while traversing",
-                        child_display.display()
-                    )));
-                }
-                for (path, child) in children {
-                    if entries.insert(path, child).is_some() {
-                        return Err(std::io::Error::other("duplicate tree entry"));
-                    }
-                }
-                None
-            }
-        };
-        if entries
-            .insert(relative, TreeContentEntry { snapshot, content })
-            .is_some()
-        {
-            return Err(std::io::Error::other("duplicate tree entry"));
-        }
-    }
-    if identity_from_stat(&rfs::fstat(directory)?) != directory_identity
-        || directory_entry_names_capped(directory, budget.limits.map(|limits| limits.max_entries))?
-            != directory_entry_names_from_keys(&entries, prefix)
-    {
-        return Err(std::io::Error::other(format!(
-            "tree directory '{}' changed while measuring content",
-            display_path.display()
-        )));
-    }
-    Ok(entries)
-}
+#[cfg(test)]
+mod source_name_tests {
+    use super::*;
 
-pub(super) fn stable_measure_tree_content_at(
-    directory: &OwnedFd,
-    display_path: &Path,
-) -> std::io::Result<BTreeMap<Vec<u8>, TreeContentEntry>> {
-    stable_measure_tree_content_at_bounded(directory, display_path, None)
-}
-
-pub(super) fn stable_measure_tree_content_at_bounded(
-    directory: &OwnedFd,
-    display_path: &Path,
-    limits: Option<TreeTraversalLimits>,
-) -> std::io::Result<BTreeMap<Vec<u8>, TreeContentEntry>> {
-    let mut first_budget = limits.map_or_else(
-        TreeMeasurementBudget::unrestricted,
-        TreeMeasurementBudget::bounded,
-    );
-    let first = measure_tree_content_at(directory, display_path, &[], &mut first_budget)?;
-    test_pause_point("tree-content-cas-between-passes");
-    let mut second_budget = limits.map_or_else(
-        TreeMeasurementBudget::unrestricted,
-        TreeMeasurementBudget::bounded,
-    );
-    let second = measure_tree_content_at(directory, display_path, &[], &mut second_budget)?;
-    if first != second {
-        return Err(std::io::Error::other(format!(
-            "tree '{}' changed between complete content measurement passes",
-            display_path.display()
-        )));
+    #[test]
+    fn source_collision_keys_normalize_unicode_without_rewriting_names() {
+        assert_eq!(
+            preserved_source_name_collision_key(OsStr::new("café.d")).unwrap(),
+            preserved_source_name_collision_key(OsStr::new("cafe\u{301}.d")).unwrap()
+        );
+        assert_eq!(
+            preserved_source_name_collision_key(OsStr::new("CAFÉ.d")).unwrap(),
+            preserved_source_name_collision_key(OsStr::new("cafe\u{301}.d")).unwrap()
+        );
     }
-    Ok(second)
-}
-
-fn directory_entry_names_from_keys(
-    entries: &BTreeMap<Vec<u8>, TreeContentEntry>,
-    prefix: &[u8],
-) -> BTreeSet<OsString> {
-    let mut names = BTreeSet::new();
-    for path in entries.keys() {
-        let remainder = if prefix.is_empty() {
-            path.as_slice()
-        } else {
-            path.strip_prefix(prefix)
-                .and_then(|value| value.strip_prefix(b"/"))
-                .unwrap_or_default()
-        };
-        let name = remainder
-            .split(|byte| *byte == b'/')
-            .next()
-            .unwrap_or_default();
-        if !name.is_empty() {
-            names.insert(OsStr::from_bytes(name).to_os_string());
-        }
-    }
-    names
 }

@@ -45,6 +45,12 @@ pub struct BuildArgs {
     /// Existing prepared source cache; it is never populated by this command.
     #[arg(long)]
     pub cache_dir: PathBuf,
+    /// Managed local cache for host C/C++ compilation; off keeps qualification cold.
+    #[arg(long, value_enum, default_value = "off")]
+    pub compiler_cache: crate::build_cache::BuildCompilerCache,
+    /// Prepared compiler-cache namespace; requires an explicit sccache or ccache backend.
+    #[arg(long)]
+    pub compiler_cache_dir: Option<PathBuf>,
     /// Positive producer parallelism.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub jobs: u64,
@@ -83,6 +89,17 @@ pub async fn run(args: BuildArgs) -> miette::Result<()> {
         work_dir: args.work_dir,
         output_dir: args.output_dir,
         cache_dir: args.cache_dir,
+        compiler_cache: match args.compiler_cache {
+            crate::build_cache::BuildCompilerCache::Auto => aros_cache::CompilerBackendChoice::Auto,
+            crate::build_cache::BuildCompilerCache::Off => aros_cache::CompilerBackendChoice::Off,
+            crate::build_cache::BuildCompilerCache::Sccache => {
+                aros_cache::CompilerBackendChoice::Sccache
+            }
+            crate::build_cache::BuildCompilerCache::Ccache => {
+                aros_cache::CompilerBackendChoice::Ccache
+            }
+        },
+        compiler_cache_dir: args.compiler_cache_dir,
         jobs: args.jobs,
         timeout_seconds: args.timeout_seconds,
         release_id: args.release_id,
@@ -126,4 +143,59 @@ pub async fn run(args: BuildArgs) -> miette::Result<()> {
     };
     aros_common::outputln!("{output}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct BuildParser {
+        #[command(flatten)]
+        args: BuildArgs,
+    }
+
+    #[test]
+    fn producer_compiler_cache_defaults_off_and_accepts_explicit_backends() {
+        let arguments = [
+            "build",
+            "--preset",
+            "fixture",
+            "--recipe",
+            "/recipe",
+            "--source-dir",
+            "/source",
+            "--producer-dir",
+            "/producer",
+            "--tools-dir",
+            "/tools",
+            "--work-dir",
+            "/work",
+            "--output-dir",
+            "/output",
+            "--cache-dir",
+            "/sources",
+            "--jobs",
+            "1",
+            "--timeout-seconds",
+            "60",
+            "--release-id",
+            "local",
+        ];
+        let parsed = BuildParser::try_parse_from(arguments).unwrap();
+        assert!(matches!(
+            parsed.args.compiler_cache,
+            crate::build_cache::BuildCompilerCache::Off
+        ));
+        assert!(parsed.args.compiler_cache_dir.is_none());
+        for backend in ["auto", "off", "sccache", "ccache"] {
+            let mut explicit = arguments.to_vec();
+            explicit.extend(["--compiler-cache", backend]);
+            assert!(BuildParser::try_parse_from(explicit).is_ok());
+        }
+        let mut invalid = arguments.to_vec();
+        invalid.extend(["--compiler-cache", "remote"]);
+        assert!(BuildParser::try_parse_from(invalid).is_err());
+    }
 }

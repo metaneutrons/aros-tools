@@ -81,6 +81,13 @@ pub struct BuildLease {
 /// A changed or partially recorded selection therefore fails before CMake runs
 /// rather than silently mixing selection and build state.
 pub fn acquire_for_build(repo_root: &Path, resolved: &ResolvedToolchain) -> Result<BuildLease> {
+    if resolved.source == ToolchainSource::LocalCompilerOnly {
+        return Ok(BuildLease {
+            _project: None,
+            _envelope: None,
+            _lease: None,
+        });
+    }
     let store = management_store(None)?;
     acquire_for_build_in_store(repo_root, resolved, &store)
 }
@@ -90,6 +97,13 @@ fn acquire_for_build_in_store(
     resolved: &ResolvedToolchain,
     store: &Path,
 ) -> Result<BuildLease> {
+    if resolved.source == ToolchainSource::LocalCompilerOnly {
+        return Ok(BuildLease {
+            _project: None,
+            _envelope: None,
+            _lease: None,
+        });
+    }
     let store_guard = acquire_store_lock(store)?;
     let project = normalized_absolute_utf8(repo_root, "project root")?;
     let project_guard = if resolved.source == ToolchainSource::LockedRelease {
@@ -132,7 +146,9 @@ fn acquire_for_build_in_store(
         ToolchainSource::LocalManifest => {
             managed_import_envelope_for_payload(store, &resolved.paths.root)?
         }
-        ToolchainSource::LockedRelease | ToolchainSource::LegacyLocal => None,
+        ToolchainSource::LockedRelease
+        | ToolchainSource::LegacyLocal
+        | ToolchainSource::LocalCompilerOnly => None,
     };
     let Some(imported) = imported else {
         drop(store_guard);
@@ -400,3 +416,28 @@ fn verify_lease_receipt(
 mod cleanup;
 
 pub use cleanup::{gc, remove, GcArgs, RemoveArgs};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::toolchain::{ToolchainPaths, ToolchainSource};
+
+    #[test]
+    fn local_compiler_only_build_uses_no_managed_lifecycle_store() {
+        let repo = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let store = base.path().join("managed-store-must-not-be-created");
+        let resolved = ResolvedToolchain {
+            paths: ToolchainPaths {
+                root: base.path().join("local-compiler"),
+                executable_roles: Vec::new(),
+            },
+            target_triple: "riscv-aros".into(),
+            release_id: None,
+            source: ToolchainSource::LocalCompilerOnly,
+        };
+
+        let _lease = acquire_for_build_in_test_store(repo.path(), &resolved, &store).unwrap();
+        assert!(!store.exists());
+    }
+}
