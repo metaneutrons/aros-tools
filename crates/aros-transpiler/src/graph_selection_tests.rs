@@ -308,6 +308,35 @@ fn native_selection_normalizes_handwritten_edge_provenance_with_the_graph() {
 }
 
 #[test]
+fn a_module_reached_only_through_its_fd_alias_is_reduced_to_its_headers() {
+    let mut graph = DependencyGraph::new();
+    let mut header_only = target("header-only", ModuleType::Library);
+    header_only.genmodule_abi = true;
+    header_only.source_files = vec!["lib.c".into()];
+    header_only.use_libs = vec!["absent".into()];
+    graph.targets.insert("header-only".into(), header_only);
+    let mut built = target("built", ModuleType::Library);
+    built.genmodule_abi = true;
+    built.source_files = vec!["lib.c".into()];
+    built.use_libs = vec!["absent".into()];
+    graph.targets.insert("built".into(), built);
+    let context = TargetContext::default();
+    let selected = BTreeSet::from(["header-only-fd".into(), "built".into()]);
+    graph.retain_native_selection(&selected, &context).unwrap();
+
+    let reduced = &graph.targets["header-only"];
+    assert_eq!(reduced.module_type, ModuleType::ModuleHeaders);
+    assert!(reduced.source_files.is_empty() && reduced.use_libs.is_empty());
+    // A selected runtime keeps every request it declared.
+    let kept = &graph.targets["built"];
+    assert_eq!(kept.module_type, ModuleType::Library);
+    assert_eq!(kept.use_libs, ["absent"]);
+    // Only the built module can fail the link-library resolution.
+    let unresolved = graph.resolve_use_libs();
+    assert!(unresolved.iter().all(|item| !item.contains("header-only")));
+}
+
+#[test]
 fn literal_object_groups_refuse_conflicting_kinds_and_outputs() {
     let context = TargetContext::default();
     let mut graph = DependencyGraph::new();

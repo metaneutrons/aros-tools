@@ -572,6 +572,38 @@ impl DependencyGraph {
                         .filter_map(|source| std::path::Path::new(source).file_stem())
                         .any(|stem| is_selected(&format!("{name}-{}", stem.to_string_lossy())))
         });
+        // A module reached only through its generated includes or FD aliases
+        // is retained as a declaration, but it is not built: its runtime,
+        // client archive and KOBJ were not selected. Keep what the reach needs
+        // and drop what it does not, so the module's own link requests are not
+        // validated against providers nobody selected.
+        let runtime_selected = |name: &str| {
+            is_selected(name)
+                || architecture_owners.contains(name)
+                || ["-linklib", "-linklib-rel", "-kobj"]
+                    .iter()
+                    .any(|suffix| is_selected(&format!("{name}{suffix}")))
+        };
+        for (name, target) in &mut self.targets {
+            if target.genmodule_abi
+                && matches!(
+                    target.module_type,
+                    ModuleType::Library
+                        | ModuleType::Device
+                        | ModuleType::Resource
+                        | ModuleType::Hidd
+                        | ModuleType::Datatype
+                        | ModuleType::Gadget
+                        | ModuleType::Mcc
+                )
+                && !runtime_selected(name)
+                && ["-includes", "-fd"]
+                    .iter()
+                    .any(|suffix| is_selected(&format!("{name}{suffix}")))
+            {
+                project_to_module_headers(target);
+            }
+        }
         let mut retained_meta = std::collections::HashMap::new();
         for (name, dependencies) in &self.meta_targets {
             if !is_selected(name) {
@@ -709,4 +741,27 @@ impl DependencyGraph {
         self.native_selected_client_archives = Some(selected_clients);
         Ok(())
     }
+}
+
+/// Reduce a declaration to the headers-only form the engine already knows
+/// (`aros_add_module_headers`): its generated includes and FD aliases, with no
+/// runtime module, archive or link requests.
+fn project_to_module_headers(target: &mut crate::ast::TargetDefinition) {
+    target.module_type = ModuleType::ModuleHeaders;
+    target.kobj_scoped_inputs = None;
+    target.genmodule_only = false;
+    target.empty_archive = false;
+    target.source_files.clear();
+    target.cxx_source_files.clear();
+    target.objc_source_files.clear();
+    target.asm_source_files.clear();
+    target.use_libs.clear();
+    target.dependencies.clear();
+    target.link_libs.clear();
+    target.genmodule_linklibs = None;
+    target.config_relative_libraries.clear();
+    target.arch_sources.clear();
+    target.arch_source_options.clear();
+    target.canonical_linklib_output = false;
+    target.canonical_linklib_eligible = false;
 }
