@@ -189,8 +189,15 @@ if(TEST_LOCKED_TOOLCHAIN)
     set(_expected_link_prefix
         "^\"[^\"]*/aros-collect\" --ld \"${AROS_CROSS_TOOLCHAIN_ROOT}/bin/ld[.]lld\" -- -r")
     if(TEST_GNU_TOOLCHAIN)
+        # The inventory-bound collector is the toolchain's own front end: it
+        # reads the linker from its descriptor and adds the sysroot-owned
+        # extras, so it takes the linker arguments directly. aros-collect's
+        # `--ld` form produces a module without its resident tag.
         set(_expected_link_prefix
-            "^\"[^\"]*/aros-collect\" --ld \"${AROS_LINKER_BIN}\" -- -r")
+            "^\"[^\"]+\" -r")
+        if("${CMAKE_C_LINK_EXECUTABLE}${CMAKE_CXX_LINK_EXECUTABLE}" MATCHES "--ld ")
+            message(FATAL_ERROR "GNU native links must not use the direct --ld form")
+        endif()
         get_directory_property(_gnu_compile_options COMPILE_OPTIONS)
         if("${_gnu_compile_options}" MATCHES "--target=" OR
            "${CMAKE_CXX_LINK_EXECUTABLE}" MATCHES "libc[+][+]|libunwind|compiler-rt")
