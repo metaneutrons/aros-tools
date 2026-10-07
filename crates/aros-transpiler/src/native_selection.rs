@@ -7,6 +7,7 @@ use aros_common::{
     SourceLocation,
 };
 use aros_transpiler::{DependencyGraph, TargetContext};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub fn bind_architecture_effects(
@@ -174,4 +175,36 @@ pub fn load_native_selection(
         ));
     }
     Ok(Some(loaded))
+}
+
+/// The exact source-relative directory of the calling engine's build tree, to
+/// be left out of a native MetaMake walk: its generated files are outputs, not
+/// recipes. Empty when no build directory was given or it is not inside the
+/// source tree. Never a basename, so a source directory called `build` stays.
+pub fn native_build_exclusion(args: &Args) -> Result<BTreeSet<String>> {
+    let Some(build_dir) = &args.build_dir else {
+        return Ok(BTreeSet::new());
+    };
+    let configuration_error = |message: String| ArosError::Configuration {
+        file: build_dir.display().to_string(),
+        message,
+    };
+    let source = args.source_dir.canonicalize().map_err(|error| {
+        configuration_error(format!("cannot resolve the source directory: {error}"))
+    })?;
+    let build = build_dir.canonicalize().map_err(|error| {
+        configuration_error(format!("cannot resolve the build directory: {error}"))
+    })?;
+    let Ok(relative) = build.strip_prefix(&source) else {
+        return Ok(BTreeSet::new());
+    };
+    if relative.as_os_str().is_empty() {
+        return Err(configuration_error(
+            "the build directory must not be the source tree itself".into(),
+        ));
+    }
+    let relative = relative.to_str().ok_or_else(|| {
+        configuration_error("the in-tree build directory path is not UTF-8".into())
+    })?;
+    Ok(BTreeSet::from([relative.to_owned()]))
 }

@@ -4825,10 +4825,11 @@ endfunction()
 # and their public include aliases. In particular, this must not create the
 # MMAKE_ID aggregate, an owner-linklib target, or any linklibs-* alias.
 function(aros_add_module_headers)
+    set(options ALLOW_NO_PUBLIC_HEADERS)
     set(oneValueArgs TARGET MMAKE_ID DIRECTORY MODTYPE MODSUFFIX)
     # Preserve semicolons in quoted arguments so unknown/runtime inputs cannot
     # be hidden by the parser's normal list expansion.
-    cmake_parse_arguments(PARSE_ARGV 0 ARG "" "${oneValueArgs}" "")
+    cmake_parse_arguments(PARSE_ARGV 0 ARG "${options}" "${oneValueArgs}" "")
 
     if(ARG_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR
@@ -4862,9 +4863,21 @@ function(aros_add_module_headers)
         MODSUFFIX "${ARG_MODSUFFIX}")
 
     if(NOT _gm_INCLUDES_TARGET OR NOT _gm_HEADERS)
-        message(FATAL_ERROR
-            "${ARG_MMAKE_ID}: headers-only module config does not produce "
-            "public genmodule headers")
+        if(NOT ARG_ALLOW_NO_PUBLIC_HEADERS)
+            message(FATAL_ERROR
+                "${ARG_MMAKE_ID}: headers-only module config does not produce "
+                "public genmodule headers")
+        endif()
+        # Native selection reached only this module's generated aliases and
+        # its config (a device, resource or HIDD, for instance) publishes no
+        # headers. The aliases the selection named are then empty endpoints;
+        # nothing else of the module is built.
+        foreach(_suffix IN ITEMS includes fd)
+            if(NOT TARGET "${ARG_MMAKE_ID}-${_suffix}")
+                add_custom_target("${ARG_MMAKE_ID}-${_suffix}")
+            endif()
+        endforeach()
+        return()
     endif()
 
     if(_gm_FD_TARGET)
@@ -5502,7 +5515,7 @@ function(aros_add_device)
         aros_place_module_scaffolding(RESOLVED_SOURCES "${_scaffold_sources}")
         _aros_module_install_dir(_install_dir
             "${AROS_DEVS_DIR}" "${ARG_INSTALL_DIR}")
-        _aros_module_output_name(_output_name "${ARG_MMAKE_ID}"
+        _aros_module_output_name(_output_name "${ARG_TARGET}"
             "device" "${ARG_MODSUFFIX}")
         add_executable(${ARG_MMAKE_ID} ${RESOLVED_SOURCES})
         aros_attach_module_scaffolding("${ARG_MMAKE_ID}" _scaffold
@@ -5594,7 +5607,7 @@ function(aros_add_resource)
         aros_place_module_scaffolding(RESOLVED_SOURCES "${_scaffold_sources}")
         _aros_module_install_dir(_install_dir
             "${AROS_RESOURCES_DIR}" "${ARG_INSTALL_DIR}")
-        _aros_module_output_name(_output_name "${ARG_MMAKE_ID}"
+        _aros_module_output_name(_output_name "${ARG_TARGET}"
             "resource" "${ARG_MODSUFFIX}")
         add_executable(${ARG_MMAKE_ID} ${RESOLVED_SOURCES})
         aros_attach_module_scaffolding("${ARG_MMAKE_ID}" _scaffold

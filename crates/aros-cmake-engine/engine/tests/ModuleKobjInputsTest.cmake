@@ -157,6 +157,22 @@ _expect_bad_json(source-line-zero "positive integer" "${_bad}")
 string(JSON _bad SET "${_valid_json}" user_objects words 0 "\"unsafe;word\"")
 _expect_bad_json(list-unsafe "unsafe CMake list representation" "${_bad}")
 
+# The build and source directory placeholders are expanded; no other `$` is.
+string(JSON _bad SET "${_valid_json}" user_objects words 0 [=["${OTHER_DIR}/first.o"]=])
+_expect_bad_json(other-placeholder "unsafe CMake list representation" "${_bad}")
+string(JSON _placed_json SET "${_valid_json}" user_objects words 0 [=["${AROS_BUILD_DIR}/gen/first.o"]=])
+aros_record_module_macro(OWNER mod-placed FORM full)
+aros_record_module_kobj_inputs(OWNER mod-placed JSON "${_placed_json}")
+_expect_refusal(placeholder-unset "which is not set"
+    "aros_record_module_macro(OWNER placeholder-unset FORM full)\naros_record_module_kobj_inputs(OWNER placeholder-unset JSON [==[${_placed_json}]==])\naros_get_module_kobj_words(_objects placeholder-unset user_objects)")
+set(AROS_BUILD_DIR "${TEST_BINARY_DIR}/build")
+aros_get_module_kobj_words(_placed mod-placed user_objects)
+list(GET _placed 0 _placed_first)
+if(NOT _placed_first STREQUAL "${AROS_BUILD_DIR}/gen/first.o")
+    message(FATAL_ERROR "The build directory placeholder was not expanded: ${_placed}")
+endif()
+unset(AROS_BUILD_DIR)
+
 string(JSON _bad SET "${_valid_json}" user_objects words "[]")
 _expect_bad_json(exact-empty-array "must be nonempty" "${_bad}")
 

@@ -22,9 +22,12 @@ function(aros_genmodule_writefiles_stamp)
        NOT "${GWS_MODTYPE}" MATCHES "^[A-Za-z0-9_-]+$")
         message(FATAL_ERROR "aros_genmodule_writefiles_stamp: unsafe module identity")
     endif()
+    # The engine builds the host tool in the build step, so it need not exist
+    # while this configures; the shared writer's command depends on it. Like
+    # aros_genmodule_header_stamp, refuse a relative, directory or symlinked
+    # path.
     if(NOT IS_ABSOLUTE "${AROS_SOURCE_DIR}" OR
        NOT IS_ABSOLUTE "${AROS_HOST_GENMODULE}" OR
-       NOT EXISTS "${AROS_HOST_GENMODULE}" OR
        IS_DIRECTORY "${AROS_HOST_GENMODULE}" OR IS_SYMLINK "${AROS_HOST_GENMODULE}")
         message(FATAL_ERROR "aros_genmodule_writefiles_stamp: source and regular host tool are required")
     endif()

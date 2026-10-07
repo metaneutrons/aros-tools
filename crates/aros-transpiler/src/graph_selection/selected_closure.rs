@@ -702,6 +702,9 @@ impl DependencyGraph {
             .retain(|declaration| is_selected(&declaration.owner));
         self.header_transforms
             .retain(|declaration| is_selected(&declaration.name));
+        // A kept transform is emitted with the consumers it names, and each has
+        // to exist as a target. Consumers the selection did not keep are not
+        // built, so they do not need the header either.
         self.source_layered_headers
             .retain(|aggregate| is_selected(&aggregate.owner));
         self.flexcat_sources
@@ -714,6 +717,39 @@ impl DependencyGraph {
             .retain(|declaration| is_selected(&declaration.owner));
         self.catalogs
             .retain(|declaration| is_selected(&declaration.mmake));
+        // A kept declaration is emitted with the consumers it names, and each
+        // has to exist as a target. Consumers the selection did not keep are
+        // not built, so they do not need what the declaration produces.
+        for declaration in &mut self.header_transforms {
+            declaration
+                .consumers
+                .retain(|consumer| is_selected(consumer));
+        }
+        for declaration in &mut self.catalogs {
+            declaration
+                .consumers
+                .retain(|consumer| is_selected(consumer));
+        }
+        for declaration in &mut self.flexcat_sources {
+            declaration
+                .consumers
+                .retain(|consumer| is_selected(consumer));
+        }
+        for declaration in &mut self.define_headers {
+            declaration
+                .consumers
+                .retain(|consumer| is_selected(consumer));
+        }
+        for declaration in &mut self.script_outputs {
+            declaration
+                .consumers
+                .retain(|consumer| is_selected(consumer));
+        }
+        for declaration in &mut self.python_outputs {
+            declaration
+                .consumers
+                .retain(|consumer| is_selected(consumer));
+        }
         self.copy_directories
             .retain(|declaration| is_selected(&declaration.name));
         self.icon_targets.retain(|name, _| is_selected(name));
@@ -747,6 +783,23 @@ impl DependencyGraph {
 /// (`aros_add_module_headers`): its generated includes and FD aliases, with no
 /// runtime module, archive or link requests.
 fn project_to_module_headers(target: &mut crate::ast::TargetDefinition) {
+    // The headers helper always needs the module type, including the plain
+    // `modtype=library` that a full declaration leaves implicit.
+    if target.declared_mod_type.is_none() {
+        target.declared_mod_type = match target.module_type {
+            ModuleType::Device => Some("device"),
+            ModuleType::Resource => Some("resource"),
+            ModuleType::Hidd => Some("hidd"),
+            ModuleType::Datatype => Some("datatype"),
+            ModuleType::Gadget => Some("gadget"),
+            ModuleType::Mcc => Some("mcc"),
+            _ => Some("library"),
+        }
+        .map(str::to_owned);
+    }
+    // A device, resource or HIDD config may publish no public headers; the
+    // aliases that were selected are then empty endpoints.
+    target.selection_headers_only = true;
     target.module_type = ModuleType::ModuleHeaders;
     target.kobj_scoped_inputs = None;
     target.genmodule_only = false;

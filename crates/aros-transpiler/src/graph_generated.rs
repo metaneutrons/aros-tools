@@ -332,6 +332,7 @@ impl DependencyGraph {
                 arch_defines: Vec::new(),
                 arch_compile_options: Vec::new(),
                 arch_source_options: Vec::new(),
+                selection_headers_only: false,
             },
         );
         reports

@@ -9,6 +9,14 @@ function(aros_configure_mesa26_runtime)
         return()
     endif()
     if(NOT TARGET mesa3dgl-library)
+        if(AROS_NATIVE_BUILD_CONTRACT)
+            # A native contract selects the product; this one has the GL
+            # loader but not the implementation. Say so, without inventing one.
+            message(WARNING
+                "Mesa26 GL loader is selected without its implementation; no "
+                "GL.default is published for this native build")
+            return()
+        endif()
         message(FATAL_ERROR "Mesa26 GL loader requires its source-selected implementation")
     endif()
     get_target_property(_loader_name workbench-libs-gl OUTPUT_NAME)

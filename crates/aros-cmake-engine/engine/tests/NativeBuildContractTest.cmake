@@ -351,6 +351,31 @@ foreach(_bad_map IN ITEMS "{\"CPU\":\"riscv\"}" "{\"FEATURE\":\"a;b\"}" "{\"FEAT
     _native_contract_run_failure("unsafe Make configuration" "${_bad_make_source}" "make_variables")
 endforeach()
 
+# The limit matches aros-common's MAX_MAKE_VARIABLES: 256 empty switches are
+# accepted, one more is refused. A port that tests many diagnostic switches
+# lists each one as empty in its contract.
+function(_native_make_map count output)
+    set(_items "")
+    foreach(_index RANGE 1 ${count})
+        list(APPEND _items "\"VAR_${_index}\":\"\"")
+    endforeach()
+    list(JOIN _items "," _joined)
+    set(${output} "{${_joined}}" PARENT_SCOPE)
+endfunction()
+
+_native_make_map(256 _full_map)
+_native_contract_copy_case("make-limit" _limit_source)
+file(READ "${_limit_source}/native-build-v1.json" _limit_json)
+string(JSON _limit_json SET "${_limit_json}" make_variables "${_full_map}")
+file(WRITE "${_limit_source}/native-build-v1.json" "${_limit_json}\n")
+_native_contract_run_success("make variable limit" "${_limit_source}")
+_native_make_map(257 _over_map)
+_native_contract_copy_case("make-over-limit" _over_source)
+file(READ "${_over_source}/native-build-v1.json" _over_json)
+string(JSON _over_json SET "${_over_json}" make_variables "${_over_map}")
+file(WRITE "${_over_source}/native-build-v1.json" "${_over_json}\n")
+_native_contract_run_failure("too many Make variables" "${_over_source}" "exceeds 256 entries")
+
 # A media adapter requires this reference. Old core-only declarations may omit
 # it, but no default or un-inventoried path is invented at the engine boundary.
 _native_contract_copy_case("geometry-reference" _geometry_source)

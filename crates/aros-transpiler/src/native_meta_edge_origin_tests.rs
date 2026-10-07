@@ -96,6 +96,7 @@ fn two_recipe_fixture(extra_dependency: &str) -> Fixture {
         owners,
         discovered_inputs: BTreeSet::from([GENERIC_RECIPE.to_owned(), EXTRA_RECIPE.to_owned()]),
         ignored_directories: BTreeSet::new(),
+        excluded_paths: BTreeSet::new(),
         snapshots,
         policy_sha256: "test-policy".into(),
         expanded_bytes: expanded_files.values().map(String::len).sum(),

@@ -22,6 +22,16 @@ include("${CMAKE_CURRENT_LIST_DIR}/QuoteIncludes.cmake")
 # none of it.
 
 set(AROS_HOST_CC "cc" CACHE STRING "C compiler for tools that run on the build machine")
+# Helpers that run the compiler from a recipe require an absolute path. The
+# cache keeps the name the user gave; a bare name is resolved here, once,
+# through PATH, in a normal variable that shadows it. An explicit absolute
+# value is left as it is.
+if(NOT IS_ABSOLUTE "${AROS_HOST_CC}")
+    find_program(_aros_host_cc_resolved NAMES "${AROS_HOST_CC}" NO_CACHE)
+    if(_aros_host_cc_resolved)
+        set(AROS_HOST_CC "${_aros_host_cc_resolved}")
+    endif()
+endif()
 # Native host-header recipes retain $(HOST_CFLAGS) as this explicit policy.
 # These are host flags, not target flags or an inferred Autoconf configuration.
 # An explicitly empty list is permitted; ambient CFLAGS are not imported.

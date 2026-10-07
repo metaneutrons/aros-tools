@@ -387,8 +387,8 @@ function(aros_validate_native_build_contract)
         endif()
         string(JSON _make_variables_json GET "${_contract_json}" make_variables)
         string(JSON _make_variable_count LENGTH "${_make_variables_json}")
-        if(_make_variable_count GREATER 64)
-            _aros_native_contract_fail("make_variables" "exceeds 64 entries")
+        if(_make_variable_count GREATER 256)
+            _aros_native_contract_fail("make_variables" "exceeds 256 entries")
         endif()
         set(_reserved_make_variables
             AROS_TARGET_CPU CPU AROS_TARGET_ARCH ARCH AROS_TARGET_PLATFORM
@@ -442,6 +442,30 @@ function(aros_validate_native_build_contract)
         if(_host_files_count GREATER 16)
             _aros_native_contract_fail("host_file_generators" "exceeds 16 entries")
         endif()
+    endif()
+    # Consumed by the Rust transpiler, which verifies their content against the
+    # sealed sources; the engine only checks that each is present as the type
+    # the contract schema gives it.
+    foreach(_rust_field IN ITEMS host_make_variables:OBJECT generated_make_templates:OBJECT
+            metamake_projection:STRING kernel_compiler_role:STRING)
+        string(REPLACE ":" ";" _rust_field_parts "${_rust_field}")
+        list(GET _rust_field_parts 0 _rust_field_name)
+        list(GET _rust_field_parts 1 _rust_field_type)
+        string(JSON _rust_field_actual ERROR_VARIABLE _rust_field_error
+            TYPE "${_contract_json}" "${_rust_field_name}")
+        if(_rust_field_error STREQUAL "NOTFOUND")
+            list(APPEND _top_fields "${_rust_field_name}")
+            if(NOT _rust_field_actual STREQUAL _rust_field_type)
+                _aros_native_contract_fail("${_rust_field_name}"
+                    "must be a JSON ${_rust_field_type}")
+            endif()
+        endif()
+    endforeach()
+    string(JSON _kernel_role ERROR_VARIABLE _kernel_role_error
+        GET "${_contract_json}" kernel_compiler_role)
+    if(_kernel_role_error STREQUAL "NOTFOUND" AND NOT _kernel_role STREQUAL "target")
+        _aros_native_contract_fail("kernel_compiler_role"
+            "the only admitted value is \"target\"")
     endif()
     _aros_native_require_object_members("${_contract_json}" "root object" "${_top_fields}")
 

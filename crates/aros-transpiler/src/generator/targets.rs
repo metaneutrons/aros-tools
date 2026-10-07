@@ -70,6 +70,9 @@ pub(super) fn emit_concrete_targets(
             if let Some(kind) = target.declared_mod_type.as_deref() {
                 writeln!(out, "    MODTYPE {}", cmake_arg(kind)).unwrap();
             }
+            if target.selection_headers_only {
+                writeln!(out, "    ALLOW_NO_PUBLIC_HEADERS").unwrap();
+            }
             if let Some(suffix) = target.mod_suffix.as_deref() {
                 writeln!(out, "    MODSUFFIX {}", cmake_arg(suffix)).unwrap();
             }

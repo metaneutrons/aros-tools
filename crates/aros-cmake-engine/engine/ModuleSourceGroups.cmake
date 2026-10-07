@@ -170,10 +170,16 @@ function(aros_record_module_kobj_sources)
     if(_known)
         message(FATAL_ERROR "Duplicate KOBJ source groups for ${KS_OWNER}")
     endif()
-    aros_resolve_kobj_source_groups(_groups OWNER "${KS_OWNER}"
-        DIRECTORY "${KS_DIRECTORY}" SOURCES ${KS_SOURCES}
-        CXX_SOURCES ${KS_CXX_SOURCES} OBJC_SOURCES ${KS_OBJC_SOURCES}
-        ASM_SOURCES ${KS_ASM_SOURCES} ARCH_SOURCES ${KS_ARCH_SOURCES})
+    # A lane the declaration does not have is left out, not forwarded as a
+    # keyword without values, which cmake_parse_arguments rejects.
+    set(_forwarded OWNER "${KS_OWNER}" DIRECTORY "${KS_DIRECTORY}")
+    foreach(_lane IN ITEMS SOURCES CXX_SOURCES OBJC_SOURCES ASM_SOURCES ARCH_SOURCES)
+        list(LENGTH KS_${_lane} _lane_length)
+        if(_lane_length GREATER 0)
+            list(APPEND _forwarded ${_lane} ${KS_${_lane}})
+        endif()
+    endforeach()
+    aros_resolve_kobj_source_groups(_groups ${_forwarded})
     get_property(_form GLOBAL PROPERTY "AROS_MODULE_MACRO_${KS_OWNER}")
     foreach(_group IN ITEMS ARCH ASM C CXX OBJC_NON_KOBJ OBJC_DECLARED)
         set_property(GLOBAL PROPERTY "AROS_KOBJ_SOURCES_${KS_OWNER}_${_group}"

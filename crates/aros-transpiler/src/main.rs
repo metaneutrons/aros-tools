@@ -31,7 +31,7 @@ use cli_args::Args;
 use error_mapping::{diagnostics_error, error_to_diagnostics, source_location};
 use native_selection::{
     append_unscoped_diagnostics, bind_architecture_effects, load_native_selection,
-    native_selection_input_error, reverify_native_owner_projection,
+    native_build_exclusion, native_selection_input_error, reverify_native_owner_projection,
 };
 use publication::Publication;
 use reports::{render_source_inventory_manifest, resolved_publication_path, write_report};
@@ -287,15 +287,32 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     } else {
         &["build", "target", ".git"]
     };
+    // The calling engine's build directory, excluded by exact path (never by
+    // basename) from a native walk when it lies inside the source tree.
+    let excluded_build_paths = if native_contract
+        .as_ref()
+        .is_some_and(|native| native.contract.metamake_projection.is_some())
+    {
+        native_build_exclusion(args)?
+    } else {
+        std::collections::BTreeSet::new()
+    };
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in WalkDir::new(&args.source_dir)
         .into_iter()
         .filter_entry(|entry| {
             !entry.file_type().is_dir()
                 || entry.depth() == 0
-                || !entry.file_name().to_str().is_some_and(|name| {
+                || !(entry.file_name().to_str().is_some_and(|name| {
                     skip_dirs.contains(&name) || source_ignoredirs.contains(name)
-                })
+                }) || entry
+                    .path()
+                    .strip_prefix(&args.source_dir)
+                    .is_ok_and(|relative| {
+                        excluded_build_paths
+                            .iter()
+                            .any(|excluded| relative.starts_with(excluded))
+                    }))
         })
     {
         let entry = entry.map_err(|error| {
@@ -326,6 +343,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 target
                     .as_ref()
                     .expect("validated native selection has explicit selectors"),
+                &excluded_build_paths,
             )
             .map_err(|message| {
                 native_selection_input_error(ArosError::Configuration {
