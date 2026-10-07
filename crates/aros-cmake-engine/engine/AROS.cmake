@@ -386,7 +386,14 @@ if(_aros_module_linker)
             "Install aros-tools, or set AROS_COLLECT_BIN explicitly. Without "
             "it every symbol set links empty.")
     endif()
-    set(_aros_link "\"${AROS_COLLECT_BIN}\" --ld \"${_aros_module_linker}\" --")
+    if(AROS_TOOLCHAIN STREQUAL "gnu")
+        # The inventory-bound collector is the toolchain's own front end. It
+        # reads its linker and emulation from the compiler-bound descriptor
+        # and refuses the direct `--ld` form that aros-collect takes.
+        set(_aros_link "\"${AROS_COLLECT_BIN}\"")
+    else()
+        set(_aros_link "\"${AROS_COLLECT_BIN}\" --ld \"${_aros_module_linker}\" --")
+    endif()
 
     set(_aros_c_builtins_link_arg "")
     if(AROS_CROSS_TOOLCHAIN_ROOT)
@@ -1904,7 +1911,7 @@ function(_aros_bind_link_libraries target_name)
         # AROS rule invokes ld.lld directly, while a development host without
         # LLD retains CMake's compiler-driver rule and must forward the same
         # tokens through that driver explicitly.
-        if(AROS_LLD_BIN)
+        if(AROS_LLD_BIN OR AROS_LINKER_BIN)
             set(_group_start --start-group)
             set(_group_end --end-group)
         else()
@@ -3282,7 +3289,7 @@ function(aros_build_external_cmake)
         endif()
         # Collector availability alone does not select its link rule. Without
         # LLD the compiler driver still owns links and needs forwarded flags.
-        if(AROS_LLD_BIN)
+        if(AROS_LLD_BIN OR AROS_LINKER_BIN)
             set(_group_start "--start-group")
             set(_group_end "--end-group")
         else()

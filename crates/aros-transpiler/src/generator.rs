@@ -200,7 +200,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
     // makes a focused ABI archive download every unrelated port.  Suppress
     // only that redundant edge; the public `<mmake>-includes` meta target
     // retains its complete historic behaviour when requested explicitly.
-    let redundant_abi_include_edges: Vec<(String, String)> = graph
+    let mut redundant_abi_include_edges: Vec<(String, String)> = graph
         .targets
         .values()
         .filter(|target| target.module_type == ModuleType::Abi)
@@ -211,6 +211,23 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             )
         })
         .collect();
+
+    // An implicit edge that closes a cycle with declared edges is left out; the
+    // report keeps the decision visible in the generated file.
+    let cycle_edges = meta::implicit_cycle_edges(
+        &all_targets,
+        &all_metas,
+        &meta_rules,
+        &graph.explicit_meta_edges,
+    );
+    for (owner, dependency) in &cycle_edges {
+        writeln!(
+            out,
+            "# cycle: implicit edge {owner} -> {dependency} yields to declared edges"
+        )
+        .unwrap();
+    }
+    redundant_abi_include_edges.extend(cycle_edges);
 
     meta::emit_meta_declarations(&mut out, &all_targets, &meta_rules);
     meta::emit_assembly_header_rules(&mut out, graph);

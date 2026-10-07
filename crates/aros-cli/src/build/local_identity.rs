@@ -10,6 +10,12 @@ use miette::{IntoDiagnostic, Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, process::Command};
 
+/// Bounds on the configured build tree's text. The ESP32-P4 graph's
+/// `build.ninja` alone is 55 MiB, so the per-file bound is several times that
+/// and the total allows the few other included manifests beside it.
+const MAX_CONFIGURATION_FILE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_CONFIGURATION_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
 const STAMP_NAME: &str = ".aros-local-native-inputs.json";
 const MAX_STAMP_BYTES: u64 = 64 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
@@ -323,15 +329,15 @@ impl ConfiguredTree {
             if files.len() >= 1024 {
                 miette::bail!("local native configuration exceeds 1024 files");
             }
-            let (_, bytes) =
-                aros_common::measure_regular_file_bounded(&build.join(&name), 16 * 1024 * 1024)
-                    .into_diagnostic()?
-                    .ok_or_else(|| {
-                        miette::miette!("local native configuration file is missing: {name}")
-                    })?;
+            let (_, bytes) = aros_common::measure_regular_file_bounded(
+                &build.join(&name),
+                MAX_CONFIGURATION_FILE_BYTES,
+            )
+            .into_diagnostic()?
+            .ok_or_else(|| miette::miette!("local native configuration file is missing: {name}"))?;
             total_bytes += bytes.len() as u64;
-            if total_bytes > 64 * 1024 * 1024 {
-                miette::bail!("local native configuration exceeds 64 MiB");
+            if total_bytes > MAX_CONFIGURATION_TOTAL_BYTES {
+                miette::bail!("local native configuration exceeds 256 MiB");
             }
             if name == "CMakeCache.txt" {
                 programs = configured_programs(build, &bytes)?;

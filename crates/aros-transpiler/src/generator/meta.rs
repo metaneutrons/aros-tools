@@ -1,6 +1,6 @@
 use super::cmake_arg;
 use crate::graph::DependencyGraph;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 /// Emits the banner above the meta-target section.
@@ -377,4 +377,144 @@ pub(super) fn emit_link_set_and_packages(out: &mut String, graph: &DependencyGra
         }
         writeln!(out).unwrap();
     }
+}
+
+/// Implicit meta edges to leave out because they close a dependency cycle with
+/// edges the recipes declare themselves.
+///
+/// MetaMake follows a target's dependencies depth-first and skips one that is
+/// already being visited, so a cycle such as `kernel-kernel-includes`
+/// (implicitly after every module's headers) against
+/// `kernel-exec-includes-<arch>` (declared to need the kernel's headers)
+/// builds in some order. CMake refuses the cycle outright. A declared edge is
+/// a statement of the recipe's author, an implicit one comes from a macro
+/// expansion, so the implicit edge yields. Candidates are tried in name order,
+/// which makes the result independent of hash order.
+pub(super) fn implicit_cycle_edges(
+    all_targets: &HashSet<String>,
+    all_metas: &HashSet<&str>,
+    meta_rules: &[(&String, &HashSet<String>)],
+    explicit: &HashSet<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut index: HashMap<&str, usize> = HashMap::new();
+    for (name, _) in meta_rules {
+        let next = index.len();
+        index.entry(name.as_str()).or_insert(next);
+    }
+    let mut names = vec![""; index.len()];
+    for (name, position) in &index {
+        names[*position] = name;
+    }
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
+    for (name, deps) in meta_rules {
+        let from = index[name.as_str()];
+        for dep in *deps {
+            let valid = *dep != **name
+                && (all_targets.contains(dep.as_str()) || all_metas.contains(dep.as_str()));
+            if let (true, Some(&to)) = (valid, index.get(dep.as_str())) {
+                edges[from].push(to);
+            }
+        }
+    }
+    let component = strongly_connected_components(&edges);
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (node, id) in component.iter().enumerate() {
+        members.entry(*id).or_default().push(node);
+    }
+    let mut dropped = Vec::new();
+    for nodes in members.values().filter(|nodes| nodes.len() > 1) {
+        let inside: HashSet<usize> = nodes.iter().copied().collect();
+        let mut kept: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut implicit = Vec::new();
+        for &from in nodes {
+            for &to in &edges[from] {
+                if !inside.contains(&to) {
+                    continue;
+                }
+                if explicit.contains(&(names[from].to_owned(), names[to].to_owned())) {
+                    kept.entry(from).or_default().push(to);
+                } else {
+                    implicit.push((from, to));
+                }
+            }
+        }
+        implicit.sort_by(|a, b| (names[a.0], names[a.1]).cmp(&(names[b.0], names[b.1])));
+        for (from, to) in implicit {
+            if reaches(&kept, to, from) {
+                dropped.push((names[from].to_owned(), names[to].to_owned()));
+            } else {
+                kept.entry(from).or_default().push(to);
+            }
+        }
+    }
+    dropped.sort();
+    dropped.dedup();
+    dropped
+}
+
+fn reaches(edges: &HashMap<usize, Vec<usize>>, start: usize, goal: usize) -> bool {
+    let mut seen = HashSet::from([start]);
+    let mut stack = vec![start];
+    while let Some(node) = stack.pop() {
+        if node == goal {
+            return true;
+        }
+        for &next in edges.get(&node).into_iter().flatten() {
+            if seen.insert(next) {
+                stack.push(next);
+            }
+        }
+    }
+    false
+}
+
+/// Tarjan's algorithm without recursion; the meta graph can be thousands deep.
+fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
+    let count = edges.len();
+    let unvisited = usize::MAX;
+    let mut order = vec![unvisited; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut component = vec![unvisited; count];
+    let mut stack = Vec::new();
+    let mut next_order = 0;
+    let mut next_component = 0;
+    for root in 0..count {
+        if order[root] != unvisited {
+            continue;
+        }
+        let mut work = vec![(root, 0usize)];
+        while let Some((node, child)) = work.pop() {
+            if child == 0 {
+                order[node] = next_order;
+                low[node] = next_order;
+                next_order += 1;
+                stack.push(node);
+                on_stack[node] = true;
+            }
+            if let Some(&next) = edges[node].get(child) {
+                work.push((node, child + 1));
+                if order[next] == unvisited {
+                    work.push((next, 0));
+                } else if on_stack[next] {
+                    low[node] = low[node].min(order[next]);
+                }
+                continue;
+            }
+            if low[node] == order[node] {
+                while let Some(member) = stack.pop() {
+                    on_stack[member] = false;
+                    component[member] = next_component;
+                    if member == node {
+                        break;
+                    }
+                }
+                next_component += 1;
+            }
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+        }
+    }
+    component
 }

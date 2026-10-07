@@ -38,6 +38,10 @@ if(LITERAL_CASE STREQUAL "output-parent-symlink")
     file(CREATE_LINK "${_build_real}/gen-target" "${_build_real}/gen" SYMBOLIC)
 endif()
 
+if(LITERAL_CASE STREQUAL "native-includes")
+    set(AROS_NATIVE_BUILD_CONTRACT ON)
+endif()
+
 set(_source "${AROS_SOURCE_DIR}/src/main.c")
 set(_cpp_source "${AROS_SOURCE_DIR}/src/helper.cpp")
 if(LITERAL_CASE STREQUAL "source-file-symlink")

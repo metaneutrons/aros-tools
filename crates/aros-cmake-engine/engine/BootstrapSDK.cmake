@@ -135,6 +135,25 @@ function(aros_bootstrap_sdk_includes)
     if(EXISTS "${SDK_INC}/exec/execbase.inc")
         file(COPY_FILE "${SDK_INC}/exec/execbase.inc"
             "${SDK_INC}/exec/execbase.h" ONLY_IF_DIFFERENT)
+        # compiler/include/mmakefile.src removes the fields an SMP Exec does
+        # not keep, line by line, when it stages execbase.h. asm.c, which is
+        # compiled below against this copy, must see the same layout.
+        if(AROS_NATIVE_BUILD_EXEC_SMP)
+            file(READ "${SDK_INC}/exec/execbase.h" _execbase)
+            string(ASCII 10 _nl)
+            set(_smp_fields ThisTask Quantum Elapsed IDNestCnt TDNestCnt)
+            set(_smp_types "IPTR         " "WORD         " "WORD         " "UBYTE        " "UBYTE        ")
+            set(_smp_names SMPPrivate1 SMPPrivate2 SMPPrivate3 SMPPrivate4 SMPPrivate5)
+            foreach(_index RANGE 0 4)
+                list(GET _smp_fields ${_index} _field)
+                list(GET _smp_types ${_index} _type)
+                list(GET _smp_names ${_index} _name)
+                string(REGEX REPLACE
+                    "(^|${_nl})[^${_nl}]*${_field};[^${_nl}]*"
+                    "\\1    ${_type}${_name};" _execbase "${_execbase}")
+            endforeach()
+            file(WRITE "${SDK_INC}/exec/execbase.h" "${_execbase}")
+        endif()
     endif()
 
     # 2. Copy AROS support headers into aros/
@@ -271,6 +290,12 @@ function(aros_bootstrap_sdk_includes)
 
     aros_platform_abi_config("${AROS_TARGET_CPU}" "${AROS_TARGET_PLATFORM}"
         _aros_platform_abi)
+    # The SMP execution path is a separate switch from the ABI padding above.
+    # Only a native contract declares it, through ENABLE_EXECSMP.
+    set(_aros_exec_smp "")
+    if(AROS_NATIVE_BUILD_EXEC_SMP)
+        set(_aros_exec_smp "#define __AROSEXEC_SMP__")
+    endif()
 
     # 14 of the 20 values config/config.h.in substitutes are still missing from
     # this file, and a missing macro is silently zero in `#if`. See OPEN-POINTS
@@ -297,6 +322,7 @@ function(aros_bootstrap_sdk_includes)
 
 /* Public ABI padding; this does not enable the SMP execution path. */
 ${_aros_platform_abi}
+${_aros_exec_smp}
 
 #define AROS_NOMINAL_WIDTH              640
 #define AROS_NOMINAL_HEIGHT             480

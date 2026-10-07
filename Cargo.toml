@@ -57,7 +57,7 @@ missing_errors_doc = "warn"
 doc_markdown = "allow"
 # Rust 1.99 asks for assert_eq!(value, [] as [T; 0]) in place of
 # assert!(value.is_empty()), which needs the element type spelled out at every
-# site and reads worse.
+# site and reads worse. To be revisited in metaneutrons/aros-tools#347.
 assert_is_empty = "allow"
 
 [workspace.dependencies]

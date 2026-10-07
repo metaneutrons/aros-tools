@@ -16,6 +16,7 @@ preserve this line
 final TOKEN without newline]=])
 file(WRITE "${_input_root}/input.h" "${_input}")
 file(WRITE "${_input_root}/no-match.h" "no match\r\nsecond line")
+file(WRITE "${_input_root}/semicolon.h" "keep\nstruct Task *ThisTask;\nkeep\n")
 set(_replacement [=[#define FIRST;
 #define SECOND ${prefix}]=])
 file(WRITE "${CMAKE_BINARY_DIR}/replacement.txt" "${_replacement}")
@@ -42,5 +43,7 @@ set(_positive_output "${_output_root}/nested/positive.h")
 set(_no_match_output "${_output_root}/nested/no-match.h")
 _add_transform(positive "${_input_root}/input.h" "${_positive_output}" TOKEN)
 _add_transform(no-match "${_input_root}/no-match.h" "${_no_match_output}" TOKEN)
+set(_semicolon_output "${_output_root}/nested/semicolon.h")
+_add_transform(semicolon "${_input_root}/semicolon.h" "${_semicolon_output}" "ThisTask;")
 add_custom_target(literal-header-transform DEPENDS
-    "${_positive_output}" "${_no_match_output}")
+    "${_positive_output}" "${_no_match_output}" "${_semicolon_output}")
