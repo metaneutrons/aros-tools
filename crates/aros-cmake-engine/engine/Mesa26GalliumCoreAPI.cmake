@@ -1,5 +1,27 @@
 include_guard(GLOBAL)
 
+# Make hashes GCA_ABI_FLAGS := $(TARGET_ISA_CFLAGS) $(USER_CPPFLAGS) of the
+# VC4 consumer into the table, so gca_bind refuses a module built with other
+# layout-relevant flags. This build compiles the consumer with its own target,
+# ISA flags and reviewed defines, which differ from Make's (#353). Hash exactly
+# those, in their declared order, and leave paths such as the sysroot out.
+function(_aros_mesa26_gca_abi_flags out_var compiler_target c_flags defines)
+    if(defines STREQUAL "")
+        message(FATAL_ERROR "Mesa 26 GalliumCoreAPI ABI flags need the consumer defines")
+    endif()
+    set(_flags "")
+    if(NOT compiler_target STREQUAL "")
+        list(APPEND _flags "--target=${compiler_target}")
+    endif()
+    separate_arguments(_isa_flags UNIX_COMMAND "${c_flags}")
+    list(APPEND _flags ${_isa_flags})
+    foreach(_define IN LISTS defines)
+        list(APPEND _flags "-D${_define}")
+    endforeach()
+    list(JOIN _flags " " _flags)
+    set(${out_var} "${_flags}" PARENT_SCOPE)
+endfunction()
+
 # Mesa 26's ARM pipe HIDDs live in separate modules from mesa3dgl.library.
 # Their imports must use one generated, versioned provider table. This is a
 # closed source capability, not a generic invocation of galliumglue.py.
@@ -55,6 +77,9 @@ function(aros_build_mesa26_gallium_core_api)
        "463c7b7930e02b9b44ba0edf893357eec50184f6634cef0f389f503780b64ff2")
         message(FATAL_ERROR "Mesa 26 GalliumCoreAPI ABI patch changed without review")
     endif()
+
+    _aros_mesa26_gca_abi_flags(_abi_flags "${CMAKE_C_COMPILER_TARGET}"
+        "${CMAKE_C_FLAGS}" "${_vc4_defines}")
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(NOT Python3_Interpreter_FOUND OR NOT Python3_EXECUTABLE)
@@ -129,6 +154,7 @@ function(aros_build_mesa26_gallium_core_api)
                 glsl_type_builtin_uint glsl_type_builtin_vec4
                 util_dynarray_is_data_stack_allocated
             --mesa-version 26.0.0 --arch "${AROS_TARGET_CPU}"
+            "--abi-flags=${_abi_flags}"
             --abi-files "${_source_patch}" --outdir "${_generated}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${_generation_stamp}"
         DEPENDS ${_consumers} ${_providers}
