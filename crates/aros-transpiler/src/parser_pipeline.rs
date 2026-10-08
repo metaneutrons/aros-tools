@@ -193,8 +193,8 @@ pub(super) fn parse_mmakefile_impl(
     // Include paths are a file-level property in Make: USER_INCLUDES applies to
     // every rule in the mmakefile, so the same set is attached to each target
     // parsed out of this file.
-    let include_set = collect_includes(&content, &rel_dir);
-    let arch_decls = collect_arch_decls(&content, &rel_dir);
+    let mut include_set = collect_includes(&content, &rel_dir);
+    let mut arch_decls = collect_arch_decls(&content, &rel_dir);
     let mut copy_scan =
         collect_copy_includes_with_scope(&content, &rel_dir, &collector_scope, target);
     // USER_CPPFLAGS / USER_CFLAGS apply to every rule in the mmakefile, so the
@@ -319,6 +319,37 @@ pub(super) fn parse_mmakefile_impl(
         )?;
         (declarations, rejected)
     };
+    // The defines an architecture include declaration carries travel with its
+    // include flags in Make, so they are read where the declaration stands.
+    // A native configuration binds the board rules such a define comes from,
+    // so it is read in the same snapshot scope as the architecture sources.
+    let (arch_flag_decls, arch_flag_unresolved) = if !content.contains("%set_archincludes") {
+        (Vec::new(), Vec::new())
+    } else if let Some(context) = native_arch_context {
+        match crate::assembly_headers::native_configuration_snapshot(
+            &content,
+            context,
+            dirs,
+            root,
+            &relative_path,
+        ) {
+            Ok(snapshot) => {
+                let (native_scope, _) = collect_vars_impl(&snapshot.joined, Some(context));
+                crate::includes::collect_arch_flag_decls(&snapshot.joined, &native_scope)
+            }
+            Err(reason) => (
+                Vec::new(),
+                vec![format!(
+                    "{}: native architecture include context is unproven: {reason}",
+                    relative_path.display()
+                )],
+            ),
+        }
+    } else {
+        crate::includes::collect_arch_flag_decls(&joined, &scope)
+    };
+    arch_decls.extend(arch_flag_decls);
+    include_set.unresolved.extend(arch_flag_unresolved);
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
     // transpiler itself stays target-agnostic.

@@ -857,6 +857,16 @@ fn expand_scoped(
     out
 }
 
+/// Classifies bare flag tokens that arrive without a variable of their own,
+/// such as the non-path part of an architecture include declaration.
+pub(crate) fn classify_tokens(tokens: &[String]) -> FlagSet {
+    let mut set = FlagSet::default();
+    for token in tokens {
+        classify(token, &mut set);
+    }
+    set
+}
+
 fn classify(tok: &str, set: &mut FlagSet) {
     // CMake drops function-like preprocessor definitions in
     // target_compile_definitions(), so preserve only a strictly safe no-op
