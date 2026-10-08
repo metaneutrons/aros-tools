@@ -110,6 +110,10 @@ pub(crate) fn render_meta_token_with(
             "AROS_TARGET_VARIANT" => "AROS_TARGET_VARIANT",
             "AROS_TARGET_ICONSET" => "AROS_TARGET_ICONSET",
             "AROS_TARGET_CPU32" => "AROS_TARGET_CPU32",
+            // Every configure preset sets AROS_TOOLCHAIN (gnu or llvm). A
+            // native policy supplies the same value as a global, which keeps
+            // its literal form below.
+            "AROS_TOOLCHAIN" if !globals.contains_key(name) => "AROS_TOOLCHAIN",
             _ => {
                 let value = globals.get(name)?;
                 if value.contains(|character: char| {

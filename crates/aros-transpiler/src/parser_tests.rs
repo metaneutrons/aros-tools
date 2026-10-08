@@ -3,8 +3,8 @@ use super::{
     collect_vars, collect_vars_impl, evaluate_macro_sources, exact_mmake_target,
     implicit_module_meta_rules, is_explicit_genmodule_only, join_continuations,
     join_mm_continuations, macro_arg, macro_argument_names, macro_invocations, render_meta_token,
-    resolve_module_suffix, resolve_module_target_dir, sanitize_ident, select_target_invocations,
-    unique_mmake_owners, MakeExprContext, TargetContext, META_RULE_RE,
+    render_meta_token_with, resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
+    select_target_invocations, unique_mmake_owners, MakeExprContext, TargetContext, META_RULE_RE,
 };
 use crate::ast::{ModuleMacroForm, ModuleType};
 use crate::capability::external_cmake::{self, AOM_COMMON_OPTIONS};
@@ -1375,7 +1375,21 @@ fn known_dynamic_meta_target_variables_become_cmake_references() {
         render_meta_token("grub2-efi32-$(AROS_TARGET_CPU32)-quick").unwrap(),
         "grub2-efi32-${AROS_TARGET_CPU32}-quick"
     );
+    assert_eq!(
+        render_meta_token("mesa3d-linklib-galliumauxiliary-$(AROS_TOOLCHAIN)").unwrap(),
+        "mesa3d-linklib-galliumauxiliary-${AROS_TOOLCHAIN}"
+    );
     assert!(render_meta_token("target-$(SOMETHING_UNKNOWN)").is_none());
+}
+
+#[test]
+fn a_native_policy_global_keeps_the_literal_toolchain_in_meta_targets() {
+    let globals =
+        std::collections::BTreeMap::from([("AROS_TOOLCHAIN".to_owned(), "gnu".to_owned())]);
+    assert_eq!(
+        render_meta_token_with("workbench-devs-networks-$(AROS_TOOLCHAIN)", &globals).unwrap(),
+        "workbench-devs-networks-gnu"
+    );
 }
 
 #[test]
