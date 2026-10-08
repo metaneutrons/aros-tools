@@ -1275,3 +1275,56 @@ fn fetched_copy_includes_reject_selected_ties_but_ignore_unselected_ties() {
         )
         .is_err());
 }
+
+#[test]
+fn an_arch_include_declaration_hands_its_defines_to_every_consumer_of_the_includes() {
+    use crate::includes::ArchIncludeDecl;
+    let mut graph = DependencyGraph::new();
+    let mut consumer = target("consumer", ModuleType::Library);
+    consumer.arch_modules = vec!["kernel".into()];
+    let mut bystander = target("bystander", ModuleType::Library);
+    bystander.arch_modules = vec!["exec".into()];
+    graph.targets.insert("consumer".into(), consumer);
+    graph.targets.insert("bystander".into(), bystander);
+    let declaration = |dir: &str, defines: &[&str], options: &[&str]| ArchIncludeDecl {
+        mainmmake: "kernel-kernel".into(),
+        modname: "kernel".into(),
+        pri: 10,
+        tag: "esp32p4-riscv".into(),
+        dir: dir.into(),
+        defines: defines.iter().map(ToString::to_string).collect(),
+        compile_options: options.iter().map(ToString::to_string).collect(),
+    };
+    graph.add_arch_decls(vec![
+        declaration("arch/riscv-esp32p4/kernel", &[], &[]),
+        declaration("", &["P4_BOARD_D1001=1"], &["-Wno-unused-function"]),
+        // A repeat of the same fact must not repeat the definition.
+        declaration("", &["P4_BOARD_D1001=1"], &[]),
+    ]);
+    graph.resolve_arch_includes();
+
+    let consumer = &graph.targets["consumer"];
+    assert_eq!(
+        consumer.arch_includes,
+        [(
+            "esp32p4-riscv".to_owned(),
+            "arch/riscv-esp32p4/kernel".to_owned()
+        )]
+    );
+    assert_eq!(
+        consumer.arch_defines,
+        [("esp32p4-riscv".to_owned(), "P4_BOARD_D1001=1".to_owned())]
+    );
+    assert_eq!(
+        consumer.arch_compile_options,
+        [(
+            "esp32p4-riscv".to_owned(),
+            "-Wno-unused-function".to_owned()
+        )]
+    );
+    // A module that did not ask for the kernel includes does not get them.
+    let bystander = &graph.targets["bystander"];
+    assert!(bystander.arch_defines.is_empty() && bystander.arch_includes.is_empty());
+    let cmake = crate::generator::generate_cmake(&graph);
+    assert!(cmake.contains("ARCH_DEFINES \"esp32p4-riscv|P4_BOARD_D1001=1\""));
+}

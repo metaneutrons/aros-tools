@@ -40,8 +40,17 @@ pub struct ArchIncludeDecl {
     pub pri: u32,
     /// `arch=`: the architecture tag this declaration applies to.
     pub tag: String,
-    /// Include directory, relative to the source root.
+    /// Include directory, relative to the source root. Empty for a declaration
+    /// that carries only `defines` and `compile_options`.
     pub dir: String,
+    /// Preprocessor definitions the declaration's `includes=` carries, without
+    /// the `-D`. Make hands them to every compile that requests the include
+    /// flags, because they travel inside `TARGET_<X>_INCLUDES`.
+    #[serde(default)]
+    pub defines: Vec<String>,
+    /// Allowlisted compiler options carried the same way.
+    #[serde(default)]
+    pub compile_options: Vec<String>,
 }
 
 /// Include information collected from one `mmakefile.src`.
@@ -606,10 +615,78 @@ pub fn collect_arch_decls(content: &str, rel_dir: &Path) -> Vec<ArchIncludeDecl>
                 pri,
                 tag: tag.clone(),
                 dir,
+                defines: Vec::new(),
+                compile_options: Vec::new(),
             });
         }
     }
     out
+}
+
+/// The preprocessor and codegen flags of each `%set_archincludes` declaration.
+///
+/// `%set_archincludes includes="-I... $(P4_BOARD_CPPFLAGS)"` ends up in
+/// `TARGET_<X>_INCLUDES`, which a consumer puts on its compile line as it is.
+/// Only the `-I` forms name directories, so `collect_arch_decls` keeps only
+/// those; this reads the rest, in the variable scope of the declaration, so a
+/// board define selected by an included `board.mk` is not lost. `content` must
+/// be the text `scope` was built from. The second value lists tokens that could
+/// not be turned into a define or an option, as `unresolved` include tokens.
+#[must_use]
+pub(crate) fn collect_arch_flag_decls(
+    content: &str,
+    scope: &VarScope,
+) -> (Vec<ArchIncludeDecl>, Vec<String>) {
+    let mut decls = Vec::new();
+    let mut unresolved = Vec::new();
+    for (line, body) in directive_bodies_at(content, "%set_archincludes") {
+        let (Some(mainmmake), Some(modname), Some(tag)) = (
+            arg_value(&body, "mainmmake"),
+            arg_value(&body, "modname"),
+            arg_value(&body, "arch"),
+        ) else {
+            continue;
+        };
+        let pri = arg_value(&body, "pri")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(u32::MAX);
+        let includes = arg_value_quoted(&body, "includes")
+            .unwrap_or_else(|| "-I$(SRCDIR)/$(CURDIR)".to_owned());
+        let mut tokens = Vec::new();
+        expand_scoped_tokens(&includes, scope, line, 8, &mut Vec::new(), &mut tokens);
+
+        let mut flags = Vec::new();
+        let mut expect_path = false;
+        for token in tokens {
+            if expect_path {
+                expect_path = false;
+            } else if SEPARATE_FLAGS.contains(&token.as_str()) {
+                expect_path = true;
+            } else if !token.starts_with("-I") {
+                flags.push(token);
+            }
+        }
+        let set = crate::flags::classify_tokens(&flags);
+        for name in &set.undefines {
+            unresolved.push(format!("%set_archincludes modname={modname}: -U{name}"));
+        }
+        for token in &set.skipped {
+            unresolved.push(format!("%set_archincludes modname={modname}: {token}"));
+        }
+        if set.defines.is_empty() && set.compile_options.is_empty() {
+            continue;
+        }
+        decls.push(ArchIncludeDecl {
+            mainmmake,
+            modname,
+            pri,
+            tag,
+            dir: String::new(),
+            defines: set.defines,
+            compile_options: set.compile_options,
+        });
+    }
+    (decls, unresolved)
 }
 
 /// Returns the body of each occurrence of `directive`, joining continuations.
@@ -867,5 +944,79 @@ USER_CFLAGS := -I$(SRCDIR)/later\n";
             set.dirs,
             vec!["${AROS_SOURCE_DIR}/arch/${AROS_TARGET_CPU}-${AROS_TARGET_PLATFORM}/include"]
         );
+    }
+
+    const BOARD_DECLARATION: &str = r#"
+P4_BOARD ?= d1001
+ifeq ($(P4_BOARD),d1001)
+P4_BOARD_CPPFLAGS := -DP4_BOARD_D1001=1
+endif
+
+%set_archincludes mainmmake=kernel-kernel maindir=rom/kernel \
+  modname=kernel pri=10 arch=esp32p4-riscv \
+  includes="-I$(SRCDIR)/$(CURDIR) $(P4_BOARD_CPPFLAGS)"
+"#;
+
+    #[test]
+    fn an_arch_include_declaration_keeps_the_defines_its_variables_resolve_to() {
+        // The contract selects the board; without it the conditional that
+        // defines the flag cannot be decided, and the token is reported.
+        let undecided = crate::make_vars::collect_vars(BOARD_DECLARATION);
+        let (none, reported) = collect_arch_flag_decls(BOARD_DECLARATION, &undecided);
+        assert!(none.is_empty());
+        assert_eq!(
+            reported,
+            ["%set_archincludes modname=kernel: $(P4_BOARD_CPPFLAGS)"]
+        );
+
+        let context = crate::TargetContext {
+            make_variables: [("P4_BOARD".to_owned(), "d1001".to_owned())].into(),
+            ..crate::TargetContext::default()
+        };
+        let (scope, _) = crate::make_vars::collect_vars_impl(BOARD_DECLARATION, Some(&context));
+        let (decls, unresolved) = collect_arch_flag_decls(BOARD_DECLARATION, &scope);
+        assert!(unresolved.is_empty(), "{unresolved:?}");
+        assert_eq!(decls.len(), 1);
+        let decl = &decls[0];
+        assert_eq!(decl.modname, "kernel");
+        assert_eq!(decl.tag, "esp32p4-riscv");
+        assert_eq!(decl.pri, 10);
+        assert_eq!(decl.defines, ["P4_BOARD_D1001=1"]);
+        assert!(decl.dir.is_empty() && decl.compile_options.is_empty());
+        // The directory half is untouched by the flag half.
+        let dirs = collect_arch_decls(BOARD_DECLARATION, &dir("arch/riscv-esp32p4/kernel"));
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].dir, "${AROS_SOURCE_DIR}/arch/riscv-esp32p4/kernel");
+        assert!(dirs[0].defines.is_empty());
+    }
+
+    #[test]
+    fn a_declaration_with_only_directories_adds_no_flag_declaration() {
+        let text = "%set_archincludes mainmmake=k maindir=rom/k modname=kernel pri=1 \\\n  arch=x includes=\"-I$(SRCDIR)/$(CURDIR) -isystem $(SRCDIR)/other\"\n";
+        let scope = crate::make_vars::collect_vars(text);
+        let (decls, unresolved) = collect_arch_flag_decls(text, &scope);
+        assert!(
+            decls.is_empty() && unresolved.is_empty(),
+            "{decls:?} {unresolved:?}"
+        );
+    }
+
+    #[test]
+    fn an_unusable_token_is_reported_instead_of_dropped() {
+        let text = "%set_archincludes mainmmake=k maindir=rom/k modname=kernel pri=1 \\\n  arch=x includes=\"-I$(SRCDIR)/$(CURDIR) $(UNKNOWN_FLAGS) -DKEPT -UGONE -Wl,--gc-sections\"\n";
+        let scope = crate::make_vars::collect_vars(text);
+        let (decls, unresolved) = collect_arch_flag_decls(text, &scope);
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].defines, ["KEPT"]);
+        assert!(unresolved
+            .iter()
+            .any(|item| item.ends_with("$(UNKNOWN_FLAGS)")));
+        assert!(unresolved.iter().any(|item| item.ends_with("-UGONE")));
+        assert!(unresolved
+            .iter()
+            .any(|item| item.ends_with("-Wl,--gc-sections")));
+        assert!(unresolved
+            .iter()
+            .all(|item| item.contains("modname=kernel")));
     }
 }

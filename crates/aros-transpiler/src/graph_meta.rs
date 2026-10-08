@@ -88,9 +88,26 @@ impl DependencyGraph {
             for module in &target.arch_modules {
                 if let Some(decls) = self.arch_decls.get(module) {
                     for decl in decls {
-                        let entry = (decl.tag.clone(), decl.dir.clone());
-                        if !resolved.contains(&entry) {
-                            resolved.push(entry);
+                        if !decl.dir.is_empty() {
+                            let entry = (decl.tag.clone(), decl.dir.clone());
+                            if !resolved.contains(&entry) {
+                                resolved.push(entry);
+                            }
+                        }
+                        // Make carries these inside TARGET_<X>_INCLUDES, so a
+                        // consumer that asks for the includes compiles with
+                        // them, under the declaration's architecture tag.
+                        for define in &decl.defines {
+                            let entry = (decl.tag.clone(), define.clone());
+                            if !target.arch_defines.contains(&entry) {
+                                target.arch_defines.push(entry);
+                            }
+                        }
+                        for option in &decl.compile_options {
+                            let entry = (decl.tag.clone(), option.clone());
+                            if !target.arch_compile_options.contains(&entry) {
+                                target.arch_compile_options.push(entry);
+                            }
                         }
                     }
                 }
