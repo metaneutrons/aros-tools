@@ -103,6 +103,9 @@ pub struct NativeOwnerProjection {
     discovered_inputs: BTreeSet<String>,
     /// Project discovery policy applied to both the original and current walks.
     ignored_directories: BTreeSet<String>,
+    /// Exact root-relative directories excluded from both walks (the calling
+    /// engine's in-tree build directory); never matched by basename.
+    excluded_paths: BTreeSet<String>,
     /// Exact original bytes; checked against the main parser and recaptured.
     pub snapshots: BTreeMap<String, String>,
     /// Source contract inputs available to configuration include replay.
@@ -182,6 +185,7 @@ impl NativeOwnerProjection {
         files: &[PathBuf],
         host: &str,
         context: &TargetContext,
+        excluded_paths: &BTreeSet<String>,
     ) -> Result<Option<Self>, String> {
         let Some(path) = &native.contract.metamake_projection else {
             return Ok(None);
@@ -193,7 +197,8 @@ impl NativeOwnerProjection {
         load_evidence_sources(root, &policy, &sealed, &mut snapshots)?;
         let project = load_project(root, &policy, &sealed, &mut snapshots)?;
         let (globals, absent) = load_globals(&policy, &project, host, context)?;
-        let discovered = verify_complete_discovery(root, files, &project.ignored_directories)?;
+        let discovered =
+            verify_complete_discovery(root, files, &project.ignored_directories, excluded_paths)?;
         let template = load_template(root, &policy, &sealed, &mut snapshots)?;
         let owners = build_owner_map(discovered.clone());
         let (expanded, expanded_bytes, expansion_origins) =
@@ -219,6 +224,7 @@ impl NativeOwnerProjection {
             owners,
             discovered_inputs: discovered,
             ignored_directories: project.ignored_directories,
+            excluded_paths: excluded_paths.clone(),
             snapshots,
             policy_sha256: aros_common::sha256_bytes(&bytes).to_string(),
             expanded_bytes,
@@ -354,7 +360,12 @@ impl NativeOwnerProjection {
     /// Returns an error if discovery changed or any captured input is
     /// unreadable or changed.
     pub fn verify(&self, root: &Path) -> Result<(), String> {
-        verify_captured_discovery(root, &self.discovered_inputs, &self.ignored_directories)?;
+        verify_captured_discovery(
+            root,
+            &self.discovered_inputs,
+            &self.ignored_directories,
+            &self.excluded_paths,
+        )?;
         verify_snapshot_digests(root, &self.snapshots)
     }
 }
@@ -586,6 +597,12 @@ fn validate_context_selectors(
     absent: &BTreeSet<String>,
     context: &TargetContext,
 ) -> Result<(), String> {
+    const FORWARDED_WHEN_SELECTED: &[&str] = &[
+        "TARGET_LLVM_VER",
+        "TARGET_LLVM_RUNTIMES_STYLE",
+        "TARGET_RUST",
+        "TARGET_RUST_VER",
+    ];
     const REQUIRED: &[&str] = &[
         "AROS_TARGET_CPU",
         "CPU",
@@ -608,6 +625,12 @@ fn validate_context_selectors(
             continue;
         }
         if let Some(expected) = context.value_of(name) {
+            // The frontend forwards these from cache variables that default to
+            // empty, so an empty value means it did not select one, not that
+            // it selected the empty string. The sealed policy then supplies it.
+            if expected.is_empty() && FORWARDED_WHEN_SELECTED.contains(name) {
+                continue;
+            }
             compare_selector(globals, absent, name, &expected, false)?;
         }
     }
@@ -642,6 +665,7 @@ fn verify_complete_discovery(
     root: &Path,
     files: &[PathBuf],
     ignored_directories: &BTreeSet<String>,
+    excluded_paths: &BTreeSet<String>,
 ) -> Result<BTreeSet<String>, String> {
     if files.len() > 20_000 {
         return Err("native MetaMake discovery exceeds file budget".into());
@@ -650,12 +674,13 @@ fn verify_complete_discovery(
     for file in files {
         let name = meta_relative_name(root, file)?;
         if !path_has_ignored_directory(Path::new(&name), ignored_directories)
+            && !path_is_excluded(Path::new(&name), excluded_paths)
             && !supplied.insert(name.to_owned())
         {
             return Err(format!("duplicate discovered MetaMake input: {name}"));
         }
     }
-    let expected = discover_meta_files(root, ignored_directories)?;
+    let expected = discover_meta_files(root, ignored_directories, excluded_paths)?;
     compare_discovered_inputs(&expected, &supplied)?;
     Ok(expected)
 }
@@ -664,8 +689,9 @@ fn verify_captured_discovery(
     root: &Path,
     discovered_inputs: &BTreeSet<String>,
     ignored_directories: &BTreeSet<String>,
+    excluded_paths: &BTreeSet<String>,
 ) -> Result<(), String> {
-    let current = discover_meta_files(root, ignored_directories)?;
+    let current = discover_meta_files(root, ignored_directories, excluded_paths)?;
     compare_discovered_inputs(discovered_inputs, &current)
 }
 
@@ -686,6 +712,7 @@ fn compare_discovered_inputs(
 fn discover_meta_files(
     root: &Path,
     ignored_directories: &BTreeSet<String>,
+    excluded_paths: &BTreeSet<String>,
 ) -> Result<BTreeSet<String>, String> {
     let walker = WalkDir::new(root)
         .follow_links(false)
@@ -693,10 +720,14 @@ fn discover_meta_files(
         .filter_entry(|entry| {
             entry.depth() == 0
                 || !entry.file_type().is_dir()
-                || !entry
+                || !(entry
                     .file_name()
                     .to_str()
                     .is_some_and(|name| ignored_directories.contains(name))
+                    || entry
+                        .path()
+                        .strip_prefix(root)
+                        .is_ok_and(|relative| path_is_excluded(relative, excluded_paths)))
         });
     let mut files = BTreeSet::new();
     for entry in walker {
@@ -851,6 +882,13 @@ fn path_has_ignored_directory(path: &Path, ignored_directories: &BTreeSet<String
             .iter()
             .any(|ignored| component.as_os_str() == std::ffi::OsStr::new(ignored))
     })
+}
+
+/// Whether `path` is, or lies below, one of the exact excluded directories.
+fn path_is_excluded(path: &Path, excluded_paths: &BTreeSet<String>) -> bool {
+    excluded_paths
+        .iter()
+        .any(|excluded| path.starts_with(Path::new(excluded)))
 }
 
 fn is_ignored_name(name: &std::ffi::OsStr, ignored_directories: &BTreeSet<String>) -> bool {
@@ -1205,7 +1243,8 @@ mod tests {
         root: &Path,
         ignored_directories: BTreeSet<String>,
     ) -> NativeOwnerProjection {
-        let discovered_inputs = discover_meta_files(root, &ignored_directories).unwrap();
+        let discovered_inputs =
+            discover_meta_files(root, &ignored_directories, &BTreeSet::new()).unwrap();
         let owners = build_owner_map(discovered_inputs.clone());
         let metadata = owners
             .keys()
@@ -1228,6 +1267,7 @@ mod tests {
             owners,
             discovered_inputs,
             ignored_directories,
+            excluded_paths: BTreeSet::new(),
             snapshots: BTreeMap::new(),
             policy_sha256: String::new(),
             expanded_bytes: 0,
@@ -1395,6 +1435,31 @@ $(GENINCDIR)/generated/table.h : $(OBJDIR)/table.s | $(GENINCDIR)/generated
             validate_context_selectors(&wrong, &BTreeSet::new(), &context)
                 .unwrap_err()
                 .contains("ARCH differs")
+        );
+    }
+
+    #[test]
+    fn an_unselected_llvm_or_rust_selector_does_not_contradict_the_sealed_policy() {
+        let mut globals = selector_globals();
+        globals.insert("TARGET_LLVM_RUNTIMES_STYLE".into(), "separate".into());
+        let mut context = selector_context();
+        // CMake forwards the cache variable's empty default.
+        context.target_llvm_runtimes_style = Some(String::new());
+        assert!(validate_context_selectors(&globals, &BTreeSet::new(), &context).is_ok());
+        // A selected value still has to match the policy.
+        context.target_llvm_runtimes_style = Some("shared".into());
+        assert!(
+            validate_context_selectors(&globals, &BTreeSet::new(), &context)
+                .unwrap_err()
+                .contains("TARGET_LLVM_RUNTIMES_STYLE differs")
+        );
+        // The selectors that define the target keep comparing empty values.
+        let mut wrong = selector_globals();
+        wrong.insert("FAMILY".into(), "other".into());
+        assert!(
+            validate_context_selectors(&wrong, &BTreeSet::new(), &selector_context())
+                .unwrap_err()
+                .contains("FAMILY differs")
         );
     }
 
@@ -1583,12 +1648,47 @@ $(GENINCDIR)/generated/table.h : $(OBJDIR)/table.s | $(GENINCDIR)/generated
             root.path().join("build/mmakefile.src"),
         ];
         assert_eq!(
-            verify_complete_discovery(root.path(), &supplied, &ignored).unwrap(),
+            verify_complete_discovery(root.path(), &supplied, &ignored, &BTreeSet::new()).unwrap(),
             BTreeSet::from(["build/mmakefile.src".into(), "live/mmakefile.src".into()])
         );
         let main_pruned = vec![root.path().join("live/mmakefile.src")];
-        let error = verify_complete_discovery(root.path(), &main_pruned, &ignored).unwrap_err();
+        let error =
+            verify_complete_discovery(root.path(), &main_pruned, &ignored, &BTreeSet::new())
+                .unwrap_err();
         assert!(error.contains("build/mmakefile.src"));
         assert!(error.contains("omitted"));
+    }
+
+    #[test]
+    fn an_excluded_build_directory_is_left_out_by_exact_path_only() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [
+            "live/mmakefile.src",
+            // The engine's in-tree build tree and its generated recipe.
+            "build/esp32p4-d1001/SDK/include/mmakefile.src",
+            // A source directory that merely shares the basename.
+            "vendor/build/mmakefile.src",
+            // A sibling build tree of another profile is not excluded.
+            "build/other/mmakefile.src",
+        ] {
+            let file = root.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "#MM root\n").unwrap();
+        }
+        let excluded = BTreeSet::from(["build/esp32p4-d1001".to_owned()]);
+        let found = discover_meta_files(root.path(), &BTreeSet::new(), &excluded).unwrap();
+        assert_eq!(
+            found,
+            BTreeSet::from([
+                "build/other/mmakefile.src".into(),
+                "live/mmakefile.src".into(),
+                "vendor/build/mmakefile.src".into(),
+            ])
+        );
+        // The main walk's list is checked against the same exclusion.
+        let supplied: Vec<_> = found.iter().map(|name| root.path().join(name)).collect();
+        assert!(
+            verify_complete_discovery(root.path(), &supplied, &BTreeSet::new(), &excluded).is_ok()
+        );
     }
 }

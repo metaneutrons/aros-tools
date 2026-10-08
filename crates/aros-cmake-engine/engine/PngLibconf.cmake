@@ -67,6 +67,14 @@ function(aros_stage_pnglibconf)
     endif()
 
     string(SHA256 _output_key "${_output}")
+    # A graph that already translates the recipe's whole-line rule owns this
+    # exact header as a transformed header. A second command for the same
+    # output would be a duplicate producer, so the translated rule stands.
+    get_property(_transformed_owner GLOBAL PROPERTY
+        "AROS_TRANSFORM_HEADER_OWNER_${_output_key}")
+    if(_transformed_owner STREQUAL PNG_OWNER)
+        return()
+    endif()
     get_property(_previous_owner GLOBAL PROPERTY
         "AROS_PNGLIBCONF_OWNER_${_output_key}")
     if(_previous_owner AND NOT _previous_owner STREQUAL PNG_NAME)

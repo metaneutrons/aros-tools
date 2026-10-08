@@ -92,6 +92,12 @@ pub struct Args {
     #[arg(long = "target-rust-ver")]
     pub target_rust_ver: Option<String>,
 
+    /// The build directory of the calling engine. A native invocation excludes
+    /// it from MetaMake discovery by exact path when it lies inside the source
+    /// tree, because its generated files are not source recipes.
+    #[arg(long = "build-dir")]
+    pub build_dir: Option<PathBuf>,
+
     /// Diagnostic renderer used for failures
     #[arg(
         long,

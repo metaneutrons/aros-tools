@@ -231,8 +231,20 @@ function(aros_compile_literal_object)
     _aros_literal_append_set(command_contents COMPILER "${driver}")
     _aros_literal_append_set(command_contents LANGUAGE "${L_LANGUAGE}")
     _aros_literal_append_set(command_contents OUTPUT_MODE "${L_OUTPUT_MODE}")
+    # The Make recipe finds SDK headers through the sysroot, which Make fills
+    # with every staged header. The native build stages them into the SDK and
+    # GENINCDIR roots and fills the sysroot only with what genmodule
+    # publishes, so name those roots after the declared arguments, in the order
+    # every other compile in this build searches them.
+    set(command_arguments ${L_ARGUMENTS})
+    if(AROS_NATIVE_BUILD_CONTRACT)
+        list(APPEND command_arguments
+            "-I${build_root}/GENINCDIR"
+            "-I${build_root}/SDK/include/aros/stdc"
+            "-I${build_root}/SDK/include")
+    endif()
     string(APPEND command_contents "set(ARGUMENTS\n")
-    foreach(argument IN LISTS L_ARGUMENTS)
+    foreach(argument IN LISTS command_arguments)
         string(APPEND command_contents "    [==[${argument}]==]\n")
     endforeach()
     string(APPEND command_contents ")\n")

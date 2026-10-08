@@ -307,6 +307,7 @@ execute_process(
             "--target-llvm-runtimes-style" "${AROS_TARGET_LLVM_RUNTIMES_STYLE}"
             "--target-rust" "${AROS_TARGET_RUST}"
             "--target-rust-ver" "${AROS_TARGET_RUST_VER}"
+            "--build-dir" "${CMAKE_BINARY_DIR}"
     RESULT_VARIABLE TRANSPILER_RES
     ERROR_VARIABLE _aros_transpiler_error
 )
@@ -362,6 +363,7 @@ if(AROS_NATIVE_BUILD_CONTRACT OR AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
                 "--target-llvm-runtimes-style" "${AROS_TARGET_LLVM_RUNTIMES_STYLE}"
                 "--target-rust" "${AROS_TARGET_RUST}"
                 "--target-rust-ver" "${AROS_TARGET_RUST_VER}"
+                "--build-dir" "${CMAKE_BINARY_DIR}"
         RESULT_VARIABLE TRANSPILER_RES
         ERROR_VARIABLE _aros_transpiler_error)
     if(NOT TRANSPILER_RES EQUAL 0 OR NOT EXISTS "${GENERATED_TARGETS_CMAKE}")
@@ -406,7 +408,8 @@ set(_aros_transpiler_record
     "--target-llvm-ver" "${AROS_TARGET_LLVM_VER}"
     "--target-llvm-runtimes-style" "${AROS_TARGET_LLVM_RUNTIMES_STYLE}"
     "--target-rust" "${AROS_TARGET_RUST}"
-    "--target-rust-ver" "${AROS_TARGET_RUST_VER}")
+    "--target-rust-ver" "${AROS_TARGET_RUST_VER}"
+    "--build-dir" "${CMAKE_BINARY_DIR}")
 string(REPLACE ";" "\n" _aros_transpiler_invocation "${_aros_transpiler_record}")
 file(WRITE "${GENERATED_TARGETS_CMAKE}.invocation"
     "${_aros_transpiler_invocation}\n")
@@ -878,7 +881,11 @@ aros_add_libdefs_audit_target()
 # Match MetaMake's configured default invocation. Every translated declaration
 # remains nameable, while the implicit CMake `all` target contains only the
 # exact dependency closure rooted at AROS.
-aros_limit_all_to_metamake_root(AROS)
+# A native contract selects its own product, and its graph has no MetaMake
+# default root; the selected targets are then what `all` builds.
+if(NOT AROS_NATIVE_BUILD_CONTRACT OR TARGET AROS)
+    aros_limit_all_to_metamake_root(AROS)
+endif()
 
 if(AROS_NATIVE_BUILD_CONTRACT)
     # Use canonical source module/archive identities, never a board-name map

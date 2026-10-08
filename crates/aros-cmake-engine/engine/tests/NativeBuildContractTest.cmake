@@ -40,6 +40,10 @@ if(DEFINED AROS_NATIVE_BUILD_CONTRACT_TEST_CHILD)
             message(FATAL_ERROR "Source Make include binding was not exported exactly")
         endif()
     endif()
+    if(DEFINED AROS_NATIVE_BUILD_CONTRACT_TEST_EXPECT_EXEC_SMP AND
+       NOT AROS_NATIVE_BUILD_EXEC_SMP STREQUAL AROS_NATIVE_BUILD_CONTRACT_TEST_EXPECT_EXEC_SMP)
+        message(FATAL_ERROR "Exec SMP was exported as '${AROS_NATIVE_BUILD_EXEC_SMP}'")
+    endif()
     if(DEFINED AROS_NATIVE_BUILD_CONTRACT_TEST_MAKE_DEFAULTS)
         string(JSON _mode GET "${AROS_NATIVE_BUILD_MAKE_VARIABLES_JSON}" FEATURE_MODE)
         string(JSON _style GET "${AROS_NATIVE_BUILD_MAKE_VARIABLES_JSON}" SDK_STYLE)
@@ -350,6 +354,55 @@ foreach(_bad_map IN ITEMS "{\"CPU\":\"riscv\"}" "{\"FEATURE\":\"a;b\"}" "{\"FEAT
     file(WRITE "${_bad_make_source}/native-build-v1.json" "${_bad_make_json}\n")
     _native_contract_run_failure("unsafe Make configuration" "${_bad_make_source}" "make_variables")
 endforeach()
+
+# The limit matches aros-common's MAX_MAKE_VARIABLES: 256 empty switches are
+# accepted, one more is refused. A port that tests many diagnostic switches
+# lists each one as empty in its contract.
+function(_native_make_map count output)
+    set(_items "")
+    foreach(_index RANGE 1 ${count})
+        list(APPEND _items "\"VAR_${_index}\":\"\"")
+    endforeach()
+    list(JOIN _items "," _joined)
+    set(${output} "{${_joined}}" PARENT_SCOPE)
+endfunction()
+
+_native_make_map(256 _full_map)
+_native_contract_copy_case("make-limit" _limit_source)
+file(READ "${_limit_source}/native-build-v1.json" _limit_json)
+string(JSON _limit_json SET "${_limit_json}" make_variables "${_full_map}")
+file(WRITE "${_limit_source}/native-build-v1.json" "${_limit_json}\n")
+_native_contract_run_success("make variable limit" "${_limit_source}")
+function(_native_exec_smp_case case_name templates expected)
+    _native_contract_copy_case("${case_name}" _smp_source)
+    file(READ "${_smp_source}/native-build-v1.json" _smp_json)
+    string(JSON _smp_json SET "${_smp_json}" generated_make_templates "${templates}")
+    file(WRITE "${_smp_source}/native-build-v1.json" "${_smp_json}\n")
+    if(expected STREQUAL "REFUSED")
+        _native_contract_run_failure("${case_name}" "${_smp_source}" "${ARGN}")
+    else()
+        _native_contract_run_success("${case_name}" "${_smp_source}"
+            "-DAROS_NATIVE_BUILD_CONTRACT_TEST_EXPECT_EXEC_SMP=${expected}")
+    endif()
+endfunction()
+
+set(_smp_on "{\"compiler/include/geninc.cfg\":{\"template\":\"compiler/include/geninc.cfg.in\",\"configure_source\":\"configure.in\",\"substitutions\":{\"@ENABLE_EXECSMP@\":\"#define __AROSEXEC_SMP__\"}}}")
+set(_smp_off "{\"compiler/include/geninc.cfg\":{\"template\":\"compiler/include/geninc.cfg.in\",\"configure_source\":\"configure.in\",\"substitutions\":{\"@ENABLE_EXECSMP@\":\"\"}}}")
+set(_smp_bad "{\"compiler/include/geninc.cfg\":{\"template\":\"compiler/include/geninc.cfg.in\",\"configure_source\":\"configure.in\",\"substitutions\":{\"@ENABLE_EXECSMP@\":\"#define OTHER\"}}}")
+set(_smp_split "{\"a/geninc.cfg\":{\"template\":\"a/geninc.cfg.in\",\"configure_source\":\"configure.in\",\"substitutions\":{\"@ENABLE_EXECSMP@\":\"#define __AROSEXEC_SMP__\"}},\"b/geninc.cfg\":{\"template\":\"b/geninc.cfg.in\",\"configure_source\":\"configure.in\",\"substitutions\":{\"@ENABLE_EXECSMP@\":\"\"}}}")
+_native_exec_smp_case("exec-smp-on" "${_smp_on}" ON)
+_native_exec_smp_case("exec-smp-off" "${_smp_off}" OFF)
+_native_exec_smp_case("exec-smp-other-value" "${_smp_bad}" REFUSED
+    "must be[ \n]+empty or")
+_native_exec_smp_case("exec-smp-templates-disagree" "${_smp_split}" REFUSED
+    "templates[ \n]+disagree[ \n]+on[ \n]+@ENABLE_EXECSMP@")
+
+_native_make_map(257 _over_map)
+_native_contract_copy_case("make-over-limit" _over_source)
+file(READ "${_over_source}/native-build-v1.json" _over_json)
+string(JSON _over_json SET "${_over_json}" make_variables "${_over_map}")
+file(WRITE "${_over_source}/native-build-v1.json" "${_over_json}\n")
+_native_contract_run_failure("too many Make variables" "${_over_source}" "exceeds 256 entries")
 
 # A media adapter requires this reference. Old core-only declarations may omit
 # it, but no default or un-inventoried path is invented at the engine boundary.

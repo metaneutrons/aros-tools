@@ -387,8 +387,8 @@ function(aros_validate_native_build_contract)
         endif()
         string(JSON _make_variables_json GET "${_contract_json}" make_variables)
         string(JSON _make_variable_count LENGTH "${_make_variables_json}")
-        if(_make_variable_count GREATER 64)
-            _aros_native_contract_fail("make_variables" "exceeds 64 entries")
+        if(_make_variable_count GREATER 256)
+            _aros_native_contract_fail("make_variables" "exceeds 256 entries")
         endif()
         set(_reserved_make_variables
             AROS_TARGET_CPU CPU AROS_TARGET_ARCH ARCH AROS_TARGET_PLATFORM
@@ -442,6 +442,64 @@ function(aros_validate_native_build_contract)
         if(_host_files_count GREATER 16)
             _aros_native_contract_fail("host_file_generators" "exceeds 16 entries")
         endif()
+    endif()
+    # Consumed by the Rust transpiler, which verifies their content against the
+    # sealed sources; the engine only checks that each is present as the type
+    # the contract schema gives it.
+    foreach(_rust_field IN ITEMS host_make_variables:OBJECT generated_make_templates:OBJECT
+            metamake_projection:STRING kernel_compiler_role:STRING)
+        string(REPLACE ":" ";" _rust_field_parts "${_rust_field}")
+        list(GET _rust_field_parts 0 _rust_field_name)
+        list(GET _rust_field_parts 1 _rust_field_type)
+        string(JSON _rust_field_actual ERROR_VARIABLE _rust_field_error
+            TYPE "${_contract_json}" "${_rust_field_name}")
+        if(_rust_field_error STREQUAL "NOTFOUND")
+            list(APPEND _top_fields "${_rust_field_name}")
+            if(NOT _rust_field_actual STREQUAL _rust_field_type)
+                _aros_native_contract_fail("${_rust_field_name}"
+                    "must be a JSON ${_rust_field_type}")
+            endif()
+        endif()
+    endforeach()
+    # configure writes ENABLE_EXECSMP into the Make templates and into
+    # aros/config.h alike. The contract carries it once, as the substitution of
+    # @ENABLE_EXECSMP@, so aros/config.h follows what the Make side reads.
+    set(_exec_smp OFF)
+    string(JSON _templates_json ERROR_VARIABLE _templates_error
+        GET "${_contract_json}" generated_make_templates)
+    if(_templates_error STREQUAL "NOTFOUND")
+        string(JSON _template_count LENGTH "${_templates_json}")
+        if(_template_count GREATER 0)
+            math(EXPR _last_template "${_template_count} - 1")
+            foreach(_template_index RANGE 0 ${_last_template})
+                string(JSON _template_path MEMBER "${_templates_json}" ${_template_index})
+                string(JSON _smp_substitution ERROR_VARIABLE _smp_error
+                    GET "${_templates_json}" "${_template_path}" substitutions "@ENABLE_EXECSMP@")
+                if(NOT _smp_error STREQUAL "NOTFOUND")
+                    continue()
+                endif()
+                if(_smp_substitution STREQUAL "#define __AROSEXEC_SMP__")
+                    set(_template_smp ON)
+                elseif(_smp_substitution STREQUAL "")
+                    set(_template_smp OFF)
+                else()
+                    _aros_native_contract_fail("generated_make_templates"
+                        "@ENABLE_EXECSMP@ must be empty or \"#define __AROSEXEC_SMP__\"")
+                endif()
+                if(DEFINED _template_seen AND NOT _template_smp STREQUAL _exec_smp)
+                    _aros_native_contract_fail("generated_make_templates"
+                        "templates disagree on @ENABLE_EXECSMP@")
+                endif()
+                set(_template_seen TRUE)
+                set(_exec_smp "${_template_smp}")
+            endforeach()
+        endif()
+    endif()
+    string(JSON _kernel_role ERROR_VARIABLE _kernel_role_error
+        GET "${_contract_json}" kernel_compiler_role)
+    if(_kernel_role_error STREQUAL "NOTFOUND" AND NOT _kernel_role STREQUAL "target")
+        _aros_native_contract_fail("kernel_compiler_role"
+            "the only admitted value is \"target\"")
     endif()
     _aros_native_require_object_members("${_contract_json}" "root object" "${_top_fields}")
 
@@ -762,6 +820,7 @@ function(aros_validate_native_build_contract)
     set(AROS_NATIVE_BUILD_ABI_CODE_MODEL "${_abi_code_model}" PARENT_SCOPE)
     set(AROS_NATIVE_BUILD_ABI_FLAVOUR "${_abi_flavour}" PARENT_SCOPE)
     set(AROS_NATIVE_BUILD_ABI_PLATFORM_SMP "${_abi_platform_smp}" PARENT_SCOPE)
+    set(AROS_NATIVE_BUILD_EXEC_SMP "${_exec_smp}" PARENT_SCOPE)
     set(AROS_NATIVE_BUILD_ABI_USE_MMU "${_abi_use_mmu}" PARENT_SCOPE)
     set(AROS_NATIVE_BUILD_CORE_RECIPE "${_core_recipe}" PARENT_SCOPE)
     set(AROS_NATIVE_BUILD_CORE_LINKER_SCRIPT "${_core_linker_script}" PARENT_SCOPE)

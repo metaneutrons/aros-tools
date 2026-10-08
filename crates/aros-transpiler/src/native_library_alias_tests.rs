@@ -302,6 +302,7 @@ fn make_fixture(
         owners,
         discovered_inputs,
         ignored_directories: BTreeSet::new(),
+        excluded_paths: BTreeSet::new(),
         snapshots,
         policy_sha256: "test-policy".into(),
         expanded_bytes: expanded_files.values().map(String::len).sum(),

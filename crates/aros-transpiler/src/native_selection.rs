@@ -7,6 +7,7 @@ use aros_common::{
     SourceLocation,
 };
 use aros_transpiler::{DependencyGraph, TargetContext};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub fn bind_architecture_effects(
@@ -174,4 +175,116 @@ pub fn load_native_selection(
         ));
     }
     Ok(Some(loaded))
+}
+
+/// The source-relative directories of build trees, to be left out of a native
+/// MetaMake walk: their generated files are outputs, not recipes. These are the
+/// calling engine's own build directory and any sibling of it that holds a
+/// CMake cache, which is what a second preset built in the same checkout
+/// leaves behind. Empty when no build directory was given or it is not inside
+/// the source tree. Never a basename, so a source directory called `build`
+/// stays.
+pub fn native_build_exclusion(args: &Args) -> Result<BTreeSet<String>> {
+    let Some(build_dir) = &args.build_dir else {
+        return Ok(BTreeSet::new());
+    };
+    let configuration_error = |message: String| ArosError::Configuration {
+        file: build_dir.display().to_string(),
+        message,
+    };
+    let source = args.source_dir.canonicalize().map_err(|error| {
+        configuration_error(format!("cannot resolve the source directory: {error}"))
+    })?;
+    let build = build_dir.canonicalize().map_err(|error| {
+        configuration_error(format!("cannot resolve the build directory: {error}"))
+    })?;
+    build_tree_exclusions(&source, &build).map_err(configuration_error)
+}
+
+fn build_tree_exclusions(
+    source: &Path,
+    build: &Path,
+) -> std::result::Result<BTreeSet<String>, String> {
+    let Ok(relative) = build.strip_prefix(source) else {
+        return Ok(BTreeSet::new());
+    };
+    if relative.as_os_str().is_empty() {
+        return Err("the build directory must not be the source tree itself".into());
+    }
+    let relative_text = |path: &Path| {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "the in-tree build directory path is not UTF-8".to_owned())
+    };
+    let mut excluded = BTreeSet::from([relative_text(relative)?]);
+    let Some(parent) = build.parent() else {
+        return Ok(excluded);
+    };
+    let entries = std::fs::read_dir(parent)
+        .map_err(|error| format!("cannot list the build directory's parent: {error}"))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("cannot list the build directory's parent: {error}"))?
+            .path();
+        let configured = path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.is_dir())
+            && path.join("CMakeCache.txt").is_file();
+        if configured {
+            if let Ok(sibling) = path.strip_prefix(source) {
+                excluded.insert(relative_text(sibling)?);
+            }
+        }
+    }
+    Ok(excluded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_tree_exclusions;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn a_configured_sibling_build_tree_is_left_out_with_the_own_one() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().canonicalize().unwrap();
+        for (directory, cache) in [
+            ("build/esp32p4-d1001", true),
+            ("build/esp32p4-jc1060p470c-v2", true),
+            ("build/unconfigured", false),
+            ("build/kept-source", false),
+        ] {
+            std::fs::create_dir_all(source.join(directory)).unwrap();
+            if cache {
+                std::fs::write(source.join(directory).join("CMakeCache.txt"), "").unwrap();
+            }
+        }
+        let own = source.join("build/esp32p4-jc1060p470c-v2");
+        assert_eq!(
+            build_tree_exclusions(&source, &own).unwrap(),
+            BTreeSet::from([
+                "build/esp32p4-d1001".to_owned(),
+                "build/esp32p4-jc1060p470c-v2".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_build_directory_outside_the_source_excludes_nothing() {
+        let source = tempfile::tempdir().unwrap();
+        let build = tempfile::tempdir().unwrap();
+        assert!(build_tree_exclusions(
+            &source.path().canonicalize().unwrap(),
+            &build.path().canonicalize().unwrap()
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
+    fn the_source_tree_itself_is_not_a_build_directory() {
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().canonicalize().unwrap();
+        assert!(build_tree_exclusions(&root, &root).is_err());
+    }
 }

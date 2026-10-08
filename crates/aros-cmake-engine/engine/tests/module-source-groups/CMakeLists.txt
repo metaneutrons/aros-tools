@@ -136,6 +136,14 @@ endforeach()
 if(CASE STREQUAL duplicate)
     aros_record_module_kobj_sources(OWNER fixture DIRECTORY "${_generic}" SOURCES first)
 endif()
+# A declaration with only generic C sources has no CXX, OBJC, ASM or ARCH lane.
+aros_record_module_macro(OWNER sparse FORM full)
+aros_record_module_kobj_sources(OWNER sparse DIRECTORY "${_generic}" SOURCES first)
+get_property(_sparse_recorded GLOBAL PROPERTY AROS_KOBJ_SOURCE_GROUPS_sparse)
+get_property(_sparse_c GLOBAL PROPERTY AROS_KOBJ_SOURCES_sparse_C)
+if(NOT _sparse_recorded OR NOT "${_sparse_c}" STREQUAL "${_generic}/first.c")
+    message(FATAL_ERROR "A declaration with empty lanes was not recorded: ${_sparse_c}")
+endif()
 # The compile-group helper must clone the final target state and generator
 # barrier, without depending on the runtime executable's own link.
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")

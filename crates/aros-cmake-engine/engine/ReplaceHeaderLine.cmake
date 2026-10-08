@@ -12,7 +12,10 @@ if(NOT DEFINED INPUT OR "${INPUT}" STREQUAL "" OR
         "REPLACEMENT_FILE, INPUT_ROOT, OUTPUT_ROOT and BINARY_ROOT")
 endif()
 
-foreach(_forbidden IN ITEMS ";" "\r" "\n" "\"" "$" "`")
+# A semicolon is allowed: the token is only ever hex-encoded and compared as
+# bytes, and source declarations match whole struct member lines such as
+# `ThisTask;`. The characters below could end or extend a command or string.
+foreach(_forbidden IN ITEMS "\r" "\n" "\"" "$" "`")
     string(FIND "${TOKEN}" "${_forbidden}" _forbidden_at)
     if(NOT _forbidden_at LESS 0)
         message(FATAL_ERROR "whole-line header transform: unsafe literal token")

@@ -50,6 +50,10 @@ endif()
 set(_output_root "${_build}/SDK/include")
 set(_expected_positive
     "#define FIRST;\n#define SECOND \${prefix}\n#define FIRST;\n#define SECOND \${prefix}\npreserve this line\n#define FIRST;\n#define SECOND \${prefix}")
+file(READ "${_output_root}/nested/semicolon.h" _actual_semicolon)
+if(NOT "${_actual_semicolon}" STREQUAL "keep\n#define FIRST;\n#define SECOND \${prefix}\nkeep\n")
+    message(FATAL_ERROR "A token ending in a semicolon did not match its line: ${_actual_semicolon}")
+endif()
 file(READ "${_output_root}/nested/positive.h" _actual_positive)
 if(NOT "${_actual_positive}" STREQUAL "${_expected_positive}")
     message(FATAL_ERROR

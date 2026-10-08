@@ -462,6 +462,7 @@ fn fixture_from_text(families: &[&str], source: &str, template: &str) -> Fixture
         owners: BTreeMap::from([(OWNER.to_owned(), RECIPE.to_owned())]),
         discovered_inputs: BTreeSet::from([RECIPE.to_owned()]),
         ignored_directories: BTreeSet::new(),
+        excluded_paths: BTreeSet::new(),
         snapshots: BTreeMap::from([
             (RECIPE.to_owned(), source_digest),
             (TEMPLATE.to_owned(), template_digest),

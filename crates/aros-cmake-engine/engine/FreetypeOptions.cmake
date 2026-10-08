@@ -18,6 +18,18 @@ function(aros_stage_freetype_options)
             "aros_stage_freetype_options requires NAME, FETCH_TARGET, OWNER, "
             "INPUT and OUTPUT")
     endif()
+    # A native contract selects a subset of the product. Consumers it did not
+    # select are not built, so they cannot need the header; classic graphs are
+    # complete and keep the strict check.
+    if(AROS_NATIVE_BUILD_CONTRACT)
+        set(_present_consumers "")
+        foreach(_consumer IN LISTS FTO_CONSUMERS)
+            if(TARGET "${_consumer}")
+                list(APPEND _present_consumers "${_consumer}")
+            endif()
+        endforeach()
+        set(FTO_CONSUMERS "${_present_consumers}")
+    endif()
     if(NOT TARGET "${FTO_FETCH_TARGET}" OR NOT TARGET "${FTO_OWNER}")
         message(FATAL_ERROR
             "${FTO_NAME}: FreeType option staging requires its fetch and owner targets")

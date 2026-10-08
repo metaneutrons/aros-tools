@@ -129,10 +129,21 @@ function(aros_stage_sdk_files)
         _aros_sdk_copy_normalize_path(
             "fetch destination" "${_fetch_destination}" _fetch_destination)
         _aros_sdk_copy_normalize_path("fetch stamp" "${_fetch_stamp}" _fetch_stamp)
+        set(_engine_stamp_root "${_binary_root}/CMakeFiles/aros-fetch")
         _aros_sdk_copy_require_descendant(
             "fetch destination" "${_fetch_destination}" "${_binary_root}" FALSE)
-        _aros_sdk_copy_require_descendant(
-            "fetch stamp" "${_fetch_stamp}" "${_fetch_destination}" FALSE)
+        # The completion stamp is CMake state, not payload. It lives either
+        # inside the fetch destination or in the engine's own stamp directory
+        # (aros_fetch_completion_stamp); anywhere else is refused.
+        cmake_path(IS_PREFIX _fetch_destination "${_fetch_stamp}" NORMALIZE
+            _stamp_in_destination)
+        cmake_path(IS_PREFIX _engine_stamp_root "${_fetch_stamp}" NORMALIZE
+            _stamp_in_engine_root)
+        if(NOT (_stamp_in_destination OR _stamp_in_engine_root) OR
+           "${_fetch_stamp}" STREQUAL "${_fetch_destination}" OR
+           "${_fetch_stamp}" STREQUAL "${_engine_stamp_root}")
+            message(FATAL_ERROR "SDK file-copy fetch stamp escapes its declared root")
+        endif()
         _aros_sdk_copy_require_descendant(
             "fetched source" "${_source_root}" "${_fetch_destination}" TRUE)
         _aros_sdk_copy_check_components(

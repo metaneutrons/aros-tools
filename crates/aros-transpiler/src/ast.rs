@@ -262,6 +262,10 @@ pub struct TargetDefinition {
     /// no longer tells them apart.
     #[serde(default)]
     pub arch_source_options: Vec<(String, String, String, String)>,
+    /// Set when native selection reduced this module to its headers because
+    /// only its generated include or FD aliases were selected. Such a module
+    /// may publish no public headers; its aliases are then empty endpoints.
+    pub selection_headers_only: bool,
 }
 
 /// A source wildcard waiting for its fetched owner.

@@ -1387,3 +1387,40 @@ fn the_banner_records_changed_upstream_selectors_without_inventing_omitted_ones(
         assert!(!omitted.contains(flag), "{omitted}");
     }
 }
+
+#[test]
+fn an_implicit_meta_edge_yields_to_declared_edges_that_close_a_cycle() {
+    use std::collections::HashSet;
+    let name = |text: &str| text.to_owned();
+    let includes = name("kernel-includes");
+    let arch = name("exec-includes-arch");
+    let other = name("other-includes");
+    let includes_deps: HashSet<String> = [arch.clone(), other.clone()].into();
+    let arch_deps: HashSet<String> = [includes.clone()].into();
+    let other_deps: HashSet<String> = HashSet::new();
+    let rules = vec![
+        (&includes, &includes_deps),
+        (&arch, &arch_deps),
+        (&other, &other_deps),
+    ];
+    let metas: HashSet<&str> = ["kernel-includes", "exec-includes-arch", "other-includes"].into();
+    let targets = HashSet::new();
+    // The architecture hook is declared to need the kernel's headers.
+    let explicit: HashSet<(String, String)> = [(arch.clone(), includes.clone())].into();
+
+    let dropped = super::meta::implicit_cycle_edges(&targets, &metas, &rules, &explicit);
+    assert_eq!(dropped, [(includes.clone(), arch.clone())]);
+
+    // Without the cycle nothing is dropped, and a cycle of declared edges is
+    // left for CMake to report.
+    let acyclic_deps: HashSet<String> = HashSet::new();
+    let acyclic = vec![(&includes, &includes_deps), (&arch, &acyclic_deps)];
+    assert!(super::meta::implicit_cycle_edges(&targets, &metas, &acyclic, &explicit).is_empty());
+    let edge = |from: &str, to: &str| (from.to_owned(), to.to_owned());
+    let both: HashSet<(String, String)> = [
+        edge("exec-includes-arch", "kernel-includes"),
+        edge("kernel-includes", "exec-includes-arch"),
+    ]
+    .into();
+    assert!(super::meta::implicit_cycle_edges(&targets, &metas, &rules, &both).is_empty());
+}

@@ -233,6 +233,7 @@ pub(super) fn collect_programs(inputs: DeclarationInputs<'_>, outputs: Declarati
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
             arch_source_options: Vec::new(),
+            selection_headers_only: false,
         };
         if source_inventory_only {
             source_inventory_targets.push((&parsed_target).into());
