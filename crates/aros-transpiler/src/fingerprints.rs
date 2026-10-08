@@ -73,6 +73,7 @@ pub const NAMES: &[&str] = &[
     "mesa26-core-recipe",
     "mesa26-core-manifest",
     "mesa26-galliumaux-recipe",
+    "mesa26-galliumaux-recipe-llvmpipe-only",
     "mesa26-galliumaux-manifest",
     "mesa26-util-recipe",
     "mesa26-util-manifest",

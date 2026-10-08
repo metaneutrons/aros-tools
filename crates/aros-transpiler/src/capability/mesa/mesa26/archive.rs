@@ -63,10 +63,10 @@ pub(super) fn archive_sources(
             }));
         }
         Mesa26Target::GalliumDrawLlvmLibrary | Mesa26Target::GalliumTessLibrary => {
-            require_file_fingerprint(
+            require_file_fingerprint_one_of(
                 root,
                 "workbench/libs/mesa/libgalliumaux/mmakefile.src",
-                fingerprint("mesa26-galliumaux-recipe")?,
+                &galliumaux_recipes()?,
                 "Mesa 26 Gallium LLVM source closure",
             )?;
             require_file_fingerprint(
@@ -246,7 +246,9 @@ pub(super) fn archive_sources(
         ),
         _ => unreachable!("closed family selection"),
     };
-    if family == "v3d" {
+    if family == "galliumaux" {
+        require_file_fingerprint_one_of(root, recipe, &galliumaux_recipes()?, family)?;
+    } else if family == "v3d" {
         // Upstream added v3d_dt to the HIDD, not to the closed Mesa archive.
         // Both reviewed recipes expand to the same archive and generator jobs.
         require_file_fingerprint_one_of(
@@ -460,4 +462,14 @@ pub(super) fn archive_sources(
         _ => unreachable!("closed family selection"),
     }
     Ok(Some(sources))
+}
+
+/// Upstream later kept galliumdrawllvm out of mesa3dgl-linklibs. Only MetaMake
+/// aggregation changed, so both reviewed recipes expand to the same sources
+/// and libraries.
+fn galliumaux_recipes() -> Result<[&'static str; 2], String> {
+    Ok([
+        fingerprint("mesa26-galliumaux-recipe")?,
+        fingerprint("mesa26-galliumaux-recipe-llvmpipe-only")?,
+    ])
 }
