@@ -199,6 +199,12 @@ foreach(_collision primary relative alias alias-relative)
     endforeach()
 endforeach()
 
+# A private client archive directory keeps a suffixed module out of the SDK;
+# the same pair in the SDK directory collides on a case-insensitive identity.
+_configure_archive_probe("case-variant-private" accept "")
+_configure_archive_probe("case-variant-sdk" reject "already owned by")
+_configure_archive_probe("abi-without-fd" accept "")
+
 # All three valid native suppression modes retain the runtime and ABI support
 # graph. The all-suppressed case is built below to prove actual headers, FD,
 # libdefs and generated module sources remain available without client archive

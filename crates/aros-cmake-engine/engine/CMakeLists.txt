@@ -473,19 +473,24 @@ aros_bind_c_startup_target("linklibs-startup")
 # exact includes target in `includes-generate`; without it, WinDebug and other
 # source-tree consumers encounter a missing proto/hostlib.h long after the
 # relevant generated-header rule was discarded by architecture filtering.
+# A hosted profile declares hostlib.resource itself, and since that module
+# owns its ABI it already materialises these headers; then only the
+# includes-generate edge is added here, as for icon.library below.
 if(TARGET "includes-generate")
-    if(NOT TARGET "kernel-hostlib-includes")
-        add_custom_target("kernel-hostlib-includes")
+    if(NOT TARGET "kernel-hostlib-includes-generated")
+        if(NOT TARGET "kernel-hostlib-includes")
+            add_custom_target("kernel-hostlib-includes")
+        endif()
+        aros_materialize_genmodule_headers(
+            NAME kernel-hostlib-includes-generated
+            OWNER kernel-hostlib-includes
+            CONFIG "arch/all-hosted/hostlib/hostlib.conf"
+            MODULE hostlib
+            MODTYPE resource
+            INCLUDE_NAME hostlib)
+        _aros_register_genmodule_public_includes("kernel-hostlib-includes")
     endif()
-    aros_materialize_genmodule_headers(
-        NAME kernel-hostlib-includes-generated
-        OWNER kernel-hostlib-includes
-        CONFIG "arch/all-hosted/hostlib/hostlib.conf"
-        MODULE hostlib
-        MODTYPE resource
-        INCLUDE_NAME hostlib)
     aros_add_target_dependency("includes-generate" "kernel-hostlib-includes")
-    _aros_register_genmodule_public_includes("kernel-hostlib-includes")
 endif()
 
 # icon.library and Wanderer's private Icon MUI class share a .conf stem.

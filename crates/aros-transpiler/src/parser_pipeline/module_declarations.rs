@@ -8,9 +8,9 @@ use super::{
     expand_file_list, implicit_module_meta_rules, is_explicit_genmodule_only, macro_arg,
     map_linklib_object_sources, read_genmodule_linklib_config, read_genmodule_linklib_config_files,
     record_partial_source_lists, render_meta_token, resolve_module_suffix,
-    resolve_module_target_dir, resolve_yes_argument, sanitize_ident, wildcard_c_sources,
-    EvaluatedSources, GenmoduleConfigFacts, GenmoduleLinklibs, MakeExprContext, ModuleType, Path,
-    TargetDefinition,
+    resolve_module_target_dir, resolve_yes_argument, safe_build_tree_output_directory,
+    sanitize_ident, wildcard_c_sources, EvaluatedSources, GenmoduleConfigFacts, GenmoduleLinklibs,
+    MakeExprContext, ModuleType, Path, TargetDefinition,
 };
 use crate::ast::ModuleMacroForm;
 use crate::capability::mesa::mesa26;
@@ -49,6 +49,7 @@ pub(super) fn collect_modules(inputs: DeclarationInputs<'_>, outputs: Declaratio
         capability_errors,
         skipped_programs,
         skipped_client_archives,
+        unresolved_output_paths,
         partial_source_lists,
         source_inventory_patterns,
         source_inventory_needs,
@@ -239,6 +240,42 @@ pub(super) fn collect_modules(inputs: DeclarationInputs<'_>, outputs: Declaratio
                 ));
                 continue;
             }
+        };
+        // make.tmpl:2569 puts a library's client archives in its libdir=, or
+        // privately below $(GENDIR)/$(CURDIR) when it has a suffix, and only
+        // otherwise in the SDK library directory. A suffixed plug-in such as
+        // MUI.MiamiPanel is not part of the SDK, and its archive must not take
+        // the place of a real SDK library whose name differs only in case.
+        let linklib_output_dir = if matches!(module_type, ModuleType::Library) {
+            let requested = match macro_arg(rest, "libdir") {
+                Some(raw) if !raw.is_empty() => Some(raw),
+                _ => mod_suffix
+                    .as_ref()
+                    .map(|_| "$(GENDIR)/$(CURDIR)".to_owned()),
+            };
+            requested.and_then(|raw| match evaluate_make_expr(&raw, &expression_context) {
+                Ok(directory) if safe_build_tree_output_directory(&directory) => Some(directory),
+                Ok(directory) => {
+                    unresolved_output_paths.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} client archive directory {raw} resolves outside the build tree ({directory})",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    None
+                }
+                Err(reason) => {
+                    unresolved_output_paths.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} client archive directory {raw} is unresolved: {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    None
+                }
+            })
+        } else {
+            None
         };
         // An ABI skeleton has no implementation sources, and the one explicit
         // genmodule-only library is implemented entirely by generated start/end
@@ -632,7 +669,7 @@ pub(super) fn collect_modules(inputs: DeclarationInputs<'_>, outputs: Declaratio
             },
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
-            linklib_output_dir: None,
+            linklib_output_dir,
             compiler_flags: Vec::new(),
             include_dirs: {
                 let mut d = declaration_includes.dirs.clone();

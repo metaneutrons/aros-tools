@@ -456,8 +456,22 @@ function(aros_build_ahi)
             "${_sdk_lexical}/proto/dma.h" "${_sdk_lexical}/proto/mbox.h")
     endif()
     set(_feature_headers "")
+    set(_feature_header_owners "")
     foreach(_header IN LISTS _feature_header_lexical)
-        if(NOT EXISTS "${_header}" OR IS_DIRECTORY "${_header}" OR IS_SYMLINK "${_header}")
+        # A module that owns its ABI publishes its headers in the build, not
+        # at configure time (proto/dma.h, proto/mbox.h). Such a header need
+        # not exist yet; its registered producer must then run first.
+        cmake_path(NORMAL_PATH _header OUTPUT_VARIABLE _header_path)
+        string(SHA256 _header_key "${_header_path}")
+        get_property(_header_owner GLOBAL PROPERTY
+            "AROS_GENMODULE_PUBLISHED_HEADER_${_header_key}")
+        if(_header_owner AND NOT EXISTS "${_header}" AND NOT IS_SYMLINK "${_header}")
+            if(NOT TARGET "${_header_owner}")
+                message(FATAL_ERROR
+                    "AHI: staged feature header ${_header} names a missing producer ${_header_owner}")
+            endif()
+            list(APPEND _feature_header_owners "${_header_owner}")
+        elseif(NOT EXISTS "${_header}" OR IS_DIRECTORY "${_header}" OR IS_SYMLINK "${_header}")
             message(FATAL_ERROR "AHI: required staged feature header is unavailable: ${_header}")
         endif()
         _aros_ahi_real_path("${_header}" _header_real)
@@ -713,5 +727,9 @@ function(aros_build_ahi)
         VERBATIM
         COMMAND_EXPAND_LISTS)
     add_custom_target("${AB_MMAKE_ID}" DEPENDS ${_install_outputs_lexical})
+    if(_feature_header_owners)
+        list(REMOVE_DUPLICATES _feature_header_owners)
+        add_dependencies("${AB_MMAKE_ID}" ${_feature_header_owners})
+    endif()
     set(AROS_AHI_INSTALL_PRODUCTS "${_install_outputs_lexical}" PARENT_SCOPE)
 endfunction()

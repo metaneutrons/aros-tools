@@ -235,6 +235,40 @@ impl VarScope {
             .or_else(|| self.configuration.get(name).cloned())
     }
 
+    /// A simple (`:=`) assignment that froze a reference to a variable which
+    /// was unresolved at that point: its text as written and the line it was
+    /// assigned on. `raw_at` refuses such a value, which is right for a path
+    /// but loses every literal token of a flag string. A caller expanding the
+    /// text at the assignment line keeps those tokens and still sees the
+    /// unresolved reference as unresolved. A conditional or opaque assignment
+    /// of the variable itself is never returned.
+    pub(crate) fn frozen_raw_at(&self, name: &str, line: usize) -> Option<(String, usize)> {
+        if self.has_opaque_assignment_before(name, line)
+            || !self.has_uncertain_path_value_before(name, line)
+        {
+            return None;
+        }
+        let reset = self
+            .path_replacements
+            .get(name)
+            .and_then(|history| history.iter().rev().find(|at| **at < line).copied());
+        let conditional = self
+            .conditional_assignments
+            .get(name)
+            .is_some_and(|history| {
+                history
+                    .iter()
+                    .any(|(at, _)| *at < line && reset.is_none_or(|reset| *at > reset))
+            });
+        if conditional {
+            return None;
+        }
+        self.raw
+            .get(name)
+            .and_then(|history| history.iter().rev().find(|(at, _)| *at < line))
+            .map(|(at, value)| (value.clone(), *at))
+    }
+
     pub(crate) fn path_raw_at(&self, name: &str, line: usize) -> Option<String> {
         if self.has_opaque_assignment_before(name, line)
             || self.has_uncertain_path_value_before(name, line)

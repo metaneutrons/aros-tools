@@ -218,6 +218,68 @@ if(AROS_ARCHIVE_PROBE)
         return()
     endif()
 
+    # make.tmpl keeps a suffixed module's client archives in a private
+    # directory. There they cannot take the place of an SDK archive whose
+    # name differs only in case; in the SDK directory they must be refused.
+    if(AROS_ARCHIVE_PROBE MATCHES "^case-variant-(private|sdk)$")
+        set(_client_location "${CMAKE_MATCH_1}")
+        set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
+        set(_private_dir "${CMAKE_BINARY_DIR}/gen/plugins")
+        set(_client_arguments
+            TARGET tiff
+            MMAKE_ID archive-plugin
+            DIRECTORY "${_tiff_dir}"
+            GENMODULE_LINKLIBS
+            SOURCES "${_tiff_source}")
+        if(_client_location STREQUAL "private")
+            list(APPEND _client_arguments OUTPUT_DIR "${_private_dir}")
+        endif()
+        aros_add_library(${_client_arguments})
+        aros_add_linklib(
+            TARGET TIFF
+            MMAKE_ID archive-sdk
+            DIRECTORY "${_tiff_dir}"
+            CANONICAL_OUTPUT
+            SOURCES "${_tiff_source}")
+        if(_client_location STREQUAL "sdk")
+            message(FATAL_ERROR "case-variant client archive in the SDK was accepted")
+        endif()
+        foreach(_client_target archive-plugin-linklib archive-plugin-linklib-rel)
+            get_target_property(_client_dir "${_client_target}" ARCHIVE_OUTPUT_DIRECTORY)
+            if(NOT _client_dir STREQUAL _private_dir)
+                message(FATAL_ERROR
+                    "${_client_target} left its private directory: ${_client_dir}")
+            endif()
+            aros_linklib_archive_path("${_client_target}" _client_archive)
+            if(NOT _client_archive MATCHES "^${_private_dir}/")
+                message(FATAL_ERROR
+                    "${_client_target} archive path is not private: ${_client_archive}")
+            endif()
+        endforeach()
+        return()
+    endif()
+
+    # dxtn.conf spells its list "## begin functionlist", so genmodule sees no
+    # functions and writes no FD, in Make as here. The ABI form must still
+    # publish its headers and client archive.
+    if(AROS_ARCHIVE_PROBE STREQUAL "abi-without-fd")
+        set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
+        aros_add_module_abi(
+            TARGET dxtn
+            MMAKE_ID abi-no-fd
+            MODTYPE library
+            DIRECTORY "${AROS_SOURCE_DIR}/workbench/libs/dxtn")
+        foreach(_required_target abi-no-fd abi-no-fd-includes abi-no-fd-linklib)
+            if(NOT TARGET "${_required_target}")
+                message(FATAL_ERROR "ABI module without FD lost ${_required_target}")
+            endif()
+        endforeach()
+        if(TARGET abi-no-fd-fd)
+            message(FATAL_ERROR "ABI module without FD declared an FD endpoint")
+        endif()
+        return()
+    endif()
+
     message(FATAL_ERROR "unknown genmodule archive probe: ${AROS_ARCHIVE_PROBE}")
 endif()
 

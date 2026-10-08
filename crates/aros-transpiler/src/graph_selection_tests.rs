@@ -1328,3 +1328,36 @@ fn an_arch_include_declaration_hands_its_defines_to_every_consumer_of_the_includ
     let cmake = crate::generator::generate_cmake(&graph);
     assert!(cmake.contains("ARCH_DEFINES \"esp32p4-riscv|P4_BOARD_D1001=1\""));
 }
+
+#[test]
+fn a_private_library_client_archive_is_not_reachable_by_a_bare_link_name() {
+    use crate::ast::GenmoduleLinklibs;
+    let private = "${AROS_BUILD_DIR}/gen/workbench/plugins".to_owned();
+    let mut graph = DependencyGraph::new();
+    let mut provider = target("suffixed-lib", ModuleType::Library);
+    provider.target_name = "MUI".into();
+    provider.genmodule_linklibs = Some(GenmoduleLinklibs {
+        enabled: true,
+        inputs_exact: true,
+        ..GenmoduleLinklibs::default()
+    });
+    provider.linklib_output_dir = Some(private.clone());
+    graph.add_target(provider);
+    let mut bare = target("bare-consumer", ModuleType::Program);
+    bare.link_options = vec!["-lMUI".into()];
+    graph.add_target(bare);
+    let mut searched = target("searched-consumer", ModuleType::Program);
+    searched.link_options = vec![format!("-L{private}"), "-lMUI".into()];
+    graph.add_target(searched);
+
+    let unresolved = graph.resolve_use_libs();
+    // Make never put this archive in the SDK, so a bare -lMUI has nothing to
+    // find there; only the consumer that names the directory reaches it.
+    assert_eq!(unresolved.len(), 1, "{unresolved:#?}");
+    assert!(
+        unresolved[0]
+            .contains("bare-consumer link option -lMUI has no public or matching private archive"),
+        "{unresolved:#?}"
+    );
+    assert!(graph.meta_targets["searched-consumer"].contains("suffixed-lib-linklib"));
+}

@@ -9,6 +9,38 @@ include("${AROS_TEST_ENGINE_DIR}/AROS.cmake")
 
 set(_module_dir "${AROS_SOURCE_DIR}/workbench/libs/version")
 set(_runtime_id runtime-owner)
+
+# Source-owned ABI headers follow MetaMake's architecture selection: Make never
+# reads another architecture's mmakefiles, so such a module keeps the bootstrap
+# headers and stays out of the public-includes barrier.
+if(TEST_ABI_ARCH_PROBE)
+    foreach(_probe IN ITEMS foreign selected)
+        if(_probe STREQUAL "foreign")
+            set(_probe_dir "${AROS_SOURCE_DIR}/arch/m68k-amiga/abi-probe")
+        else()
+            set(_probe_dir "${AROS_SOURCE_DIR}/arch/all-native/abi-probe")
+        endif()
+        aros_set_module_config(${_probe}-probe "${_module_dir}/version.conf")
+        aros_set_module_abi(${_probe}-probe)
+        aros_module_scaffolding(_probe_sources _probe_support
+            MODTYPE resource
+            TARGET version
+            MMAKE_ID ${_probe}-probe
+            DIRECTORY "${_probe_dir}")
+    endforeach()
+    if(TARGET foreign-probe-includes-generated)
+        message(FATAL_ERROR "a foreign-architecture module took ownership of its ABI headers")
+    endif()
+    if(NOT TARGET selected-probe-includes-generated)
+        message(FATAL_ERROR "a selected-architecture module lost ownership of its ABI headers")
+    endif()
+    get_target_property(_barrier aros-genmodule-public-includes MANUALLY_ADDED_DEPENDENCIES)
+    if(NOT "selected-probe-includes-generated" IN_LIST _barrier OR
+       "foreign-probe-includes-generated" IN_LIST _barrier)
+        message(FATAL_ERROR "public-includes barrier has the wrong members: ${_barrier}")
+    endif()
+    return()
+endif()
 if(TEST_BUILDER STREQUAL "library")
     aros_set_module_config(runtime-owner "${_module_dir}/version.conf")
     aros_add_library(

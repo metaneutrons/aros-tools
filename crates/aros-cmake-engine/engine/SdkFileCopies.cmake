@@ -163,6 +163,13 @@ function(aros_stage_sdk_files)
                 get_property(_candidate_destination TARGET "${_fetch_candidate}"
                     PROPERTY AROS_FETCH_DESTINATION)
                 if(_candidate_destination)
+                    # A fetch rule creates its destination from the build root,
+                    # so a relative one (%fetch without destination=, as for
+                    # pci.ids) names a directory below it, never an error.
+                    if(NOT IS_ABSOLUTE "${_candidate_destination}")
+                        cmake_path(ABSOLUTE_PATH _candidate_destination
+                            BASE_DIRECTORY "${CMAKE_BINARY_DIR}" NORMALIZE)
+                    endif()
                     _aros_sdk_copy_normalize_path(
                         "registered fetch destination" "${_candidate_destination}"
                         _candidate_destination)

@@ -110,6 +110,20 @@ endforeach()
 
 set(_builder_fixture
     "${CMAKE_CURRENT_LIST_DIR}/runtime-module-builders")
+set(_abi_arch_build "${_root}/abi-arch-probe")
+execute_process(COMMAND "${CMAKE_COMMAND}" -G Ninja
+    -S "${_builder_fixture}" -B "${_abi_arch_build}"
+    "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+    "-DAROS_HOST_GENMODULE=${AROS_TEST_TOOLS_DIR}/aros-genmodule"
+    "-DTEST_ABI_ARCH_PROBE=ON"
+    ${AROS_TEST_TOOL_ARGS}
+    TIMEOUT "${AROS_TEST_CHILD_TIMEOUT}"
+    RESULT_VARIABLE _abi_arch_status OUTPUT_VARIABLE _abi_arch_stdout ERROR_VARIABLE _abi_arch_stderr)
+if(NOT _abi_arch_status EQUAL 0)
+    message(FATAL_ERROR
+        "architecture-selected ABI probe failed (${_abi_arch_status}): ${_abi_arch_stdout}${_abi_arch_stderr}")
+endif()
+
 foreach(_builder IN ITEMS library genmodule-only device resource)
     if(_builder STREQUAL "device" OR _builder STREQUAL "resource")
         set(_runtime_owner version)

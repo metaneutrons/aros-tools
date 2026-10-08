@@ -76,7 +76,12 @@ else()
 endif()
 set_property(TARGET fetch-sdk PROPERTY AROS_FETCH_DESTINATION "${_fetch_root}")
 set_property(TARGET fetch-sdk PROPERTY AROS_FETCH_COMPLETION_STAMP "${_fetch_stamp}")
-set_property(GLOBAL PROPERTY AROS_FETCH_TARGETS fetch-sdk)
+# A %fetch without destination= registers "." (rom/hidds/pci does). It names
+# the build root and can never own an SDK copy's fetch directory, so the
+# ownership scan must resolve it instead of refusing the whole configuration.
+add_custom_target(fetch-relative)
+set_property(TARGET fetch-relative PROPERTY AROS_FETCH_DESTINATION ".")
+set_property(GLOBAL PROPERTY AROS_FETCH_TARGETS fetch-sdk fetch-relative)
 
 include("${AROS_ENGINE_DIR}/SdkFileCopies.cmake")
 

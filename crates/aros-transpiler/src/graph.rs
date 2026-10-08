@@ -410,11 +410,12 @@ fn inventory_has_public_link_archive(target: &crate::ast::InventoryTargetIdentit
     match target.module_type {
         ModuleType::Abi => true,
         ModuleType::Library => {
-            target.genmodule_only
-                || target
-                    .genmodule_linklibs
-                    .as_ref()
-                    .is_some_and(|metadata| metadata.enabled)
+            target.linklib_output_dir.is_none()
+                && (target.genmodule_only
+                    || target
+                        .genmodule_linklibs
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.enabled))
         }
         ModuleType::LinkLib => target.canonical_linklib_output || target.canonical_linklib_eligible,
         _ => false,
@@ -424,20 +425,22 @@ fn inventory_has_public_link_archive(target: &crate::ast::InventoryTargetIdentit
 /// Whether a raw `-l<name>` consumer can find this declaration's archive in
 /// the target SDK library directory.
 ///
-/// Full genmodule/ABI client archives are public by construction. An ordinary
-/// link library is public only when it already owns, or may safely be promoted
-/// to, its canonical SDK archive name. In-tree/private `libdir=` outputs are
-/// deliberately excluded: the direct AROS linker rule has no proven search
-/// path for them.
+/// Full genmodule/ABI client archives are public by construction, unless the
+/// library keeps them in a private directory (an explicit `libdir=`, or a
+/// module suffix). An ordinary link library is public only when it already
+/// owns, or may safely be promoted to, its canonical SDK archive name.
+/// In-tree/private `libdir=` outputs are deliberately excluded: the direct
+/// AROS linker rule has no proven search path for them.
 fn has_public_link_archive(target: &TargetDefinition) -> bool {
     match target.module_type {
         ModuleType::Abi => true,
         ModuleType::Library => {
-            target.genmodule_only
-                || target
-                    .genmodule_linklibs
-                    .as_ref()
-                    .is_some_and(|metadata| metadata.enabled)
+            target.linklib_output_dir.is_none()
+                && (target.genmodule_only
+                    || target
+                        .genmodule_linklibs
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.enabled))
         }
         ModuleType::LinkLib => target.canonical_linklib_output || target.canonical_linklib_eligible,
         _ => false,
