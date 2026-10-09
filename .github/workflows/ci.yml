@@ -220,8 +220,13 @@ jobs:
           else
             # The GNU lifecycle fixtures require GNU Make >=4, not Apple's 3.81.
             # Homebrew's make formula exposes the selected executable as gmake.
-            brew install xorriso make bison flex pkg-config ninja gnu-sed
+            # Clang-hosted GNU fixtures also use LLVM's host ar and ranlib.
+            brew install xorriso make bison flex pkg-config ninja gnu-sed llvm
             gmake --version
+            llvm_bin="$(brew --prefix llvm)/bin"
+            test -x "$llvm_bin/llvm-ar"
+            test -x "$llvm_bin/llvm-ranlib"
+            printf '%s\n' "$llvm_bin" >> "$GITHUB_PATH"
           fi
           xorriso -version
       - name: Read the versioned source and producer contract
