@@ -24,6 +24,9 @@
     "wrangler": "4.134.0"
   },
   "overrides": {
+    "@expressive-code/core": {
+      "postcss-nested": "7.0.2"
+    },
     "miniflare": {
       "sharp": "0.35.5",
       "undici": "7.29.1"
