@@ -14,6 +14,7 @@ use aros_common::run_output_with_timeout;
 use serde::Serialize;
 
 use crate::profiles::Profile;
+use crate::source_lock::CompilerFamily;
 use crate::ContractError;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -92,11 +93,24 @@ pub fn inspect(profile: &Profile) -> Result<HostPreflight, ContractError> {
         "make"
     };
     let make = probe(make)?;
-    if profile.family() == crate::source_lock::CompilerFamily::Gnu {
+    let gnu = profile.family() == CompilerFamily::Gnu;
+    if gnu {
         require_gnu_make(&make.version)?;
     }
     tools.push(make);
-    if profile.family() == crate::source_lock::CompilerFamily::Gnu {
+    if gnu {
+        let cc_version = tools
+            .iter()
+            .find(|tool| tool.name == "cc")
+            .map(|tool| tool.version.clone())
+            .ok_or_else(|| {
+                ContractError::prerequisite("native preflight omitted host C compiler")
+            })?;
+        tools.extend(probe_llvm_gnu_binutils(
+            profile.family(),
+            &cc_version,
+            probe,
+        )?);
         for name in ["bison", "flex", "patch", "pkg-config", "ninja"] {
             tools.push(probe(name)?);
         }
@@ -107,6 +121,34 @@ pub fn inspect(profile: &Profile) -> Result<HostPreflight, ContractError> {
         capabilities: profile.capabilities().to_vec(),
         tools,
     })
+}
+
+fn uses_llvm_gnu_binutils(family: CompilerFamily, cc_version: &str) -> bool {
+    if family != CompilerFamily::Gnu {
+        return false;
+    }
+    // M3 passes the preflighted `cc` invocation path to configure as CC. The
+    // source derives HOST_CC_NAME from that invocation name, before symlink
+    // resolution; its exact `gcc`-name exception is not selected here.
+    let version = cc_version.to_ascii_lowercase();
+    version.contains("clang") || version.contains("llvm")
+}
+
+fn probe_llvm_gnu_binutils<F>(
+    family: CompilerFamily,
+    cc_version: &str,
+    mut probe_tool: F,
+) -> Result<Vec<HostTool>, ContractError>
+where
+    F: FnMut(&'static str) -> Result<HostTool, ContractError>,
+{
+    if !uses_llvm_gnu_binutils(family, cc_version) {
+        return Ok(Vec::new());
+    }
+    ["llvm-ar", "llvm-ranlib"]
+        .into_iter()
+        .map(&mut probe_tool)
+        .collect()
 }
 
 fn require_gnu_make(version: &str) -> Result<(), ContractError> {
@@ -213,12 +255,18 @@ fn version_line(line: &str) -> bool {
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
 
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{inspect, probe_selected, require_gnu_make};
+    use super::{
+        inspect, probe_llvm_gnu_binutils, probe_selected, require_gnu_make, uses_llvm_gnu_binutils,
+    };
+    use crate::preflight::HostTool;
     use crate::profiles::Profiles;
+    use crate::source_lock::CompilerFamily;
+    use crate::ContractError;
 
     #[test]
     fn gnu_make_gate_accepts_file_function_versions_and_rejects_legacy_or_unknown() {
@@ -234,6 +282,79 @@ mod tests {
         ] {
             assert!(require_gnu_make(version).is_err(), "{version}");
         }
+    }
+
+    #[test]
+    fn llvm_companion_predicate_is_limited_to_gnu_and_matches_ascii_case_insensitively() {
+        assert!(uses_llvm_gnu_binutils(
+            CompilerFamily::Gnu,
+            "Apple ClAnG version 17.0.0"
+        ));
+        assert!(uses_llvm_gnu_binutils(
+            CompilerFamily::Gnu,
+            "Acme LLVM compiler version 19"
+        ));
+        assert!(!uses_llvm_gnu_binutils(
+            CompilerFamily::Gnu,
+            "gcc (Homebrew GCC 15.2.0) 15.2.0"
+        ));
+        assert!(!uses_llvm_gnu_binutils(
+            CompilerFamily::Llvm,
+            "Apple clang version 17.0.0"
+        ));
+    }
+
+    #[test]
+    fn llvm_gnu_companion_resolver_probes_both_tools_and_propagates_missing_tool() {
+        let resolved =
+            probe_llvm_gnu_binutils(CompilerFamily::Gnu, "Apple clang version 17.0.0", |name| {
+                let path = PathBuf::from(format!("/fake/llvm/bin/{name}"));
+                Ok(HostTool {
+                    name,
+                    path: path.clone(),
+                    invocation_path: path,
+                    version: format!("{name} fixture"),
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            resolved.iter().map(|tool| tool.name).collect::<Vec<_>>(),
+            ["llvm-ar", "llvm-ranlib"]
+        );
+        assert!(resolved
+            .iter()
+            .all(|tool| tool.invocation_path.is_absolute()));
+
+        let mut requested = Vec::new();
+        let missing =
+            probe_llvm_gnu_binutils(CompilerFamily::Gnu, "Apple clang version 17.0.0", |name| {
+                requested.push(name);
+                if name == "llvm-ranlib" {
+                    return Err(ContractError::prerequisite(
+                        "required native producer tool 'llvm-ranlib' is unavailable",
+                    ));
+                }
+                Ok(HostTool {
+                    name,
+                    path: PathBuf::from(format!("/fake/llvm/bin/{name}")),
+                    invocation_path: PathBuf::from(format!("/fake/llvm/bin/{name}")),
+                    version: format!("{name} fixture"),
+                })
+            });
+
+        assert!(missing.is_err());
+        assert!(missing.unwrap_err().to_string().contains("llvm-ranlib"));
+        assert_eq!(requested, ["llvm-ar", "llvm-ranlib"]);
+
+        let mut llvm_requests = Vec::new();
+        let skipped =
+            probe_llvm_gnu_binutils(CompilerFamily::Llvm, "Apple clang version 17.0.0", |name| {
+                llvm_requests.push(name);
+                Err(ContractError::prerequisite("unexpected probe"))
+            })
+            .unwrap();
+        assert!(skipped.is_empty());
+        assert!(llvm_requests.is_empty());
     }
 
     #[test]

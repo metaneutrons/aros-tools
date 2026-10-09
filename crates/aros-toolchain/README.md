@@ -253,6 +253,11 @@ layout, including the prefix-owned `objdump` used for native ELF inspection.
 GNU's source-declared format lists are narrowed to one verified lock entry;
 they cannot select an ambient archive or transport fallback. GNU execution
 requires GNU Make 4.0 or newer and its additional measured host prerequisites.
+When the selected host `cc --version` identifies Clang or LLVM, GNU builds
+also require `llvm-ar` and `llvm-ranlib` on `PATH`; preflight measures those
+executables and admits their directories to the build environment. On macOS,
+Homebrew's LLVM package supplies them (`brew install llvm`, then add
+`$(brew --prefix llvm)/bin` to the invoking shell's `PATH`).
 There is no legacy execution adapter. No extra executable
 is exposed. `--resume-from compiler` is the sole local recovery boundary: it
 remeasures the retained snapshots and

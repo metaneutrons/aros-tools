@@ -38,9 +38,14 @@ an observed floor, not a reservation guarantee.
 
 GNU candidates additionally require GNU Make 4.0 or newer, bison, flex, patch,
 pkg-config and Ninja. On macOS select `gmake`; Apple's Make 3.81 cannot execute
-the source's generated rules. Mako and MarkupSafe are mandatory locked Python
-imports. A selected source that also needs PyYAML must declare its `yaml` import
-and exact archive/version in the lock; ambient Python packages are not accepted.
+the source's generated rules. If the selected host `cc --version` identifies
+Clang or LLVM, GNU candidates also require `llvm-ar` and `llvm-ranlib` on
+`PATH`. Preflight checks both before configure and admits their observed
+directories to the build environment. Homebrew provides them on macOS with
+`brew install llvm`; add `$(brew --prefix llvm)/bin` to the invoking shell's
+`PATH`. Mako and MarkupSafe are mandatory locked Python imports. A selected
+source that also needs PyYAML must declare its `yaml` import and exact
+archive/version in the lock; ambient Python packages are not accepted.
 GCC's format lists are narrowed to exactly one hash-verified lock entry before
 the native Rust fetch bridge runs, never used as transport fallbacks. GNU
 cache subdirectories are stamp namespaces, not alternative source locations.
