@@ -4338,6 +4338,15 @@ function(_aros_generate_module_support out_prefix)
             VERBATIM)
         set(_includes_target "${GM_MMAKE_ID}-includes-generated")
         add_custom_target("${_includes_target}" DEPENDS ${_published_headers})
+        # The bootstrap copies were removed above, so these exist only once
+        # the build ran. Record the owner of each for configure-time consumers
+        # that need to name a header before it is written (AHI).
+        foreach(_published IN LISTS _published_headers)
+            cmake_path(NORMAL_PATH _published OUTPUT_VARIABLE _published_path)
+            string(SHA256 _published_key "${_published_path}")
+            set_property(GLOBAL PROPERTY
+                "AROS_GENMODULE_PUBLISHED_HEADER_${_published_key}" "${_includes_target}")
+        endforeach()
     else()
         set(_published_headers "")
         if(NOT GM_SOURCES_ONLY)
@@ -4633,6 +4642,14 @@ function(aros_module_scaffolding out_sources out_prefix)
 
     string(MAKE_C_IDENTIFIER "${MS_MMAKE_ID}" _abi_key)
     get_property(_source_abi GLOBAL PROPERTY "AROS_MODULE_ABI_${_abi_key}")
+    # MetaMake never reads another architecture's mmakefiles, so Make never
+    # generates such a module's headers. Owning them here would put every
+    # foreign HIDD and resource behind the public-includes barrier that each
+    # compile waits for, and remove the bootstrap copies of same-named
+    # headers of the selected architecture.
+    if(_source_abi)
+        aros_arch_path_matches(_source_abi "${MS_DIRECTORY}")
+    endif()
     if(_source_abi)
         set(_generation_mode ABI)
     else()
@@ -4778,8 +4795,16 @@ function(aros_add_module_abi)
         MODTYPE "${ARG_MODTYPE}"
         MODSUFFIX "${ARG_MODSUFFIX}")
 
-    _aros_bind_genmodule_abi_targets("${ARG_MMAKE_ID}"
-        "${_gm_INCLUDES_TARGET}" "${_gm_FD_TARGET}")
+    if(_gm_FD_TARGET)
+        _aros_bind_genmodule_abi_targets("${ARG_MMAKE_ID}"
+            "${_gm_INCLUDES_TARGET}" "${_gm_FD_TARGET}")
+    else()
+        # A config whose function list genmodule does not recognise (dxtn.conf
+        # spells it "## begin functionlist") yields headers but no FD, in
+        # Make as here. Publish only the real includes endpoint then.
+        _aros_genmodule_alias("${ARG_MMAKE_ID}-includes"
+            "${_gm_INCLUDES_TARGET}")
+    endif()
 
     add_library("${ARG_MMAKE_ID}-linklib" STATIC EXCLUDE_FROM_ALL
         ${_gm_STUB_SOURCES})
@@ -4793,8 +4818,10 @@ function(aros_add_module_abi)
         "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
     _aros_add_genmodule_quote_dirs("${ARG_MMAKE_ID}-linklib"
         "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
-    add_dependencies("${ARG_MMAKE_ID}-linklib"
-        "${_gm_INCLUDES_TARGET}" "${_gm_FD_TARGET}")
+    add_dependencies("${ARG_MMAKE_ID}-linklib" "${_gm_INCLUDES_TARGET}")
+    if(_gm_FD_TARGET)
+        add_dependencies("${ARG_MMAKE_ID}-linklib" "${_gm_FD_TARGET}")
+    endif()
     _aros_add_genmodule_config_header_dependencies(
         "${ARG_MMAKE_ID}-linklib"
         "${ARG_DIRECTORY}/${ARG_TARGET}.conf")
@@ -4813,8 +4840,10 @@ function(aros_add_module_abi)
     add_custom_target("${ARG_MMAKE_ID}")
     add_dependencies("${ARG_MMAKE_ID}"
         "${ARG_MMAKE_ID}-includes"
-        "${ARG_MMAKE_ID}-fd"
         "${ARG_MMAKE_ID}-linklib")
+    if(_gm_FD_TARGET)
+        add_dependencies("${ARG_MMAKE_ID}" "${ARG_MMAKE_ID}-fd")
+    endif()
     _aros_genmodule_alias("includes-${ARG_TARGET}" "${ARG_MMAKE_ID}-includes")
     _aros_genmodule_alias("includes-${ARG_TARGET}_rel" "${ARG_MMAKE_ID}-includes")
     _aros_genmodule_alias("linklibs-${ARG_TARGET}" "${ARG_MMAKE_ID}-linklib")
@@ -4920,13 +4949,23 @@ function(aros_add_library)
     # two bogus sources.
     set(oneValueArgs TARGET MMAKE_ID DIRECTORY INSTALL_DIR
         MODSUFFIX DEFAULT_MODTYPE DEFAULT_INSTALL_DIR DEFAULT_MODSUFFIX
-        LINKLIB_NAME)
+        LINKLIB_NAME OUTPUT_DIR)
     set(multiValueArgs SOURCES CXX_SOURCES OBJC_SOURCES ASM_SOURCES
         LIBS USELIBS INCLUDES ARCH_INCLUDES
         DEFINES UNDEFINES COMPILE_OPTIONS ARCH_SOURCES
         ARCH_DEFINES ARCH_COMPILE_OPTIONS LINK_OPTIONS
         LINKLIB_SOURCES LINKLIB_OBJECT_SOURCES KICKSTART_MEMBER)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    # make.tmpl puts a module's client archives in its libdir=, or privately
+    # below $(GENDIR)/$(CURDIR) when the module has a suffix, and only
+    # otherwise in the SDK library directory. The transpiler resolves that
+    # rule and passes a private directory as OUTPUT_DIR.
+    set(_client_archive_dir "${AROS_DEVELOPER_LIB_DIR}")
+    if(ARG_OUTPUT_DIR)
+        _aros_validate_linklib_output_directory(
+            _client_archive_dir "${ARG_MMAKE_ID}" "${ARG_OUTPUT_DIR}")
+    endif()
 
     if((ARG_NO_CLIENT_ARCHIVES OR ARG_NO_NORMAL_CLIENT_ARCHIVE OR ARG_NO_RELATIVE_CLIENT_ARCHIVE) AND
        (NOT AROS_NATIVE_BUILD_CONTRACT_VALIDATED OR ARG_GENMODULE_ONLY))
@@ -4966,7 +5005,7 @@ function(aros_add_library)
         add_library("${ARG_MMAKE_ID}-linklib" STATIC ${_gm_STUB_SOURCES})
         set_target_properties("${ARG_MMAKE_ID}-linklib" PROPERTIES
             OUTPUT_NAME "${ARG_TARGET}"
-            ARCHIVE_OUTPUT_DIRECTORY "${AROS_DEVELOPER_LIB_DIR}"
+            ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
             LINKER_LANGUAGE C)
         target_include_directories("${ARG_MMAKE_ID}-linklib" BEFORE PRIVATE
             "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
@@ -5168,12 +5207,12 @@ function(aros_add_library)
             ${_linklib_sources}
             ${_gm_NORMAL_LINKLIB_SOURCES})
         _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
-            "${AROS_DEVELOPER_LIB_DIR}" "${ARG_TARGET}")
+            "${_client_archive_dir}" "${ARG_TARGET}")
         add_library("${ARG_MMAKE_ID}-linklib" STATIC
             ${_normal_client_sources})
         set_target_properties("${ARG_MMAKE_ID}-linklib" PROPERTIES
             OUTPUT_NAME "${ARG_TARGET}"
-            ARCHIVE_OUTPUT_DIRECTORY "${AROS_DEVELOPER_LIB_DIR}"
+            ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
             LINKER_LANGUAGE C)
         list(APPEND _client_link_targets "${ARG_MMAKE_ID}-linklib")
         endif()
@@ -5191,12 +5230,12 @@ function(aros_add_library)
                 ${_linklib_sources}
                 ${_gm_REL_LINKLIB_SOURCES})
             _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib-rel"
-                "${AROS_DEVELOPER_LIB_DIR}" "${ARG_TARGET}_rel")
+                "${_client_archive_dir}" "${ARG_TARGET}_rel")
             add_library("${ARG_MMAKE_ID}-linklib-rel" STATIC
                 ${_rel_client_sources})
             set_target_properties("${ARG_MMAKE_ID}-linklib-rel" PROPERTIES
                 OUTPUT_NAME "${ARG_TARGET}_rel"
-                ARCHIVE_OUTPUT_DIRECTORY "${AROS_DEVELOPER_LIB_DIR}"
+                ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
                 LINKER_LANGUAGE C)
             list(APPEND _client_link_targets
                 "${ARG_MMAKE_ID}-linklib-rel")
@@ -5270,9 +5309,9 @@ function(aros_add_library)
         if(ARG_LINKLIB_NAME AND NOT ARG_LINKLIB_NAME STREQUAL ARG_TARGET)
             if(TARGET "${ARG_MMAKE_ID}-linklib")
             _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
-                "${AROS_DEVELOPER_LIB_DIR}" "${ARG_LINKLIB_NAME}")
+                "${_client_archive_dir}" "${ARG_LINKLIB_NAME}")
             set(_linklib_alias
-                "${AROS_DEVELOPER_LIB_DIR}/lib${ARG_LINKLIB_NAME}.a")
+                "${_client_archive_dir}/lib${ARG_LINKLIB_NAME}.a")
             add_custom_command(TARGET "${ARG_MMAKE_ID}-linklib" POST_BUILD
                 BYPRODUCTS "${_linklib_alias}"
                 COMMAND "${CMAKE_COMMAND}" -E copy_if_different
@@ -5283,9 +5322,9 @@ function(aros_add_library)
             endif()
             if(TARGET "${ARG_MMAKE_ID}-linklib-rel")
                 _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib-rel"
-                    "${AROS_DEVELOPER_LIB_DIR}" "${ARG_LINKLIB_NAME}_rel")
+                    "${_client_archive_dir}" "${ARG_LINKLIB_NAME}_rel")
                 set(_rel_linklib_alias
-                    "${AROS_DEVELOPER_LIB_DIR}/lib${ARG_LINKLIB_NAME}_rel.a")
+                    "${_client_archive_dir}/lib${ARG_LINKLIB_NAME}_rel.a")
                 add_custom_command(
                     TARGET "${ARG_MMAKE_ID}-linklib-rel" POST_BUILD
                     BYPRODUCTS "${_rel_linklib_alias}"

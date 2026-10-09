@@ -38,8 +38,20 @@ file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/GENINCDIR/libraries/mui.h"
     CONTENT "/* fixture mui */\n")
 if(AHI_FIXTURE_MODE STREQUAL "arm" OR AHI_FIXTURE_MODE STREQUAL "aarch64")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/SDK/include/proto")
-    file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/SDK/include/proto/dma.h"
-        CONTENT "/* fixture dma */\n")
+    # A module that owns its ABI writes proto/dma.h only in the build. The
+    # engine then records the producer, and AHI must wait for it instead of
+    # requiring the header at configure time. Without a producer it refuses.
+    if(AHI_FIXTURE_CASE STREQUAL "built-dma")
+        add_custom_target(fixture-dma-includes-generated)
+        set(_dma_header "${CMAKE_BINARY_DIR}/SDK/include/proto/dma.h")
+        cmake_path(NORMAL_PATH _dma_header)
+        string(SHA256 _dma_key "${_dma_header}")
+        set_property(GLOBAL PROPERTY
+            "AROS_GENMODULE_PUBLISHED_HEADER_${_dma_key}" fixture-dma-includes-generated)
+    elseif(NOT AHI_FIXTURE_CASE STREQUAL "missing-dma")
+        file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/SDK/include/proto/dma.h"
+            CONTENT "/* fixture dma */\n")
+    endif()
     file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/SDK/include/proto/mbox.h"
         CONTENT "/* fixture mbox */\n")
 endif()
@@ -110,6 +122,12 @@ aros_build_ahi(
     HOST_SFDC "${AROS_HOST_SFDC}"
     HOST_PERL "${HOST_PERL}")
 
-if(NOT AHI_FIXTURE_CASE STREQUAL "")
+if(AHI_FIXTURE_CASE STREQUAL "built-dma")
+    get_target_property(_ahi_dependencies workbench-devs-AHI-subsystem
+        MANUALLY_ADDED_DEPENDENCIES)
+    if(NOT "fixture-dma-includes-generated" IN_LIST _ahi_dependencies)
+        message(FATAL_ERROR "AHI does not wait for the producer of proto/dma.h")
+    endif()
+elseif(NOT AHI_FIXTURE_CASE STREQUAL "")
     message(FATAL_ERROR "fixture case ${AHI_FIXTURE_CASE} unexpectedly configured")
 endif()

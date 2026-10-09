@@ -523,8 +523,15 @@ fn active_define_headers_shadow_old_and_configured_values_until_replaced() {
         assert_eq!(alias_scope.raw_at("USER_CPPFLAGS", usize::MAX), None);
         assert!(alias_scope.conditionally_assigned_before("ALIAS", usize::MAX));
         assert!(alias_scope.conditionally_assigned_before("USER_CPPFLAGS", usize::MAX));
+        // The frozen reference is reported as itself, and nothing from the
+        // body, the previous or the replacement value leaks into the flags.
         let flags = crate::flags::collect_flags_at(&alias_scope, usize::MAX);
-        assert!(flags.skipped.contains(&"$(USER_CPPFLAGS)".to_owned()));
+        assert!(
+            flags.skipped.contains(&"$(ALIAS)".to_owned()),
+            "{:?}",
+            flags.skipped
+        );
+        assert!(flags.defines.is_empty() && flags.compile_options.is_empty());
     }
 
     let dynamic = "define $(DYNAMIC_NAME)\nvalue\nendef\n";
@@ -576,8 +583,12 @@ USER_CPPFLAGS := $(ALIAS)\n";
         assert!(scope.conditionally_assigned_before("USER_CPPFLAGS", usize::MAX));
         assert_eq!(scope.raw_at("USER_CPPFLAGS", usize::MAX), None);
         let flags = crate::flags::collect_flags_at(&scope, usize::MAX);
-        assert!(flags.skipped.contains(&"$(USER_CPPFLAGS)".to_owned()));
-        assert!(!flags.defines.contains(&"INITIAL".to_owned()));
+        assert!(
+            flags.skipped.contains(&"$(ALIAS)".to_owned()),
+            "{:?}",
+            flags.skipped
+        );
+        assert!(flags.defines.is_empty() && flags.compile_options.is_empty());
     }
 
     let reset_flags = "USER_CPPFLAGS := -DINITIAL\n\
@@ -777,4 +788,35 @@ fn unsupported_dynamic_undefine_forms_are_rejected() {
     assert_eq!(undefine_directive("undefine VALUE"), Ok(Some("VALUE")));
     assert!(undefine_directive("undefine $(NAME)").is_err());
     assert!(undefine_directive("undefine VALUE OTHER").is_err());
+}
+
+#[test]
+fn a_frozen_flag_string_keeps_its_literal_flags_around_an_undecided_reference() {
+    // compiler/crt/stdc: STDC_MATH_CPPFLAGS exists only under an ifneq on a
+    // configure value; -Dlint must still reach the compile, or k_log.h
+    // redefines rcsid.
+    let text = "\
+ifneq ($(UNDECIDED),)
+MATH := -DSECTIONCOMMENT=x
+endif
+USER_CPPFLAGS := $(MATH) -D_GNU_SOURCE -Dlint '-D__FBSDID(x)='
+";
+    let scope = collect_vars_with_context(text, &TargetContext::default());
+    assert_eq!(scope.raw_at("USER_CPPFLAGS", usize::MAX), None);
+    let flags = crate::flags::collect_flags_at(&scope, usize::MAX);
+    assert_eq!(flags.defines, ["_GNU_SOURCE", "lint"]);
+    assert_eq!(flags.compile_options, ["-D__FBSDID(x)="]);
+    assert_eq!(flags.skipped, ["$(MATH)"]);
+
+    // A conditional assignment of the flag variable itself stays unusable.
+    let own = "\
+USER_CPPFLAGS := -DKEPT
+ifneq ($(UNDECIDED),)
+USER_CPPFLAGS := -DOTHER
+endif
+";
+    let own_scope = collect_vars_with_context(own, &TargetContext::default());
+    let own_flags = crate::flags::collect_flags_at(&own_scope, usize::MAX);
+    assert!(own_flags.defines.is_empty(), "{:?}", own_flags.defines);
+    assert_eq!(own_flags.skipped, ["$(USER_CPPFLAGS)"]);
 }

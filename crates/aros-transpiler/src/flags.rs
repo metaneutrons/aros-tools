@@ -751,7 +751,18 @@ pub(crate) fn collect_flags_at(scope: &VarScope, line: usize) -> FlagSet {
 
     for key in ["USER_CPPFLAGS", "USER_CFLAGS"] {
         if conditionally_replaced_before(scope, key, line) {
-            set.skipped.push(format!("$({key})"));
+            // `USER_CPPFLAGS := $(MATH) -Dlint` with MATH set only under an
+            // undecidable ifneq: the literal flags hold either way, only the
+            // reference is unknown. Read the frozen text where it was
+            // assigned, so the reference stays one and is reported.
+            if let Some((raw, assigned)) = scope.frozen_raw_at(key, line) {
+                let expanded = expand_scoped(&raw, scope, assigned, key, 8);
+                for tok in split_flags(&expanded) {
+                    classify(tok, &mut set);
+                }
+            } else {
+                set.skipped.push(format!("$({key})"));
+            }
             continue;
         }
         let Some(raw) = scope.raw_at(key, line) else {

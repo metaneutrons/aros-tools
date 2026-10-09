@@ -219,6 +219,8 @@ foreach(_mode IN ITEMS x86_64 arm aarch64)
     endif()
 endforeach()
 
+_ahi_configure("aarch64" "built-dma" TRUE "")
+_ahi_configure("aarch64" "missing-dma" FALSE "required staged feature header is unavailable")
 _ahi_configure("x86_64" "symlink-binary" FALSE "audited paths escape their owning tree")
 _ahi_configure("x86_64" "relative-perl" FALSE "PERL must be an absolute path")
 _ahi_configure("x86_64" "missing-collector" FALSE

@@ -3717,3 +3717,72 @@ fn real_tree_module_output_metadata_has_expected_coverage() {
         12
     );
 }
+
+#[test]
+fn a_library_client_archive_goes_where_make_puts_it() {
+    let tree = TempTree::new();
+    let module = tree.0.join("workbench/plugins");
+    fs::create_dir_all(&module).unwrap();
+    for (name, base) in [
+        ("plain", "Plain"),
+        ("MUI.MiamiPanel", "MiamiPanel"),
+        ("explicit", "Explicit"),
+        ("thing", "Thing"),
+    ] {
+        fs::write(
+            module.join(format!("{name}.conf")),
+            format!("##begin config\nbasename {base}\n##end config\n"),
+        )
+        .unwrap();
+    }
+    for source in ["plain", "panel", "explicit", "thing"] {
+        fs::write(module.join(format!("{source}.c")), "").unwrap();
+    }
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "\
+%build_module mmake=plain-lib modname=plain modtype=library conffile=plain.conf files=plain
+%build_module mmake=suffixed-lib modname=MUI modtype=library modsuffix=MiamiPanel \\
+    conffile=MUI.MiamiPanel.conf files=panel
+%build_module mmake=explicit-lib modname=explicit modtype=library \\
+    libdir=$(GENDIR)/lib/private conffile=explicit.conf files=explicit
+%build_module mmake=suffixed-resource modname=thing modtype=resource modsuffix=extra \\
+    conffile=thing.conf files=thing
+",
+    )
+    .unwrap();
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &target_context("x86_64", "pc", ""),
+    )
+    .unwrap();
+    let targets: BTreeMap<_, _> = parsed
+        .targets
+        .iter()
+        .map(|target| (target.mmake_name.as_str(), target))
+        .collect();
+
+    // A plain library publishes its client archive in the SDK.
+    assert_eq!(targets["plain-lib"].linklib_output_dir, None);
+    // A suffixed plug-in keeps it below $(GENDIR)/$(CURDIR), as make.tmpl does,
+    // so libMUI.a never shares the SDK directory with libmui.a.
+    assert_eq!(
+        targets["suffixed-lib"].linklib_output_dir.as_deref(),
+        Some("${AROS_BUILD_DIR}/gen/workbench/plugins")
+    );
+    // An explicit libdir= wins over both.
+    assert_eq!(
+        targets["explicit-lib"].linklib_output_dir.as_deref(),
+        Some("${AROS_BUILD_DIR}/gen/lib/private")
+    );
+    // Only libraries have client archives here; the rule leaves others alone.
+    assert_eq!(targets["suffixed-resource"].linklib_output_dir, None);
+    assert!(
+        parsed.unresolved_output_paths.is_empty(),
+        "{:?}",
+        parsed.unresolved_output_paths
+    );
+}
