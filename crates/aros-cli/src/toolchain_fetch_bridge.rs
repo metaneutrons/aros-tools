@@ -76,7 +76,11 @@ fn fetch_request(
         .map_err(|error| miette::miette!("native MetaMake fetch bridge: {error}"))?;
 
     let lock_checksum = format!("{}=sha256:{}", source.filename(), source.sha256());
+    // GenMF emits `-cs ""` for an undeclared optional source checksum. Only
+    // that literal empty placeholder may be filled from the verified lock;
+    // nonempty declarations must agree, and duplicate options were rejected.
     if checksum_was_supplied
+        && !cli.checksums.is_empty()
         && cli.checksums.split_ascii_whitespace().collect::<Vec<_>>() != [lock_checksum.as_str()]
     {
         return Err(miette::miette!(
