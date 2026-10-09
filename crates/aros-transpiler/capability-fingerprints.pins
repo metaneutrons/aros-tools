@@ -50,6 +50,8 @@ mesa26-compiler-manifest = f5452181979700a6bfa941f0a7cc3fae6e9b420f93c013bb5967e
 mesa26-core-recipe = cb9a53da44e93cd58bda21783d55fcea4adedef262c3fdda983ec1c9a68b984e
 mesa26-core-manifest = 0fe9d122a56ed4f98e85edcecb3d5f36bc94510e40e82683ad3f7687495864f5
 mesa26-galliumaux-recipe = 291b33bdbd5b4db1cbccd2a933bfdd6a0795066dc33b99d2e8e3ba0432f062de
+# Keeps galliumdrawllvm out of mesa3dgl-linklibs; sources and libraries are unchanged.
+mesa26-galliumaux-recipe-llvmpipe-only = cf353c235442d3056339f43317009c036aca00849e2a671c8cd32e100b9c0784
 mesa26-galliumaux-manifest = b24fcbebbbb2b1c32eb505e5d42b91d9e15470b04b5f57af4ac3238c3a0f180d
 mesa26-util-recipe = e8ce470d8eb25536171d69d988c6cc3f13a378a652a648a22ff33de0d483cabe
 mesa26-util-manifest = e31d9aa580180ebac45f41a4364b60dce03595b35a457ae517affc78c0ae7471

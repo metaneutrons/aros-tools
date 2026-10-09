@@ -444,3 +444,97 @@ fn mesa26_archives_use_only_reviewed_inventories() {
         "{error}"
     );
 }
+
+#[test]
+fn galliumaux_admits_only_the_reviewed_llvmpipe_only_recipe() {
+    const AGGREGATE: &str = "\
+# mmake reads #MM out of the .src text, so the ifeq above cannot hide these.
+# Route through $(AROS_TOOLCHAIN) instead: on gnu the -gnu spelling is never
+# declared, and an undeclared metatarget is simply empty.
+#MM- mesa3dgl-linklibs : mesa3d-linklib-galliumdrawllvm-$(AROS_TOOLCHAIN)
+#MM- mesa3d-linklib-galliumdrawllvm-llvm : mesa3d-linklib-galliumdrawllvm
+";
+    const LLVMPIPE_ONLY: &str = "\
+# Only llvmpipe links this, and hidd-llvmpipe names it directly. Keep it out of
+# mesa3dgl-linklibs, so hardware gallium drivers do not wait for the target LLVM.
+";
+    let root = mesa26_source_root();
+    let profile = TargetContext {
+        cpu: Some("aarch64".to_owned()),
+        platform: Some("raspi".to_owned()),
+        toolchain: Some("llvm".to_owned()),
+        cpu32: Some(String::new()),
+        use_mmu: Some("1".to_owned()),
+        float_abi: Some(String::new()),
+        mesa_version: Some("26.0.0".to_owned()),
+        ..TargetContext::default()
+    };
+    let relative = Path::new("workbench/libs/mesa/libgalliumaux");
+    let targets = [
+        "mesa3d-linklib-galliumauxiliary",
+        "mesa3d-linklib-galliumdrawllvm",
+        "mesa3d-linklib-galliumtess",
+    ];
+    let sources = |root: &Path, mmake: &str| {
+        archive_sources(root, relative, mmake, Some(&profile))
+            .unwrap()
+            .expect("reviewed Mesa 26 galliumaux recipe")
+    };
+    let baseline = targets.map(|mmake| sources(&root, mmake));
+
+    let temporary = tempfile::tempdir().unwrap();
+    for path in [
+        "workbench/libs/mesa/libgalliumaux/mmakefile.src",
+        "workbench/libs/mesa/libgalliumaux/galliumaux-26.0.0.sources",
+        "workbench/libs/mesa/mesa.cfg",
+    ] {
+        let destination = temporary.path().join(path);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(root.join(path), destination).unwrap();
+    }
+    let recipe = temporary
+        .path()
+        .join("workbench/libs/mesa/libgalliumaux/mmakefile.src");
+    let original = fs::read_to_string(&recipe).unwrap();
+    let original_digest = aros_common::sha256_bytes(original.as_bytes()).to_string();
+    let old_pin = crate::fingerprints::fingerprint("mesa26-galliumaux-recipe").unwrap();
+    let llvmpipe_only_pin =
+        crate::fingerprints::fingerprint("mesa26-galliumaux-recipe-llvmpipe-only").unwrap();
+    let (alternate, alternate_pin) = if original_digest == old_pin {
+        assert_eq!(original.matches(AGGREGATE).count(), 1);
+        (
+            original.replacen(AGGREGATE, LLVMPIPE_ONLY, 1),
+            llvmpipe_only_pin,
+        )
+    } else {
+        assert_eq!(original_digest, llvmpipe_only_pin);
+        assert_eq!(original.matches(LLVMPIPE_ONLY).count(), 1);
+        (original.replacen(LLVMPIPE_ONLY, AGGREGATE, 1), old_pin)
+    };
+    assert_eq!(
+        aros_common::sha256_bytes(alternate.as_bytes()).to_string(),
+        alternate_pin
+    );
+    fs::write(&recipe, &alternate).unwrap();
+    for (mmake, expected) in targets.iter().zip(&baseline) {
+        let admitted = sources(temporary.path(), mmake);
+        assert_eq!(admitted.c, expected.c, "{mmake} sources must not change");
+        assert_eq!(
+            admitted.cxx, expected.cxx,
+            "{mmake} sources must not change"
+        );
+    }
+
+    fs::write(
+        &recipe,
+        format!("{alternate}\n# unreviewed galliumaux recipe drift\n"),
+    )
+    .unwrap();
+    for mmake in targets {
+        let error = archive_sources(temporary.path(), relative, mmake, Some(&profile)).unwrap_err();
+        assert!(
+            error.contains("unsupported upstream recipe drift"),
+            "{mmake}: {error}"
+        );
+    }
+}
