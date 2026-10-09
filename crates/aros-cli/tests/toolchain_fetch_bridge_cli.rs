@@ -149,19 +149,50 @@ fn bridge_extracts_locked_tar_xz_applies_contained_patch_and_never_runs_fetch_sh
 #[test]
 fn corrupt_locked_payload_fails_before_source_output_or_ledger_record() {
     let payload = tar_xz("hello.txt", b"valid locked payload\n");
-    let fixture = Fixture::new(&payload);
-    fs::write(fixture.cache.join("gcc.tar.xz"), b"corrupt bytes").unwrap();
-    let args = fixture.base_arguments();
-    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = fixture.command(&args).output().unwrap();
-    assert!(!output.status.success());
-    assert!(!fixture.output.exists());
-    assert_eq!(fs::read_to_string(&fixture.ledger).unwrap(), "");
-    assert!(!fixture.marker.exists());
-    assert_eq!(
-        fs::read(fixture.cache.join("gcc.tar.gz")).unwrap(),
-        b"ambient wrong suffix candidate"
-    );
+    for checksum_arguments in [vec![], vec!["--checksums=".to_owned()]] {
+        let fixture = Fixture::new(&payload);
+        fs::write(fixture.cache.join("gcc.tar.xz"), b"corrupt bytes").unwrap();
+        let mut args = fixture.base_arguments();
+        args.extend(checksum_arguments);
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = fixture.command(&args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(!fixture.output.exists());
+        assert_eq!(fs::read_to_string(&fixture.ledger).unwrap(), "");
+        assert!(!fixture.marker.exists());
+        assert_eq!(
+            fs::read(fixture.cache.join("gcc.tar.gz")).unwrap(),
+            b"ambient wrong suffix candidate"
+        );
+    }
+}
+
+#[test]
+fn empty_or_matching_source_checksum_uses_the_verified_lock_pin() {
+    let payload = tar_xz("hello.txt", b"locked\n");
+    let matching = format!("gcc.tar.xz=sha256:{}", sha256_bytes(&payload));
+    let checksum_options = [
+        vec![],
+        vec!["-cs".to_owned(), String::new()],
+        vec!["--checksums".to_owned(), String::new()],
+        vec!["--checksums=".to_owned()],
+        vec!["-cs".to_owned(), matching],
+    ];
+
+    for checksum_option in checksum_options {
+        let fixture = Fixture::new(&payload);
+        let mut args = fixture.base_arguments();
+        args.extend(checksum_option);
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = fixture.command(&args).output().unwrap();
+        assert_success(&output);
+        assert_eq!(
+            fs::read(fixture.output.join("hello.txt")).unwrap(),
+            b"locked\n"
+        );
+        assert_eq!(fs::read_to_string(&fixture.ledger).unwrap(), "gcc.tar.xz\n");
+        assert!(!fixture.marker.exists());
+    }
 }
 
 #[test]
@@ -228,30 +259,57 @@ fn bridge_rejects_patch_file_symlink_that_escapes_source_snapshot() {
 }
 
 #[test]
-fn mandatory_policy_bypasses_and_duplicate_or_conflicting_lock_checksums_are_rejected() {
+fn mandatory_policy_bypasses_and_invalid_or_duplicate_lock_checksums_are_rejected() {
     let payload = tar_xz("hello.txt", b"before\n");
+    let matching = format!("gcc.tar.xz=sha256:{}", sha256_bytes(&payload));
+    let conflicting = format!("gcc.tar.xz=sha256:{}", "a".repeat(64));
     for invalid in [
-        vec!["--offline=false"],
-        vec!["--offline"],
-        vec!["--require-checksums=false"],
-        vec!["--require-checksums"],
+        vec!["--offline=false".to_owned()],
+        vec!["--offline".to_owned()],
+        vec!["--require-checksums=false".to_owned()],
+        vec!["--require-checksums".to_owned()],
         vec![
-            "-cs",
-            "gcc.tar.xz=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "-cs",
-            "gcc.tar.xz=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "-cs".to_owned(),
+            conflicting.clone(),
+            "-cs".to_owned(),
+            conflicting.clone(),
+        ],
+        vec!["-cs".to_owned(), conflicting],
+        vec!["--checksums".to_owned(), "invalid".to_owned()],
+        vec!["--checksums".to_owned(), " \t ".to_owned()],
+        vec![
+            "-cs".to_owned(),
+            String::new(),
+            "-cs".to_owned(),
+            String::new(),
         ],
         vec![
-            "-cs",
-            "gcc.tar.xz=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "-cs".to_owned(),
+            String::new(),
+            "--checksums".to_owned(),
+            matching,
         ],
     ] {
         let fixture = Fixture::new(&payload);
         let mut args = fixture.base_arguments();
-        args.extend(invalid.iter().map(|value| (*value).into()));
+        args.extend(invalid.iter().cloned());
         let args = args.iter().map(String::as_str).collect::<Vec<_>>();
         let output = fixture.command(&args).output().unwrap();
         assert!(!output.status.success(), "accepted {invalid:?}");
+        let checksum_options = invalid
+            .iter()
+            .filter(|value| matches!(value.as_str(), "-cs" | "--checksums"))
+            .count();
+        let expected = match checksum_options {
+            0 => "mandatory offline/checksum policy",
+            1 => "source checksum differs from the selected source lock",
+            _ => "repeated -cs/--checksums options are not allowed",
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "unexpected rejection for {invalid:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(fs::read_to_string(&fixture.ledger).unwrap(), "");
         assert!(!fixture.output.exists());
         assert!(!fixture.marker.exists());
