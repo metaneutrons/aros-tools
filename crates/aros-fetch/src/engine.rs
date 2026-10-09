@@ -46,6 +46,7 @@ const LOCK_TIMEOUT: Duration = Duration::from_mins(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const TRANSFER_TIMEOUT: Duration = Duration::from_mins(15);
 const RETRIES: usize = 3;
+const RETRY_AFTER_LIMIT: Duration = Duration::from_secs(10);
 const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_PATCH_BYTES: u64 = 64 * 1024 * 1024;
 const RECEIPT_NAMESPACE: &str = ".aros-fetch";
@@ -374,6 +375,7 @@ async fn fetch_candidates(
     refresh_local: bool,
 ) -> FetchResult<PreparedPayload> {
     let mut attempts = Vec::new();
+    let mut integrity = None;
     for candidate in candidates {
         let cached = cache.join(candidate);
         let candidate_lock = FetchLock::acquire_candidate(&cached)?;
@@ -449,14 +451,34 @@ async fn fetch_candidates(
                         let path = cache.join(candidate);
                         let payload =
                             PreparedPayload::import(&path, candidate, MAX_DOWNLOAD_BYTES)?;
-                        if let Err(error) = verify(
-                            candidate,
-                            &payload,
-                            request.checksums.get(candidate),
-                            logger,
-                        ) {
+                        // A mirror can answer 200 with an HTML page, or serve
+                        // other bytes than the declared digest. Neither may
+                        // reach the cache; the next declared source may
+                        // still have the real archive.
+                        let mut rejection = foreign_archive_payload(candidate, &payload.path)?;
+                        if rejection.is_none() {
+                            if let Err(error) = verify(
+                                candidate,
+                                &payload,
+                                request.checksums.get(candidate),
+                                logger,
+                            ) {
+                                rejection = Some(error.diagnostic().message.clone());
+                                integrity.get_or_insert(error);
+                            }
+                        }
+                        if let Some(reason) = rejection {
+                            drop(payload);
                             let _ = fs::remove_file(&path);
-                            return Err(error);
+                            report_failed_source(
+                                logger,
+                                candidate,
+                                origin_index,
+                                &reason,
+                                &event_context,
+                            )?;
+                            attempts.push(reason);
+                            continue;
                         }
                         logger.event(
                             LogLevel::Info,
@@ -467,10 +489,25 @@ async fn fetch_candidates(
                         candidate_lock.revalidate()?;
                         return Ok(payload);
                     }
-                    Err(error) => attempts.push(error.diagnostic().message.clone()),
+                    Err(error) => {
+                        let reason = error.diagnostic().message.clone();
+                        report_failed_source(
+                            logger,
+                            candidate,
+                            origin_index,
+                            &reason,
+                            &event_context,
+                        )?;
+                        attempts.push(reason);
+                    }
                 }
             }
         }
+    }
+    // Every source failed. A digest mismatch outranks transport noise: it is
+    // what an operator has to look at.
+    if let Some(error) = integrity {
+        return Err(error);
     }
     let detail = attempts
         .last()
@@ -648,11 +685,29 @@ async fn transfer(
 
 async fn download_http(client: &reqwest::Client, url: &str, output: &Path) -> FetchResult<()> {
     let mut last = None;
-    for _ in 0..RETRIES {
+    let mut pause = None;
+    let mut made = 0;
+    for attempt in 0..RETRIES {
+        if attempt > 0 {
+            match pause.take() {
+                Some(delay) => tokio::time::sleep(delay).await,
+                // The server answered definitively (404, 403, ...); asking
+                // it again cannot change that.
+                None => break,
+            }
+        }
+        made = attempt + 1;
         match client.get(url).send().await {
             Ok(response) => {
-                if !response.status().is_success() {
-                    last = Some(format!("HTTP server returned status {}", response.status()));
+                let status = response.status();
+                if !status.is_success() {
+                    last = Some(format!("HTTP server returned status {status}"));
+                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                        || status.is_server_error()
+                    {
+                        pause = Some(retry_pause(attempt, response.headers()));
+                    }
                     continue;
                 }
                 if response
@@ -691,6 +746,7 @@ async fn download_http(client: &reqwest::Client, url: &str, output: &Path) -> Fe
                     drop(file);
                     let _ = fs::remove_file(output);
                     last = Some(format!("HTTP response stream failed: {error}"));
+                    pause = Some(retry_pause(attempt, &reqwest::header::HeaderMap::new()));
                     continue;
                 }
                 file.sync_all().map_err(|error| {
@@ -698,13 +754,29 @@ async fn download_http(client: &reqwest::Client, url: &str, output: &Path) -> Fe
                 })?;
                 return Ok(());
             }
-            Err(error) => last = Some(http_error_summary(&error)),
+            Err(error) => {
+                last = Some(http_error_summary(&error));
+                pause = Some(retry_pause(attempt, &reqwest::header::HeaderMap::new()));
+            }
         }
     }
     Err(network_failure(format!(
-        "HTTP transfer failed after {RETRIES} attempts: {}",
+        "HTTP transfer failed after {made} attempt(s): {}",
         last.unwrap_or_else(|| "unknown transport error".to_owned())
     )))
+}
+
+/// Waits 1 s, then 2 s, between attempts; a server's Retry-After in seconds
+/// is honoured up to RETRY_AFTER_LIMIT.
+fn retry_pause(attempt: usize, headers: &reqwest::header::HeaderMap) -> Duration {
+    let backoff = Duration::from_secs(1 << attempt.min(4));
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(backoff, |seconds| {
+            Duration::from_secs(seconds).clamp(backoff, RETRY_AFTER_LIMIT)
+        })
 }
 
 fn http_error_summary(error: &reqwest::Error) -> String {
@@ -808,6 +880,69 @@ fn new_temporary(path: &Path) -> FetchResult<File> {
                 path.display()
             ))
         })
+}
+
+/// Explains why a downloaded payload cannot be the archive its name declares,
+/// judged by the format's leading bytes. Names of formats aros-fetch does not
+/// unpack are not judged.
+fn foreign_archive_payload(candidate: &str, payload: &Path) -> FetchResult<Option<String>> {
+    let (format, signatures): (&str, &[&[u8]]) =
+        if has_extensions(candidate, &["tar", "gz"]) || has_extensions(candidate, &["tgz"]) {
+            ("gzip", &[b"\x1f\x8b"])
+        } else if has_extensions(candidate, &["tar", "bz2"]) {
+            ("bzip2", &[b"BZh"])
+        } else if has_extensions(candidate, &["tar", "xz"]) {
+            ("xz", &[b"\xfd7zXZ\x00"])
+        } else if has_extensions(candidate, &["zip"]) {
+            ("zip", &[b"PK\x03\x04", b"PK\x05\x06"])
+        } else {
+            return Ok(None);
+        };
+    let mut head = [0_u8; 6];
+    let mut length = 0;
+    let mut file = File::open(payload)
+        .map_err(|error| cache_failure(format!("cannot reopen payload snapshot: {error}")))?;
+    while length < head.len() {
+        match file.read(&mut head[length..]) {
+            Ok(0) => break,
+            Ok(read) => length += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                return Err(cache_failure(format!(
+                    "cannot read payload snapshot: {error}"
+                )))
+            }
+        }
+    }
+    if signatures
+        .iter()
+        .any(|signature| head[..length].starts_with(signature))
+    {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "payload is not a {format} archive; it begins with {:?}",
+        String::from_utf8_lossy(&head[..length])
+    )))
+}
+
+fn report_failed_source(
+    logger: &mut Logger,
+    candidate: &str,
+    origin_index: usize,
+    reason: &str,
+    context: &DiagnosticContext,
+) -> FetchResult<()> {
+    aros_common::outputln!(
+        "Failed     {candidate} from declared origin {}: {reason}",
+        origin_index + 1
+    );
+    logger.event(
+        LogLevel::Warn,
+        "transfer.rejected",
+        "declared source failed; trying the next one",
+        context,
+    )
 }
 
 fn verify(

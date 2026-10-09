@@ -84,7 +84,7 @@ tracing = "0.1"
 
 # Concurrency & Async
 rayon = "1.10"
-tokio = { version = "1.53", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1.53", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 # Serialization & Data
 serde = { version = "1.0", features = ["derive"] }
