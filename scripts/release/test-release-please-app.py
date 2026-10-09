@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Regression checks for repository-scoped, PR-only Release Please App auth."""
+"""Regression checks for scoped Release Please PR and promotion jobs."""
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -24,12 +25,28 @@ class ReleasePleaseApp(unittest.TestCase):
     def policy(self, old=None, new=None, marker=None):
         if old:
             self.assertIn(old, SOURCE)
-            self.workflow.write_text(SOURCE.replace(old, new))
+            source = SOURCE.replace(old, new)
+        else:
+            source = SOURCE
+        self.policy_source(source, marker)
+
+    def policy_source(self, source, marker=None):
+        self.workflow.write_text(source)
         result = subprocess.run(["bash", str(ROOT / "scripts/release/check-actions-policy.sh"), str(self.work)],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 1 if marker else 0, result.stderr)
         if marker:
             self.assertIn(marker, result.stderr)
+
+    def mutate_job(self, job_name, old, new):
+        start = SOURCE.index(f"  {job_name}:\n")
+        following = [match.start() for match in re.finditer(
+            r"^  [A-Za-z0-9_-]+:\n", SOURCE[start + 1:], re.MULTILINE
+        )]
+        end = start + 1 + following[0] if following else len(SOURCE)
+        job = SOURCE[start:end]
+        self.assertIn(old, job)
+        return SOURCE[:start] + job.replace(old, new) + SOURCE[end:]
 
     def test_valid_policy(self):
         self.policy()
@@ -40,7 +57,7 @@ class ReleasePleaseApp(unittest.TestCase):
 
     def test_wrong_environment(self):
         self.policy("environment: release-please", "environment: release",
-                    "missing Release Please App contract")
+                    "Release Please PR job must bind only environment release-please")
 
     def test_other_repository(self):
         self.policy("repositories: aros-tools", "repositories: aros-tools,other",
@@ -61,6 +78,99 @@ class ReleasePleaseApp(unittest.TestCase):
     def test_no_duplicate_dispatch(self):
         self.policy("set -euo pipefail", "set -euo pipefail\n          gh workflow run ci.yml",
                     "duplicate dispatch")
+
+    def test_release_admission_has_only_read_permissions(self):
+        source = self.mutate_job("release-admission", "      contents: read\n",
+                                 "      contents: write\n")
+        self.policy_source(source,
+                           "release-admission must request exactly Contents, Pull requests and Actions read")
+
+    def test_release_start_permissions_are_exact(self):
+        source = self.mutate_job("release-start", "      actions: write\n",
+                                 "      actions: read\n")
+        self.policy_source(source,
+                           "release-start must request exactly Contents, Pull requests and Actions write")
+
+    def test_release_start_stays_off_push(self):
+        self.policy("github.event_name != 'push'", "github.event_name == 'push'",
+                    "release-start contract is missing")
+
+    def test_release_start_uses_the_exact_release_please_outputs(self):
+        self.policy("RP_SHA: ${{ steps.candidate.outputs.sha }}",
+                    "RP_SHA: ${{ github.sha }}", "release-start contract is missing")
+
+    def test_release_start_job_requires_admission_ready(self):
+        guard = " && needs.release-admission.outputs.ready == 'true'"
+        self.policy(guard, "", "release-start contract is missing")
+
+    def test_release_start_has_no_secret_access(self):
+        source = self.mutate_job("release-start", "set -euo pipefail",
+                                 "set -euo pipefail\n          echo ${{ secrets.EXTRA_TOKEN }}")
+        self.policy_source(source, "must not access repository secrets")
+
+    def test_release_admission_uses_only_governance_read_secret(self):
+        source = self.mutate_job(
+            "release-admission",
+            "GOVERNANCE_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}",
+            "GOVERNANCE_TOKEN: ${{ secrets.EXTRA_TOKEN }}",
+        )
+        self.policy_source(source, "release-admission must use only the release governance read token")
+
+    def test_release_admission_is_bound_to_its_environment(self):
+        source = self.mutate_job("release-admission", "environment: release\n",
+                                 "environment: release-please\n")
+        self.policy_source(source, "release-admission contract is missing environment: release")
+
+    def test_release_start_must_recheck_short_lived_admission(self):
+        source = self.mutate_job(
+            "release-start",
+            "python3 scripts/release/release-automation.py recheck",
+            "python3 scripts/release/release-automation.py skip-recheck",
+        )
+        self.policy_source(source, "release-start contract is missing")
+
+    def test_release_start_uses_only_admission_candidate_output(self):
+        source = self.mutate_job(
+            "release-start",
+            "ADMISSION_JSON: ${{ needs.release-admission.outputs.candidate }}",
+            "ADMISSION_JSON: ${{ github.sha }}",
+        )
+        self.policy_source(source, "release-start contract is missing")
+
+    def test_release_start_has_no_step_level_readiness_escape(self):
+        source = self.mutate_job(
+            "release-start",
+            "      - name: Let Release Please create only the admitted private draft\n",
+            "      - name: Let Release Please create only the admitted private draft\n"
+            "        if: always()\n",
+        )
+        self.policy_source(source, "release-start steps must rely on the job-level ready gate")
+
+    def test_release_start_disables_label_mutation(self):
+        self.policy("skip-labeling: true", "skip-labeling: false",
+                    "release-start contract is missing skip-labeling: true")
+
+    def test_release_start_checks_out_only_protected_main(self):
+        source = self.mutate_job("release-start", "          ref: main\n",
+                                 "          ref: ${{ github.event.workflow_run.head_sha }}\n")
+        self.policy_source(source, "release-start contract is missing ref: main")
+
+    def test_release_admission_checks_out_only_protected_main(self):
+        source = self.mutate_job("release-admission", "          ref: main\n",
+                                 "          ref: ${{ github.event.workflow_run.head_sha }}\n")
+        self.policy_source(source, "release-admission must check out only protected main")
+
+    def test_release_start_uses_exact_environment(self):
+        source = self.mutate_job("release-start", "environment: release-please\n",
+                                 "environment: release-please-preview\n")
+        self.policy_source(source, "release-start must bind only environment release-please")
+
+    def test_release_qualification_has_no_tag_push_producer(self):
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        trigger = release.split("permissions:", 1)[0]
+        self.assertNotIn("push:", trigger)
+        self.assertNotIn("tags:", trigger)
+        self.assertIn("workflow_dispatch:", trigger)
 
     def probe(self, repositories, *, slug="metaneutrons-release-please", code=None):
         # Exercise the actual workflow preflight, not a rewritten copy.
@@ -98,7 +208,8 @@ class ReleasePleaseApp(unittest.TestCase):
     def probe_release_pr(self, heads, *, files=None, expected_success=True):
         # Exercise the workflow step with a stateful GitHub API fake. A freshly
         # updated App branch can precede the pull-request API's head refresh.
-        step = SOURCE.split("      - name: Verify the exact App-authored release PR\n", 1)[1]
+        job = SOURCE.split("  release-pr:\n", 1)[1].split("\n  release-admission:\n", 1)[0]
+        step = job.split("      - name: Verify the exact App-authored release PR\n", 1)[1]
         run = textwrap.dedent(step.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
         run = run.replace("sleep 2", ":")
         gh = self.work / "gh"

@@ -53,7 +53,7 @@ class PlatformMatrixTests(unittest.TestCase):
                 self.assertFalse(any(entry["source_qualification"] for entry in value["include"][1:]))
 
     def test_integrated_push_and_explicit_manual_selection_preserve_source_qualification(self):
-        scope, _, value = planner.plan(event="push", changed_paths=None, dispatch_scope="full")
+        scope, _, value = planner.plan(event="push", changed_paths=("crates/aros-cli/src/main.rs",), dispatch_scope="full")
         self.assertEqual(scope, "fast")
         self.assertTrue(value["include"][0]["source_qualification"])
         for scope in ("fast", "full"):
@@ -63,6 +63,27 @@ class PlatformMatrixTests(unittest.TestCase):
                 )
                 self.assertEqual(actual_scope, scope)
                 self.assertTrue(actual["include"][0]["source_qualification"])
+
+    def test_release_merge_push_satisfies_release_admission_host_contract(self):
+        spec = importlib.util.spec_from_file_location(
+            "release_automation", ROOT / "scripts/release/release-automation.py"
+        )
+        automation = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(automation)
+        scope, _, value = planner.plan(
+            event="push", changed_paths=tuple(automation.FILES), dispatch_scope="fast"
+        )
+        self.assertEqual(scope, "full")
+        produced = {f"Tests ({host['name']})" for host in value["include"]}
+        required = {name for name in automation.REQUIRED_JOBS["ci.yml"] if name.startswith("Tests (")}
+        self.assertEqual(produced, required)
+
+    def test_push_without_paths_cannot_silently_select_one_host(self):
+        with self.assertRaises(planner.PolicyError):
+            planner.plan(event="push", changed_paths=None, dispatch_scope="fast")
+        scope, _, value = planner.plan(event="push", changed_paths=(), dispatch_scope="fast")
+        self.assertEqual(scope, "full")
+        self.assertEqual(len(value["include"]), 3)
 
     def test_scheduled_sweep_is_full(self):
         scope, reason, value = planner.plan(event="schedule", changed_paths=None, dispatch_scope="fast")

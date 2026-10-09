@@ -31,6 +31,8 @@ EXPECTED_CONFIG_KEYS = {
     "bootstrap-sha",
     "bump-minor-pre-major",
     "bump-patch-for-minor-pre-major",
+    "draft",
+    "force-tag-creation",
     "include-component-in-tag",
     "include-v-in-tag",
     "initial-version",
@@ -305,7 +307,18 @@ def main() -> None:
         config.get("bump-patch-for-minor-pre-major") is True,
         "Release Please must retain the reviewed pre-1.0 fix bump policy",
     )
-    errors.require(config.get("skip-github-release") is True, "Release Please must remain PR-only")
+    errors.require(
+        config.get("skip-github-release") is False,
+        "Release Please must create the private draft candidate",
+    )
+    errors.require(
+        config.get("draft") is True,
+        "Release Please candidates must remain drafts until qualification completes",
+    )
+    errors.require(
+        config.get("force-tag-creation") is False,
+        "Release Please must not force-create a lightweight tag",
+    )
     errors.require(
         config.get("group-pull-request-title-pattern")
         == "chore${scope}: release${component} ${version}",
