@@ -116,6 +116,25 @@ enum ResultFormat {
     Json,
 }
 
+/// Explicit archive and manifest format for local package operations.
+#[derive(Clone, Copy, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum PackageFormatArg {
+    /// Historical LLVM schema-v1 metadata and v1 asset naming.
+    LegacyV1,
+    /// Compiler-family schema-v2 metadata and v2 asset naming.
+    FamilyV2,
+}
+
+impl From<PackageFormatArg> for package::PackageFormat {
+    fn from(value: PackageFormatArg) -> Self {
+        match value {
+            PackageFormatArg::LegacyV1 => Self::LegacyLlvmV1,
+            PackageFormatArg::FamilyV2 => Self::CompilerFamilyV2,
+        }
+    }
+}
+
 /// Inputs for native closed recipe construction.
 #[derive(Args)]
 struct RecipeArgs {
@@ -230,6 +249,9 @@ struct PackageArgs {
     /// Absent final package-set directory
     #[arg(long)]
     output_dir: PathBuf,
+    /// Package metadata format; omitted selects the existing compiler-family default
+    #[arg(long, value_enum)]
+    package_format: Option<PackageFormatArg>,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -243,6 +265,9 @@ struct VerifyPackageArgs {
     /// Complete package directory to verify without mutation
     #[arg(long)]
     input_dir: PathBuf,
+    /// Package metadata format; omitted selects the existing compiler-family default
+    #[arg(long, value_enum)]
+    package_format: Option<PackageFormatArg>,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -639,7 +664,7 @@ fn environment(args: &EnvironmentArgs) -> miette::Result<()> {
 
 fn package(args: PackageArgs) -> miette::Result<()> {
     let context = package_context(args.context.clone())?;
-    let output = package::package(&package::PackageRequest {
+    let request = package::PackageRequest {
         candidate_root: args.input_dir,
         output_dir: args.output_dir,
         release_id: context.release_id,
@@ -649,8 +674,12 @@ fn package(args: PackageArgs) -> miette::Result<()> {
         profile: context.profile,
         build_environment: context.build_environment,
         forbidden_prefixes: context.forbidden_prefixes,
-    })
-    .map_err(|error| native_error(&error))?;
+    };
+    let result = args.package_format.map_or_else(
+        || package::package(&request),
+        |format| package::package_with_format(&request, format.into()),
+    );
+    let output = result.map_err(|error| native_error(&error))?;
     match args.format {
         ResultFormat::Human => aros_common::outputln!(
             "Native package: {}\nSHA-256: {}\nSize: {}",
@@ -675,7 +704,7 @@ fn package(args: PackageArgs) -> miette::Result<()> {
 
 fn verify_package(args: VerifyPackageArgs) -> miette::Result<()> {
     let context = package_context(args.context)?;
-    let output = package_verify::verify(&package_verify::PackageVerificationRequest {
+    let request = package_verify::PackageVerificationRequest {
         package_dir: args.input_dir,
         release_id: context.release_id,
         host: context.host,
@@ -684,8 +713,12 @@ fn verify_package(args: VerifyPackageArgs) -> miette::Result<()> {
         profile: context.profile,
         build_environment: context.build_environment,
         forbidden_prefixes: context.forbidden_prefixes,
-    })
-    .map_err(|error| native_error(&error))?;
+    };
+    let result = args.package_format.map_or_else(
+        || package_verify::verify(&request),
+        |format| package_verify::verify_with_format(&request, format.into()),
+    );
+    let output = result.map_err(|error| native_error(&error))?;
     match args.format {
         ResultFormat::Human => aros_common::outputln!(
             "Native package verified\nSHA-256: {}\nSize: {}",
@@ -1509,6 +1542,54 @@ mod tests {
         ResultFormat,
     };
     use crate::Cli;
+
+    fn parse_package_format(command: &str, package_format: &str) -> Result<Cli, clap::Error> {
+        let mut args = vec![
+            "aros",
+            "toolchain",
+            "producer",
+            command,
+            "--recipe",
+            "/producer/recipe.json",
+            "--source-lock",
+            "/producer/toolchains/lock.sources.json",
+            "--profiles",
+            "/producer/toolchains/profiles.json",
+            "--preset",
+            "pc-x86_64",
+            "--release-id",
+            "candidate-1",
+            "--host",
+            "linux-x86_64",
+            "--build-environment",
+            "/evidence/environment.json",
+            "--input-dir",
+            "/candidate/toolchain",
+            "--package-format",
+            package_format,
+        ];
+        if command == "package" {
+            args.extend(["--output-dir", "/packages/candidate"]);
+        }
+        Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn package_format_option_is_closed_and_available_for_both_package_commands() {
+        for command in ["package", "verify-package"] {
+            for package_format in ["legacy-v1", "family-v2"] {
+                assert!(
+                    parse_package_format(command, package_format).is_ok(),
+                    "{command} should accept {package_format}"
+                );
+            }
+
+            let Err(error) = parse_package_format(command, "future-v3") else {
+                panic!("{command} unexpectedly accepted an unknown package format");
+            };
+            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{command}");
+        }
+    }
 
     #[test]
     fn producer_stage_surface_excludes_the_migrated_source_cache_frontends() {

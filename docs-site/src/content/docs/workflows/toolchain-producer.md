@@ -166,6 +166,16 @@ that consumer; producer acceptance alone does not qualify a native GNU board
 build. It remains local-only, has no release provenance, and cannot be promoted
 by copying it into a consumer lock.
 
+The separate `toolchain producer package` and `verify-package` stages accept
+`--package-format legacy-v1|family-v2`. Omitting the option preserves the
+existing family default: LLVM uses its historical schema-v1 manifest and v1
+asset name, while GNU uses compiler-family schema v2. For an explicit LLVM
+schema-v2 package, pass `--package-format family-v2`; its manifest records the
+LLVM compiler family and version and its asset uses the v2 LLVM name. The
+historical `legacy-v1` choice remains LLVM-only. This explicit local format
+does not add LLVM v2 to the current release index, publication, qualification,
+or recovery paths.
+
 For GNU builds, configure records host compiler prefix maps in `HOST_*FLAGS`.
 The compiler-build process does not export `CFLAGS` or `CXXFLAGS`: MetaMake
 owns the target ISA flags, which must not reach host-built Binutils or GCC.

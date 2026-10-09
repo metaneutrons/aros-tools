@@ -12,8 +12,10 @@ use std::path::{Component, Path, PathBuf};
 use aros_common::{toolchain_tree_inventory, ArosToolchainManifest};
 
 use crate::filesystem::open_directory;
+use crate::package::PackageFormat;
 use crate::package_verify::{
-    extract_verified_archive, measure_archive, verify, PackageVerificationRequest, VerifiedPackage,
+    extract_verified_archive, measure_archive, verify_with_format, PackageVerificationRequest,
+    VerifiedPackage,
 };
 use crate::ContractError;
 
@@ -50,12 +52,32 @@ pub struct ExtractedPackage {
 pub fn verify_and_extract(
     request: &PackageExtractionRequest,
 ) -> Result<ExtractedPackage, ContractError> {
-    let verified = verify(&request.verification)?;
+    verify_and_extract_with_format(
+        request,
+        PackageFormat::default_for(request.verification.source_lock.family()),
+    )
+}
+
+/// Verify and extract a package under an explicitly selected format.
+///
+/// The default [`verify_and_extract`] entry point retains LLVM v1 and GNU v2
+/// behavior. The destination is created only after format-aware read-back
+/// verification succeeds.
+///
+/// # Errors
+/// Returns a verification diagnostic for an invalid package or format,
+/// unsafe or existing extraction roots, or payload read-back mismatches.
+pub fn verify_and_extract_with_format(
+    request: &PackageExtractionRequest,
+    format: PackageFormat,
+) -> Result<ExtractedPackage, ContractError> {
+    let verified = verify_with_format(&request.verification, format)?;
     let root = create_fresh_root(&request.output_root)?;
-    let asset = crate::package_identity::asset_name(
+    let asset = crate::package_identity::asset_name_for_format(
         &request.verification.source_lock,
         &request.verification.profile,
         &request.verification.host,
+        format,
     )?;
     let archive = request.verification.package_dir.join(asset);
     let (file, size, sha256) = measure_archive(&archive)?;
@@ -149,7 +171,9 @@ fn verify_extracted_tree(
             "extracted package payload differs from the verified package inventory",
         ));
     }
-    if let Some(compiler) = manifest.compiler.as_ref() {
+    if let Some(compiler @ aros_common::ArosCompilerIdentity::Gnu { .. }) =
+        manifest.compiler.as_ref()
+    {
         crate::package_layout::validate_root(root, compiler, &manifest.target_triple).map_err(
             |error| {
                 ContractError::verification(format!(

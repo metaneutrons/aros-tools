@@ -32,6 +32,30 @@ const SUPPORTED_HOSTS: &[&str] = &[
     "macos-aarch64",
 ];
 
+/// On-disk metadata and asset naming contract for one compiler package.
+///
+/// The default [`package`] entry point retains the historical LLVM v1
+/// package format and the current GNU v2 format. Select `CompilerFamilyV2`
+/// explicitly to emit schema-v2 LLVM metadata and the v2 LLVM asset name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageFormat {
+    /// Historical LLVM package metadata and v1 asset naming.
+    LegacyLlvmV1,
+    /// Compiler-family schema-v2 metadata and family-aware asset naming.
+    CompilerFamilyV2,
+}
+
+impl PackageFormat {
+    /// Select the existing default format for a compiler family.
+    #[must_use]
+    pub const fn default_for(family: CompilerFamily) -> Self {
+        match family {
+            CompilerFamily::Llvm => Self::LegacyLlvmV1,
+            CompilerFamily::Gnu => Self::CompilerFamilyV2,
+        }
+    }
+}
+
 /// Explicit inputs to one local deterministic package operation.
 ///
 /// `output_dir` is the final directory of one complete package set. It must
@@ -90,7 +114,26 @@ pub struct PackageOutput {
 /// Returns a producer package diagnostic for invalid inputs, unsafe candidate
 /// entries, prefix leakage, serialization/write failures, or output conflicts.
 pub fn package(request: &PackageRequest) -> Result<PackageOutput, ContractError> {
-    validate_request(request)?;
+    package_with_format(
+        request,
+        PackageFormat::default_for(request.source_lock.family()),
+    )
+}
+
+/// Package one candidate using an explicit metadata and asset format.
+///
+/// `LegacyLlvmV1` is accepted only for LLVM. `CompilerFamilyV2` supports LLVM
+/// and GNU and binds the exact source-lock and profiles document bytes to the
+/// recipe before creating any output directory.
+///
+/// # Errors
+/// Returns a package diagnostic for invalid format/input bindings, unsafe or
+/// prefix-leaking candidates, serialization failures, or existing outputs.
+pub fn package_with_format(
+    request: &PackageRequest,
+    format: PackageFormat,
+) -> Result<PackageOutput, ContractError> {
+    validate_request(request, format)?;
     let parent = request
         .output_dir
         .parent()
@@ -119,15 +162,19 @@ pub fn package(request: &PackageRequest) -> Result<PackageOutput, ContractError>
     let (tree_sha256, files) = toolchain_tree_inventory(&staged_root).map_err(|error| {
         ContractError::package(format!("cannot inventory staged candidate: {error}"))
     })?;
-    let manifest = manifest(request, tree_sha256, files)?;
+    let manifest = manifest(request, format, tree_sha256, files)?;
     let manifest_bytes = pretty_json(&manifest)?;
     write_new(
         &staged_root.join(AROS_TOOLCHAIN_MANIFEST_FILE),
         &manifest_bytes,
     )?;
 
-    let asset =
-        crate::package_identity::asset_name(&request.source_lock, &request.profile, &request.host)?;
+    let asset = crate::package_identity::asset_name_for_format(
+        &request.source_lock,
+        &request.profile,
+        &request.host,
+        format,
+    )?;
     let archive = package_stage.path().join(&asset);
     write_archive(&archive, &staged_root, request.recipe.source_date_epoch())?;
     let measured = sha256_file(&archive)
@@ -189,13 +236,17 @@ pub fn canonical_asset_name(
     ))
 }
 
-fn validate_request(request: &PackageRequest) -> Result<(), ContractError> {
-    let identity =
-        crate::package_identity::compiler_identity(&request.source_lock, &request.profile)?;
-    crate::package_identity::require_gnu_recipe_binding(
+fn validate_request(request: &PackageRequest, format: PackageFormat) -> Result<(), ContractError> {
+    let identity = crate::package_identity::compiler_identity_for_format(
+        &request.source_lock,
+        &request.profile,
+        format,
+    )?;
+    crate::package_identity::require_recipe_binding(
         &request.recipe,
         &request.source_lock,
         &request.profile,
+        format,
     )?;
     if !request.candidate_root.is_absolute() || !request.output_dir.is_absolute() {
         return Err(ContractError::package(
@@ -229,8 +280,12 @@ fn validate_request(request: &PackageRequest) -> Result<(), ContractError> {
             "release identifier must be one safe nonempty segment",
         ));
     }
-    let _ =
-        crate::package_identity::asset_name(&request.source_lock, &request.profile, &request.host)?;
+    let _ = crate::package_identity::asset_name_for_format(
+        &request.source_lock,
+        &request.profile,
+        &request.host,
+        format,
+    )?;
     let build_environment = Value::Object(request.build_environment.clone());
     crate::canonical::bytes(&build_environment)?;
     for prefix in &request.forbidden_prefixes {
@@ -494,14 +549,18 @@ fn scan_file(
 
 fn manifest(
     request: &PackageRequest,
+    format: PackageFormat,
     tree_sha256: String,
     files: Vec<aros_common::ArosToolchainManifestEntry>,
 ) -> Result<ArosToolchainManifest, ContractError> {
-    let gnu = request.source_lock.family() == CompilerFamily::Gnu;
-    let identity =
-        crate::package_identity::compiler_identity(&request.source_lock, &request.profile)?;
+    let family_v2 = format == PackageFormat::CompilerFamilyV2;
+    let identity = crate::package_identity::compiler_identity_for_format(
+        &request.source_lock,
+        &request.profile,
+        format,
+    )?;
     let manifest = ArosToolchainManifest {
-        schema: if gnu {
+        schema: if family_v2 {
             AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2
         } else {
             AROS_TOOLCHAIN_MANIFEST_SCHEMA
@@ -511,8 +570,8 @@ fn manifest(
         target_profile: request.profile.name().to_owned(),
         target_triple: request.profile.target_triple().to_owned(),
         tree_sha256,
-        llvm_version: (!gnu).then(|| request.source_lock.version().to_owned()),
-        compiler: gnu.then_some(identity),
+        llvm_version: (!family_v2).then(|| request.source_lock.version().to_owned()),
+        compiler: family_v2.then_some(identity),
         recipe_sha256: request.recipe.sha256().to_string(),
         source_lock_sha256: request.recipe.source_lock_sha256().to_string(),
         profiles_sha256: request.recipe.profiles_sha256().to_string(),

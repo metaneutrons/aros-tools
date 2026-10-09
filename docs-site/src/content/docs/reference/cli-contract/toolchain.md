@@ -111,6 +111,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer package` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer package` | input_dir | --input-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer package` | output_dir | --output-dir | — | required | 1 |  |  | — |  |
+| `aros toolchain producer package` | package_format | --package-format | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
 | `aros toolchain producer package` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer prepare-recovery` | qualification_evidence | --qualification-evidence | — | required | 1 |  |  | — |  |
 | `aros toolchain producer prepare-recovery` | release_dir | --release-dir | — | required | 1 |  |  | — |  |
@@ -185,6 +186,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer verify-package` | build_environment | --build-environment | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | input_dir | --input-dir | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-package` | package_format | --package-format | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
 | `aros toolchain producer verify-package` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain register` | source | --source | — | required | 1 |  |  | — |  |
 | `aros toolchain register` | store | --store | — | optional | 1 |  |  | — |  |

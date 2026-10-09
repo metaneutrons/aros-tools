@@ -131,6 +131,13 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer compatibility-host-tools` | Print the measured command roles required for native compatibility |
 | `aros toolchain producer compatibility` | Execute all six local package-compatibility phases |
 
+The local `package` and `verify-package` commands accept the optional
+`--package-format legacy-v1|family-v2`. When omitted, LLVM keeps its historical
+schema-v1 package format and GNU uses compiler-family schema v2. Explicit
+`family-v2` enables local LLVM schema-v2 packaging; `legacy-v1` is rejected for
+GNU. This format selector does not change release-index, publication,
+qualification, or recovery capability.
+
 ### Physical-board workflow
 
 | Command | Effect and boundary |

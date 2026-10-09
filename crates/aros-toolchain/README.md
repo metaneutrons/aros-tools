@@ -238,6 +238,19 @@ This is neither a same-user sandbox nor independent Git-object/origin verificati
 
 ## Current CLI scope
 
+The local `toolchain producer package` and `verify-package` stages accept
+`--package-format legacy-v1|family-v2`. Omitting the option preserves the
+current family default: LLVM uses its historical schema-v1 manifest and
+`aros-toolchain-v1-llvm…` asset name; GNU uses compiler-family schema v2.
+Selecting `family-v2` for LLVM writes a schema-v2 `compiler: {family: llvm,
+version: …}` identity, omits `llvm_version`, and uses the
+`aros-toolchain-v2-llvm…` asset name. This format accepts the three active
+build hosts and recipe-bound LLVM profiles that pass declarative CPU/triple
+validation; profile IDs are not a hardcoded allowlist. It requires the exact
+source-lock and profiles bytes to match the selected recipe. `legacy-v1` is
+retained for historical LLVM packages and is rejected for GNU packages. This
+local format option does not extend release-index or recovery support.
+
 The CLI consumer `install`, `list`, `verify` and `path` commands are unchanged.
 `toolchain build` defaults to the native lifecycle and requires a prepared,
 verified source cache, an exact declaration, fresh work/output roots, and
