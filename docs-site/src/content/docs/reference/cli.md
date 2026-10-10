@@ -132,6 +132,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer compatibility-host-tools` | Print the measured command roles required for native compatibility |
 | `aros toolchain producer compatibility` | Execute all six local package-compatibility phases; optional `--evidence-dir` publishes complete family-v2 input/report/ELF evidence locally, never authenticated origin |
 | `aros toolchain producer verify-release-evidence` | Read back every family-v2 A/B package and compatibility lane against independent selections; byte consistency only, not authenticated execution |
+| `aros toolchain producer verify-qualification` | Bind complete family-v2 qualification claims to all measured release evidence; byte consistency only, not signature or execution authentication |
 
 The local `package`, `verify-package` and `compatibility` commands accept the optional
 `--package-format legacy-v1|family-v2`. When omitted, LLVM keeps its historical
@@ -167,6 +168,13 @@ inventory, an external closed lane selection and independently retained raw
 digests for the selection, input collection, index and subject manifest. It
 checks every selected A/B package and compatibility report/log/ELF closure,
 without executing builds or modifying files. Its result is not release admission.
+
+`producer verify-qualification` adds `--qualification-evidence`,
+`--qualification-sha256`, `--policy` and `--policy-sha256` to those arguments.
+It requires complete V2 coverage and joins report claims to raw measured files,
+including the final checksum, subject-list and provenance bytes. A positive
+run attempt is required but not authenticated here. The command is read-only;
+signatures, job/artifact origin and publication authorization remain separate.
 
 Compatibility verifies the complete package set independently into both fresh
 relocation roots using the selected format. It never detects a different format

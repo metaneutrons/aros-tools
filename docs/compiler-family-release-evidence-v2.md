@@ -72,3 +72,36 @@ run attempt, owning jobs and exact artifact bytes separately, bind the selection
 to those verified observations, and require V2 qualification/recovery admission.
 Do not use this command's output as a `verified` flag for publication. Historical
 V1 recovery remains a separate operation.
+
+## Join qualification claims to actual bytes
+
+`aros toolchain producer verify-qualification` accepts the same complete
+selection arguments as `verify-release-evidence`, plus:
+
+| Required argument | Independently selected input |
+| --- | --- |
+| `--qualification-evidence` | Closed `aros-toolchain-qualification-evidence-v2` document |
+| `--qualification-sha256` | Raw digest of that exact document |
+| `--policy` | Closed repository/workflow/signer/epoch `EvidencePolicy` document |
+| `--policy-sha256` | Raw digest of that exact policy document |
+
+Qualification and policy files must remain outside every selected release,
+package and compatibility root. The supplied index bytes must match the exact
+canonical index verified in the final inventory; semantically equivalent JSON
+with a different raw digest is rejected.
+
+Only complete `release-candidate` coverage is accepted. The operation acquires
+all selected evidence itself: the two build-report claims must equal the raw
+complete finished-package export digests; the comparison claim must equal the
+raw comparison file digest; the compatibility claim must equal the raw portable
+manifest digest covering every receipt, report, log and ELF. A receipt's
+self-digest cannot replace any of these raw file hashes. Final checksum,
+pre-attestation subject-list and provenance-bundle claims must equal measured
+bytes. `source_run.run_attempt` is mandatory and positive; it is still a claim
+until the external verifier binds it to provider/certificate observations.
+
+The command writes nothing. JSON remains `assurance: byte-consistency-only`
+and adds the selected qualification/policy document digests. It does not call
+GitHub, verify signatures, prove independent execution or authorize recovery
+or publication. A complete, internally consistent forged evidence set still
+requires rejection by the independent authentication boundary.

@@ -36,7 +36,7 @@ stage rules; they must not become a second hard-coded workflow inventory.
 | Packaging and index | `release_index_v2_builder.rs`, `release_index_v2_readback.rs`, `toolchain_producer/release_index_family.rs` | Explicit family-v2 CLI stages measure packages and index/checksum inputs. They do not qualify execution or authenticate provenance. |
 | A/B comparison | `native_candidate/comparison.rs`, `native_candidate/release_readback.rs`, `release_index.rs::PackageComparisonReport` | Local proofs and complete portable byte acquisition join both packages, retained exports/reports, selected groups and final checksum/subject bytes. `verify-release-evidence` exposes the complete byte collector; external execution/artifact authentication remains separate. |
 | Compatibility | `compatibility/execution_retained.rs`, `compatibility/execution_portable.rs`, `native_candidate/release_compatibility.rs` | Owning-host export and rootless read-back validate the exact report/log/ELF closure against independent expectations. The CLI exposes owning-host exports through `--evidence-dir` and complete indexed acquisition through `verify-release-evidence`. Authenticated recovery admission remains incomplete; byte consistency is not proof of execution. |
-| Qualification | `qualification_evidence_v2.rs` | The V2 record validates claims and their index/policy joins, not actual report acquisition. `record-qualification` still uses V1. |
+| Qualification | `qualification_evidence_v2.rs`, `qualification_readback_v2.rs` | `verify-qualification` acquires the complete selected release and binds V2 claims to raw A/B exports, comparison and compatibility closure bytes, final checksums, subjects and provenance bytes. Execution/signature/job authentication and V2 record/recovery wiring remain separate; `record-qualification` still uses V1. |
 | Recovery | `recovery.rs`, `toolchain_producer.rs` | Admission, inventory measurement and CLI still select the V1 index/evidence and active/historical V1 inventory shapes. |
 
 Paths in the table are relative to `crates/aros-toolchain/src/` except
@@ -123,7 +123,10 @@ and exact portable file set after complete execution. It does not admit the
 aggregate report set or authenticate the owning job. The separate
 [`verify-release-evidence` CLI](compiler-family-release-evidence-v2.md) acquires
 the complete indexed build and compatibility bytes without authenticating
-execution. External origin and V2 qualification/recovery admission remain
+execution. `verify-qualification` also joins a complete V2 claim document to
+those bytes, including its exact run attempt, raw export/manifest digests and
+measured provenance bundle digest. It authenticates neither that attempt nor
+its owning jobs. External origin and V2 qualification/recovery admission remain
 implementation requirements, not authenticated evidence from this audit.
 
 ### Producer audit boundary

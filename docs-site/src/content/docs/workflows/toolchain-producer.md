@@ -322,6 +322,14 @@ The lane set comes from release inputs, not discovered reports. JSON reports
 `assurance: byte-consistency-only`; authentication, qualification and recovery
 remain separate gates.
 
+`producer verify-qualification` additionally requires `--qualification-evidence`,
+`--qualification-sha256`, `--policy` and `--policy-sha256`. It joins complete V2
+claims to that same actual evidence: raw A/B exports, comparison, compatibility
+manifest, final checksums, subject list and provenance bytes. Diagnostic coverage
+and self-hashes substituted for raw exports/manifests are rejected. It writes
+nothing and remains `assurance: byte-consistency-only`; the run attempt,
+signatures and producing jobs still need independent authentication.
+
 The v2 library also binds comparison-report claims for all four package members
 to measured final checksum entries. This check does not authenticate independent
 builds or authorize release publication; CLI release admission is still a
@@ -334,7 +342,8 @@ The `pre-attestation` stage writes the index and subject list, not final checksu
 After external attestation supplies provenance, `final` requires the original
 `--subject-manifest-sha256`, verifies unchanged subjects and writes final checksums.
 These local byte checks do not authenticate signatures. The default `legacy-v1`
-index path remains available; qualification and recovery still use V1.
+index path remains available. Qualification recording and recovery still use V1;
+V2 byte read-back does not by itself make those paths V2-capable.
 
 The producer preserves owned work/output roots on failure, cancellation, and
 deadline expiry. Inspect their lifecycle receipts and logs, correct the exact

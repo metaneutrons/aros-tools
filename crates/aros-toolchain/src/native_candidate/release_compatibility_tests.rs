@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aros_common::{sha256_bytes, ArosCompilerIdentity, Sha256Digest};
-use serde_json::json;
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use super::release_readback_tests::{prepare_release, PreparedRelease};
@@ -24,6 +24,10 @@ use crate::compatibility::{
     PORTABLE_NATIVE_COMPATIBILITY_MANIFEST,
 };
 use crate::package_verify::VerifiedPackage;
+use crate::qualification_evidence::EvidencePolicy;
+use crate::qualification_readback_v2::{
+    readback_qualification_bytes_v2, QualificationByteReadbackRequestV2,
+};
 use crate::recipe::GitObjectId;
 use crate::release_index_v2::NativeReleaseArtifactV2;
 
@@ -368,6 +372,425 @@ fn assert_message(error: &crate::ContractError, expected: &str) {
         _ => "AX0703",
     };
     assert_eq!(diagnostics[0].code.to_string(), code, "{error}");
+}
+
+fn qualification_policy() -> EvidencePolicy {
+    EvidencePolicy {
+        source_repository: "https://github.com/example/aros-toolchains".into(),
+        source_workflow: ".github/workflows/qualification.yml".into(),
+        signer_repository: "https://github.com/example/aros-toolchains".into(),
+        signer_workflow: ".github/workflows/qualification.yml".into(),
+        signer: "github-actions".into(),
+        now: 150,
+    }
+}
+
+fn qualification_evidence_value(
+    request: &ReleaseCompatibilityReadbackRequestV2<'_>,
+    measured: &super::ReleaseCompatibilityReadbackV2,
+    index_bytes: &[u8],
+    policy: &EvidencePolicy,
+    coverage: &str,
+) -> Value {
+    let packages = &request.builds.packages;
+    let index = &packages.index;
+    let lanes = index
+        .artifacts()
+        .iter()
+        .map(|artifact| {
+            let group = packages
+                .inputs
+                .groups()
+                .iter()
+                .find(|group| group.id() == artifact.group_id())
+                .unwrap();
+            let build = measured
+                .builds()
+                .lanes()
+                .iter()
+                .find(|lane| lane.asset() == artifact.asset())
+                .unwrap();
+            let compatibility = measured
+                .lanes()
+                .iter()
+                .find(|lane| lane.asset() == artifact.asset())
+                .unwrap();
+            let measurements = build.measurement_sha256();
+            json!({
+                "group_id": artifact.group_id(),
+                "asset": artifact.asset(),
+                "host": artifact.host(),
+                "target_profile": artifact.target_profile(),
+                "target_triple": artifact.target_triple(),
+                "source_commit": artifact.source_commit(),
+                "compiler": artifact.compiler(),
+                "recipe_sha256": group.recipe().sha256(),
+                "source_lock_sha256": group.source_lock_reference().sha256(),
+                "profiles_sha256": group.profiles_reference().sha256(),
+                "archive_sha256": artifact.sha256(),
+                "archive_size": artifact.size(),
+                "tree_sha256": artifact.tree_sha256(),
+                "build_a_report_sha256": measurements[0],
+                "build_b_report_sha256": measurements[1],
+                "comparison_report_sha256": build.comparison_sha256(),
+                "compatibility_report_sha256": compatibility.compatibility().manifest_sha256()
+            })
+        })
+        .collect::<Vec<_>>();
+    let subject_manifest_sha256 = measured.builds().subject_manifest_sha256();
+    json!({
+        "schema": "aros-toolchain-qualification-evidence-v2",
+        "created_at": 100,
+        "expires_at": 300,
+        "source_run": {
+            "repository": policy.source_repository,
+            "workflow": policy.source_workflow,
+            "run_id": 42,
+            "run_attempt": 1,
+            "producer_commit": index.producer_commit(),
+            "source_tag": "release-test",
+            "tag_object": "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a"
+        },
+        "release": {
+            "release_id": index.release_id(),
+            "base_url": index.base_url(),
+            "inputs_sha256": packages.inputs.collection_sha256(),
+            "release_index_sha256": sha256_bytes(index_bytes),
+            "pre_attestation_checksums_sha256": subject_manifest_sha256,
+            "checksums_sha256": measured.builds().checksums_sha256(),
+            "provenance_sha256": measured.builds().provenance_sha256(),
+            "producer_commit": index.producer_commit(),
+            "tools_commit": index.tools_commit()
+        },
+        "attestation": {
+            "repository": policy.signer_repository,
+            "workflow": policy.signer_workflow,
+            "signer": policy.signer,
+            "subject_manifest_sha256": subject_manifest_sha256
+        },
+        "lanes": lanes,
+        "coverage": coverage
+    })
+}
+
+fn qualification_bytes(
+    request: &ReleaseCompatibilityReadbackRequestV2<'_>,
+    measured: &super::ReleaseCompatibilityReadbackV2,
+    index_bytes: &[u8],
+    policy: &EvidencePolicy,
+    coverage: &str,
+) -> Vec<u8> {
+    serde_json::to_vec(&qualification_evidence_value(
+        request,
+        measured,
+        index_bytes,
+        policy,
+        coverage,
+    ))
+    .unwrap()
+}
+
+fn assert_qualification_message(error: &crate::ContractError, expected: &str) {
+    let diagnostics = &error.diagnostics().diagnostics;
+    assert_eq!(diagnostics.len(), 1, "{error}");
+    assert_eq!(diagnostics[0].message, expected, "{error}");
+    assert_eq!(diagnostics[0].code.to_string(), "AX0901", "{error}");
+}
+
+fn assert_qualification_rejected_without_mutation(
+    request: &ReleaseCompatibilityReadbackRequestV2<'_>,
+    evidence_bytes: &[u8],
+    index_bytes: &[u8],
+    policy: &EvidencePolicy,
+    expected: &str,
+) {
+    let before = snapshot_request(request);
+    let Err(error) = readback_qualification_bytes_v2(&QualificationByteReadbackRequestV2 {
+        evidence_bytes,
+        index_bytes,
+        complete: request,
+        policy,
+    }) else {
+        panic!("qualification byte read-back accepted an invalid claim");
+    };
+    assert_qualification_message(&error, expected);
+    assert_eq!(
+        snapshot_request(request),
+        before,
+        "qualification gate changed an input"
+    );
+}
+
+fn assert_lower_layer_rejected_without_mutation(
+    request: &ReleaseCompatibilityReadbackRequestV2<'_>,
+    evidence_bytes: &[u8],
+    index_bytes: &[u8],
+    policy: &EvidencePolicy,
+    expected: &str,
+) {
+    let before = snapshot_request(request);
+    let Err(error) = readback_qualification_bytes_v2(&QualificationByteReadbackRequestV2 {
+        evidence_bytes,
+        index_bytes,
+        complete: request,
+        policy,
+    }) else {
+        panic!("qualification byte read-back accepted changed compatibility bytes");
+    };
+    assert_message(&error, expected);
+    assert_eq!(
+        snapshot_request(request),
+        before,
+        "qualification gate changed an input"
+    );
+}
+
+#[test]
+fn qualification_readback_joins_three_host_claims_to_complete_bytes_without_writes() {
+    let prepared = prepare_release();
+    let builds = prepared.request();
+    let build_proof = readback_release_builds_v2(&builds).unwrap();
+    let compatibility = prepare_compatibility(&prepared, &build_proof);
+    let no_overrides = BTreeMap::new();
+    let complete = compatibility_request(&builds, &compatibility.lanes, &no_overrides);
+    let independently_measured = readback_release_compatibility_v2(&complete).unwrap();
+    let index_path = builds
+        .packages
+        .directory
+        .join(crate::release_index_v2::INDEX_NAME);
+    let index_bytes = fs::read(index_path).unwrap();
+    let policy = qualification_policy();
+    let evidence_bytes = qualification_bytes(
+        &complete,
+        &independently_measured,
+        &index_bytes,
+        &policy,
+        "release-candidate",
+    );
+    let before = snapshot_request(&complete);
+
+    let joined = readback_qualification_bytes_v2(&QualificationByteReadbackRequestV2 {
+        evidence_bytes: &evidence_bytes,
+        index_bytes: &index_bytes,
+        complete: &complete,
+        policy: &policy,
+    })
+    .unwrap();
+
+    assert_eq!(joined.evidence().lanes.len(), 3);
+    assert_eq!(joined.complete().builds().lanes().len(), 3);
+    assert_eq!(joined.complete().lanes().len(), 3);
+    assert_eq!(
+        joined.evidence().release.checksums_sha256,
+        *joined.complete().builds().checksums_sha256()
+    );
+    assert_eq!(
+        joined.evidence().release.pre_attestation_checksums_sha256,
+        *joined.complete().builds().subject_manifest_sha256()
+    );
+    assert_eq!(
+        joined.evidence().release.provenance_sha256,
+        *joined.complete().builds().provenance_sha256()
+    );
+    for lane in &joined.evidence().lanes {
+        let build = joined
+            .complete()
+            .builds()
+            .lanes()
+            .iter()
+            .find(|build| build.asset() == lane.asset)
+            .unwrap();
+        let compatibility = joined
+            .complete()
+            .lanes()
+            .iter()
+            .find(|compatibility| compatibility.asset() == lane.asset)
+            .unwrap();
+        let measurements = build.measurement_sha256();
+        assert_eq!(lane.build_a_report_sha256, *measurements[0]);
+        assert_eq!(lane.build_b_report_sha256, *measurements[1]);
+        assert_eq!(lane.comparison_report_sha256, *build.comparison_sha256());
+        assert_eq!(
+            lane.compatibility_report_sha256,
+            *compatibility.compatibility().manifest_sha256()
+        );
+    }
+    assert_eq!(
+        snapshot_request(&complete),
+        before,
+        "qualification gate changed an input"
+    );
+}
+
+#[test]
+fn qualification_readback_rejects_claim_substitutions_and_incomplete_coverage_without_writes() {
+    let prepared = prepare_release();
+    let builds = prepared.request();
+    let build_proof = readback_release_builds_v2(&builds).unwrap();
+    let compatibility = prepare_compatibility(&prepared, &build_proof);
+    let no_overrides = BTreeMap::new();
+    let complete = compatibility_request(&builds, &compatibility.lanes, &no_overrides);
+    let independently_measured = readback_release_compatibility_v2(&complete).unwrap();
+    let index_path = builds
+        .packages
+        .directory
+        .join(crate::release_index_v2::INDEX_NAME);
+    let index_bytes = fs::read(index_path).unwrap();
+    let policy = qualification_policy();
+    let evidence_bytes = qualification_bytes(
+        &complete,
+        &independently_measured,
+        &index_bytes,
+        &policy,
+        "release-candidate",
+    );
+    let valid: Value = serde_json::from_slice(&evidence_bytes).unwrap();
+
+    let mut alternate_index_bytes = index_bytes.clone();
+    alternate_index_bytes.push(b' ');
+    let alternate_index = crate::release_index_v2::NativeReleaseIndexV2::parse(
+        &alternate_index_bytes,
+        &builds.packages.inputs,
+    )
+    .unwrap();
+    assert_eq!(alternate_index, builds.packages.index);
+    let mut resealed_index_claim = valid.clone();
+    resealed_index_claim["release"]["release_index_sha256"] =
+        json!(sha256_bytes(&alternate_index_bytes));
+    let resealed_index_claim = serde_json::to_vec(&resealed_index_claim).unwrap();
+    let parsed_claim =
+        crate::qualification_evidence_v2::QualificationEvidenceV2::parse(&resealed_index_claim)
+            .unwrap();
+    parsed_claim
+        .validate_against_index(&alternate_index_bytes, &builds.packages.inputs, &policy)
+        .unwrap();
+    assert_qualification_rejected_without_mutation(
+        &complete,
+        &resealed_index_claim,
+        &alternate_index_bytes,
+        &policy,
+        "qualification index bytes differ from the complete selected release",
+    );
+
+    for (field, nonce) in [
+        ("build_a_report_sha256", 0xf001_u64),
+        ("build_b_report_sha256", 0xf002),
+        ("comparison_report_sha256", 0xf003),
+        ("compatibility_report_sha256", 0xf004),
+    ] {
+        let mut changed = valid.clone();
+        changed["lanes"][0][field] = json!(format!("{nonce:064x}"));
+        assert_qualification_rejected_without_mutation(
+            &complete,
+            &serde_json::to_vec(&changed).unwrap(),
+            &index_bytes,
+            &policy,
+            "qualification report claims differ from the complete measured evidence bytes",
+        );
+    }
+
+    let mut changed_checksums = valid.clone();
+    changed_checksums["release"]["checksums_sha256"] = json!("f101".repeat(16));
+    assert_qualification_rejected_without_mutation(
+        &complete,
+        &serde_json::to_vec(&changed_checksums).unwrap(),
+        &index_bytes,
+        &policy,
+        "qualification release claims differ from measured checksums, subjects or provenance bytes",
+    );
+
+    let mut changed_subject = valid.clone();
+    let new_subject = "f102".repeat(16);
+    changed_subject["release"]["pre_attestation_checksums_sha256"] = json!(new_subject);
+    changed_subject["attestation"]["subject_manifest_sha256"] = json!(new_subject);
+    assert_qualification_rejected_without_mutation(
+        &complete,
+        &serde_json::to_vec(&changed_subject).unwrap(),
+        &index_bytes,
+        &policy,
+        "qualification release claims differ from measured checksums, subjects or provenance bytes",
+    );
+
+    let mut changed_provenance = valid.clone();
+    changed_provenance["release"]["provenance_sha256"] = json!("f103".repeat(16));
+    assert_qualification_rejected_without_mutation(
+        &complete,
+        &serde_json::to_vec(&changed_provenance).unwrap(),
+        &index_bytes,
+        &policy,
+        "qualification release claims differ from measured checksums, subjects or provenance bytes",
+    );
+
+    let mut diagnostic = valid.clone();
+    diagnostic["coverage"] = json!("diagnostic");
+    assert_qualification_rejected_without_mutation(
+        &complete,
+        &serde_json::to_vec(&diagnostic).unwrap(),
+        &index_bytes,
+        &policy,
+        "qualification byte read-back requires complete release-candidate coverage",
+    );
+
+    let mut subset = valid;
+    subset["lanes"].as_array_mut().unwrap().pop();
+    assert_qualification_rejected_without_mutation(
+        &complete,
+        &serde_json::to_vec(&subset).unwrap(),
+        &index_bytes,
+        &policy,
+        "qualification evidence v2 lacks the complete input-derived matrix",
+    );
+}
+
+#[test]
+fn qualification_readback_rejects_changed_compatibility_log_bytes_without_writes() {
+    let prepared = prepare_release();
+    let builds = prepared.request();
+    let build_proof = readback_release_builds_v2(&builds).unwrap();
+    let mut compatibility = prepare_compatibility(&prepared, &build_proof);
+    let no_overrides = BTreeMap::new();
+    let original_request = compatibility_request(&builds, &compatibility.lanes, &no_overrides);
+    let independently_measured = readback_release_compatibility_v2(&original_request).unwrap();
+    let index_path = builds
+        .packages
+        .directory
+        .join(crate::release_index_v2::INDEX_NAME);
+    let index_bytes = fs::read(index_path).unwrap();
+    let policy = qualification_policy();
+    let evidence_bytes = qualification_bytes(
+        &original_request,
+        &independently_measured,
+        &index_bytes,
+        &policy,
+        "release-candidate",
+    );
+    drop(original_request);
+    drop(independently_measured);
+
+    let asset = asset_for_host(&builds, "linux-aarch64");
+    let directory = compatibility.lanes[asset].directory.clone();
+    let log_name = "upstream-configure.stdout.log";
+    let log_path = directory.join(log_name);
+    let mut changed_log = fs::read(&log_path).unwrap();
+    changed_log.push(b'x');
+    fs::write(&log_path, &changed_log).unwrap();
+
+    let manifest_path = directory.join(PORTABLE_NATIVE_COMPATIBILITY_MANIFEST);
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["files"][log_name]["sha256"] = json!(sha256_bytes(&changed_log));
+    manifest["files"][log_name]["size"] = json!(changed_log.len());
+    let changed_manifest = crate::canonical::bytes(&manifest).unwrap();
+    fs::write(&manifest_path, &changed_manifest).unwrap();
+    compatibility.lanes.get_mut(asset).unwrap().manifest_sha256 = sha256_bytes(&changed_manifest);
+
+    let changed_request = compatibility_request(&builds, &compatibility.lanes, &no_overrides);
+    assert_lower_layer_rejected_without_mutation(
+        &changed_request,
+        &evidence_bytes,
+        &index_bytes,
+        &policy,
+        "native compatibility retained command log bytes differ from their report hashes",
+    );
 }
 
 fn snapshot_directory(directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {

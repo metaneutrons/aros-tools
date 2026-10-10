@@ -16,12 +16,17 @@ use aros_toolchain::native_candidate::{
     ReleaseBuildSideRequestV2, ReleaseCompatibilityReadbackRequestV2,
 };
 use aros_toolchain::plan::{Executor, Identity};
+use aros_toolchain::qualification_evidence::EvidencePolicy;
+use aros_toolchain::qualification_readback_v2::{
+    readback_qualification_bytes_v2, QualificationByteReadbackRequestV2,
+};
 use aros_toolchain::release_index_v2::{NativeReleaseIndexV2, INDEX_NAME};
 use aros_toolchain::release_index_v2_readback::{
     readback_indexed_packages, IndexedPackageReadbackRequestV2,
 };
 use aros_toolchain::release_inputs::{ReleaseInputs, ACTIVE_HOSTS};
 
+use super::qualification_bytes::QualificationArgs;
 use super::release_evidence::EvidenceArgs;
 use super::release_evidence_selection::{self, Selection};
 use super::{native_error, print_json, ResultFormat};
@@ -30,6 +35,30 @@ const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const INPUTS_NAME: &str = "toolchain-release-inputs-v2.json";
 
 pub(super) fn run(args: &EvidenceArgs) -> miette::Result<()> {
+    run_selected(args, None)
+}
+
+pub(super) fn run_qualification(args: &QualificationArgs) -> miette::Result<()> {
+    run_selected(&args.evidence, Some(args))
+}
+
+fn run_selected(
+    args: &EvidenceArgs,
+    qualification: Option<&QualificationArgs>,
+) -> miette::Result<()> {
+    let selected_qualification = qualification
+        .map(|selected| {
+            let bytes = read_selected(
+                &selected.qualification_evidence,
+                &selected.qualification_sha256,
+            )?;
+            let policy_bytes = read_selected(&selected.policy, &selected.policy_sha256)?;
+            let policy: EvidencePolicy = serde_json::from_slice(&policy_bytes).map_err(|_| {
+                miette::miette!("qualification policy must match the closed verifier schema")
+            })?;
+            Ok::<_, miette::Report>((bytes, policy))
+        })
+        .transpose()?;
     let selection_bytes = read_selected(&args.selection, &args.selection_sha256)?;
     let selection = release_evidence_selection::parse(&selection_bytes)?;
     let inputs = ReleaseInputs::load(&args.directory).map_err(|error| native_error(&error))?;
@@ -42,7 +71,7 @@ pub(super) fn run(args: &EvidenceArgs) -> miette::Result<()> {
     let index_bytes = read_selected(&index_path, &args.index_sha256)?;
     let index =
         NativeReleaseIndexV2::parse(&index_bytes, &inputs).map_err(|error| native_error(&error))?;
-    validate_selection(args, &index, &selection)?;
+    validate_selection(args, &index, &selection, qualification)?;
     let packages = IndexedPackageReadbackRequestV2 {
         directory: args.directory.clone(),
         inputs,
@@ -136,11 +165,23 @@ pub(super) fn run(args: &EvidenceArgs) -> miette::Result<()> {
         .collect::<miette::Result<BTreeMap<_, _>>>()?;
     // This factory acquires all A/B bytes itself, then joins all compatibility
     // closures. No partial lane result or caller-created proof is accepted.
-    let readback = readback_release_compatibility_v2(&ReleaseCompatibilityReadbackRequestV2 {
+    let complete_request = ReleaseCompatibilityReadbackRequestV2 {
         builds: &builds,
         lanes,
-    })
-    .map_err(|error| native_error(&error))?;
+    };
+    let readback = if let Some((bytes, policy)) = &selected_qualification {
+        readback_qualification_bytes_v2(&QualificationByteReadbackRequestV2 {
+            evidence_bytes: bytes,
+            index_bytes: &index_bytes,
+            complete: &complete_request,
+            policy,
+        })
+        .map_err(|error| native_error(&error))?
+        .into_complete()
+    } else {
+        readback_release_compatibility_v2(&complete_request)
+            .map_err(|error| native_error(&error))?
+    };
     read_selected(&args.selection, &args.selection_sha256)?;
     read_selected(&index_path, &args.index_sha256)?;
     read_selected(&args.directory.join(INPUTS_NAME), &args.inputs_sha256)?;
@@ -149,6 +190,13 @@ pub(super) fn run(args: &EvidenceArgs) -> miette::Result<()> {
             &lane.compatibility.inputs.path,
             &lane.compatibility.inputs.sha256,
         )?;
+    }
+    if let Some(selected) = qualification {
+        read_selected(
+            &selected.qualification_evidence,
+            &selected.qualification_sha256,
+        )?;
+        read_selected(&selected.policy, &selected.policy_sha256)?;
     }
     let lanes = readback.builds().lanes().iter().zip(readback.lanes()).map(|(build, compatibility)| {
         serde_json::json!({
@@ -163,9 +211,14 @@ pub(super) fn run(args: &EvidenceArgs) -> miette::Result<()> {
             "standalone": standalone_document(compatibility.compatibility().standalone()),
         })
     }).collect::<Vec<_>>();
-    let result = serde_json::json!({
+    let operation = if qualification.is_some() {
+        "verify-qualification"
+    } else {
+        "verify-release-evidence"
+    };
+    let mut result = serde_json::json!({
         "schema": "aros-toolchain-producer-stage-v2",
-        "operation": "verify-release-evidence",
+        "operation": operation,
         "release_format": "family-v2",
         "assurance": "byte-consistency-only",
         "release_id": args.release_id,
@@ -174,10 +227,15 @@ pub(super) fn run(args: &EvidenceArgs) -> miette::Result<()> {
         "selection_sha256": args.selection_sha256,
         "subject_manifest_sha256": readback.builds().subject_manifest_sha256(),
         "checksums_sha256": readback.builds().checksums_sha256(),
+        "provenance_sha256": readback.builds().provenance_sha256(),
         "lane_count": lanes.len(),
         "build_count": lanes.len() * 2,
         "lanes": lanes,
     });
+    if let Some(selected) = qualification {
+        result["qualification_sha256"] = serde_json::json!(selected.qualification_sha256);
+        result["policy_sha256"] = serde_json::json!(selected.policy_sha256);
+    }
     match args.format {
         ResultFormat::Json => print_json(&result),
         ResultFormat::Human => {
@@ -259,6 +317,7 @@ fn validate_selection(
     args: &EvidenceArgs,
     index: &NativeReleaseIndexV2,
     selection: &Selection,
+    qualification: Option<&QualificationArgs>,
 ) -> miette::Result<()> {
     if index.release_id() != args.release_id || index.base_url() != args.base_url {
         return Err(miette::miette!(
@@ -287,12 +346,20 @@ fn validate_selection(
         },
     ));
     let protected = roots.collect::<Vec<_>>();
-    for document in std::iter::once(args.selection.as_path()).chain(
-        selection
-            .lanes
-            .values()
-            .map(|lane| lane.compatibility.inputs.path.as_path()),
-    ) {
+    let documents = std::iter::once(args.selection.as_path())
+        .chain(
+            selection
+                .lanes
+                .values()
+                .map(|lane| lane.compatibility.inputs.path.as_path()),
+        )
+        .chain(qualification.into_iter().flat_map(|selected| {
+            [
+                selected.qualification_evidence.as_path(),
+                selected.policy.as_path(),
+            ]
+        }));
+    for document in documents {
         for root in &protected {
             if super::compatibility_export::filesystem_overlap(document, root)? {
                 return Err(miette::miette!("independent evidence inputs must remain outside all selected release, package and compatibility roots"));

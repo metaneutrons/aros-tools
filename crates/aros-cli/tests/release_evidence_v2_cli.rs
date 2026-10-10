@@ -12,6 +12,8 @@ use std::process::{Command, Output};
 use aros_common::sha256_bytes;
 use aros_toolchain::canonical;
 use aros_toolchain::release_index::PackageComparisonReport;
+use aros_toolchain::release_index_v2::{NativeReleaseIndexV2, INDEX_NAME};
+use aros_toolchain::release_inputs::ReleaseInputs;
 use serde_json::{json, Value};
 use support::{Fixture, BASE_URL, RELEASE_ID};
 
@@ -140,6 +142,215 @@ fn copy_compatibility_for_mutation(
     selection["lanes"][asset]["compatibility"]["directory"] = json!(destination);
     selection["lanes"][asset]["compatibility"]["manifest_sha256"] = json!(manifest_sha256.as_str());
     destination
+}
+
+fn write_json_input(fixture: &Fixture, name: &str, value: &Value) -> (PathBuf, String) {
+    let path = fixture.transport_directory.join(name);
+    let bytes = serde_json::to_vec(value).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    (
+        fs::canonicalize(path).unwrap(),
+        sha256_bytes(&bytes).to_string(),
+    )
+}
+
+fn qualification_claims(fixture: &Fixture, baseline: &Value) -> Value {
+    let inputs = ReleaseInputs::load(&fixture.release_directory).unwrap();
+    let index_bytes = fs::read(fixture.release_directory.join(INDEX_NAME)).unwrap();
+    let index = NativeReleaseIndexV2::parse(&index_bytes, &inputs).unwrap();
+    assert_eq!(
+        sha256_bytes(&index_bytes).as_str(),
+        fixture.index_sha256.as_str()
+    );
+
+    let actual_lanes = baseline["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lane| (lane["asset"].as_str().unwrap(), lane))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let lanes = index
+        .artifacts()
+        .iter()
+        .map(|artifact| {
+            let group = inputs
+                .groups()
+                .iter()
+                .find(|group| group.id() == artifact.group_id())
+                .unwrap();
+            let measured = actual_lanes.get(artifact.asset()).unwrap();
+            json!({
+                "group_id": artifact.group_id(),
+                "asset": artifact.asset(),
+                "host": artifact.host(),
+                "target_profile": artifact.target_profile(),
+                "target_triple": artifact.target_triple(),
+                "source_commit": artifact.source_commit(),
+                "compiler": artifact.compiler(),
+                "recipe_sha256": group.recipe().sha256(),
+                "source_lock_sha256": group.source_lock_reference().sha256(),
+                "profiles_sha256": group.profiles_reference().sha256(),
+                "archive_sha256": artifact.sha256(),
+                "archive_size": artifact.size(),
+                "tree_sha256": artifact.tree_sha256(),
+                "build_a_report_sha256": measured["measurement_sha256"][0],
+                "build_b_report_sha256": measured["measurement_sha256"][1],
+                "comparison_report_sha256": measured["comparison_sha256"],
+                // Qualification binds the raw compatibility manifest bytes,
+                // not the nested receipt's self-digest.
+                "compatibility_report_sha256": measured["compatibility_manifest_sha256"]
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lanes.len(), actual_lanes.len());
+
+    let repository = "https://github.com/example/aros-toolchains";
+    let workflow = ".github/workflows/qualification.yml";
+    json!({
+        "schema": "aros-toolchain-qualification-evidence-v2",
+        "created_at": 100,
+        "expires_at": 300,
+        "source_run": {
+            "repository": repository,
+            "workflow": workflow,
+            "run_id": 42,
+            "run_attempt": 1,
+            "producer_commit": index.producer_commit(),
+            "source_tag": "release-2026.10",
+            "tag_object": "9a".repeat(20)
+        },
+        "release": {
+            "release_id": index.release_id(),
+            "base_url": index.base_url(),
+            "inputs_sha256": inputs.collection_sha256(),
+            "release_index_sha256": sha256_bytes(&index_bytes),
+            "pre_attestation_checksums_sha256": baseline["subject_manifest_sha256"],
+            "checksums_sha256": baseline["checksums_sha256"],
+            "provenance_sha256": baseline["provenance_sha256"],
+            "producer_commit": index.producer_commit(),
+            "tools_commit": index.tools_commit()
+        },
+        "attestation": {
+            "repository": repository,
+            "workflow": workflow,
+            "signer": "github-actions",
+            "subject_manifest_sha256": baseline["subject_manifest_sha256"]
+        },
+        "lanes": lanes,
+        "coverage": "release-candidate"
+    })
+}
+
+fn qualification_command(
+    fixture: &Fixture,
+    selection: &Value,
+    name: &str,
+    evidence: &Value,
+    selected_evidence_sha256: Option<&str>,
+) -> Command {
+    let (selection_path, selection_sha256) =
+        fixture.write_selection(&format!("qualification-{name}.json"), selection);
+    let (evidence_path, evidence_sha256) = write_json_input(
+        fixture,
+        &format!("qualification-{name}-evidence.json"),
+        evidence,
+    );
+    let policy = json!({
+        "source_repository": "https://github.com/example/aros-toolchains",
+        "source_workflow": ".github/workflows/qualification.yml",
+        "signer_repository": "https://github.com/example/aros-toolchains",
+        "signer_workflow": ".github/workflows/qualification.yml",
+        "signer": "github-actions",
+        "now": 150
+    });
+    let (policy_path, policy_sha256) = write_json_input(
+        fixture,
+        &format!("qualification-{name}-policy.json"),
+        &policy,
+    );
+    let selected_evidence_sha256 = selected_evidence_sha256.unwrap_or(&evidence_sha256);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
+    command.args([
+        "toolchain",
+        "producer",
+        "verify-qualification",
+        "--directory",
+        fixture.release_directory.to_str().unwrap(),
+        "--release-id",
+        RELEASE_ID,
+        "--base-url",
+        BASE_URL,
+        "--inputs-sha256",
+        fixture.inputs_sha256.as_str(),
+        "--index-sha256",
+        fixture.index_sha256.as_str(),
+        "--selection",
+        selection_path.to_str().unwrap(),
+        "--selection-sha256",
+        selection_sha256.as_str(),
+        "--subject-manifest",
+        fixture.subject_manifest.to_str().unwrap(),
+        "--subject-manifest-sha256",
+        fixture.subject_manifest_sha256.as_str(),
+        "--qualification-evidence",
+        evidence_path.to_str().unwrap(),
+        "--qualification-sha256",
+        selected_evidence_sha256,
+        "--policy",
+        policy_path.to_str().unwrap(),
+        "--policy-sha256",
+        policy_sha256.as_str(),
+        "--format",
+        "json",
+    ]);
+    command
+}
+
+fn assert_qualification_failure_is_read_only(
+    fixture: &Fixture,
+    selection: &Value,
+    name: &str,
+    evidence: &Value,
+    selected_evidence_sha256: Option<&str>,
+    expected_diagnostic: &str,
+    expected_code: Option<&str>,
+) {
+    let mut command =
+        qualification_command(fixture, selection, name, evidence, selected_evidence_sha256);
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "unexpected qualification success for {name}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failure for {name} emitted a success-shaped stdout document: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_diagnostic),
+        "failure for {name} did not reach its intended rejection; expected {expected_diagnostic:?} in stderr:\n{stderr}"
+    );
+    if let Some(code) = expected_code {
+        assert!(
+            stderr.contains(code),
+            "failure for {name} did not include diagnostic code {code}:\n{stderr}"
+        );
+    }
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "CLI mutated the final release during failed {name} qualification"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "CLI mutated selected transport evidence during failed {name} qualification"
+    );
 }
 
 #[test]
@@ -392,4 +603,207 @@ fn process_collects_complete_synthetic_v2_closure_and_rejects_mutations_read_onl
             &[changed_root],
         );
     }
+}
+
+#[test]
+fn process_joins_v2_qualification_claims_to_measured_bytes_and_rejects_claim_substitutions() {
+    // The claims are assembled from a prior actual collector result and the
+    // fixture's parsed, input-bound index. This proves the CLI joins its own
+    // byte collection to claims instead of trusting a success-shaped input.
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "qualification-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic baseline collection failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    assert_eq!(baseline["operation"], "verify-release-evidence");
+    assert_eq!(baseline["assurance"], "byte-consistency-only");
+    assert!(baseline["provenance_sha256"].is_string());
+
+    let valid = qualification_claims(&fixture, &baseline);
+    assert_eq!(valid["source_run"]["run_id"], 42);
+    assert_eq!(valid["source_run"]["run_attempt"], 1);
+    let mut success = qualification_command(
+        &fixture,
+        &fixture.selection,
+        "qualification-success",
+        &valid,
+        None,
+    );
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let output = success.output().unwrap();
+    assert!(
+        output.status.success(),
+        "synthetic qualification byte join failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "successful qualification mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "successful qualification mutated selected transport evidence"
+    );
+    let joined: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(joined["operation"], "verify-qualification");
+    assert_eq!(joined["assurance"], "byte-consistency-only");
+    assert_eq!(joined["release_format"], "family-v2");
+    assert_eq!(joined["lane_count"], 3);
+    assert_eq!(joined["build_count"], 6);
+    assert_eq!(joined["inputs_sha256"], baseline["inputs_sha256"]);
+    assert_eq!(joined["index_sha256"], baseline["index_sha256"]);
+    assert_eq!(joined["checksums_sha256"], baseline["checksums_sha256"]);
+    assert_eq!(joined["provenance_sha256"], baseline["provenance_sha256"]);
+    for authority_claim in [
+        "execution_authenticated",
+        "signature_verified",
+        "job_origin_verified",
+        "publication_authorized",
+        "recovery_authorized",
+    ] {
+        assert!(
+            joined.get(authority_claim).is_none(),
+            "byte-only qualification result unexpectedly claims {authority_claim}"
+        );
+    }
+    assert_eq!(
+        joined["qualification_sha256"],
+        sha256_bytes(&serde_json::to_vec(&valid).unwrap()).as_str()
+    );
+
+    let mut wrong_report = valid.clone();
+    wrong_report["lanes"][0]["build_a_report_sha256"] =
+        json!(sha256_bytes(b"internally well-formed but unmeasured report claim").as_str());
+    assert_qualification_failure_is_read_only(
+        &fixture,
+        &fixture.selection,
+        "qualification-wrong-report",
+        &wrong_report,
+        None,
+        "qualification report claims differ from the complete measured evidence bytes",
+        Some("AX0901"),
+    );
+
+    let mut compatibility_self_hash = valid.clone();
+    let asset = compatibility_self_hash["lanes"][0]["asset"]
+        .as_str()
+        .unwrap();
+    let measured = baseline["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lane| lane["asset"] == asset)
+        .unwrap();
+    // The nested receipt digest is not the raw compatibility manifest digest.
+    compatibility_self_hash["lanes"][0]["compatibility_report_sha256"] =
+        measured["compatibility_receipt_sha256"].clone();
+    assert_qualification_failure_is_read_only(
+        &fixture,
+        &fixture.selection,
+        "qualification-compatibility-self-hash",
+        &compatibility_self_hash,
+        None,
+        "qualification report claims differ from the complete measured evidence bytes",
+        Some("AX0901"),
+    );
+
+    let mut missing_attempt = valid.clone();
+    missing_attempt["source_run"]
+        .as_object_mut()
+        .unwrap()
+        .remove("run_attempt");
+    assert_qualification_failure_is_read_only(
+        &fixture,
+        &fixture.selection,
+        "qualification-missing-attempt",
+        &missing_attempt,
+        None,
+        "qualification evidence is not a closed v2 JSON document",
+        Some("AX0901"),
+    );
+
+    let wrong_selected_digest =
+        sha256_bytes(b"not the selected qualification document").to_string();
+    assert_qualification_failure_is_read_only(
+        &fixture,
+        &fixture.selection,
+        "qualification-wrong-selected-digest",
+        &valid,
+        Some(&wrong_selected_digest),
+        "selected evidence metadata differs from its independently retained raw digest or identity",
+        None,
+    );
+
+    // A valid policy document is still an independent transport selector and
+    // cannot be placed inside a selected compatibility root.
+    let prepared = qualification_command(
+        &fixture,
+        &fixture.selection,
+        "qualification-policy-overlap",
+        &valid,
+        None,
+    );
+    let mut args = prepared
+        .get_args()
+        .map(std::ffi::OsStr::to_os_string)
+        .collect::<Vec<_>>();
+    let policy_position = args
+        .iter()
+        .position(|arg| arg.to_str() == Some("--policy"))
+        .unwrap();
+    let original_policy_path = PathBuf::from(args[policy_position + 1].clone());
+    let policy_bytes = fs::read(original_policy_path).unwrap();
+    let overlap_asset = asset_for_host(&fixture, "linux-x86_64");
+    let compatibility_root = PathBuf::from(
+        fixture.selection["lanes"][&overlap_asset]["compatibility"]["directory"]
+            .as_str()
+            .unwrap(),
+    );
+    let overlapping_policy_path = compatibility_root.join("selected-qualification-policy.json");
+    fs::write(&overlapping_policy_path, &policy_bytes).unwrap();
+    args[policy_position + 1] = overlapping_policy_path.as_os_str().to_os_string();
+    let policy_digest_position = args
+        .iter()
+        .position(|arg| arg.to_str() == Some("--policy-sha256"))
+        .unwrap();
+    args[policy_digest_position + 1] =
+        std::ffi::OsString::from(sha256_bytes(&policy_bytes).to_string());
+    let mut overlap = Command::new(env!("CARGO_BIN_EXE_aros"));
+    overlap.args(args);
+
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let output = overlap.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "qualification unexpectedly accepted a policy inside compatibility evidence"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "overlapping policy failure emitted success-shaped stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "independent evidence inputs must remain outside all selected release, package and compatibility roots"
+        ),
+        "policy overlap did not reach the intended selector rejection:\n{stderr}"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "overlapping policy rejection mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "overlapping policy rejection mutated selected transport evidence"
+    );
 }

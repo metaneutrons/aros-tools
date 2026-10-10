@@ -60,6 +60,8 @@ pub struct SourceRunIdentityV2 {
     pub workflow: String,
     /// Nonzero provider run identifier.
     pub run_id: u64,
+    /// Exact nonzero provider attempt; a rerun is a different execution.
+    pub run_attempt: u64,
     /// Exact producer revision selected by the run.
     pub producer_commit: GitObjectId,
     /// Immutable tag name; validated against observed Git state elsewhere.
@@ -146,13 +148,15 @@ pub struct QualificationLaneV2 {
     pub archive_size: u64,
     /// Payload tree digest declared by the bound index.
     pub tree_sha256: Sha256Digest,
-    /// First independent build report digest.
+    /// Raw digest of A's complete portable finished-package measurement export.
+    /// Its full build result and six-phase chain are acquired separately.
     pub build_a_report_sha256: Sha256Digest,
-    /// Second independent build report digest.
+    /// Raw digest of B's complete portable finished-package measurement export.
     pub build_b_report_sha256: Sha256Digest,
     /// Byte-comparison report digest.
     pub comparison_report_sha256: Sha256Digest,
-    /// Complete compatibility/relocation report digest.
+    /// Raw portable compatibility manifest digest, covering the exact receipt,
+    /// all phase reports/logs and standalone ELFs, not a receipt self-digest.
     pub compatibility_report_sha256: Sha256Digest,
 }
 
@@ -271,6 +275,7 @@ impl QualificationEvidenceV2 {
             || self.created_at == 0
             || self.expires_at <= self.created_at
             || self.source_run.run_id == 0
+            || self.source_run.run_attempt == 0
             || !safe_segment(&self.source_run.source_tag)
             || !safe_segment(&self.release.release_id)
             || !safe_workflow_path(&self.source_run.workflow)
