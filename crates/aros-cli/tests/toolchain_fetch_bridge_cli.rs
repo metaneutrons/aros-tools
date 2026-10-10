@@ -165,6 +165,104 @@ fn corrupt_locked_payload_fails_before_source_output_or_ledger_record() {
 }
 
 #[test]
+fn bridge_accepts_empty_checksum_placeholders_and_the_exact_locked_checksum() {
+    let payload = tar_xz("hello.txt", b"locked payload\n");
+    let locked_checksum = format!("gcc.tar.xz=sha256:{}", sha256_bytes(&payload));
+    let checksum_arguments = [
+        vec!["-cs".into(), String::new()],
+        vec!["-cs".into(), " \t\r\n".into()],
+        vec!["--checksums".into(), String::new()],
+        vec!["--checksums".into(), " \t".into()],
+        vec!["--checksums=".into()],
+        vec!["--checksums".into(), locked_checksum],
+    ];
+
+    for checksum_arguments in checksum_arguments {
+        let fixture = Fixture::new(&payload);
+        let mut args = fixture.base_arguments();
+        args.extend(checksum_arguments);
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = fixture.command(&args).output().unwrap();
+        assert_success(&output);
+        assert_eq!(
+            fs::read(fixture.output.join("hello.txt")).unwrap(),
+            b"locked payload\n"
+        );
+        assert_eq!(fs::read_to_string(&fixture.ledger).unwrap(), "gcc.tar.xz\n");
+        assert!(!fixture.marker.exists(), "upstream fetch.sh was executed");
+    }
+}
+
+#[test]
+fn corrupt_locked_payload_with_empty_checksum_placeholder_fails_closed() {
+    let payload = tar_xz("hello.txt", b"valid locked payload\n");
+    let fixture = Fixture::new(&payload);
+    fs::write(fixture.cache.join("gcc.tar.xz"), b"corrupt bytes").unwrap();
+    let mut args = fixture.base_arguments();
+    args.extend(["-cs".into(), " \t\n".into()]);
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = fixture.command(&args).output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("selected a missing, unsafe or changed locked source archive"));
+    assert!(!fixture.output.exists());
+    assert_eq!(fs::read_to_string(&fixture.ledger).unwrap(), "");
+    assert!(!fixture.marker.exists());
+}
+
+#[test]
+fn bridge_rejects_duplicate_empty_or_mixed_checksum_options() {
+    let payload = tar_xz("hello.txt", b"locked payload\n");
+    let locked_checksum = format!("gcc.tar.xz=sha256:{}", sha256_bytes(&payload));
+    let invalid = [
+        vec!["-cs".into(), String::new(), "--checksums=".into()],
+        vec!["-cs".into(), " \t".into(), "-cs".into(), locked_checksum],
+        vec!["--checksums=".into(), "--checksums".into(), String::new()],
+    ];
+
+    for invalid in invalid {
+        let fixture = Fixture::new(&payload);
+        let mut args = fixture.base_arguments();
+        args.extend(invalid);
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = fixture.command(&args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("repeated -cs/--checksums options are not allowed"));
+        assert!(!fixture.output.exists());
+        assert_eq!(fs::read_to_string(&fixture.ledger).unwrap(), "");
+        assert!(!fixture.marker.exists());
+    }
+}
+
+#[test]
+fn bridge_rejects_nonempty_checksums_that_are_not_one_exact_lock_entry() {
+    let payload = tar_xz("hello.txt", b"locked payload\n");
+    let digest = sha256_bytes(&payload).to_string();
+    let locked_checksum = format!("gcc.tar.xz=sha256:{digest}");
+    let invalid = [
+        format!("other.tar.xz=sha256:{digest}"),
+        format!("{locked_checksum} other.tar.xz=sha256:{digest}"),
+        "gcc.tar.xz=sha256:not-a-digest".into(),
+        format!("\u{2003}{locked_checksum}\u{2003}"),
+    ];
+
+    for invalid in invalid {
+        let fixture = Fixture::new(&payload);
+        let mut args = fixture.base_arguments();
+        args.extend(["--checksums".into(), invalid]);
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = fixture.command(&args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("source checksum differs from the selected source lock"));
+        assert!(!fixture.output.exists());
+        assert_eq!(fs::read_to_string(&fixture.ledger).unwrap(), "");
+        assert!(!fixture.marker.exists());
+    }
+}
+
+#[test]
 fn bridge_rejects_remote_and_escaping_patch_origins_even_offline() {
     let payload = tar_xz("hello.txt", b"before\n");
     for (index, patch_origin) in ["https://patches.invalid", "../../outside-patches"]

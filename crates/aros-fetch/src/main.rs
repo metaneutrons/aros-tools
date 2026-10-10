@@ -5,20 +5,23 @@ use aros_common::{
     effective_log_level, CommitState, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet,
     DiagnosticStage,
 };
-use aros_fetch::contract::{normalize_legacy_arguments, Cli, FetchRequest};
+use aros_fetch::contract::{
+    archive_payload_options, command_with_payload_options, normalize_legacy_arguments, Cli,
+    FetchRequest,
+};
 use aros_fetch::engine;
 use aros_fetch::observability::{
     render, requested_diagnostic_format, DiagnosticFormat, LogLevel, Logger,
 };
 use aros_fetch::FetchFailure;
-use clap::{error::ErrorKind, parser::ValueSource, CommandFactory, FromArgMatches};
+use clap::{error::ErrorKind, parser::ValueSource, FromArgMatches};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let original: Vec<OsString> = std::env::args_os().collect();
     let requested_format = requested_diagnostic_format(&original);
     let arguments = normalize_legacy_arguments(original);
-    let matches = match Cli::command().try_get_matches_from(arguments) {
+    let matches = match command_with_payload_options().try_get_matches_from(arguments) {
         Ok(matches) => matches,
         Err(error)
             if matches!(
@@ -83,6 +86,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let archive_payload_options = archive_payload_options(&matches);
     let mut logger = match Logger::open(
         effective_log_level(
             cli.log_level,
@@ -101,6 +105,9 @@ async fn main() -> ExitCode {
         Ok(request) => request,
         Err(error) => return render_logged_failure(error, &mut logger, cli.diagnostic_format),
     };
+    if let Err(error) = request.validate_archive_payload_options(archive_payload_options) {
+        return render_logged_failure(error, &mut logger, cli.diagnostic_format);
+    }
     let context = DiagnosticContext {
         mode: Some(if request.offline { "offline" } else { "online" }.into()),
         target: Some(request.destination.display().to_string()),
@@ -115,7 +122,13 @@ async fn main() -> ExitCode {
     ) {
         return render_failure(error.into_diagnostic(), cli.diagnostic_format);
     }
-    let outcome = match engine::run(&request, &mut logger).await {
+    let outcome = match engine::run_with_archive_payload_options(
+        &request,
+        archive_payload_options,
+        &mut logger,
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(error) => return render_logged_failure(error, &mut logger, cli.diagnostic_format),
     };

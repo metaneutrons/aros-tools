@@ -20,14 +20,16 @@ use serde::{Deserialize, Serialize};
 use tempfile::{Builder, TempDir};
 use xz2::read::XzDecoder;
 
-use crate::contract::{FetchRequest, PatchSpec};
+use crate::contract::{ArchivePayloadOptions, FetchRequest, PatchSpec};
 use crate::observability::Logger;
 use crate::FetchResult;
 
 mod budget;
 use budget::{ExtractionBudget, MAX_ARCHIVE_ENTRIES};
+mod archive_representation;
 /// Safe snapshotting of an already-downloaded, verified cache payload.
 pub mod cache;
+use cache::{CachePayloadNormalization, VerifiedCachePayload};
 mod diagnostics;
 pub mod source_receipt;
 mod tar_links;
@@ -99,6 +101,33 @@ pub struct FetchOutcome {
 /// Returns one stable diagnostic when cache locking, transport, integrity
 /// validation, safe extraction, publication, or patch application fails.
 pub async fn run(request: &FetchRequest, logger: &mut Logger) -> FetchResult<FetchOutcome> {
+    run_with_archive_payload_options(request, ArchivePayloadOptions::default(), logger).await
+}
+
+/// Execute a fetch contract with an explicit archive representation policy.
+///
+/// Exact-byte mode remains the compatibility default. Canonical tar-gzip mode
+/// uses a separate final-byte cache namespace and completes direct acquisition
+/// before any ordinary archive candidate lock is taken.
+///
+/// # Errors
+///
+/// Returns one stable diagnostic when options, cache identity, transport,
+/// extraction, or publication violates the selected contract.
+pub async fn run_with_archive_payload_options(
+    request: &FetchRequest,
+    archive_options: ArchivePayloadOptions,
+    logger: &mut Logger,
+) -> FetchResult<FetchOutcome> {
+    request.validate_archive_payload_options(archive_options)?;
+    if archive_options
+        .normalized_size
+        .is_some_and(|size| size > MAX_DOWNLOAD_BYTES)
+    {
+        return Err(contract_failure(format!(
+            "--normalized-size exceeds the {MAX_DOWNLOAD_BYTES}-byte archive safety limit"
+        )));
+    }
     create_directory(&request.location, "archive cache")?;
     create_directory(&request.destination, "archive destination")?;
     create_directory(&request.base, "patch cache")?;
@@ -124,24 +153,40 @@ pub async fn run(request: &FetchRequest, logger: &mut Logger) -> FetchResult<Fet
         .build()
         .map_err(|error| network_failure(format!("cannot initialize HTTPS client: {error}")))?;
 
-    let archive = fetch_candidates(
-        &client,
-        &request.archive_candidates,
-        &request.archive_origins,
-        &request.location,
-        request,
-        logger,
-        false,
-    )
-    .await?;
+    let (archive, canonical_cache_owner) = match archive_options.normalization {
+        CachePayloadNormalization::ExactBytesV1 => (
+            fetch_candidates(
+                &client,
+                &request.archive_candidates,
+                &request.archive_origins,
+                &request.location,
+                request,
+                logger,
+                false,
+            )
+            .await?,
+            None,
+        ),
+        CachePayloadNormalization::CanonicalTarGzipV1 => {
+            archive_representation::fetch_canonical_archive(request, archive_options, logger)
+                .await?
+        }
+    };
 
     let mut patches = Vec::with_capacity(request.patches.len());
     for patch in &request.patches {
         patches.push(fetch_patch(&client, patch, request, logger).await?);
     }
 
-    publish_source_transaction(&archive, &patches, request, logger)
-        .map(|committed| FetchOutcome { committed })
+    publish_source_transaction(
+        &archive,
+        canonical_cache_owner.as_ref(),
+        archive_options.normalization == CachePayloadNormalization::CanonicalTarGzipV1,
+        &patches,
+        request,
+        logger,
+    )
+    .map(|committed| FetchOutcome { committed })
 }
 
 async fn fetch_patch(
@@ -978,24 +1023,36 @@ fn verify(
 
 fn publish_source_transaction(
     archive: &PreparedPayload,
+    canonical_cache_owner: Option<&VerifiedCachePayload>,
+    force_archive_extraction: bool,
     patches: &[PreparedPatch],
     request: &FetchRequest,
     logger: &mut Logger,
 ) -> FetchResult<bool> {
-    publish_source_transaction_inner(archive, patches, request, logger)
-        .map_err(|error| error.with_commit_state_if_absent(CommitState::RolledBack))
+    publish_source_transaction_inner(
+        archive,
+        canonical_cache_owner,
+        force_archive_extraction,
+        patches,
+        request,
+        logger,
+    )
+    .map_err(|error| error.with_commit_state_if_absent(CommitState::RolledBack))
 }
 
 fn publish_source_transaction_inner(
     archive: &PreparedPayload,
+    canonical_cache_owner: Option<&VerifiedCachePayload>,
+    force_archive_extraction: bool,
     patches: &[PreparedPatch],
     request: &FetchRequest,
     logger: &mut Logger,
 ) -> FetchResult<bool> {
     let archive_name = &archive.name;
     let archive_marker = request.base.join(format!(".{archive_name}.unpacked"));
-    let extracts_archive =
-        request.archive_candidates.len() > 1 || archive_name.as_str() != request.archive;
+    let extracts_archive = force_archive_extraction
+        || request.archive_candidates.len() > 1
+        || archive_name.as_str() != request.archive;
     if !extracts_archive && patches.is_empty() {
         return Ok(false);
     }
@@ -1136,6 +1193,9 @@ fn publish_source_transaction_inner(
     #[cfg(debug_assertions)]
     fetch_test_pause("before-payload-revalidation");
     archive.revalidate()?;
+    if let Some(cache_owner) = canonical_cache_owner {
+        cache_owner.revalidate()?;
+    }
     for patch in patches {
         patch.origin.revalidate()?;
         patch.payload.revalidate()?;

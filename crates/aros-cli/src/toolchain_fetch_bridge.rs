@@ -180,15 +180,20 @@ fn revalidate_private_source(
 
 fn reject_duplicate_checksums(arguments: &[OsString]) -> miette::Result<bool> {
     let mut occurrences = 0_usize;
+    let mut has_nonempty_declaration = false;
     let mut index = 0_usize;
     while let Some(argument) = arguments.get(index).and_then(|value| value.to_str()) {
         if argument == "-cs" || argument == "--checksums" {
             occurrences += 1;
+            if let Some(value) = arguments.get(index + 1).and_then(|value| value.to_str()) {
+                has_nonempty_declaration |= !value.bytes().all(|byte| byte.is_ascii_whitespace());
+            }
             index = index.saturating_add(2);
             continue;
         }
-        if argument.starts_with("--checksums=") {
+        if let Some(value) = argument.strip_prefix("--checksums=") {
             occurrences += 1;
+            has_nonempty_declaration |= !value.bytes().all(|byte| byte.is_ascii_whitespace());
         }
         // Skip values of the legacy two-token options so a value resembling
         // `-cs` is not misclassified as another option.
@@ -206,7 +211,7 @@ fn reject_duplicate_checksums(arguments: &[OsString]) -> miette::Result<bool> {
             "native MetaMake fetch bridge: repeated -cs/--checksums options are not allowed"
         ));
     }
-    Ok(occurrences == 1)
+    Ok(has_nonempty_declaration)
 }
 
 fn contained_patch_origins(origins: &str, source_root: &Path) -> miette::Result<String> {
