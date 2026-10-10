@@ -12,11 +12,15 @@ use std::process::{Command, Output};
 
 use aros_common::sha256_bytes;
 use aros_toolchain::canonical;
+use aros_toolchain::package::PackageFormat;
+use aros_toolchain::package_verify::{verify_with_format, PackageVerificationRequest};
 use aros_toolchain::release_index::PackageComparisonReport;
 use aros_toolchain::release_index_v2::{NativeReleaseIndexV2, INDEX_NAME};
 use aros_toolchain::release_inputs::ReleaseInputs;
 use serde_json::{json, Value};
 use support::{Fixture, BASE_URL, RELEASE_ID};
+
+const RECOVERED_RELEASE_ID: &str = "release-evidence-v2-recovered";
 
 fn command(fixture: &Fixture, selection: &Value, name: &str) -> Output {
     let (selection_path, selection_sha256) = fixture.write_selection(name, selection);
@@ -1804,4 +1808,718 @@ fn process_records_complete_family_v2_qualification_and_rejects_invalid_recordin
         "qualification output parent must have no symlink components",
         None,
     );
+}
+
+struct RepackageDestinations {
+    root: tempfile::TempDir,
+    first_extraction_dir: PathBuf,
+    second_extraction_dir: PathBuf,
+    first_output_dir: PathBuf,
+    second_output_dir: PathBuf,
+    comparison_output: PathBuf,
+}
+
+impl RepackageDestinations {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        Self {
+            first_extraction_dir: root_path.join("extract-a"),
+            second_extraction_dir: root_path.join("extract-b"),
+            first_output_dir: root_path.join("package-a"),
+            second_output_dir: root_path.join("package-b"),
+            comparison_output: root_path.join("comparison.json"),
+            root,
+        }
+    }
+
+    fn assert_package_destinations_absent(&self) {
+        for path in [
+            &self.first_extraction_dir,
+            &self.second_extraction_dir,
+            &self.first_output_dir,
+            &self.second_output_dir,
+        ] {
+            assert!(
+                !path.exists(),
+                "failed repackage created {}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn repackage_command(
+    recovery: &Command,
+    asset: &str,
+    destinations: &RepackageDestinations,
+) -> Command {
+    let mut arguments = command_arguments(recovery);
+    let operation_position = argument_position(&arguments, "verify-recovery");
+    arguments[operation_position] = "repackage".into();
+    let directory_position = argument_position(&arguments, "--directory");
+    arguments[directory_position] = "--release-dir".into();
+    let release_id_position = argument_position(&arguments, "--release-id");
+    arguments[release_id_position] = "--source-release-id".into();
+
+    let mut command = command_from_arguments(arguments);
+    command.args([
+        "--release-format",
+        "family-v2",
+        "--asset",
+        asset,
+        "--first-extraction-dir",
+        destinations.first_extraction_dir.to_str().unwrap(),
+        "--second-extraction-dir",
+        destinations.second_extraction_dir.to_str().unwrap(),
+        "--first-output-dir",
+        destinations.first_output_dir.to_str().unwrap(),
+        "--second-output-dir",
+        destinations.second_output_dir.to_str().unwrap(),
+        "--comparison-output",
+        destinations.comparison_output.to_str().unwrap(),
+    ]);
+    command
+}
+
+fn package_verification_request(
+    fixture: &Fixture,
+    asset: &str,
+    package_dir: PathBuf,
+    release_id: &str,
+) -> PackageVerificationRequest {
+    let inputs = ReleaseInputs::load(&fixture.release_directory).unwrap();
+    let index_bytes = fs::read(fixture.release_directory.join(INDEX_NAME)).unwrap();
+    let index = NativeReleaseIndexV2::parse(&index_bytes, &inputs).unwrap();
+    let artifact = index
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.asset() == asset)
+        .unwrap_or_else(|| panic!("asset {asset} is not in the fixture index"));
+    let group = inputs
+        .groups()
+        .iter()
+        .find(|group| group.id() == artifact.group_id())
+        .unwrap();
+    PackageVerificationRequest {
+        package_dir,
+        release_id: release_id.to_owned(),
+        host: artifact.host().to_owned(),
+        recipe: group.recipe().clone(),
+        source_lock: group.source_lock().clone(),
+        profile: group
+            .profiles()
+            .select(artifact.target_profile())
+            .unwrap()
+            .clone(),
+        build_environment: serde_json::from_value(
+            fixture.selection["lanes"][asset]["build_environment"].clone(),
+        )
+        .unwrap(),
+        forbidden_prefixes: Vec::new(),
+    }
+}
+
+fn assert_repackage_failure_is_read_only(
+    fixture: &Fixture,
+    destinations: &RepackageDestinations,
+    name: &str,
+    mut command: Command,
+    expected_diagnostic: &str,
+    expected_code: Option<&str>,
+) {
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let destinations_before = support::snapshot_tree(destinations.root.path());
+    let comparison_before = destinations
+        .comparison_output
+        .exists()
+        .then(|| fs::read(&destinations.comparison_output).unwrap());
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "unexpected repackage success for {name}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed repackage {name} emitted success-shaped stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_diagnostic),
+        "repackage {name} did not reach its intended rejection; expected {expected_diagnostic:?} in stderr:\n{stderr}"
+    );
+    if let Some(code) = expected_code {
+        assert!(
+            stderr.contains(code),
+            "repackage {name} did not include diagnostic code {code}:\n{stderr}"
+        );
+    }
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "failed repackage {name} mutated the original release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "failed repackage {name} mutated original transport evidence"
+    );
+    assert_eq!(
+        support::snapshot_tree(destinations.root.path()),
+        destinations_before,
+        "failed repackage {name} wrote into fresh destinations"
+    );
+    destinations.assert_package_destinations_absent();
+    if let Some(bytes) = comparison_before {
+        assert_eq!(
+            fs::read(&destinations.comparison_output).unwrap(),
+            bytes,
+            "failed repackage {name} changed existing comparison output"
+        );
+    } else {
+        assert_eq!(
+            fs::symlink_metadata(&destinations.comparison_output)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound,
+            "failed repackage {name} created comparison output"
+        );
+    }
+}
+
+fn assert_forbidden_destination_failure_is_read_only(
+    fixture: &Fixture,
+    destinations: &RepackageDestinations,
+    forbidden_root: &std::path::Path,
+    name: &str,
+    mut command: Command,
+) {
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let destinations_before = support::snapshot_tree(destinations.root.path());
+    let forbidden_before = support::snapshot_tree(forbidden_root);
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "unexpected repackage success for forbidden destination {name}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed forbidden-destination repackage {name} emitted stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "repackage destinations must remain outside each other and all selected evidence paths"
+        ),
+        "forbidden destination {name} did not reach its intended rejection:\n{stderr}"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "forbidden destination {name} mutated the original release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "forbidden destination {name} mutated transport evidence"
+    );
+    assert_eq!(
+        support::snapshot_tree(destinations.root.path()),
+        destinations_before,
+        "forbidden destination {name} wrote to the fresh destination root"
+    );
+    assert_eq!(
+        support::snapshot_tree(forbidden_root),
+        forbidden_before,
+        "forbidden destination {name} wrote into its protected root"
+    );
+    destinations.assert_package_destinations_absent();
+    assert!(
+        !destinations.comparison_output.exists(),
+        "forbidden destination {name} created comparison output"
+    );
+}
+
+#[test]
+fn process_repackages_every_selected_v2_host_asset_without_authenticating_execution() {
+    // Every package, compatibility output and provider claim is synthetic.
+    // The operation proves byte consistency and packaging only, not compiler
+    // execution, provider identity, signature validity or publication authority.
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "repackage-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic repackage baseline failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    assert_eq!(baseline["lane_count"], 3);
+    assert_eq!(baseline["build_count"], 6);
+    let evidence = qualification_claims(&fixture, &baseline);
+    let recovery = recovery_request(&evidence, "packaging-recovery", "packaging");
+    let inputs = ReleaseInputs::load(&fixture.release_directory).unwrap();
+    let index_bytes = fs::read(fixture.release_directory.join(INDEX_NAME)).unwrap();
+    let index = NativeReleaseIndexV2::parse(&index_bytes, &inputs).unwrap();
+
+    for host in ["linux-aarch64", "linux-x86_64", "macos-aarch64"] {
+        let asset = asset_for_host(&fixture, host);
+        let destinations = RepackageDestinations::new();
+        let recovery_command = recovery_command(
+            &fixture,
+            &fixture.selection,
+            &format!("repackage-{host}"),
+            &evidence,
+            &recovery,
+            None,
+            None,
+        );
+        let mut process = repackage_command(&recovery_command, &asset, &destinations);
+        if host == "linux-aarch64" {
+            let missing_prefix = destinations.root.path().join("unrelated-missing-prefix");
+            assert!(!missing_prefix.exists());
+            process.arg("--forbidden-prefix").arg(missing_prefix);
+        }
+        let release_before = support::snapshot_tree(&fixture.release_directory);
+        let transport_before = support::snapshot_tree(&fixture.transport_directory);
+        let result = process.output().unwrap();
+        assert!(
+            result.status.success(),
+            "family-v2 repackage failed for {host}:\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.stderr.is_empty(),
+            "successful repackage for {host} emitted diagnostics: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let result: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(result["operation"], "repackage");
+        assert_eq!(result["release_format"], "family-v2");
+        assert_eq!(result["assurance"], "byte-consistency-only");
+        assert_eq!(result["lane_count"], 3);
+        assert_eq!(result["build_count"], 6);
+        assert_eq!(result["source_release_id"], RELEASE_ID);
+        assert_eq!(result["release_id"], RECOVERED_RELEASE_ID);
+        assert_eq!(result["asset"], asset);
+        assert_eq!(
+            result["first_package_dir"],
+            destinations.first_output_dir.to_str().unwrap()
+        );
+        assert_eq!(
+            result["second_package_dir"],
+            destinations.second_output_dir.to_str().unwrap()
+        );
+        assert_eq!(
+            result["comparison_receipt"],
+            destinations.comparison_output.to_str().unwrap()
+        );
+        for authority_claim in [
+            "execution_authenticated",
+            "signature_verified",
+            "job_origin_verified",
+            "publication_authorized",
+            "recovery_authorized",
+        ] {
+            assert!(
+                result.get(authority_claim).is_none(),
+                "byte-only repackage unexpectedly claims {authority_claim}"
+            );
+        }
+
+        let original_package_dir = fixture.lanes[&asset].builds[0].package_dir.clone();
+        let original = verify_with_format(
+            &package_verification_request(&fixture, &asset, original_package_dir, RELEASE_ID),
+            PackageFormat::CompilerFamilyV2,
+        )
+        .unwrap();
+        let first = verify_with_format(
+            &package_verification_request(
+                &fixture,
+                &asset,
+                destinations.first_output_dir.clone(),
+                RECOVERED_RELEASE_ID,
+            ),
+            PackageFormat::CompilerFamilyV2,
+        )
+        .unwrap();
+        let second = verify_with_format(
+            &package_verification_request(
+                &fixture,
+                &asset,
+                destinations.second_output_dir.clone(),
+                RECOVERED_RELEASE_ID,
+            ),
+            PackageFormat::CompilerFamilyV2,
+        )
+        .unwrap();
+        let mut expected_manifest = original.manifest.clone();
+        expected_manifest.release_id = RECOVERED_RELEASE_ID.to_owned();
+        assert_eq!(first.manifest, expected_manifest);
+        assert_eq!(second.manifest, expected_manifest);
+        assert_eq!(first.manifest.tree_sha256, original.manifest.tree_sha256);
+        assert_eq!(second.manifest.tree_sha256, original.manifest.tree_sha256);
+        assert_eq!(first.archive_sha256, second.archive_sha256);
+
+        let first_members = support::snapshot_tree(&destinations.first_output_dir);
+        let second_members = support::snapshot_tree(&destinations.second_output_dir);
+        assert_eq!(
+            first_members.len(),
+            4,
+            "family-v2 package must have four members"
+        );
+        assert_eq!(first_members, second_members, "A/B package bytes differ");
+        let comparison_bytes = fs::read(&destinations.comparison_output).unwrap();
+        assert_eq!(
+            sha256_bytes(&comparison_bytes).as_str(),
+            result["comparison_receipt_sha256"].as_str().unwrap()
+        );
+        let comparison = PackageComparisonReport::parse(&comparison_bytes).unwrap();
+        assert!(comparison.byte_identical);
+        assert_eq!(comparison.members.len(), 4);
+        assert_eq!(
+            comparison.package_set_sha256.as_str(),
+            result["package_set_sha256"].as_str().unwrap()
+        );
+        let expected_comparison_members = first_members
+            .iter()
+            .map(
+                |(path, bytes)| aros_toolchain::release_index::PackageSetComparisonMember {
+                    name: path.to_str().unwrap().to_owned(),
+                    sha256: sha256_bytes(bytes),
+                    size: bytes.len() as u64,
+                },
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(comparison.members, expected_comparison_members);
+        assert_eq!(
+            result["source_archive_sha256"],
+            original.archive_sha256.as_str()
+        );
+        assert_eq!(
+            result["source_archive_size"].as_u64(),
+            Some(original.archive_size)
+        );
+        assert_eq!(
+            support::snapshot_tree(&fixture.release_directory),
+            release_before,
+            "repackage mutated the original release for {host}"
+        );
+        assert_eq!(
+            support::snapshot_tree(&fixture.transport_directory),
+            transport_before,
+            "repackage mutated original transport evidence for {host}"
+        );
+    }
+
+    assert_eq!(index.artifacts().len(), 3, "fixture host matrix changed");
+}
+
+#[test]
+fn process_repackage_protects_every_forbidden_destination_and_resolves_prefix_aliases() {
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "repackage-forbidden-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic repackage baseline failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let evidence = qualification_claims(&fixture, &baseline);
+    let recovery = recovery_request(&evidence, "packaging-recovery", "packaging");
+    let asset = asset_for_host(&fixture, "linux-x86_64");
+
+    for (case, destination) in [
+        ("first-extraction", 0),
+        ("second-extraction", 1),
+        ("first-output", 2),
+        ("second-output", 3),
+        ("comparison", 4),
+    ] {
+        let mut destinations = RepackageDestinations::new();
+        let forbidden_root = tempfile::tempdir().unwrap();
+        let forbidden_root_path = forbidden_root.path().canonicalize().unwrap();
+        fs::write(
+            forbidden_root_path.join("preserve-sentinel"),
+            b"forbidden output root must remain unchanged\n",
+        )
+        .unwrap();
+        let forbidden_destination = forbidden_root_path.join(format!("blocked-{case}"));
+        match destination {
+            0 => destinations.first_extraction_dir = forbidden_destination,
+            1 => destinations.second_extraction_dir = forbidden_destination,
+            2 => destinations.first_output_dir = forbidden_destination,
+            3 => destinations.second_output_dir = forbidden_destination,
+            4 => destinations.comparison_output = forbidden_destination,
+            _ => unreachable!("all repackage destinations are enumerated above"),
+        }
+
+        let prepared = recovery_command(
+            &fixture,
+            &fixture.selection,
+            &format!("repackage-forbidden-{case}"),
+            &evidence,
+            &recovery,
+            None,
+            None,
+        );
+        let mut process = repackage_command(&prepared, &asset, &destinations);
+        process.arg("--forbidden-prefix").arg(&forbidden_root_path);
+        assert_forbidden_destination_failure_is_read_only(
+            &fixture,
+            &destinations,
+            &forbidden_root_path,
+            case,
+            process,
+        );
+    }
+
+    let mut destinations = RepackageDestinations::new();
+    let forbidden_root = tempfile::tempdir().unwrap();
+    let forbidden_root_path = forbidden_root.path().canonicalize().unwrap();
+    fs::write(
+        forbidden_root_path.join("preserve-sentinel"),
+        b"forbidden output root must remain unchanged\n",
+    )
+    .unwrap();
+    let alias_parent = tempfile::tempdir().unwrap();
+    let forbidden_alias = alias_parent.path().join("forbidden-root-alias");
+    symlink(&forbidden_root_path, &forbidden_alias).unwrap();
+    destinations.first_output_dir = forbidden_root_path.join("blocked-through-alias");
+    let prepared = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-forbidden-symlink-alias",
+        &evidence,
+        &recovery,
+        None,
+        None,
+    );
+    let mut process = repackage_command(&prepared, &asset, &destinations);
+    process.arg("--forbidden-prefix").arg(&forbidden_alias);
+    assert_forbidden_destination_failure_is_read_only(
+        &fixture,
+        &destinations,
+        &forbidden_root_path,
+        "symlink-alias",
+        process,
+    );
+}
+
+#[test]
+fn process_repackage_rejects_replay_unselected_asset_bad_digest_and_unsafe_comparison_destinations()
+{
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "repackage-negative-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic repackage baseline failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let evidence = qualification_claims(&fixture, &baseline);
+    let asset = asset_for_host(&fixture, "linux-x86_64");
+    let packaging = recovery_request(&evidence, "packaging-recovery", "packaging");
+
+    let replay = recovery_request(&evidence, "compatibility-replay", "compatibility-harness");
+    let replay_destinations = RepackageDestinations::new();
+    let replay_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-replay",
+        &evidence,
+        &replay,
+        None,
+        None,
+    );
+    let replay_command = repackage_command(&replay_recovery, &asset, &replay_destinations);
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &replay_destinations,
+        "compatibility-replay",
+        replay_command,
+        "compatibility replay cannot execute packaging recovery",
+        Some("AX0901"),
+    );
+
+    let unknown_destinations = RepackageDestinations::new();
+    let unknown_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-unknown-asset",
+        &evidence,
+        &packaging,
+        None,
+        None,
+    );
+    let unknown_command = repackage_command(
+        &unknown_recovery,
+        "not-an-indexed-asset.tar.xz",
+        &unknown_destinations,
+    );
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &unknown_destinations,
+        "unknown-asset",
+        unknown_command,
+        "recovery asset is not a selected indexed lane",
+        Some("AX0901"),
+    );
+
+    let wrong_digest = "0000000000000000000000000000000000000000000000000000000000000000";
+    let digest_destinations = RepackageDestinations::new();
+    let digest_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-wrong-request-digest",
+        &evidence,
+        &packaging,
+        None,
+        Some(wrong_digest),
+    );
+    let digest_command = repackage_command(&digest_recovery, &asset, &digest_destinations);
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &digest_destinations,
+        "wrong-request-digest",
+        digest_command,
+        "selected evidence metadata differs from its independently retained raw digest or identity",
+        None,
+    );
+
+    let existing_destinations = RepackageDestinations::new();
+    let sentinel = b"existing comparison must remain unchanged\n";
+    fs::write(&existing_destinations.comparison_output, sentinel).unwrap();
+    let existing_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-existing-comparison",
+        &evidence,
+        &packaging,
+        None,
+        None,
+    );
+    let existing_command = repackage_command(&existing_recovery, &asset, &existing_destinations);
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &existing_destinations,
+        "existing-comparison",
+        existing_command,
+        "repackage destination already exists or is unavailable",
+        None,
+    );
+    assert_eq!(
+        fs::read(&existing_destinations.comparison_output).unwrap(),
+        sentinel
+    );
+
+    let mut overlap_destinations = RepackageDestinations::new();
+    overlap_destinations.comparison_output = fixture
+        .release_directory
+        .join("overlapping-repackage-comparison.json");
+    assert!(!overlap_destinations.comparison_output.exists());
+    let overlap_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-overlapping-comparison",
+        &evidence,
+        &packaging,
+        None,
+        None,
+    );
+    let overlap_command = repackage_command(&overlap_recovery, &asset, &overlap_destinations);
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &overlap_destinations,
+        "overlapping-comparison",
+        overlap_command,
+        "repackage destinations must remain outside each other and all selected evidence paths",
+        None,
+    );
+    assert!(!overlap_destinations.comparison_output.exists());
+}
+
+#[test]
+fn process_repackage_revalidates_stale_measurement_and_compatibility_bytes_from_other_lanes() {
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "repackage-stale-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic repackage baseline failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let evidence = qualification_claims(&fixture, &baseline);
+    let recovery = recovery_request(&evidence, "packaging-recovery", "packaging");
+    let selected_asset = asset_for_host(&fixture, "linux-x86_64");
+    let changed_asset = asset_for_host(&fixture, "linux-aarch64");
+    assert_ne!(selected_asset, changed_asset);
+
+    let measurement = fixture.lanes[&changed_asset].builds[1].measurement.clone();
+    let original_measurement = fs::read(&measurement).unwrap();
+    let mut changed_measurement = original_measurement.clone();
+    changed_measurement.push(b'X');
+    fs::write(&measurement, changed_measurement).unwrap();
+    let measurement_destinations = RepackageDestinations::new();
+    let measurement_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-stale-other-lane-b-measurement",
+        &evidence,
+        &recovery,
+        None,
+        None,
+    );
+    let measurement_command = repackage_command(
+        &measurement_recovery,
+        &selected_asset,
+        &measurement_destinations,
+    );
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &measurement_destinations,
+        "stale-other-lane-b-measurement",
+        measurement_command,
+        "portable package measurement differs from selected raw bytes",
+        Some("AX0801"),
+    );
+    fs::write(&measurement, original_measurement).unwrap();
+
+    let compatibility_directory = PathBuf::from(
+        fixture.selection["lanes"][&changed_asset]["compatibility"]["directory"]
+            .as_str()
+            .unwrap(),
+    );
+    let compatibility_log = compatibility_directory.join("cmake-consumer.stdout.log");
+    let original_compatibility_log = fs::read(&compatibility_log).unwrap();
+    let mut changed_compatibility_log = original_compatibility_log.clone();
+    changed_compatibility_log.push(b'X');
+    fs::write(&compatibility_log, changed_compatibility_log).unwrap();
+    let compatibility_destinations = RepackageDestinations::new();
+    let compatibility_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-stale-other-lane-compatibility",
+        &evidence,
+        &recovery,
+        None,
+        None,
+    );
+    let compatibility_command = repackage_command(
+        &compatibility_recovery,
+        &selected_asset,
+        &compatibility_destinations,
+    );
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &compatibility_destinations,
+        "stale-other-lane-compatibility",
+        compatibility_command,
+        "portable compatibility member differs from its selected manifest",
+        Some("AX0703"),
+    );
+    fs::write(&compatibility_log, original_compatibility_log).unwrap();
 }

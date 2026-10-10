@@ -182,15 +182,30 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer release-plan` | directory | --directory | — | required | 1 |  |  | — |  |
 | `aros toolchain producer release-plan` | inputs_sha256 | --inputs-sha256 | — | required | 1 |  |  | — |  |
 | `aros toolchain producer release-plan` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros toolchain producer repackage` | release_format | --release-format | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
 | `aros toolchain producer repackage` | recovery_request | --recovery-request | — | required | 1 |  |  | — |  |
-| `aros toolchain producer repackage` | source_package_dir | --source-package-dir | — | required | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | source_package_dir | --source-package-dir | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer repackage` | source_release_id | --source-release-id | — | required | 1 |  |  | — |  |
-| `aros toolchain producer repackage` | recipe | --recipe | — | required | 1 |  |  | — |  |
-| `aros toolchain producer repackage` | source_lock | --source-lock | — | required | 1 |  |  | — |  |
-| `aros toolchain producer repackage` | profiles | --profiles | — | required | 1 |  |  | — |  |
-| `aros toolchain producer repackage` | preset | --preset | — | required | 1 |  |  | — |  |
-| `aros toolchain producer repackage` | host | --host | — | required | 1 |  |  | — |  |
-| `aros toolchain producer repackage` | build_environment | --build-environment | — | required | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | recipe | --recipe | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | source_lock | --source-lock | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | profiles | --profiles | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | preset | --preset | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | host | --host | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | build_environment | --build-environment | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | release_dir | --release-dir | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | base_url | --base-url | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | inputs_sha256 | --inputs-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | index_sha256 | --index-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | selection | --selection | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | selection_sha256 | --selection-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | subject_manifest | --subject-manifest | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | subject_manifest_sha256 | --subject-manifest-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | qualification_evidence | --qualification-evidence | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | qualification_sha256 | --qualification-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | policy | --policy | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | policy_sha256 | --policy-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | recovery_request_sha256 | --recovery-request-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer repackage` | asset | --asset | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer repackage` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer repackage` | first_extraction_dir | --first-extraction-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer repackage` | second_extraction_dir | --second-extraction-dir | — | required | 1 |  |  | — |  |
@@ -276,3 +291,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 ### `aros toolchain producer materialize-engine-free-source`
 
 Source identity: select --recipe OR both --source-commit and --source-tree. Neither half of the explicit pair is valid alone. All identities bind a clean committed checkout; this command does not change a compiler package or its recipe.
+
+### `aros toolchain producer repackage`
+
+Format selection: omitted or --release-format legacy-v1 requires --source-package-dir, --recipe, --source-lock, --profiles, --preset, --host and --build-environment. Explicit family-v2 requires the complete release/evidence selection and all independently retained digests, plus one exact --asset; it derives package context from that selected input group. Do not mix V1 and V2 selectors. All five output/extraction/comparison destinations must be absent, nonoverlapping and outside selected evidence, with existing nonsymlink parents. This command executes two local packaging operations, not compiler A/B builds, signing or publication.

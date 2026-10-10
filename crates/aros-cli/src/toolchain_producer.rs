@@ -45,6 +45,7 @@ mod release_evidence_selection;
 #[cfg(unix)]
 mod release_index_family;
 mod release_plan;
+mod repackage_family;
 
 /// Closed native producer stages exposed by `aros toolchain producer`.
 #[derive(Args)]
@@ -107,7 +108,7 @@ enum ProducerCommand {
     /// Compare two complete local package sets byte-for-byte
     Compare(CompareArgs),
     /// Repackage one evidence-bound retained package into two fresh package sets
-    Repackage(RepackageArgs),
+    Repackage(Box<RepackageArgs>),
     /// Re-evaluate recovery eligibility against one isolated complete release inventory
     ValidateRecovery(ValidateRecoveryArgs),
     /// Record complete native qualification evidence from an isolated final release
@@ -337,34 +338,78 @@ struct CompareArgs {
 
 /// Inputs for one evidence-bound, two-output local packaging recovery.
 #[derive(Args)]
+#[command(
+    group(ArgGroup::new("legacy_repackage").multiple(true).conflicts_with("family_repackage")),
+    after_help = "Format selection: omitted or --release-format legacy-v1 requires --source-package-dir, --recipe, --source-lock, --profiles, --preset, --host and --build-environment. Explicit family-v2 requires the complete release/evidence selection and all independently retained digests, plus one exact --asset; it derives package context from that selected input group. Do not mix V1 and V2 selectors. All five output/extraction/comparison destinations must be absent, nonoverlapping and outside selected evidence, with existing nonsymlink parents. This command executes two local packaging operations, not compiler A/B builds, signing or publication."
+)]
 struct RepackageArgs {
-    /// Closed recovery-request-v1 document with isolated inventory and policy claims
+    /// Explicit recovery format; omitted retains historical legacy-v1 execution
+    #[arg(long, value_enum)]
+    release_format: Option<ReleaseFormatArg>,
+    /// Closed recovery request in the explicitly selected format
     #[arg(long)]
     recovery_request: PathBuf,
-    /// Complete four-member retained source package set
-    #[arg(long)]
-    source_package_dir: PathBuf,
+    /// V1 only: complete four-member retained source package set
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    source_package_dir: Option<PathBuf>,
     /// Immutable release identity embedded in the retained source package
     #[arg(long)]
     source_release_id: String,
-    /// Self-digesting recipe-v2 JSON document
-    #[arg(long)]
-    recipe: PathBuf,
-    /// Source-lock-v2 document bound by the selected recipe
-    #[arg(long)]
-    source_lock: PathBuf,
-    /// Profiles-v1 document bound by the selected recipe
-    #[arg(long)]
-    profiles: PathBuf,
-    /// Exact profile from the recipe-bound profiles matrix
-    #[arg(long)]
-    preset: String,
-    /// Closed v1 host selector for the retained source package
-    #[arg(long)]
-    host: String,
-    /// JSON object recording the retained package's measured build environment
-    #[arg(long)]
-    build_environment: PathBuf,
+    /// V1 only: self-digesting recipe-v2 JSON document
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    recipe: Option<PathBuf>,
+    /// V1 only: source-lock-v2 document bound by the selected recipe
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    source_lock: Option<PathBuf>,
+    /// V1 only: profiles-v1 document bound by the selected recipe
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    profiles: Option<PathBuf>,
+    /// V1 only: exact profile from the recipe-bound profiles matrix
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    preset: Option<String>,
+    /// V1 only: closed host selector for the retained source package
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    host: Option<String>,
+    /// V1 only: JSON object recording the retained package's measured build environment
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    build_environment: Option<PathBuf>,
+    #[command(flatten)]
+    family: repackage_family::FamilyRepackageArgs,
     /// Absolute build root forbidden from package regular-file contents; repeatable
     #[arg(long = "forbidden-prefix")]
     forbidden_prefixes: Vec<PathBuf>,
@@ -642,7 +687,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::Package(args) => package(&args),
         ProducerCommand::VerifyPackage(args) => verify_package(args),
         ProducerCommand::Compare(args) => compare(&args),
-        ProducerCommand::Repackage(args) => repackage(args),
+        ProducerCommand::Repackage(args) => repackage(*args),
         ProducerCommand::ValidateRecovery(args) => validate_recovery(&args),
         ProducerCommand::RecordQualification(args) => record_qualification(&args),
         ProducerCommand::PrepareRecovery(args) => prepare_recovery(&args),
@@ -928,25 +973,34 @@ fn compare(args: &CompareArgs) -> miette::Result<()> {
 }
 
 fn repackage(args: RepackageArgs) -> miette::Result<()> {
+    if matches!(args.release_format, Some(ReleaseFormatArg::FamilyV2)) {
+        return repackage_family::run(&args);
+    }
     let recovery = RecoveryRequest::parse(&read_regular_input(
         &args.recovery_request,
         "recovery request",
     )?)
     .map_err(|error| native_error(&error))?;
     let context = package_context(PackageContextArgs {
-        recipe: args.recipe,
-        source_lock: args.source_lock,
-        profiles: args.profiles,
-        preset: args.preset,
+        recipe: legacy_repackage_required(args.recipe, "--recipe")?,
+        source_lock: legacy_repackage_required(args.source_lock, "--source-lock")?,
+        profiles: legacy_repackage_required(args.profiles, "--profiles")?,
+        preset: legacy_repackage_required(args.preset, "--preset")?,
         release_id: args.source_release_id,
-        host: args.host,
-        build_environment: args.build_environment,
+        host: legacy_repackage_required(args.host, "--host")?,
+        build_environment: legacy_repackage_required(
+            args.build_environment,
+            "--build-environment",
+        )?,
         forbidden_prefixes: args.forbidden_prefixes,
     })?;
     let output = repackage::repackage_verified_package(&VerifiedPackageRepackageRequest {
         recovery,
         source: package_verify::PackageVerificationRequest {
-            package_dir: args.source_package_dir,
+            package_dir: legacy_repackage_required(
+                args.source_package_dir,
+                "--source-package-dir",
+            )?,
             release_id: context.release_id,
             host: context.host,
             recipe: context.recipe,
@@ -1000,6 +1054,10 @@ fn repackage(args: RepackageArgs) -> miette::Result<()> {
         }))?,
     }
     Ok(())
+}
+
+fn legacy_repackage_required<T>(value: Option<T>, name: &str) -> miette::Result<T> {
+    value.ok_or_else(|| miette::miette!("legacy-v1 repackage requires {name}"))
 }
 
 fn validate_recovery(args: &ValidateRecoveryArgs) -> miette::Result<()> {
@@ -1739,3 +1797,7 @@ mod toolchain_producer_active_matrix_tests;
 #[cfg(test)]
 #[path = "toolchain_producer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "toolchain_producer/repackage_parser_tests.rs"]
+mod repackage_parser_tests;

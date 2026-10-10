@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt as _;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use aros_common::publication::{
     publish_atomic_file, validate_existing_directory_prefix_nofollow, AtomicFilePolicy,
@@ -36,12 +36,15 @@ use aros_toolchain::release_index_v2_readback::{
     readback_indexed_packages, IndexedPackageReadbackRequestV2,
 };
 use aros_toolchain::release_inputs::{ReleaseInputs, ACTIVE_HOSTS};
+use aros_toolchain::repackage_v2::{
+    repackage_verified_package_v2, VerifiedPackageRepackageRequestV2,
+};
 
 use super::qualification_bytes::QualificationArgs;
 use super::recovery_family::RecoveryArgs;
 use super::release_evidence::EvidenceArgs;
 use super::release_evidence_selection::{self, Selection};
-use super::{native_error, print_json, RecordQualificationArgs, ResultFormat};
+use super::{native_error, print_json, RecordQualificationArgs, RepackageArgs, ResultFormat};
 
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const INPUTS_NAME: &str = "toolchain-release-inputs-v2.json";
@@ -58,12 +61,29 @@ pub(super) fn run_recovery(args: &RecoveryArgs) -> miette::Result<()> {
     run_selected(&args.qualification.evidence, Operation::Recovery(args))
 }
 
+pub(super) fn run_repackage(recovery: &RecoveryArgs, args: &RepackageArgs) -> miette::Result<()> {
+    run_selected(
+        &recovery.qualification.evidence,
+        Operation::Repackage(recovery, args),
+    )
+}
+
 #[derive(Clone, Copy)]
 enum Operation<'a> {
     Inspect,
     Verify(&'a QualificationArgs),
     Record(&'a RecordQualificationArgs),
     Recovery(&'a RecoveryArgs),
+    Repackage(&'a RecoveryArgs, &'a RepackageArgs),
+}
+
+impl<'a> Operation<'a> {
+    const fn recovery(self) -> Option<&'a RecoveryArgs> {
+        match self {
+            Self::Recovery(selected) | Self::Repackage(selected, _) => Some(selected),
+            _ => None,
+        }
+    }
 }
 
 /// V2 identity is selected by the independently retained exact index digest.
@@ -101,7 +121,9 @@ fn required<'a, T>(value: Option<&'a T>, name: &str) -> miette::Result<&'a T> {
 fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result<()> {
     let qualification = match operation {
         Operation::Verify(selected) => Some(selected),
-        Operation::Recovery(selected) => Some(&selected.qualification),
+        Operation::Recovery(selected) | Operation::Repackage(selected, _) => {
+            Some(&selected.qualification)
+        }
         _ => None,
     };
     let selected_qualification = qualification
@@ -117,7 +139,7 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             Ok::<_, miette::Report>((bytes, policy))
         })
         .transpose()?;
-    let selected_recovery = if let Operation::Recovery(selected) = operation {
+    let selected_recovery = if let Some(selected) = operation.recovery() {
         let bytes = read_selected(
             &selected.recovery_request,
             &selected.recovery_request_sha256,
@@ -139,8 +161,11 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
     let index =
         NativeReleaseIndexV2::parse(&index_bytes, &inputs).map_err(|error| native_error(&error))?;
     validate_selection(args, &index, &selection, qualification)?;
-    if let Operation::Recovery(selected) = operation {
+    if let Some(selected) = operation.recovery() {
         require_independent_document(args, &selection, &selected.recovery_request)?;
+    }
+    if let Operation::Repackage(recovery, execution) = operation {
+        repackage_preflight(execution, args, &selection, recovery)?;
     }
     if let Operation::Record(selected) = operation {
         recording_preflight(selected, args, &selection)?;
@@ -244,6 +269,7 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
     };
     let mut recorded = None;
     let mut recovery_decision = None;
+    let mut recovered_packages = None;
     let readback = if let Operation::Record(selected) = operation {
         let producer_commit =
             super::parse_git_object(&selected.source_tag_commit, "source tag commit")?;
@@ -285,13 +311,33 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             policy,
         };
         if let Some(recovery) = &selected_recovery {
-            let (decision, joined) = readback_recovery_bytes_v2(&RecoveryByteReadbackRequestV2 {
+            let request = RecoveryByteReadbackRequestV2 {
                 recovery,
                 qualification: &request,
-            })
-            .map_err(|error| native_error(&error))?
-            .into_parts();
+            };
+            let (decision, joined) = readback_recovery_bytes_v2(&request)
+                .map_err(|error| native_error(&error))?
+                .into_parts();
             recovery_decision = Some(decision);
+            if let Operation::Repackage(_, execution) = operation {
+                let asset =
+                    super::repackage_family::selected(execution.family.asset.as_ref(), "--asset")?;
+                recovered_packages = Some(
+                    repackage_verified_package_v2(&VerifiedPackageRepackageRequestV2 {
+                        recovery: &request,
+                        asset: &asset,
+                        extraction_roots: [
+                            execution.first_extraction_dir.clone(),
+                            execution.second_extraction_dir.clone(),
+                        ],
+                        output_dirs: [
+                            execution.first_output_dir.clone(),
+                            execution.second_output_dir.clone(),
+                        ],
+                    })
+                    .map_err(|error| native_error(&error))?,
+                );
+            }
             joined.into_complete()
         } else {
             readback_qualification_bytes_v2(&request)
@@ -318,7 +364,7 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         )?;
         read_selected(&selected.policy, &selected.policy_sha256)?;
     }
-    if let Operation::Recovery(selected) = operation {
+    if let Some(selected) = operation.recovery() {
         read_selected(
             &selected.recovery_request,
             &selected.recovery_request_sha256,
@@ -343,6 +389,7 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         Operation::Verify(_) => "verify-qualification",
         Operation::Record(_) => "record-qualification",
         Operation::Recovery(_) => "verify-recovery",
+        Operation::Repackage(_, _) => "repackage",
     };
     let mut result = serde_json::json!({
         "schema": "aros-toolchain-producer-stage-v2",
@@ -364,12 +411,41 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         result["qualification_sha256"] = serde_json::json!(selected.qualification_sha256);
         result["policy_sha256"] = serde_json::json!(selected.policy_sha256);
     }
-    if let Operation::Recovery(selected) = operation {
+    if let Some(selected) = operation.recovery() {
         result["recovery_request_sha256"] = serde_json::json!(selected.recovery_request_sha256);
         result["decision"] = serde_json::to_value(recovery_decision.as_ref().ok_or_else(|| {
             miette::miette!("family-v2 recovery did not reacquire complete evidence")
         })?)
         .map_err(|_| miette::miette!("cannot serialize recovery decision"))?;
+    }
+    if let Operation::Repackage(_, execution) = operation {
+        let output = recovered_packages.as_ref().ok_or_else(|| {
+            miette::miette!("family-v2 recovery did not execute complete packaging")
+        })?;
+        let receipt = aros_toolchain::release_index::write_package_comparison_report(
+            &execution.comparison_output,
+            &output.comparison,
+        )
+        .map_err(|error| native_error(&error))?;
+        result["source_release_id"] = serde_json::json!(args.release_id);
+        result["release_id"] = serde_json::json!(
+            output
+                .packages
+                .repackaged
+                .first_verified
+                .manifest
+                .release_id
+        );
+        result["asset"] = serde_json::json!(execution.family.asset);
+        result["source_archive_sha256"] = serde_json::json!(output.packages.source.archive_sha256);
+        result["source_archive_size"] = serde_json::json!(output.packages.source.archive_size);
+        result["first_package_dir"] =
+            serde_json::json!(output.packages.repackaged.first.output_dir);
+        result["second_package_dir"] =
+            serde_json::json!(output.packages.repackaged.second.output_dir);
+        result["comparison_receipt"] = serde_json::json!(receipt.path);
+        result["comparison_receipt_sha256"] = serde_json::json!(receipt.sha256);
+        result["package_set_sha256"] = serde_json::json!(output.comparison.package_set_sha256);
     }
     if let Operation::Record(selected) = operation {
         let evidence = recorded.as_ref().ok_or_else(|| {
@@ -404,6 +480,9 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
                     selected.output.display()
                 );
             }
+            if let Operation::Repackage(_, execution) = operation {
+                aros_common::outputln!("Local family-v2 repackage: {}\nFirst package: {}\nSecond package: {}\nComparison receipt: {}\nThese are packaging operations, not new compiler A/B builds.", result["release_id"].as_str().unwrap_or_default(), execution.first_output_dir.display(), execution.second_output_dir.display(), execution.comparison_output.display());
+            }
             Ok(())
         }
     }
@@ -415,41 +494,83 @@ fn recording_preflight(
     selection: &Selection,
 ) -> miette::Result<()> {
     let output = &selected.output;
+    fresh_output_preflight(output, "qualification output")?;
+    let protected = selected_evidence_paths(args, selection);
+    for path in protected {
+        if super::compatibility_export::filesystem_overlap(output, path)? {
+            return Err(miette::miette!("qualification output must remain outside all selected release, package, compatibility and input paths"));
+        }
+    }
+    Ok(())
+}
+
+fn repackage_preflight(
+    execution: &RepackageArgs,
+    args: &EvidenceArgs,
+    selection: &Selection,
+    recovery: &RecoveryArgs,
+) -> miette::Result<()> {
+    let destinations = [
+        &execution.first_extraction_dir,
+        &execution.second_extraction_dir,
+        &execution.first_output_dir,
+        &execution.second_output_dir,
+        &execution.comparison_output,
+    ];
+    let mut protected = selected_evidence_paths(args, selection);
+    protected.extend([
+        recovery.qualification.qualification_evidence.as_path(),
+        recovery.qualification.policy.as_path(),
+        recovery.recovery_request.as_path(),
+    ]);
+    for (index, output) in destinations.iter().enumerate() {
+        fresh_output_preflight(output, "repackage destination")?;
+        for path in destinations[..index]
+            .iter()
+            .map(|path| path.as_path())
+            .chain(protected.iter().copied())
+        {
+            if super::compatibility_export::filesystem_overlap(output, path)? {
+                return Err(miette::miette!("repackage destinations must remain outside each other and all selected evidence paths"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fresh_output_preflight(output: &Path, label: &str) -> miette::Result<()> {
     if !output.is_absolute()
         || output
             .components()
             .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
     {
         return Err(miette::miette!(
-            "qualification output must have an absolute normalized path"
+            "{label} must have an absolute normalized path"
         ));
     }
     let parent = output
         .parent()
-        .ok_or_else(|| miette::miette!("qualification output has no parent"))?;
+        .ok_or_else(|| miette::miette!("{label} has no parent"))?;
     let leaf = output
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| miette::miette!("qualification output has no portable leaf"))?;
-    PortableOutputName::new(leaf)
-        .map_err(|_| miette::miette!("qualification output has no portable leaf"))?;
-    validate_existing_directory_prefix_nofollow(parent).map_err(|_| {
-        miette::miette!("qualification output parent must have no symlink components")
-    })?;
+        .ok_or_else(|| miette::miette!("{label} has no portable leaf"))?;
+    PortableOutputName::new(leaf).map_err(|_| miette::miette!("{label} has no portable leaf"))?;
+    validate_existing_directory_prefix_nofollow(parent)
+        .map_err(|_| miette::miette!("{label} parent must have no symlink components"))?;
     if !parent.is_dir() {
-        return Err(miette::miette!(
-            "qualification output parent must already exist"
-        ));
+        return Err(miette::miette!("{label} parent must already exist"));
     }
     match std::fs::symlink_metadata(output) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        _ => {
-            return Err(miette::miette!(
-                "qualification output already exists or is unavailable"
-            ))
-        }
+        _ => return Err(miette::miette!("{label} already exists or is unavailable")),
     }
+    Ok(())
+}
+
+fn selected_evidence_paths<'a>(args: &'a EvidenceArgs, selection: &'a Selection) -> Vec<&'a Path> {
     let protected = std::iter::once(args.directory.as_path())
+        .chain(args.forbidden_prefixes.iter().map(PathBuf::as_path))
         .chain([args.selection.as_path(), args.subject_manifest.as_path()])
         .chain(selection.lanes.values().flat_map(|lane| {
             [
@@ -465,12 +586,7 @@ fn recording_preflight(
                 ]
             }))
         }));
-    for path in protected {
-        if super::compatibility_export::filesystem_overlap(output, path)? {
-            return Err(miette::miette!("qualification output must remain outside all selected release, package, compatibility and input paths"));
-        }
-    }
-    Ok(())
+    protected.collect()
 }
 
 fn build_request(
