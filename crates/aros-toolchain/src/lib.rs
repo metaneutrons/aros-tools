@@ -59,6 +59,8 @@ pub mod recipe;
 pub mod recipe_builder;
 pub mod recovery;
 #[cfg(unix)]
+pub mod recovery_v2;
+#[cfg(unix)]
 pub mod release_attestation_manifest_v2;
 pub mod release_checksums_v2;
 #[cfg(unix)]

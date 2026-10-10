@@ -133,6 +133,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer compatibility` | Execute all six local package-compatibility phases; optional `--evidence-dir` publishes complete family-v2 input/report/ELF evidence locally, never authenticated origin |
 | `aros toolchain producer verify-release-evidence` | Read back every family-v2 A/B package and compatibility lane against independent selections; byte consistency only, not authenticated execution |
 | `aros toolchain producer verify-qualification` | Bind complete family-v2 qualification claims to all measured release evidence; byte consistency only, not signature or execution authentication |
+| `aros toolchain producer verify-recovery` | Reacquire complete family-v2 qualification and check recovery observations; read-only, no authentication or recovery execution |
 
 The local `package`, `verify-package` and `compatibility` commands accept the optional
 `--package-format legacy-v1|family-v2`. When omitted, LLVM keeps its historical
@@ -176,6 +177,16 @@ including the final checksum, subject-list and provenance bytes. A positive
 run attempt is required but not authenticated here. The command is read-only;
 signatures, job/artifact origin and publication authorization remain separate.
 
+`producer verify-recovery` additionally requires `--recovery-request` and
+`--recovery-request-sha256`. The closed V2 request binds the qualification
+digest and exact external run-attempt, tag, signer and fresh-handoff
+observations. It checks all original bytes again and rejects expired evidence
+and non-absent packaging handoff observations. Replay permits only a
+compatibility-harness failure, not an actual compatibility failure; compiler
+and comparison failures are ineligible. The protected workflow must authenticate
+these observations. The command executes no recovery; historical
+`prepare-recovery`, `validate-recovery` and `repackage` remain V1-only.
+
 `producer record-qualification --release-format family-v2` derives claims from
 that complete byte selection. Use `--release-dir` instead of `--directory`,
 add the explicit source-run/tag/signer/time fields and a positive
@@ -200,8 +211,9 @@ The six-phase `compatibility` adapter accepts LLVM and GNU packages. GNU require
 `aros-targets.toml`; its `toolchain_profile`, CPU, platform and compiler family
 must match the package. Source selectors remain separate from compiler profiles.
 LLVM retains its legacy adapter and rejects this option. GNU's v3 compatibility
-receipt is local evidence, not release admission: V2 release-evidence and
-recovery integration remain unavailable.
+receipt is local evidence, not release admission. Complete V2 byte read-back
+is available; authenticated producer and recovery execution integration remain
+unqualified.
 
 
 ### Physical-board workflow

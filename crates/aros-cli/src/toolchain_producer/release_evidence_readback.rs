@@ -28,6 +28,9 @@ use aros_toolchain::qualification_readback_v2::{
 use aros_toolchain::qualification_recording_v2::{
     record_qualification_bytes_v2, QualificationRecordingRequestV2,
 };
+use aros_toolchain::recovery_v2::{
+    readback_recovery_bytes_v2, RecoveryByteReadbackRequestV2, RecoveryRequestV2,
+};
 use aros_toolchain::release_index_v2::{NativeReleaseIndexV2, INDEX_NAME};
 use aros_toolchain::release_index_v2_readback::{
     readback_indexed_packages, IndexedPackageReadbackRequestV2,
@@ -35,6 +38,7 @@ use aros_toolchain::release_index_v2_readback::{
 use aros_toolchain::release_inputs::{ReleaseInputs, ACTIVE_HOSTS};
 
 use super::qualification_bytes::QualificationArgs;
+use super::recovery_family::RecoveryArgs;
 use super::release_evidence::EvidenceArgs;
 use super::release_evidence_selection::{self, Selection};
 use super::{native_error, print_json, RecordQualificationArgs, ResultFormat};
@@ -50,11 +54,16 @@ pub(super) fn run_qualification(args: &QualificationArgs) -> miette::Result<()> 
     run_selected(&args.evidence, Operation::Verify(args))
 }
 
+pub(super) fn run_recovery(args: &RecoveryArgs) -> miette::Result<()> {
+    run_selected(&args.qualification.evidence, Operation::Recovery(args))
+}
+
 #[derive(Clone, Copy)]
 enum Operation<'a> {
     Inspect,
     Verify(&'a QualificationArgs),
     Record(&'a RecordQualificationArgs),
+    Recovery(&'a RecoveryArgs),
 }
 
 /// V2 identity is selected by the independently retained exact index digest.
@@ -92,6 +101,7 @@ fn required<'a, T>(value: Option<&'a T>, name: &str) -> miette::Result<&'a T> {
 fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result<()> {
     let qualification = match operation {
         Operation::Verify(selected) => Some(selected),
+        Operation::Recovery(selected) => Some(&selected.qualification),
         _ => None,
     };
     let selected_qualification = qualification
@@ -107,6 +117,15 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             Ok::<_, miette::Report>((bytes, policy))
         })
         .transpose()?;
+    let selected_recovery = if let Operation::Recovery(selected) = operation {
+        let bytes = read_selected(
+            &selected.recovery_request,
+            &selected.recovery_request_sha256,
+        )?;
+        Some(RecoveryRequestV2::parse(&bytes).map_err(|error| native_error(&error))?)
+    } else {
+        None
+    };
     let selection_bytes = read_selected(&args.selection, &args.selection_sha256)?;
     let selection = release_evidence_selection::parse(&selection_bytes)?;
     let inputs = ReleaseInputs::load(&args.directory).map_err(|error| native_error(&error))?;
@@ -120,6 +139,9 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
     let index =
         NativeReleaseIndexV2::parse(&index_bytes, &inputs).map_err(|error| native_error(&error))?;
     validate_selection(args, &index, &selection, qualification)?;
+    if let Operation::Recovery(selected) = operation {
+        require_independent_document(args, &selection, &selected.recovery_request)?;
+    }
     if let Operation::Record(selected) = operation {
         recording_preflight(selected, args, &selection)?;
     }
@@ -221,6 +243,7 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         lanes,
     };
     let mut recorded = None;
+    let mut recovery_decision = None;
     let readback = if let Operation::Record(selected) = operation {
         let producer_commit =
             super::parse_git_object(&selected.source_tag_commit, "source tag commit")?;
@@ -255,14 +278,26 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         recorded = Some(evidence);
         complete
     } else if let Some((bytes, policy)) = &selected_qualification {
-        readback_qualification_bytes_v2(&QualificationByteReadbackRequestV2 {
+        let request = QualificationByteReadbackRequestV2 {
             evidence_bytes: bytes,
             index_bytes: &index_bytes,
             complete: &complete_request,
             policy,
-        })
-        .map_err(|error| native_error(&error))?
-        .into_complete()
+        };
+        if let Some(recovery) = &selected_recovery {
+            let (decision, joined) = readback_recovery_bytes_v2(&RecoveryByteReadbackRequestV2 {
+                recovery,
+                qualification: &request,
+            })
+            .map_err(|error| native_error(&error))?
+            .into_parts();
+            recovery_decision = Some(decision);
+            joined.into_complete()
+        } else {
+            readback_qualification_bytes_v2(&request)
+                .map_err(|error| native_error(&error))?
+                .into_complete()
+        }
     } else {
         readback_release_compatibility_v2(&complete_request)
             .map_err(|error| native_error(&error))?
@@ -283,6 +318,13 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         )?;
         read_selected(&selected.policy, &selected.policy_sha256)?;
     }
+    if let Operation::Recovery(selected) = operation {
+        read_selected(
+            &selected.recovery_request,
+            &selected.recovery_request_sha256,
+        )?;
+        require_independent_document(args, &selection, &selected.recovery_request)?;
+    }
     let lanes = readback.builds().lanes().iter().zip(readback.lanes()).map(|(build, compatibility)| {
         serde_json::json!({
             "asset": build.asset(),
@@ -300,6 +342,7 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         Operation::Inspect => "verify-release-evidence",
         Operation::Verify(_) => "verify-qualification",
         Operation::Record(_) => "record-qualification",
+        Operation::Recovery(_) => "verify-recovery",
     };
     let mut result = serde_json::json!({
         "schema": "aros-toolchain-producer-stage-v2",
@@ -320,6 +363,13 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
     if let Some(selected) = qualification {
         result["qualification_sha256"] = serde_json::json!(selected.qualification_sha256);
         result["policy_sha256"] = serde_json::json!(selected.policy_sha256);
+    }
+    if let Operation::Recovery(selected) = operation {
+        result["recovery_request_sha256"] = serde_json::json!(selected.recovery_request_sha256);
+        result["decision"] = serde_json::to_value(recovery_decision.as_ref().ok_or_else(|| {
+            miette::miette!("family-v2 recovery did not reacquire complete evidence")
+        })?)
+        .map_err(|_| miette::miette!("cannot serialize recovery decision"))?;
     }
     if let Operation::Record(selected) = operation {
         let evidence = recorded.as_ref().ok_or_else(|| {
@@ -514,16 +564,6 @@ fn validate_selection(
             "evidence selection must exactly cover the input-derived index and required paths"
         ));
     }
-    // Transport expectations must not hide among the inventory they select.
-    let roots = std::iter::once(args.directory.as_path()).chain(selection.lanes.values().flat_map(
-        |lane| {
-            lane.builds
-                .iter()
-                .map(|build| build.package_dir.as_path())
-                .chain(std::iter::once(lane.compatibility.directory.as_path()))
-        },
-    ));
-    let protected = roots.collect::<Vec<_>>();
     let documents = std::iter::once(args.selection.as_path())
         .chain(
             selection
@@ -538,10 +578,28 @@ fn validate_selection(
             ]
         }));
     for document in documents {
-        for root in &protected {
-            if super::compatibility_export::filesystem_overlap(document, root)? {
-                return Err(miette::miette!("independent evidence inputs must remain outside all selected release, package and compatibility roots"));
-            }
+        require_independent_document(args, selection, document)?;
+    }
+    Ok(())
+}
+
+fn require_independent_document(
+    args: &EvidenceArgs,
+    selection: &Selection,
+    document: &Path,
+) -> miette::Result<()> {
+    // Transport expectations must not hide among the inventory they select.
+    let roots = std::iter::once(args.directory.as_path()).chain(selection.lanes.values().flat_map(
+        |lane| {
+            lane.builds
+                .iter()
+                .map(|build| build.package_dir.as_path())
+                .chain(std::iter::once(lane.compatibility.directory.as_path()))
+        },
+    ));
+    for root in roots {
+        if super::compatibility_export::filesystem_overlap(document, root)? {
+            return Err(miette::miette!("independent evidence inputs must remain outside all selected release, package and compatibility roots"));
         }
     }
     Ok(())

@@ -354,6 +354,104 @@ fn assert_qualification_failure_is_read_only(
     );
 }
 
+fn recovery_request(evidence: &Value, operation: &str, failed_stage: &str) -> Value {
+    let source_run = evidence["source_run"].clone();
+    let source_tag = json!({
+        "name": source_run["source_tag"],
+        "tag_object": source_run["tag_object"],
+        "peeled_commit": source_run["producer_commit"]
+    });
+    let handoff = (operation == "packaging-recovery").then(|| {
+        json!({
+            "release_id": "release-evidence-v2-recovered",
+            "tag": {
+                "name": "release-2026.10-recovered",
+                "tag_object": "ab".repeat(20),
+                "peeled_commit": source_run["producer_commit"]
+            },
+            "state": "absent"
+        })
+    });
+    json!({
+        "schema": aros_toolchain::recovery_v2::RECOVERY_V2_SCHEMA,
+        "qualification_sha256": sha256_bytes(&serde_json::to_vec(evidence).unwrap()),
+        "operation": operation,
+        "failed_stage": failed_stage,
+        "observed_run": source_run,
+        "source_tag": source_tag,
+        "observed_attestation": evidence["attestation"],
+        "handoff": handoff
+    })
+}
+
+fn recovery_command(
+    fixture: &Fixture,
+    selection: &Value,
+    name: &str,
+    evidence: &Value,
+    request: &Value,
+    selected_evidence_sha256: Option<&str>,
+    selected_request_sha256: Option<&str>,
+) -> Command {
+    let qualification =
+        qualification_command(fixture, selection, name, evidence, selected_evidence_sha256);
+    let mut arguments = command_arguments(&qualification);
+    let operation_position = argument_position(&arguments, "verify-qualification");
+    arguments[operation_position] = std::ffi::OsString::from("verify-recovery");
+    let (request_path, request_sha256) =
+        write_json_input(fixture, &format!("recovery-{name}-request.json"), request);
+    let mut command = command_from_arguments(arguments);
+    command.args([
+        "--recovery-request",
+        request_path.to_str().unwrap(),
+        "--recovery-request-sha256",
+        selected_request_sha256.unwrap_or(&request_sha256),
+    ]);
+    command
+}
+
+fn assert_recovery_failure_is_read_only(
+    fixture: &Fixture,
+    name: &str,
+    mut command: Command,
+    expected_diagnostic: &str,
+    expected_code: Option<&str>,
+) {
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "unexpected recovery success for {name}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "recovery failure for {name} emitted a success-shaped stdout document: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_diagnostic),
+        "recovery failure for {name} did not reach its intended rejection; expected {expected_diagnostic:?} in stderr:\n{stderr}"
+    );
+    if let Some(code) = expected_code {
+        assert!(
+            stderr.contains(code),
+            "recovery failure for {name} did not include diagnostic code {code}:\n{stderr}"
+        );
+    }
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "failed recovery {name} mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "failed recovery {name} mutated selected transport evidence"
+    );
+}
+
 fn record_qualification_command(
     fixture: &Fixture,
     selection: &Value,
@@ -942,6 +1040,457 @@ fn process_joins_v2_qualification_claims_to_measured_bytes_and_rejects_claim_sub
         support::snapshot_tree(&fixture.transport_directory),
         transport_before,
         "overlapping policy rejection mutated selected transport evidence"
+    );
+}
+
+#[test]
+fn process_revalidates_v2_recovery_requests_against_fresh_complete_bytes() {
+    // Observations here are synthetic; passing is not provider, signer or
+    // owning-job authentication and must never be used as release evidence.
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "recovery-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic recovery baseline collection failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let qualification = qualification_claims(&fixture, &baseline);
+
+    let packaging_request = recovery_request(&qualification, "packaging-recovery", "packaging");
+    let mut packaging = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "packaging-recovery-success",
+        &qualification,
+        &packaging_request,
+        None,
+        None,
+    );
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let packaging_output = packaging.output().unwrap();
+    assert!(
+        packaging_output.status.success(),
+        "fresh absent packaging recovery failed:\n{}",
+        String::from_utf8_lossy(&packaging_output.stderr)
+    );
+    assert!(
+        packaging_output.stderr.is_empty(),
+        "successful recovery emitted diagnostics: {}",
+        String::from_utf8_lossy(&packaging_output.stderr)
+    );
+    let packaging_result: Value = serde_json::from_slice(&packaging_output.stdout).unwrap();
+    assert_eq!(packaging_result["operation"], "verify-recovery");
+    assert_eq!(packaging_result["assurance"], "byte-consistency-only");
+    assert_eq!(packaging_result["lane_count"], 3);
+    assert_eq!(packaging_result["build_count"], 6);
+    assert_eq!(
+        packaging_result["recovery_request_sha256"],
+        sha256_bytes(&serde_json::to_vec(&packaging_request).unwrap()).as_str()
+    );
+    assert_eq!(
+        packaging_result["decision"]["repackage"]["release_id"],
+        "release-evidence-v2-recovered"
+    );
+    assert_eq!(
+        packaging_result["decision"]["repackage"]["tag"]["name"],
+        "release-2026.10-recovered"
+    );
+    for authority_claim in [
+        "execution_authenticated",
+        "signature_verified",
+        "job_origin_verified",
+        "publication_authorized",
+        "recovery_authorized",
+    ] {
+        assert!(
+            packaging_result.get(authority_claim).is_none(),
+            "byte-only recovery result unexpectedly claims {authority_claim}"
+        );
+    }
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "successful packaging recovery mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "successful packaging recovery mutated selected transport evidence"
+    );
+
+    let replay_request = recovery_request(
+        &qualification,
+        "compatibility-replay",
+        "compatibility-harness",
+    );
+    let mut replay = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "compatibility-replay-success",
+        &qualification,
+        &replay_request,
+        None,
+        None,
+    );
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let replay_output = replay.output().unwrap();
+    assert!(
+        replay_output.status.success(),
+        "compatibility-harness replay failed:\n{}",
+        String::from_utf8_lossy(&replay_output.stderr)
+    );
+    let replay_result: Value = serde_json::from_slice(&replay_output.stdout).unwrap();
+    assert_eq!(replay_result["operation"], "verify-recovery");
+    assert_eq!(replay_result["decision"], "replay-compatibility");
+    assert_eq!(replay_result["lane_count"], 3);
+    assert_eq!(replay_result["build_count"], 6);
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "successful compatibility replay mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "successful compatibility replay mutated selected transport evidence"
+    );
+
+    let mut wrong_attempt = recovery_request(&qualification, "packaging-recovery", "packaging");
+    wrong_attempt["observed_run"]["run_attempt"] = json!(2);
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "wrong-attempt",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "wrong-attempt",
+            &qualification,
+            &wrong_attempt,
+            None,
+            None,
+        ),
+        "recovery provider observation differs from the exact source run attempt",
+        Some("AX0901"),
+    );
+
+    let mut wrong_tag = recovery_request(&qualification, "packaging-recovery", "packaging");
+    wrong_tag["source_tag"]["name"] = json!("release-2026.10-substituted");
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "wrong-tag",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "wrong-tag",
+            &qualification,
+            &wrong_tag,
+            None,
+            None,
+        ),
+        "observed source tag does not match the immutable qualification identity",
+        Some("AX0901"),
+    );
+
+    let mut wrong_attestation = recovery_request(&qualification, "packaging-recovery", "packaging");
+    wrong_attestation["observed_attestation"]["signer"] = json!("unverified-signer");
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "wrong-attestation",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "wrong-attestation",
+            &qualification,
+            &wrong_attestation,
+            None,
+            None,
+        ),
+        "recovery requires the exact external attestation observation",
+        Some("AX0901"),
+    );
+
+    let mut reused_handoff = recovery_request(&qualification, "packaging-recovery", "packaging");
+    reused_handoff["handoff"]["release_id"] = json!(RELEASE_ID);
+    reused_handoff["handoff"]["tag"]["name"] = qualification["source_run"]["source_tag"].clone();
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "reused-handoff",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "reused-handoff",
+            &qualification,
+            &reused_handoff,
+            None,
+            None,
+        ),
+        "recovery handoff conflicts with the original identity or an existing release",
+        Some("AX0901"),
+    );
+
+    for state in ["draft", "published"] {
+        let mut existing_handoff =
+            recovery_request(&qualification, "packaging-recovery", "packaging");
+        existing_handoff["handoff"]["state"] = json!(state);
+        assert_recovery_failure_is_read_only(
+            &fixture,
+            &format!("{state}-handoff"),
+            recovery_command(
+                &fixture,
+                &fixture.selection,
+                &format!("{state}-handoff"),
+                &qualification,
+                &existing_handoff,
+                None,
+                None,
+            ),
+            "recovery handoff conflicts with the original identity or an existing release",
+            Some("AX0901"),
+        );
+    }
+
+    for failed_stage in ["compiler", "comparison", "compatibility"] {
+        let invalid_stage = recovery_request(&qualification, "packaging-recovery", failed_stage);
+        assert_recovery_failure_is_read_only(
+            &fixture,
+            &format!("failed-{failed_stage}"),
+            recovery_command(
+                &fixture,
+                &fixture.selection,
+                &format!("failed-{failed_stage}"),
+                &qualification,
+                &invalid_stage,
+                None,
+                None,
+            ),
+            "recovery operation does not match the sole measured failed stage",
+            Some("AX0901"),
+        );
+    }
+
+    let valid_packaging = recovery_request(&qualification, "packaging-recovery", "packaging");
+    let protected_request = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "protected-request",
+        &qualification,
+        &valid_packaging,
+        None,
+        None,
+    );
+    let mut protected_arguments = command_arguments(&protected_request);
+    let protected_asset = asset_for_host(&fixture, "linux-x86_64");
+    let protected_root = PathBuf::from(
+        fixture.selection["lanes"][&protected_asset]["compatibility"]["directory"]
+            .as_str()
+            .unwrap(),
+    );
+    let request_bytes = serde_json::to_vec(&valid_packaging).unwrap();
+    let protected_path = protected_root.join("recovery-request.json");
+    fs::write(&protected_path, &request_bytes).unwrap();
+    let request_position = argument_position(&protected_arguments, "--recovery-request");
+    protected_arguments[request_position + 1] = protected_path.into_os_string();
+    assert_recovery_failure_is_read_only(
+        &fixture, "protected-request", command_from_arguments(protected_arguments),
+        "independent evidence inputs must remain outside all selected release, package and compatibility roots",
+        None,
+    );
+    fs::remove_file(protected_root.join("recovery-request.json")).unwrap();
+
+    let duplicate_request = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "duplicate-request",
+        &qualification,
+        &valid_packaging,
+        None,
+        None,
+    );
+    let mut duplicate_arguments = command_arguments(&duplicate_request);
+    let mut duplicate_bytes = format!(
+        "{{\"schema\":\"{}\",",
+        aros_toolchain::recovery_v2::RECOVERY_V2_SCHEMA
+    )
+    .into_bytes();
+    duplicate_bytes.extend_from_slice(&request_bytes[1..]);
+    let duplicate_path = fixture
+        .transport_directory
+        .join("duplicate-recovery-request.json");
+    fs::write(&duplicate_path, &duplicate_bytes).unwrap();
+    let request_position = argument_position(&duplicate_arguments, "--recovery-request");
+    duplicate_arguments[request_position + 1] = duplicate_path.into_os_string();
+    let digest_position = argument_position(&duplicate_arguments, "--recovery-request-sha256");
+    duplicate_arguments[digest_position + 1] = sha256_bytes(&duplicate_bytes).to_string().into();
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "duplicate-request",
+        command_from_arguments(duplicate_arguments),
+        "recovery request is not a closed v2 JSON document",
+        Some("AX0901"),
+    );
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "wrong-request-digest",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "wrong-request-digest",
+            &qualification,
+            &valid_packaging,
+            None,
+            Some(&"00".repeat(32)),
+        ),
+        "selected evidence metadata differs from its independently retained raw digest or identity",
+        None,
+    );
+
+    let mut v1_request = valid_packaging.clone();
+    v1_request["schema"] = json!("aros-toolchain-recovery-request-v1");
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "v1-request-schema",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "v1-request-schema",
+            &qualification,
+            &v1_request,
+            None,
+            None,
+        ),
+        "recovery request does not select the v2 schema",
+        Some("AX0901"),
+    );
+
+    let mut unknown_field_request = valid_packaging.clone();
+    unknown_field_request["unexpected_authority"] = json!(true);
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "unknown-request-field",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "unknown-request-field",
+            &qualification,
+            &unknown_field_request,
+            None,
+            None,
+        ),
+        "recovery request is not a closed v2 JSON document",
+        Some("AX0901"),
+    );
+
+    let asset = asset_for_host(&fixture, "linux-x86_64");
+    let measurement_path = PathBuf::from(
+        fixture.selection["lanes"][&asset]["builds"][0]["measurement"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let original_measurement = fs::read(&measurement_path).unwrap();
+    let mut changed_measurement = original_measurement.clone();
+    changed_measurement.push(b'X');
+    fs::write(&measurement_path, changed_measurement).unwrap();
+    let changed_report = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "changed-report",
+        &qualification,
+        &valid_packaging,
+        None,
+        None,
+    );
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "changed-report",
+        changed_report,
+        "portable package measurement differs from selected raw bytes",
+        Some("AX0801"),
+    );
+    fs::write(&measurement_path, original_measurement).unwrap();
+
+    let mut changed_log_selection = fixture.selection.clone();
+    let changed_log_root = copy_compatibility_for_mutation(
+        &fixture,
+        &mut changed_log_selection,
+        &asset,
+        "recovery-log",
+        "cmake-consumer.stdout.log",
+    );
+    let changed_log = recovery_command(
+        &fixture,
+        &changed_log_selection,
+        "changed-log",
+        &qualification,
+        &valid_packaging,
+        None,
+        None,
+    );
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "changed-log",
+        changed_log,
+        "native compatibility retained command log bytes differ from their report hashes",
+        Some("AX0703"),
+    );
+    let _ = changed_log_root;
+
+    let mut missing_selection = fixture.selection.clone();
+    let missing_asset = asset_for_host(&fixture, "linux-x86_64");
+    missing_selection["lanes"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&missing_asset);
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "missing-selection",
+        recovery_command(
+            &fixture,
+            &missing_selection,
+            "missing-selection",
+            &qualification,
+            &valid_packaging,
+            None,
+            None,
+        ),
+        "evidence selection must exactly cover the input-derived index and required paths",
+        None,
+    );
+
+    let expired = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "expired-policy",
+        &qualification,
+        &valid_packaging,
+        None,
+        None,
+    );
+    let mut expired_arguments = command_arguments(&expired);
+    let (expired_policy_path, expired_policy_sha256) = write_json_input(
+        &fixture,
+        "recovery-expired-policy.json",
+        &json!({
+            "source_repository": "https://github.com/example/aros-toolchains",
+            "source_workflow": ".github/workflows/qualification.yml",
+            "signer_repository": "https://github.com/example/aros-toolchains",
+            "signer_workflow": ".github/workflows/qualification.yml",
+            "signer": "github-actions",
+            "now": 300
+        }),
+    );
+    let policy_position = argument_position(&expired_arguments, "--policy");
+    expired_arguments[policy_position + 1] = expired_policy_path.into_os_string();
+    let policy_digest_position = argument_position(&expired_arguments, "--policy-sha256");
+    expired_arguments[policy_digest_position + 1] = std::ffi::OsString::from(expired_policy_sha256);
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "expired-policy",
+        command_from_arguments(expired_arguments),
+        "qualification evidence v2 is not valid at the policy epoch",
+        Some("AX0901"),
     );
 }
 

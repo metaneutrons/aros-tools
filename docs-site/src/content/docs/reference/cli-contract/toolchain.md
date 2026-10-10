@@ -228,6 +228,23 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer verify-qualification` | qualification_sha256 | --qualification-sha256 | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-qualification` | policy | --policy | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-qualification` | policy_sha256 | --policy-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | directory | --directory | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | release_id | --release-id | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | base_url | --base-url | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | inputs_sha256 | --inputs-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | index_sha256 | --index-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | selection | --selection | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | selection_sha256 | --selection-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | subject_manifest | --subject-manifest | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | subject_manifest_sha256 | --subject-manifest-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros toolchain producer verify-recovery` | qualification_evidence | --qualification-evidence | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | qualification_sha256 | --qualification-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | policy | --policy | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | policy_sha256 | --policy-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | recovery_request | --recovery-request | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-recovery` | recovery_request_sha256 | --recovery-request-sha256 | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-release-evidence` | directory | --directory | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-release-evidence` | release_id | --release-id | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-release-evidence` | base_url | --base-url | — | required | 1 |  |  | — |  |

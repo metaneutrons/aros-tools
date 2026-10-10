@@ -283,9 +283,10 @@ Driver roles and RISC-V flags come from the verified package and profile, not
 PATH or board-name inference. GNU receipts use schema v3, LLVM family-v2 uses
 package-bound schema v4, and legacy LLVM v1 retains schema v2. Family-v2
 execution checks the source/profile binding, both complete inventories and
-compiler-bound standalone ELF outputs. The release-evidence
-and recovery paths do not yet admit v3/v4 receipts. Successful packaging or synthetic
-adapter tests are not a real consumer qualification.
+compiler-bound standalone ELF outputs. Complete V2 release-evidence and read-only
+recovery checks admit GNU v3 and LLVM v4 receipts; historical recovery execution
+remains V1-only. Successful packaging or synthetic adapter tests are not a real
+consumer qualification.
 Family-v2 compatibility also checks the exact retained report/log inventory
 against pre-execution source and environment expectations, then reparses the
 standalone outputs. This local read-back is not signature verification or
@@ -330,6 +331,15 @@ and self-hashes substituted for raw exports/manifests are rejected. It writes
 nothing and remains `assurance: byte-consistency-only`; the run attempt,
 signatures and producing jobs still need independent authentication.
 
+`producer verify-recovery` uses those same complete selections and adds
+`--recovery-request` and `--recovery-request-sha256`. It checks the exact V2
+qualification digest, external run-attempt/tag/signer observations and a fresh
+absent packaging handoff. It reacquires all original bytes and writes nothing.
+Replay allows a compatibility-harness failure, not an actual compatibility
+failure; compilation and comparison failures are also ineligible. Observations
+still require external authentication; this check executes no recovery. The
+historical request-creation and repackage commands remain V1-only.
+
 `producer record-qualification --release-format family-v2` acquires that same
 complete closure before deriving the claim file. Supply `--release-dir`, the
 independent input/index/selection/subject digests and paths, and source
@@ -354,9 +364,9 @@ The `pre-attestation` stage writes the index and subject list, not final checksu
 After external attestation supplies provenance, `final` requires the original
 `--subject-manifest-sha256`, verifies unchanged subjects and writes final checksums.
 These local byte checks do not authenticate signatures. The default `legacy-v1`
-index path remains available. Qualification recording explicitly supports V2;
-recovery remains V1-only and cannot admit this recorded V2 claim;
-V2 byte read-back does not by itself make those paths V2-capable.
+index path remains available. Qualification recording and read-only recovery
+verification explicitly support V2. Recovery execution remains V1-only;
+the V2 byte checker does not make the historical execution path V2-capable.
 
 The producer preserves owned work/output roots on failure, cancellation, and
 deadline expiry. Inspect their lifecycle receipts and logs, correct the exact

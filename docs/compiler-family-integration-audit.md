@@ -36,8 +36,8 @@ stage rules; they must not become a second hard-coded workflow inventory.
 | Packaging and index | `release_index_v2_builder.rs`, `release_index_v2_readback.rs`, `toolchain_producer/release_index_family.rs` | Explicit family-v2 CLI stages measure packages and index/checksum inputs. They do not qualify execution or authenticate provenance. |
 | A/B comparison | `native_candidate/comparison.rs`, `native_candidate/release_readback.rs`, `release_index.rs::PackageComparisonReport` | Local proofs and complete portable byte acquisition join both packages, retained exports/reports, selected groups and final checksum/subject bytes. `verify-release-evidence` exposes the complete byte collector; external execution/artifact authentication remains separate. |
 | Compatibility | `compatibility/execution_retained.rs`, `compatibility/execution_portable.rs`, `native_candidate/release_compatibility.rs` | Owning-host export and rootless read-back validate the exact report/log/ELF closure against independent expectations. The CLI exposes owning-host exports through `--evidence-dir` and complete indexed acquisition through `verify-release-evidence`. Authenticated recovery admission remains incomplete; byte consistency is not proof of execution. |
-| Qualification | `qualification_evidence_v2.rs`, `qualification_readback_v2.rs` | `verify-qualification` acquires the complete selected release and binds V2 claims to raw A/B exports, comparison and compatibility closure bytes, final checksums, subjects and provenance bytes. Execution/signature/job authentication and V2 record/recovery wiring remain separate; `record-qualification` still uses V1. |
-| Recovery | `recovery.rs`, `toolchain_producer.rs` | Admission, inventory measurement and CLI still select the V1 index/evidence and active/historical V1 inventory shapes. |
+| Qualification | `qualification_evidence_v2.rs`, `qualification_readback_v2.rs`, `qualification_recording_v2.rs` | Explicit family-V2 recording and verification acquire the complete selected release and bind claims to raw exports, comparison/compatibility closure, checksums, subjects and provenance. Execution/signature/job authentication and protected producer wiring remain separate. |
+| Recovery | `recovery_v2.rs`, `toolchain_producer/recovery_family.rs` | `verify-recovery` reacquires complete V2 qualification bytes and checks exact run-attempt/tag/attestation/fresh-handoff observations. It does not authenticate observations or execute recovery. Request creation, V2 repackage and protected workflow wiring remain open; historical V1 stays separate. |
 
 Paths in the table are relative to `crates/aros-toolchain/src/` except
 `toolchain_producer*`, which belong to `crates/aros-cli/src/`.
@@ -207,7 +207,7 @@ every selected package, A/B export, comparison and compatibility closure, then
 atomically writes one absent claim file outside all selected roots. Its paired
 `verify-qualification` operation rejoins those claims to actual bytes. Both
 remain byte-consistency-only. Owning-job/artifact authentication, V2 recovery
-admission and cohesive protected-producer wiring are still required before
+execution and cohesive protected-producer wiring are still required before
 Block 2 can close; these local commands do not supply that authority.
 
 ### Block 3: Real qualification and public cutover

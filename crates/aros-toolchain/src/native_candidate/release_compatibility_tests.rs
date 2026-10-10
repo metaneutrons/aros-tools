@@ -25,7 +25,7 @@ use crate::compatibility::{
 };
 use crate::package_verify::VerifiedPackage;
 use crate::qualification_evidence::EvidencePolicy;
-use crate::qualification_evidence_v2::SourceRunIdentityV2;
+use crate::qualification_evidence_v2::{QualificationEvidenceV2, SourceRunIdentityV2};
 use crate::qualification_readback_v2::{
     readback_qualification_bytes_v2, QualificationByteReadbackRequestV2,
 };
@@ -33,6 +33,14 @@ use crate::qualification_recording_v2::{
     record_qualification_bytes_v2, QualificationRecordingRequestV2,
 };
 use crate::recipe::GitObjectId;
+use crate::recovery::{
+    FailedStage, ObservedTag, RecoveryDecision, RecoveryHandoff, RecoveryOperation,
+    ReleaseHandoffState,
+};
+use crate::recovery_v2::{
+    readback_recovery_bytes_v2, RecoveryByteReadbackRequestV2, RecoveryRequestV2,
+    RECOVERY_V2_SCHEMA,
+};
 use crate::release_index_v2::NativeReleaseArtifactV2;
 
 const COMPATIBILITY_RECEIPT: &str = "native-compatibility.receipt.json";
@@ -1400,4 +1408,547 @@ fn assert_reobserver_rejects(
     );
     assert_eq!(after, snapshot, "reobserver changed an input");
     fs::write(path, original).unwrap();
+}
+
+struct RecoveryFixtureV2 {
+    _prepared: PreparedRelease,
+    builds: super::ReleaseBuildReadbackRequestV2,
+    compatibility: PreparedCompatibility,
+    no_overrides: BTreeMap<String, LaneOverride<'static>>,
+    index_bytes: Vec<u8>,
+    policy: EvidencePolicy,
+    evidence_bytes: Vec<u8>,
+}
+
+impl RecoveryFixtureV2 {
+    fn complete_request(&self) -> ReleaseCompatibilityReadbackRequestV2<'_> {
+        compatibility_request(&self.builds, &self.compatibility.lanes, &self.no_overrides)
+    }
+}
+
+fn prepare_recovery_fixture_v2() -> RecoveryFixtureV2 {
+    let prepared = prepare_release();
+    let builds = prepared.request();
+    let build_proof = readback_release_builds_v2(&builds).unwrap();
+    let compatibility = prepare_compatibility(&prepared, &build_proof);
+    let no_overrides = BTreeMap::new();
+    let complete = compatibility_request(&builds, &compatibility.lanes, &no_overrides);
+    let measured = readback_release_compatibility_v2(&complete).unwrap();
+    let index_bytes = fs::read(
+        builds
+            .packages
+            .directory
+            .join(crate::release_index_v2::INDEX_NAME),
+    )
+    .unwrap();
+    let policy = qualification_policy();
+    let evidence_bytes = qualification_bytes(
+        &complete,
+        &measured,
+        &index_bytes,
+        &policy,
+        "release-candidate",
+    );
+    RecoveryFixtureV2 {
+        _prepared: prepared,
+        builds,
+        compatibility,
+        no_overrides: BTreeMap::new(),
+        index_bytes,
+        policy,
+        evidence_bytes,
+    }
+}
+
+fn recovery_qualification_request<'a, 'e>(
+    fixture: &'a RecoveryFixtureV2,
+    complete: &'a ReleaseCompatibilityReadbackRequestV2<'e>,
+    evidence_bytes: &'a [u8],
+    policy: &'a EvidencePolicy,
+) -> QualificationByteReadbackRequestV2<'a, 'e> {
+    QualificationByteReadbackRequestV2 {
+        evidence_bytes,
+        index_bytes: &fixture.index_bytes,
+        complete,
+        policy,
+    }
+}
+
+fn recovery_request_v2(
+    evidence_bytes: &[u8],
+    operation: RecoveryOperation,
+    failed_stage: FailedStage,
+    handoff: Option<RecoveryHandoff>,
+) -> RecoveryRequestV2 {
+    let evidence = QualificationEvidenceV2::parse(evidence_bytes).unwrap();
+    RecoveryRequestV2 {
+        schema: RECOVERY_V2_SCHEMA.to_owned(),
+        qualification_sha256: sha256_bytes(evidence_bytes),
+        operation,
+        failed_stage,
+        observed_run: evidence.source_run.clone(),
+        source_tag: ObservedTag {
+            name: evidence.source_run.source_tag.clone(),
+            tag_object: evidence.source_run.tag_object.clone(),
+            peeled_commit: evidence.source_run.producer_commit.clone(),
+        },
+        observed_attestation: Some(evidence.attestation),
+        handoff,
+    }
+}
+
+fn fresh_recovery_handoff(
+    source_run: &SourceRunIdentityV2,
+    state: ReleaseHandoffState,
+) -> RecoveryHandoff {
+    RecoveryHandoff {
+        release_id: "recovered-release".into(),
+        tag: ObservedTag {
+            name: "release-recovered".into(),
+            tag_object: GitObjectId::try_from(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            )
+            .unwrap(),
+            peeled_commit: source_run.producer_commit.clone(),
+        },
+        state,
+    }
+}
+
+fn assert_recovery_rejected_without_mutation(
+    recovery: &RecoveryRequestV2,
+    qualification: &QualificationByteReadbackRequestV2<'_, '_>,
+    expected_message: &str,
+    expected_code: &str,
+) {
+    let before = snapshot_request(qualification.complete);
+    let error = readback_recovery_bytes_v2(&RecoveryByteReadbackRequestV2 {
+        recovery,
+        qualification,
+    })
+    .unwrap_err();
+    let diagnostics = &error.diagnostics().diagnostics;
+    assert_eq!(diagnostics.len(), 1, "{error}");
+    assert_eq!(diagnostics[0].message, expected_message, "{error}");
+    assert_eq!(diagnostics[0].code.to_string(), expected_code, "{error}");
+    assert_eq!(
+        snapshot_request(qualification.complete),
+        before,
+        "recovery read-back changed an input"
+    );
+}
+
+// These records are synthetic local observations. A passing test does not
+// authenticate the provider run, Git tag, signer, or attestation origin.
+#[test]
+fn recovery_v2_accepts_packaging_handoff_and_harness_replay_as_opaque_byte_readbacks() {
+    let fixture = prepare_recovery_fixture_v2();
+    let complete = fixture.complete_request();
+    let qualification = recovery_qualification_request(
+        &fixture,
+        &complete,
+        &fixture.evidence_bytes,
+        &fixture.policy,
+    );
+    let before = snapshot_request(&complete);
+    let evidence = QualificationEvidenceV2::parse(&fixture.evidence_bytes).unwrap();
+
+    let handoff = fresh_recovery_handoff(&evidence.source_run, ReleaseHandoffState::Absent);
+    assert_eq!(
+        handoff.tag.peeled_commit,
+        evidence.source_run.producer_commit
+    );
+    assert_ne!(handoff.tag.tag_object, evidence.source_run.tag_object);
+    let packaging = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        Some(handoff.clone()),
+    );
+    let recovered = readback_recovery_bytes_v2(&RecoveryByteReadbackRequestV2 {
+        recovery: &packaging,
+        qualification: &qualification,
+    })
+    .unwrap();
+    assert_eq!(
+        recovered.decision(),
+        &RecoveryDecision::Repackage {
+            release_id: handoff.release_id,
+            tag: handoff.tag,
+        }
+    );
+    assert_eq!(recovered.qualification().evidence().lanes.len(), 3);
+    assert_eq!(
+        recovered.qualification().complete().builds().lanes().len(),
+        3
+    );
+    assert_eq!(recovered.qualification().complete().lanes().len(), 3);
+
+    let replay = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::CompatibilityReplay,
+        FailedStage::CompatibilityHarness,
+        None,
+    );
+    let replayed = readback_recovery_bytes_v2(&RecoveryByteReadbackRequestV2 {
+        recovery: &replay,
+        qualification: &qualification,
+    })
+    .unwrap();
+    assert_eq!(replayed.decision(), &RecoveryDecision::ReplayCompatibility);
+    assert_eq!(replayed.qualification().complete().lanes().len(), 3);
+    assert_eq!(snapshot_request(&complete), before);
+}
+
+#[test]
+fn recovery_v2_rejects_observation_operation_and_handoff_substitutions_without_writes() {
+    let fixture = prepare_recovery_fixture_v2();
+    let complete = fixture.complete_request();
+    let qualification = recovery_qualification_request(
+        &fixture,
+        &complete,
+        &fixture.evidence_bytes,
+        &fixture.policy,
+    );
+    let evidence = QualificationEvidenceV2::parse(&fixture.evidence_bytes).unwrap();
+    let valid = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::CompatibilityReplay,
+        FailedStage::CompatibilityHarness,
+        None,
+    );
+
+    let mut changed = valid.clone();
+    changed.qualification_sha256 = sha256_bytes(b"another raw qualification document");
+    assert_recovery_rejected_without_mutation(
+        &changed,
+        &qualification,
+        "recovery request v2 differs from selected qualification bytes",
+        "AX0901",
+    );
+
+    for change_attempt in [true, false] {
+        let mut changed = valid.clone();
+        if change_attempt {
+            changed.observed_run.run_attempt += 1;
+        } else {
+            changed.observed_run.run_id += 1;
+        }
+        assert_recovery_rejected_without_mutation(
+            &changed,
+            &qualification,
+            "recovery provider observation differs from the exact source run attempt",
+            "AX0901",
+        );
+    }
+
+    let mut missing_attestation = valid.clone();
+    missing_attestation.observed_attestation = None;
+    assert_recovery_rejected_without_mutation(
+        &missing_attestation,
+        &qualification,
+        "recovery requires the exact external attestation observation",
+        "AX0901",
+    );
+
+    let mut swapped_signer = valid.clone();
+    swapped_signer.observed_attestation.as_mut().unwrap().signer = "another-signer".into();
+    assert_recovery_rejected_without_mutation(
+        &swapped_signer,
+        &qualification,
+        "recovery requires the exact external attestation observation",
+        "AX0901",
+    );
+
+    let mut swapped_tag = valid.clone();
+    swapped_tag.source_tag.name = "another-source-tag".into();
+    assert_recovery_rejected_without_mutation(
+        &swapped_tag,
+        &qualification,
+        "observed source tag does not match the immutable qualification identity",
+        "AX0901",
+    );
+
+    for change_tag_object in [true, false] {
+        let mut changed = valid.clone();
+        if change_tag_object {
+            changed.source_tag.tag_object =
+                GitObjectId::try_from("dddddddddddddddddddddddddddddddddddddddd".to_owned())
+                    .unwrap();
+        } else {
+            changed.source_tag.peeled_commit =
+                GitObjectId::try_from("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned())
+                    .unwrap();
+        }
+        assert_recovery_rejected_without_mutation(
+            &changed,
+            &qualification,
+            "observed source tag does not match the immutable qualification identity",
+            "AX0901",
+        );
+    }
+
+    for failed_stage in [
+        FailedStage::Compiler,
+        FailedStage::Comparison,
+        FailedStage::Compatibility,
+    ] {
+        let changed = recovery_request_v2(
+            &fixture.evidence_bytes,
+            RecoveryOperation::PackagingRecovery,
+            failed_stage,
+            Some(fresh_recovery_handoff(
+                &evidence.source_run,
+                ReleaseHandoffState::Absent,
+            )),
+        );
+        assert_eq!(changed.operation, RecoveryOperation::PackagingRecovery);
+        assert_recovery_rejected_without_mutation(
+            &changed,
+            &qualification,
+            "recovery operation does not match the sole measured failed stage",
+            "AX0901",
+        );
+    }
+
+    let wrong_replay_stage = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::CompatibilityReplay,
+        FailedStage::Compatibility,
+        None,
+    );
+    assert_recovery_rejected_without_mutation(
+        &wrong_replay_stage,
+        &qualification,
+        "recovery operation does not match the sole measured failed stage",
+        "AX0901",
+    );
+
+    let packaging_without_handoff = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        None,
+    );
+    assert_recovery_rejected_without_mutation(
+        &packaging_without_handoff,
+        &qualification,
+        "packaging recovery requires an observed fresh absent handoff",
+        "AX0901",
+    );
+
+    let replay_with_handoff = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::CompatibilityReplay,
+        FailedStage::CompatibilityHarness,
+        Some(fresh_recovery_handoff(
+            &evidence.source_run,
+            ReleaseHandoffState::Absent,
+        )),
+    );
+    assert_recovery_rejected_without_mutation(
+        &replay_with_handoff,
+        &qualification,
+        "compatibility replay has no release handoff authority",
+        "AX0901",
+    );
+
+    for state in [ReleaseHandoffState::Draft, ReleaseHandoffState::Published] {
+        let invalid = recovery_request_v2(
+            &fixture.evidence_bytes,
+            RecoveryOperation::PackagingRecovery,
+            FailedStage::Packaging,
+            Some(fresh_recovery_handoff(&evidence.source_run, state)),
+        );
+        assert_recovery_rejected_without_mutation(
+            &invalid,
+            &qualification,
+            "recovery handoff conflicts with the original identity or an existing release",
+            "AX0901",
+        );
+    }
+
+    let mut reused_source_tag =
+        fresh_recovery_handoff(&evidence.source_run, ReleaseHandoffState::Absent);
+    reused_source_tag.tag.name = evidence.source_run.source_tag.clone();
+    let invalid = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        Some(reused_source_tag),
+    );
+    assert_recovery_rejected_without_mutation(
+        &invalid,
+        &qualification,
+        "recovery handoff conflicts with the original identity or an existing release",
+        "AX0901",
+    );
+
+    let mut reused_tag_object =
+        fresh_recovery_handoff(&evidence.source_run, ReleaseHandoffState::Absent);
+    reused_tag_object.tag.tag_object = evidence.source_run.tag_object.clone();
+    let invalid = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        Some(reused_tag_object),
+    );
+    assert_recovery_rejected_without_mutation(
+        &invalid,
+        &qualification,
+        "recovery handoff conflicts with the original identity or an existing release",
+        "AX0901",
+    );
+
+    let mut wrong_peel = fresh_recovery_handoff(&evidence.source_run, ReleaseHandoffState::Absent);
+    wrong_peel.tag.peeled_commit =
+        GitObjectId::try_from("cccccccccccccccccccccccccccccccccccccccc".to_owned()).unwrap();
+    let invalid = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        Some(wrong_peel),
+    );
+    assert_recovery_rejected_without_mutation(
+        &invalid,
+        &qualification,
+        "recovery handoff conflicts with the original identity or an existing release",
+        "AX0901",
+    );
+
+    let mut reused_release =
+        fresh_recovery_handoff(&evidence.source_run, ReleaseHandoffState::Absent);
+    reused_release.release_id = evidence.release.release_id;
+    let invalid = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        Some(reused_release),
+    );
+    assert_recovery_rejected_without_mutation(
+        &invalid,
+        &qualification,
+        "recovery handoff conflicts with the original identity or an existing release",
+        "AX0901",
+    );
+}
+
+#[test]
+fn recovery_v2_rejects_expired_diagnostic_and_subset_qualification_bytes() {
+    let fixture = prepare_recovery_fixture_v2();
+    let complete = fixture.complete_request();
+    let valid = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        Some(fresh_recovery_handoff(
+            &QualificationEvidenceV2::parse(&fixture.evidence_bytes)
+                .unwrap()
+                .source_run,
+            ReleaseHandoffState::Absent,
+        )),
+    );
+
+    let expired_policy = EvidencePolicy {
+        now: 300,
+        ..fixture.policy.clone()
+    };
+    let expired_qualification = recovery_qualification_request(
+        &fixture,
+        &complete,
+        &fixture.evidence_bytes,
+        &expired_policy,
+    );
+    assert_recovery_rejected_without_mutation(
+        &valid,
+        &expired_qualification,
+        "qualification evidence v2 is not valid at the policy epoch",
+        "AX0901",
+    );
+
+    let mut diagnostic: Value = serde_json::from_slice(&fixture.evidence_bytes).unwrap();
+    diagnostic["coverage"] = json!("diagnostic");
+    let diagnostic_bytes = serde_json::to_vec(&diagnostic).unwrap();
+    let diagnostic_qualification =
+        recovery_qualification_request(&fixture, &complete, &diagnostic_bytes, &fixture.policy);
+    let diagnostic_recovery = recovery_request_v2(
+        &diagnostic_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        valid.handoff.clone(),
+    );
+    assert_recovery_rejected_without_mutation(
+        &diagnostic_recovery,
+        &diagnostic_qualification,
+        "qualification byte read-back requires complete release-candidate coverage",
+        "AX0901",
+    );
+
+    let mut subset: Value = serde_json::from_slice(&fixture.evidence_bytes).unwrap();
+    subset["lanes"].as_array_mut().unwrap().pop();
+    let subset_bytes = serde_json::to_vec(&subset).unwrap();
+    let subset_qualification =
+        recovery_qualification_request(&fixture, &complete, &subset_bytes, &fixture.policy);
+    let subset_recovery = recovery_request_v2(
+        &subset_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        valid.handoff,
+    );
+    assert_recovery_rejected_without_mutation(
+        &subset_recovery,
+        &subset_qualification,
+        "qualification evidence v2 lacks the complete input-derived matrix",
+        "AX0901",
+    );
+}
+
+#[test]
+fn recovery_v2_propagates_changed_package_and_report_byte_diagnostics_without_writes() {
+    let fixture = prepare_recovery_fixture_v2();
+    let complete = fixture.complete_request();
+    let qualification = recovery_qualification_request(
+        &fixture,
+        &complete,
+        &fixture.evidence_bytes,
+        &fixture.policy,
+    );
+    let recovery = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        Some(fresh_recovery_handoff(
+            &QualificationEvidenceV2::parse(&fixture.evidence_bytes)
+                .unwrap()
+                .source_run,
+            ReleaseHandoffState::Absent,
+        )),
+    );
+    let asset = asset_for_host(&fixture.builds, "linux-aarch64").to_owned();
+
+    let package_member = complete.builds.lanes[&asset].builds[0]
+        .package_dir
+        .join(format!("{asset}.manifest.json"));
+    let original_package = fs::read(&package_member).unwrap();
+    let changed_package = b"tampered A package manifest".to_vec();
+    fs::write(&package_member, &changed_package).unwrap();
+    assert_recovery_rejected_without_mutation(
+        &recovery,
+        &qualification,
+        "external package manifest is not valid JSON",
+        "AX0602",
+    );
+    fs::write(&package_member, original_package).unwrap();
+
+    let report = complete.builds.lanes[&asset].comparison.clone();
+    let original_report = fs::read(&report).unwrap();
+    let changed_report = b"tampered comparison report".to_vec();
+    fs::write(&report, &changed_report).unwrap();
+    assert_recovery_rejected_without_mutation(
+        &recovery,
+        &qualification,
+        "release build evidence differs from independently selected raw bytes",
+        "AX0702",
+    );
+    fs::write(report, original_report).unwrap();
 }

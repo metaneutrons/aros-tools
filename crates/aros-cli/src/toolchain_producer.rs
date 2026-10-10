@@ -37,6 +37,7 @@ mod compatibility_export;
 mod finished_package;
 mod native_compatibility;
 mod qualification_bytes;
+mod recovery_family;
 mod release_evidence;
 #[cfg(unix)]
 mod release_evidence_readback;
@@ -83,6 +84,7 @@ impl ProducerArgs {
             }
             ProducerCommand::ReleasePlan(_) => "toolchain.producer.release-plan",
             ProducerCommand::VerifyQualification(_) => "toolchain.producer.verify-qualification",
+            ProducerCommand::VerifyRecovery(_) => "toolchain.producer.verify-recovery",
         }
     }
 }
@@ -127,6 +129,8 @@ enum ProducerCommand {
     ReleasePlan(release_plan::ReleasePlanArgs),
     /// Bind family-v2 qualification claims to all measured release evidence; no execution authentication
     VerifyQualification(Box<qualification_bytes::QualificationArgs>),
+    /// Reacquire complete family-v2 recovery bytes and check external observations; no authentication or mutation
+    VerifyRecovery(Box<recovery_family::RecoveryArgs>),
 }
 
 /// Machine- or human-readable local stage result.
@@ -648,6 +652,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::VerifyReleaseEvidence(args) => release_evidence::run(&args),
         ProducerCommand::ReleasePlan(args) => release_plan::run(&args),
         ProducerCommand::VerifyQualification(args) => qualification_bytes::run(&args),
+        ProducerCommand::VerifyRecovery(args) => recovery_family::run(&args),
     }
 }
 

@@ -135,3 +135,34 @@ Omitting `--release-format` retains historical V1 recording. Explicit
 `legacy-v1` uses that same layout. V1 source-lock/report-root flags cannot be
 combined with the V2 selection; V2 requires every independent digest and the
 positive run attempt. There is no automatic schema fallback.
+
+## Check recovery against complete original bytes
+
+`aros toolchain producer verify-recovery` takes every `verify-qualification`
+argument plus `--recovery-request` and its independently selected
+`--recovery-request-sha256`. It accepts only the closed
+`aros-toolchain-recovery-request-v2` schema, not a V1 request or earlier success
+summary. The request remains outside all selected inventories and evidence
+roots. No output file, extraction, build or repackage is performed.
+
+The request binds the raw qualification digest, operation, sole failed stage,
+fresh source run/attempt and annotated-tag observations, exact external
+attestation identity, and optional fresh handoff. Every original indexed A/B
+package, report, compatibility log/ELF and final inventory is reacquired before
+the local decision is returned. The verifier policy supplies the current epoch;
+expired evidence fails.
+
+Compatibility replay allows only `compatibility-harness` failure and no
+handoff. Packaging recovery allows only `packaging` failure and a distinct
+absent release/tag with a different annotated object peeling to the original
+producer commit. Failed compilation, comparison or actual compatibility cannot
+be recovered through this boundary. Existing drafts/releases and reused tags
+are rejected.
+
+JSON reports the exact request digest, complete measurements and conditional
+decision with `assurance: byte-consistency-only`. The observations must already
+have been authenticated by the protected workflow; matching caller-supplied
+fields is not signature, GitHub job/artifact or Git authentication. This check
+does not grant execution or publication authority. V2 request creation and
+repackage execution remain integration work; historical `prepare-recovery`,
+`validate-recovery` and `repackage` remain V1-only.
