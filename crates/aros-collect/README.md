@@ -20,6 +20,13 @@ differences:
 | undefined-symbol audit, AROS ABI byte, executable permissions | disabled | enabled |
 | report and retained linker-script paths | accepted | not exposed |
 
+For compiler-driver aliases, `--sysroot` must be absolute, but its `lib` or
+`lib32` directory need not exist for a library-free link. The collector checks
+each file it adds for a discovered `__cxa_pure_virtual` or pthread reference.
+Explicit user libraries remain for the selected linker to resolve; missing
+collector-added inputs report `AC0502`, while a missing user library is a
+linker failure.
+
 Both paths stage beside the requested output. A failed first or second link
 therefore leaves an existing good output untouched. Temporary files are
 removed unless `COLLECT_AROS_DEBUG` is set; an explicitly requested retained
