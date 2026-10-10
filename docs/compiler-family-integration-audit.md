@@ -201,6 +201,15 @@ Before compiler builds, exercise the complete synthetic handoff below with
 positive cases and expected-diagnostic, no-mutation counterprobes. Documentation
 must distinguish implemented commands from release-qualified behavior.
 
+Local V2 qualification recording is implemented as a complete byte-derivation
+operation: `producer record-qualification --release-format family-v2` acquires
+every selected package, A/B export, comparison and compatibility closure, then
+atomically writes one absent claim file outside all selected roots. Its paired
+`verify-qualification` operation rejoins those claims to actual bytes. Both
+remain byte-consistency-only. Owning-job/artifact authentication, V2 recovery
+admission and cohesive protected-producer wiring are still required before
+Block 2 can close; these local commands do not supply that authority.
+
 ### Block 3: Real qualification and public cutover
 
 Release and independently audit the required tools runtime first; pin only its

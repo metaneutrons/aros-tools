@@ -25,8 +25,12 @@ use crate::compatibility::{
 };
 use crate::package_verify::VerifiedPackage;
 use crate::qualification_evidence::EvidencePolicy;
+use crate::qualification_evidence_v2::SourceRunIdentityV2;
 use crate::qualification_readback_v2::{
     readback_qualification_bytes_v2, QualificationByteReadbackRequestV2,
+};
+use crate::qualification_recording_v2::{
+    record_qualification_bytes_v2, QualificationRecordingRequestV2,
 };
 use crate::recipe::GitObjectId;
 use crate::release_index_v2::NativeReleaseArtifactV2;
@@ -490,6 +494,54 @@ fn qualification_bytes(
     .unwrap()
 }
 
+fn qualification_source_run(
+    request: &ReleaseCompatibilityReadbackRequestV2<'_>,
+    index_bytes: &[u8],
+    policy: &EvidencePolicy,
+) -> SourceRunIdentityV2 {
+    let measured = readback_release_compatibility_v2(request).unwrap();
+    let fixture_claims =
+        qualification_evidence_value(request, &measured, index_bytes, policy, "release-candidate");
+    serde_json::from_value(fixture_claims["source_run"].clone()).unwrap()
+}
+
+fn recording_request<'a, 'e>(
+    index_bytes: &'a [u8],
+    complete: &'a ReleaseCompatibilityReadbackRequestV2<'e>,
+    source_run: SourceRunIdentityV2,
+    policy: EvidencePolicy,
+    created_at: u64,
+    expires_at: u64,
+) -> QualificationRecordingRequestV2<'a, 'e> {
+    QualificationRecordingRequestV2 {
+        index_bytes,
+        complete,
+        source_run,
+        policy,
+        created_at,
+        expires_at,
+    }
+}
+
+fn assert_recording_rejected_without_mutation(
+    request: &QualificationRecordingRequestV2<'_, '_>,
+    expected_message: &str,
+) {
+    let before = snapshot_request(request.complete);
+    let Err(error) = record_qualification_bytes_v2(request) else {
+        panic!("qualification recording accepted an invalid selection");
+    };
+    let diagnostics = &error.diagnostics().diagnostics;
+    assert_eq!(diagnostics.len(), 1, "{error}");
+    assert_eq!(diagnostics[0].message, expected_message, "{error}");
+    assert_eq!(diagnostics[0].code.to_string(), "AX0901", "{error}");
+    assert_eq!(
+        snapshot_request(request.complete),
+        before,
+        "qualification recording changed an input"
+    );
+}
+
 fn assert_qualification_message(error: &crate::ContractError, expected: &str) {
     let diagnostics = &error.diagnostics().diagnostics;
     assert_eq!(diagnostics.len(), 1, "{error}");
@@ -791,6 +843,191 @@ fn qualification_readback_rejects_changed_compatibility_log_bytes_without_writes
         &policy,
         "native compatibility retained command log bytes differ from their report hashes",
     );
+}
+
+#[test]
+fn qualification_recording_derives_claims_and_roundtrips_through_byte_readback_without_writes() {
+    let prepared = prepare_release();
+    let builds = prepared.request();
+    let build_proof = readback_release_builds_v2(&builds).unwrap();
+    let compatibility = prepare_compatibility(&prepared, &build_proof);
+    let no_overrides = BTreeMap::new();
+    let complete = compatibility_request(&builds, &compatibility.lanes, &no_overrides);
+    let index_path = builds
+        .packages
+        .directory
+        .join(crate::release_index_v2::INDEX_NAME);
+    let index_bytes = fs::read(index_path).unwrap();
+    let policy = qualification_policy();
+    let before = snapshot_request(&complete);
+    let source_run = qualification_source_run(&complete, &index_bytes, &policy);
+    assert_eq!(snapshot_request(&complete), before);
+
+    // Recording receives only selected producer identity and policy inputs.
+    // The qualification claims themselves are derived from its own read-back.
+    let request = recording_request(
+        &index_bytes,
+        &complete,
+        source_run,
+        policy.clone(),
+        100,
+        300,
+    );
+    let recorded = record_qualification_bytes_v2(&request).unwrap();
+    assert_eq!(recorded.evidence().lanes.len(), 3);
+    assert_eq!(recorded.complete().builds().lanes().len(), 3);
+    assert_eq!(recorded.complete().lanes().len(), 3);
+    assert_eq!(snapshot_request(&complete), before);
+
+    let evidence_bytes = serde_json::to_vec(recorded.evidence()).unwrap();
+    let verified = readback_qualification_bytes_v2(&QualificationByteReadbackRequestV2 {
+        evidence_bytes: &evidence_bytes,
+        index_bytes: &index_bytes,
+        complete: &complete,
+        policy: &policy,
+    })
+    .unwrap();
+    assert_eq!(verified.evidence(), recorded.evidence());
+    assert_eq!(verified.complete().builds().lanes().len(), 3);
+    assert_eq!(verified.complete().lanes().len(), 3);
+    assert_eq!(snapshot_request(&complete), before);
+}
+
+#[test]
+fn qualification_recording_rejects_wrong_run_index_and_time_claims_without_writes() {
+    let prepared = prepare_release();
+    let builds = prepared.request();
+    let build_proof = readback_release_builds_v2(&builds).unwrap();
+    let compatibility = prepare_compatibility(&prepared, &build_proof);
+    let no_overrides = BTreeMap::new();
+    let complete = compatibility_request(&builds, &compatibility.lanes, &no_overrides);
+    let index_path = builds
+        .packages
+        .directory
+        .join(crate::release_index_v2::INDEX_NAME);
+    let index_bytes = fs::read(index_path).unwrap();
+    let policy = qualification_policy();
+    let source_run = qualification_source_run(&complete, &index_bytes, &policy);
+
+    let mut wrong_producer = source_run.clone();
+    wrong_producer.producer_commit = GitObjectId::try_from("8".repeat(40)).unwrap();
+    let wrong_producer_request = recording_request(
+        &index_bytes,
+        &complete,
+        wrong_producer,
+        policy.clone(),
+        100,
+        300,
+    );
+    assert_recording_rejected_without_mutation(
+        &wrong_producer_request,
+        "qualification recording source producer differs from the selected index",
+    );
+
+    let mut alternate_index_bytes = index_bytes.clone();
+    alternate_index_bytes.push(b' ');
+    let alternate_index_request = recording_request(
+        &alternate_index_bytes,
+        &complete,
+        source_run.clone(),
+        policy.clone(),
+        100,
+        300,
+    );
+    assert_recording_rejected_without_mutation(
+        &alternate_index_request,
+        "qualification recording index bytes are not the selected canonical index",
+    );
+
+    let expired_request = recording_request(
+        &index_bytes,
+        &complete,
+        source_run,
+        policy.clone(),
+        100,
+        policy.now,
+    );
+    assert_recording_rejected_without_mutation(
+        &expired_request,
+        "qualification recording has invalid creation, expiry or policy time",
+    );
+}
+
+#[test]
+fn qualification_recording_rejects_changed_compatibility_report_and_log_without_writes() {
+    let prepared = prepare_release();
+    let builds = prepared.request();
+    let build_proof = readback_release_builds_v2(&builds).unwrap();
+    let mut compatibility = prepare_compatibility(&prepared, &build_proof);
+    let no_overrides = BTreeMap::new();
+    let original_request = compatibility_request(&builds, &compatibility.lanes, &no_overrides);
+    let index_path = builds
+        .packages
+        .directory
+        .join(crate::release_index_v2::INDEX_NAME);
+    let index_bytes = fs::read(index_path).unwrap();
+    let policy = qualification_policy();
+    let source_run = qualification_source_run(&original_request, &index_bytes, &policy);
+    drop(original_request);
+
+    let asset = asset_for_host(&builds, "linux-aarch64");
+    let directory = compatibility.lanes[asset].directory.clone();
+    let original_manifest_path = directory.join(PORTABLE_NATIVE_COMPATIBILITY_MANIFEST);
+    let original_manifest = fs::read(&original_manifest_path).unwrap();
+    let original_manifest_sha256 = compatibility.lanes[asset].manifest_sha256.clone();
+
+    for (member, expected_message) in [
+        (
+            "upstream-configure.report.json",
+            "native compatibility phase report bytes are not canonical JSON",
+        ),
+        (
+            "upstream-configure.stdout.log",
+            "native compatibility retained command log bytes differ from their report hashes",
+        ),
+    ] {
+        let member_path = directory.join(member);
+        let original_member = fs::read(&member_path).unwrap();
+        let mut changed_member = original_member.clone();
+        changed_member.push(b' ');
+        fs::write(&member_path, &changed_member).unwrap();
+
+        let mut manifest: Value = serde_json::from_slice(&original_manifest).unwrap();
+        manifest["files"][member]["sha256"] = json!(sha256_bytes(&changed_member));
+        manifest["files"][member]["size"] = json!(changed_member.len());
+        let changed_manifest = crate::canonical::bytes(&manifest).unwrap();
+        fs::write(&original_manifest_path, &changed_manifest).unwrap();
+        compatibility.lanes.get_mut(asset).unwrap().manifest_sha256 =
+            sha256_bytes(&changed_manifest);
+
+        {
+            let changed_request =
+                compatibility_request(&builds, &compatibility.lanes, &no_overrides);
+            let recording = recording_request(
+                &index_bytes,
+                &changed_request,
+                source_run.clone(),
+                policy.clone(),
+                100,
+                300,
+            );
+            let before = snapshot_request(&changed_request);
+            let Err(error) = record_qualification_bytes_v2(&recording) else {
+                panic!("qualification recording accepted changed compatibility bytes");
+            };
+            assert_message(&error, expected_message);
+            assert_eq!(
+                snapshot_request(&changed_request),
+                before,
+                "qualification recording changed an input"
+            );
+        }
+
+        fs::write(member_path, original_member).unwrap();
+        fs::write(&original_manifest_path, &original_manifest).unwrap();
+        compatibility.lanes.get_mut(asset).unwrap().manifest_sha256 =
+            original_manifest_sha256.clone();
+    }
 }
 
 fn snapshot_directory(directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {

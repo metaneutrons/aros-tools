@@ -330,6 +330,18 @@ and self-hashes substituted for raw exports/manifests are rejected. It writes
 nothing and remains `assurance: byte-consistency-only`; the run attempt,
 signatures and producing jobs still need independent authentication.
 
+`producer record-qualification --release-format family-v2` acquires that same
+complete closure before deriving the claim file. Supply `--release-dir`, the
+independent input/index/selection/subject digests and paths, and source
+repository/workflow/run ID/positive attempt/tag object/peeled producer commit.
+The index digest binds release ID and download URL. Add the selected signer
+claims, creation/expiry times and an absent absolute `--output` outside every
+input and evidence root, with an existing nonsymlink parent. The complete file
+is written atomically without replacement; JSON includes its raw digest and
+`assurance: byte-consistency-only`. External authentication remains mandatory.
+Default recording and explicit `legacy-v1` keep the historical layout; legacy
+report-root arguments cannot be combined with the V2 selection.
+
 The v2 library also binds comparison-report claims for all four package members
 to measured final checksum entries. This check does not authenticate independent
 builds or authorize release publication; CLI release admission is still a
@@ -342,7 +354,8 @@ The `pre-attestation` stage writes the index and subject list, not final checksu
 After external attestation supplies provenance, `final` requires the original
 `--subject-manifest-sha256`, verifies unchanged subjects and writes final checksums.
 These local byte checks do not authenticate signatures. The default `legacy-v1`
-index path remains available. Qualification recording and recovery still use V1;
+index path remains available. Qualification recording explicitly supports V2;
+recovery remains V1-only and cannot admit this recorded V2 claim;
 V2 byte read-back does not by itself make those paths V2-capable.
 
 The producer preserves owned work/output roots on failure, cancellation, and

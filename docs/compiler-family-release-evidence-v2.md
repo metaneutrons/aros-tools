@@ -105,3 +105,33 @@ and adds the selected qualification/policy document digests. It does not call
 GitHub, verify signatures, prove independent execution or authorize recovery
 or publication. A complete, internally consistent forged evidence set still
 requires rejection by the independent authentication boundary.
+
+## Record complete qualification claims
+
+`aros toolchain producer record-qualification --release-format family-v2`
+uses the same complete byte collector. Select `--release-dir`, independent
+input/index/selection/subject digests and paths, and the explicit source-run
+repository, workflow, ID, **attempt**, tag object and peeled producer commit.
+The selected index digest binds release ID and download URL; the command does
+not accept a caller's JSON summary as evidence.
+
+Supply attestation repository/workflow/signer claims, `--created-at`,
+`--expires-at` and an absent absolute `--output` outside all release, package,
+compatibility and input paths. Its real parent must already exist without
+symlink components. Only after every lane and final checksum member passes
+does one atomic no-clobber write expose the complete claim file. Existing
+outputs remain unchanged. JSON reports its raw digest and
+`assurance: byte-consistency-only`.
+The durable publisher may retain an empty advisory lock in the output parent;
+keep that coordination file outside the release inventory.
+
+Creation and expiry must be positive and ordered. Source-run and signer values
+remain external claims: recording does not verify provider execution, tag
+identity or signatures. Rechecking the recorded file with
+`verify-qualification` still requires a separately selected policy and raw
+digest; it does not grant recovery or publication authority.
+
+Omitting `--release-format` retains historical V1 recording. Explicit
+`legacy-v1` uses that same layout. V1 source-lock/report-root flags cannot be
+combined with the V2 selection; V2 requires every independent digest and the
+positive run attempt. There is no automatic schema fallback.

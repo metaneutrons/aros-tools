@@ -126,7 +126,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer compare` | Compare two complete package sets byte-for-byte and write a receipt |
 | `aros toolchain producer repackage` | Repackage a retained, evidence-bound package twice under a closed recovery request |
 | `aros toolchain producer validate-recovery` | Re-evaluate recovery eligibility against one isolated release inventory |
-| `aros toolchain producer record-qualification` | Record complete measured native qualification evidence from an isolated inventory |
+| `aros toolchain producer record-qualification` | Record complete qualification claims; explicit `--release-format family-v2` derives every lane from selected bytes and writes one absent output |
 | `aros toolchain producer prepare-recovery` | Create a closed recovery request from externally verified qualification facts |
 | `aros toolchain producer index` | Advance a complete local release inventory through an explicit index stage |
 | `aros toolchain producer compatibility-host-tools` | Print the measured command roles required for native compatibility |
@@ -175,6 +175,15 @@ It requires complete V2 coverage and joins report claims to raw measured files,
 including the final checksum, subject-list and provenance bytes. A positive
 run attempt is required but not authenticated here. The command is read-only;
 signatures, job/artifact origin and publication authorization remain separate.
+
+`producer record-qualification --release-format family-v2` derives claims from
+that complete byte selection. Use `--release-dir` instead of `--directory`,
+add the explicit source-run/tag/signer/time fields and a positive
+`--source-run-attempt`. The absent absolute `--output` must be outside every
+selected root and input path; its parent must already exist without symlinks.
+One atomic no-clobber write follows complete validation. The result is byte
+consistency, not authentication. Omitting the format retains V1 recording;
+V1 report-root flags and V2 selection flags cannot be mixed.
 
 Compatibility verifies the complete package set independently into both fresh
 relocation roots using the selected format. It never detects a different format

@@ -6,6 +6,7 @@
 mod support;
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -350,6 +351,142 @@ fn assert_qualification_failure_is_read_only(
         support::snapshot_tree(&fixture.transport_directory),
         transport_before,
         "CLI mutated selected transport evidence during failed {name} qualification"
+    );
+}
+
+fn record_qualification_command(
+    fixture: &Fixture,
+    selection: &Value,
+    name: &str,
+    output_path: &std::path::Path,
+) -> Command {
+    let (selection_path, selection_sha256) =
+        fixture.write_selection(&format!("record-{name}-selection.json"), selection);
+    let inputs = ReleaseInputs::load(&fixture.release_directory).unwrap();
+    let index_bytes = fs::read(fixture.release_directory.join(INDEX_NAME)).unwrap();
+    let index = NativeReleaseIndexV2::parse(&index_bytes, &inputs).unwrap();
+    let producer_commit = index.producer_commit().as_str();
+    let tag_object = "9a".repeat(20);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
+    command.args([
+        "--diagnostic-format=json",
+        "toolchain",
+        "producer",
+        "record-qualification",
+        "--release-dir",
+        fixture.release_directory.to_str().unwrap(),
+        "--release-format",
+        "family-v2",
+        "--inputs-sha256",
+        fixture.inputs_sha256.as_str(),
+        "--index-sha256",
+        fixture.index_sha256.as_str(),
+        "--selection",
+        selection_path.to_str().unwrap(),
+        "--selection-sha256",
+        selection_sha256.as_str(),
+        "--subject-manifest",
+        fixture.subject_manifest.to_str().unwrap(),
+        "--subject-manifest-sha256",
+        fixture.subject_manifest_sha256.as_str(),
+        "--source-repository",
+        "https://github.com/example/aros-toolchains",
+        "--source-workflow",
+        ".github/workflows/qualification.yml",
+        "--source-run-id",
+        "42",
+        "--source-run-attempt",
+        "1",
+        "--source-tag",
+        "release-2026.10",
+        "--source-tag-object",
+        tag_object.as_str(),
+        "--source-tag-commit",
+        producer_commit,
+        "--attestation-repository",
+        "https://github.com/example/aros-toolchains",
+        "--attestation-workflow",
+        ".github/workflows/qualification.yml",
+        "--attestation-signer",
+        "github-actions",
+        "--created-at",
+        "100",
+        "--expires-at",
+        "300",
+        "--output",
+        output_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    command
+}
+
+fn command_arguments(command: &Command) -> Vec<std::ffi::OsString> {
+    command
+        .get_args()
+        .map(std::ffi::OsStr::to_os_string)
+        .collect()
+}
+
+fn argument_position(arguments: &[std::ffi::OsString], name: &str) -> usize {
+    arguments
+        .iter()
+        .position(|argument| argument.to_str() == Some(name))
+        .unwrap_or_else(|| panic!("command lacks {name}"))
+}
+
+fn command_from_arguments(arguments: Vec<std::ffi::OsString>) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
+    command.args(arguments);
+    command
+}
+
+fn assert_record_failure_is_read_only(
+    fixture: &Fixture,
+    mut command: Command,
+    output_path: &std::path::Path,
+    expected_diagnostic: &str,
+    existing_output: Option<&[u8]>,
+) {
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "invalid record-qualification invocation unexpectedly succeeded"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed record-qualification emitted stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_diagnostic),
+        "record-qualification failed for the wrong reason; expected {expected_diagnostic:?}:\n{stderr}"
+    );
+    if let Some(expected) = existing_output {
+        assert_eq!(
+            fs::read(output_path).unwrap(),
+            expected,
+            "failed record-qualification replaced an existing output"
+        );
+    } else {
+        assert!(
+            !output_path.exists(),
+            "failed record-qualification created its output"
+        );
+    }
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "failed record-qualification mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "failed record-qualification mutated selected transport evidence"
     );
 }
 
@@ -805,5 +942,317 @@ fn process_joins_v2_qualification_claims_to_measured_bytes_and_rejects_claim_sub
         support::snapshot_tree(&fixture.transport_directory),
         transport_before,
         "overlapping policy rejection mutated selected transport evidence"
+    );
+}
+
+#[test]
+fn process_records_complete_family_v2_qualification_and_rejects_invalid_recording_inputs() {
+    let fixture = Fixture::new();
+    let output_root = tempfile::tempdir().unwrap();
+    let output_directory = output_root.path().canonicalize().unwrap();
+    let recorded_path = output_directory.join("recorded-family-v2-qualification.json");
+    let mut record = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "successful-recording",
+        &recorded_path,
+    );
+    let release_before_record = support::snapshot_tree(&fixture.release_directory);
+    let transport_before_record = support::snapshot_tree(&fixture.transport_directory);
+    let record_output = record.output().unwrap();
+    assert!(
+        record_output.status.success(),
+        "family-v2 record-qualification failed:\n{}",
+        String::from_utf8_lossy(&record_output.stderr)
+    );
+    assert!(
+        record_output.stderr.is_empty(),
+        "successful record-qualification wrote diagnostics: {}",
+        String::from_utf8_lossy(&record_output.stderr)
+    );
+    let record_result: Value = serde_json::from_slice(&record_output.stdout).unwrap();
+    assert_eq!(record_result["operation"], "record-qualification");
+    assert_eq!(record_result["release_format"], "family-v2");
+    assert_eq!(record_result["assurance"], "byte-consistency-only");
+    assert_eq!(record_result["lane_count"], 3);
+    assert_eq!(record_result["build_count"], 6);
+    assert_eq!(
+        PathBuf::from(record_result["qualification_evidence"].as_str().unwrap()),
+        recorded_path
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before_record,
+        "record-qualification mutated the final release"
+    );
+    let recorded_bytes = fs::read(&recorded_path).unwrap();
+    let recorded_sha256 = sha256_bytes(&recorded_bytes).to_string();
+    assert_eq!(
+        record_result["qualification_sha256"],
+        recorded_sha256.as_str()
+    );
+    let recorded_evidence: Value = serde_json::from_slice(&recorded_bytes).unwrap();
+    assert_eq!(
+        recorded_evidence["schema"],
+        "aros-toolchain-qualification-evidence-v2"
+    );
+    assert_eq!(recorded_evidence["source_run"]["run_id"], 42);
+    assert_eq!(recorded_evidence["source_run"]["run_attempt"], 1);
+    assert_eq!(
+        recorded_evidence["source_run"]["producer_commit"],
+        recorded_evidence["release"]["producer_commit"]
+    );
+    assert_eq!(recorded_evidence["lanes"].as_array().unwrap().len(), 3);
+    let transport_after_record = support::snapshot_tree(&fixture.transport_directory);
+    let mut published_members = support::snapshot_tree(&output_directory);
+    assert_eq!(
+        published_members
+            .remove(std::path::Path::new(
+                "recorded-family-v2-qualification.json"
+            ))
+            .unwrap(),
+        recorded_bytes,
+        "record-qualification wrote bytes other than its one selected evidence file"
+    );
+    // The shared durable publisher intentionally retains one empty advisory
+    // lock. It is output coordination, never a qualification/inventory member.
+    assert_eq!(published_members.len(), 1);
+    assert!(published_members.iter().all(|(name, bytes)| {
+        bytes.is_empty()
+            && name
+                .to_str()
+                .is_some_and(aros_common::publication::is_publication_journal_lock_name)
+    }));
+    assert!(
+        transport_after_record == transport_before_record,
+        "record-qualification changed existing transport evidence"
+    );
+
+    // Feed the actual recorded file and its separately measured raw digest to
+    // the complete verifier; the producer's claim file must survive that join.
+    let verify_prepared = qualification_command(
+        &fixture,
+        &fixture.selection,
+        "verify-recorded-qualification",
+        &recorded_evidence,
+        Some(&recorded_sha256),
+    );
+    let mut verify_arguments = command_arguments(&verify_prepared);
+    let evidence_position = argument_position(&verify_arguments, "--qualification-evidence");
+    verify_arguments[evidence_position + 1] = recorded_path.as_os_str().to_os_string();
+    let evidence_sha256_position = argument_position(&verify_arguments, "--qualification-sha256");
+    verify_arguments[evidence_sha256_position + 1] =
+        std::ffi::OsString::from(recorded_sha256.as_str());
+    let mut verify = command_from_arguments(verify_arguments);
+    let release_before_verify = support::snapshot_tree(&fixture.release_directory);
+    let transport_before_verify = support::snapshot_tree(&fixture.transport_directory);
+    let verify_output = verify.output().unwrap();
+    assert!(
+        verify_output.status.success(),
+        "recorded qualification failed its measured verifier join:\n{}",
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+    let verify_result: Value = serde_json::from_slice(&verify_output.stdout).unwrap();
+    assert_eq!(verify_result["operation"], "verify-qualification");
+    assert_eq!(verify_result["assurance"], "byte-consistency-only");
+    assert_eq!(
+        verify_result["qualification_sha256"],
+        recorded_sha256.as_str()
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before_verify,
+        "verification of recorded qualification mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before_verify,
+        "verification of recorded qualification mutated transport evidence"
+    );
+
+    let missing_attempt_path = fixture
+        .transport_directory
+        .join("record-missing-attempt.json");
+    let missing_attempt = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "missing-attempt",
+        &missing_attempt_path,
+    );
+    let mut arguments = command_arguments(&missing_attempt);
+    let attempt_position = argument_position(&arguments, "--source-run-attempt");
+    arguments.drain(attempt_position..=attempt_position + 1);
+    assert_record_failure_is_read_only(
+        &fixture,
+        command_from_arguments(arguments),
+        &missing_attempt_path,
+        "--source-run-attempt",
+        None,
+    );
+
+    let v1_collision_path = fixture.transport_directory.join("record-v1-collision.json");
+    let v1_collision = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "v1-flag-collision",
+        &v1_collision_path,
+    );
+    let mut arguments = command_arguments(&v1_collision);
+    arguments.push(std::ffi::OsString::from("--source-lock-filename"));
+    arguments.push(std::ffi::OsString::from("source-lock.json"));
+    assert_record_failure_is_read_only(
+        &fixture,
+        command_from_arguments(arguments),
+        &v1_collision_path,
+        "--source-lock-filename",
+        None,
+    );
+
+    let wrong_producer_path = fixture
+        .transport_directory
+        .join("record-wrong-producer.json");
+    let wrong_producer = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "wrong-source-producer",
+        &wrong_producer_path,
+    );
+    let mut arguments = command_arguments(&wrong_producer);
+    let producer_position = argument_position(&arguments, "--source-tag-commit");
+    arguments[producer_position + 1] = std::ffi::OsString::from("44".repeat(20));
+    assert_record_failure_is_read_only(
+        &fixture,
+        command_from_arguments(arguments),
+        &wrong_producer_path,
+        "qualification recording source producer differs from the selected index",
+        None,
+    );
+
+    let invalid_time_path = fixture.transport_directory.join("record-invalid-time.json");
+    let invalid_time = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "invalid-time-order",
+        &invalid_time_path,
+    );
+    let mut arguments = command_arguments(&invalid_time);
+    let expires_position = argument_position(&arguments, "--expires-at");
+    arguments[expires_position + 1] = std::ffi::OsString::from("99");
+    assert_record_failure_is_read_only(
+        &fixture,
+        command_from_arguments(arguments),
+        &invalid_time_path,
+        "qualification recording has invalid creation, expiry or policy time",
+        None,
+    );
+
+    let asset = asset_for_host(&fixture, "linux-x86_64");
+    let changed_measurement = PathBuf::from(
+        fixture.selection["lanes"][&asset]["builds"][0]["measurement"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let original_measurement_bytes = fs::read(&changed_measurement).unwrap();
+    let mut changed_bytes = original_measurement_bytes.clone();
+    changed_bytes.push(b'X');
+    fs::write(&changed_measurement, changed_bytes).unwrap();
+    let changed_report_path = fixture
+        .transport_directory
+        .join("record-changed-measurement.json");
+    let changed_report = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "changed-measurement",
+        &changed_report_path,
+    );
+    assert_record_failure_is_read_only(
+        &fixture,
+        changed_report,
+        &changed_report_path,
+        "portable package measurement differs from selected raw bytes",
+        None,
+    );
+    fs::write(&changed_measurement, original_measurement_bytes).unwrap();
+
+    let mut changed_log_selection = fixture.selection.clone();
+    let _changed_log_root = copy_compatibility_for_mutation(
+        &fixture,
+        &mut changed_log_selection,
+        &asset,
+        "record-log",
+        "cmake-consumer.stdout.log",
+    );
+    let changed_log_path = fixture.transport_directory.join("record-changed-log.json");
+    let changed_log = record_qualification_command(
+        &fixture,
+        &changed_log_selection,
+        "changed-log",
+        &changed_log_path,
+    );
+    assert_record_failure_is_read_only(
+        &fixture,
+        changed_log,
+        &changed_log_path,
+        "native compatibility retained command log bytes differ from their report hashes",
+        None,
+    );
+
+    let protected_asset = asset_for_host(&fixture, "linux-x86_64");
+    let protected_root = PathBuf::from(
+        fixture.selection["lanes"][&protected_asset]["compatibility"]["directory"]
+            .as_str()
+            .unwrap(),
+    );
+    let protected_output = protected_root.join("qualification-protected-output.json");
+    let protected_command = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "protected-output",
+        &protected_output,
+    );
+    assert_record_failure_is_read_only(
+        &fixture,
+        protected_command,
+        &protected_output,
+        "qualification output must remain outside all selected release, package, compatibility and input paths",
+        None,
+    );
+
+    let existing_output = fixture
+        .transport_directory
+        .join("record-existing-output.json");
+    let existing_bytes = b"sentinel qualification output must be preserved\n";
+    fs::write(&existing_output, existing_bytes).unwrap();
+    let existing_command = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "existing-output",
+        &existing_output,
+    );
+    assert_record_failure_is_read_only(
+        &fixture,
+        existing_command,
+        &existing_output,
+        "qualification output already exists or is unavailable",
+        Some(existing_bytes),
+    );
+
+    let symlink_parent = fixture
+        .transport_directory
+        .join("record-output-parent-symlink");
+    symlink(&fixture.release_directory, &symlink_parent).unwrap();
+    let symlink_output = symlink_parent.join("record-through-symlink.json");
+    let symlink_command = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "symlink-parent",
+        &symlink_output,
+    );
+    assert_record_failure_is_read_only(
+        &fixture,
+        symlink_command,
+        &symlink_output,
+        "qualification output parent must have no symlink components",
+        None,
     );
 }

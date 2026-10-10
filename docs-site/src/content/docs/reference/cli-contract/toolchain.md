@@ -153,13 +153,22 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer recipe` | output | --output | — | required | 1 |  |  | — |  |
 | `aros toolchain producer recipe` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer record-qualification` | release_dir | --release-dir | — | required | 1 |  |  | — |  |
-| `aros toolchain producer record-qualification` | source_lock_filename | --source-lock-filename | — | required | 1 |  |  | — |  |
-| `aros toolchain producer record-qualification` | lifecycle_reports_dir | --lifecycle-reports-dir | — | required | 1 |  |  | — |  |
-| `aros toolchain producer record-qualification` | comparison_reports_dir | --comparison-reports-dir | — | required | 1 |  |  | — |  |
-| `aros toolchain producer record-qualification` | compatibility_reports_dir | --compatibility-reports-dir | — | required | 1 |  |  | — |  |
+| `aros toolchain producer record-qualification` | release_format | --release-format | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
+| `aros toolchain producer record-qualification` | source_lock_filename | --source-lock-filename | — | optional | 1 |  |  | — | inputs_sha256, index_sha256, selection, selection_sha256, subject_manifest, subject_manifest_sha256, source_run_attempt, forbidden_prefixes |
+| `aros toolchain producer record-qualification` | lifecycle_reports_dir | --lifecycle-reports-dir | — | optional | 1 |  |  | — | selection, inputs_sha256, source_run_attempt |
+| `aros toolchain producer record-qualification` | comparison_reports_dir | --comparison-reports-dir | — | optional | 1 |  |  | — | selection, inputs_sha256, source_run_attempt |
+| `aros toolchain producer record-qualification` | compatibility_reports_dir | --compatibility-reports-dir | — | optional | 1 |  |  | — | selection, inputs_sha256, source_run_attempt |
+| `aros toolchain producer record-qualification` | inputs_sha256 | --inputs-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer record-qualification` | index_sha256 | --index-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer record-qualification` | selection | --selection | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer record-qualification` | selection_sha256 | --selection-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer record-qualification` | subject_manifest | --subject-manifest | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer record-qualification` | subject_manifest_sha256 | --subject-manifest-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer record-qualification` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer record-qualification` | source_repository | --source-repository | — | required | 1 |  |  | — |  |
 | `aros toolchain producer record-qualification` | source_workflow | --source-workflow | — | required | 1 |  |  | — |  |
 | `aros toolchain producer record-qualification` | source_run_id | --source-run-id | — | required | 1 |  |  | — |  |
+| `aros toolchain producer record-qualification` | source_run_attempt | --source-run-attempt | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer record-qualification` | source_tag | --source-tag | — | required | 1 |  |  | — |  |
 | `aros toolchain producer record-qualification` | source_tag_object | --source-tag-object | — | required | 1 |  |  | — |  |
 | `aros toolchain producer record-qualification` | source_tag_commit | --source-tag-commit | — | required | 1 |  |  | — |  |
