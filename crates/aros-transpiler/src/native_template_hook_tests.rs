@@ -3,6 +3,7 @@ use crate::ast::MetaTargetRule;
 use crate::genmf_projection::{expand_bytes, Limits as GenmfLimits};
 use crate::metamake_owner_graph::{Limits as MetaMakeLimits, MetaMakeOwnerGraph};
 use crate::{DependencyGraph, TargetContext};
+use aros_common::native_build_contract::{NativeMetaAbsence, NativeOptionalMetaDependency};
 use aros_common::{Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -491,19 +492,108 @@ fn bind(
     diagnostics: &[Diagnostic],
     meta_edge_origins: &BTreeMap<(String, String), BTreeSet<String>>,
 ) -> Result<super::NativeMetaSemanticsEvidence, String> {
-    let declarations = [];
+    bind_with_declarations(fixture, graph, roots, diagnostics, meta_edge_origins, &[])
+}
+
+fn bind_with_declarations(
+    fixture: &Fixture,
+    graph: &mut DependencyGraph,
+    roots: &[String],
+    diagnostics: &[Diagnostic],
+    meta_edge_origins: &BTreeMap<(String, String), BTreeSet<String>>,
+    declarations: &[NativeOptionalMetaDependency],
+) -> Result<super::NativeMetaSemanticsEvidence, String> {
     fixture.projection.bind_native_meta_semantics(
         fixture.root.path(),
         graph,
         NativeMetaSemanticsSelection {
             context: &fixture.context,
             roots,
-            declarations: &declarations,
+            declarations,
             diagnostics,
             meta_edge_origins,
         },
         &mut BTreeMap::new(),
     )
+}
+
+#[test]
+fn selector_contract_only_omits_source_declared_virtual_dependencies() {
+    for (source, expected_optional) in [
+        ("#MM- required : absent-$(ARCH)\n", true),
+        ("#MM required : absent-$(ARCH)\n", false),
+        (
+            "#MM- required : absent-$(ARCH)\n#MM required : absent-$(ARCH)\n",
+            false,
+        ),
+    ] {
+        let fixture = fixture_from_text(&[], source, "");
+        let (mut graph, roots) = request_graph(vec!["required".into()]);
+        // Physical #MM targets are supplied by the native parser, not imported
+        // as virtual aliases. Model that production path and its exact origin.
+        graph.add_meta_rule(MetaTargetRule {
+            name: "required".into(),
+            dependencies: vec!["absent-${AROS_TARGET_PLATFORM}".into()],
+        });
+        let origins = BTreeMap::from([(
+            ("required".into(), "absent-esp32p4".into()),
+            BTreeSet::from([RECIPE.into()]),
+        )]);
+        let declarations = [NativeOptionalMetaDependency {
+            recipe: RECIPE.into(),
+            target: "required".into(),
+            dependency: "absent-${AROS_TARGET_PLATFORM}".into(),
+            absence: NativeMetaAbsence::Selector,
+        }];
+        let result =
+            bind_with_declarations(&fixture, &mut graph, &roots, &[], &origins, &declarations);
+        if expected_optional {
+            let evidence = result.expect("source-declared virtual selector is valid");
+            assert_eq!(evidence.architecture_hook_omissions.len(), 1);
+            assert!(!missing(&graph, &fixture, &roots, &[]).contains("absent-esp32p4"));
+        } else {
+            let error = result.expect_err("contract must not reclassify a mandatory #MM edge");
+            assert!(error.contains("mandatory source dependency"), "{error}");
+            assert!(missing(&graph, &fixture, &roots, &[]).contains("absent-esp32p4"));
+        }
+    }
+}
+
+#[test]
+fn literal_mandatory_collision_cannot_cut_a_virtual_selectors_missing_child() {
+    let fixture = fixture_from_text(
+        &[],
+        concat!(
+            "#MM- required : branch-$(ARCH)\n",
+            "#MM required : branch-esp32p4\n",
+            "#MM- branch-$(ARCH) : absent-$(CPU)\n",
+        ),
+        "",
+    );
+    let (mut graph, roots) = request_graph(vec!["required".into()]);
+    graph.add_meta_rule(MetaTargetRule {
+        name: "required".into(),
+        dependencies: vec![
+            "branch-${AROS_TARGET_PLATFORM}".into(),
+            "branch-esp32p4".into(),
+        ],
+    });
+    let origins = BTreeMap::from([(
+        ("required".into(), "branch-esp32p4".into()),
+        BTreeSet::from([RECIPE.into()]),
+    )]);
+    let declarations = [NativeOptionalMetaDependency {
+        recipe: RECIPE.into(),
+        target: "required".into(),
+        dependency: "branch-${AROS_TARGET_PLATFORM}".into(),
+        absence: NativeMetaAbsence::Selector,
+    }];
+    let evidence =
+        bind_with_declarations(&fixture, &mut graph, &roots, &[], &origins, &declarations)
+            .expect("the virtual declaration is exact; a literal collision vetoes omissions");
+    assert!(evidence.architecture_hook_omissions.is_empty());
+    assert!(graph.meta_targets["branch-esp32p4"].contains("absent-riscv"));
+    assert!(missing(&graph, &fixture, &roots, &[]).contains("absent-riscv"));
 }
 
 fn request_graph(dependencies: Vec<String>) -> (DependencyGraph, Vec<String>) {

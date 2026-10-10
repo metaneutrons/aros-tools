@@ -340,10 +340,17 @@ impl NativeOwnerProjection {
                 charge(&mut work)?;
                 for source_edge in &declaration.dependencies {
                     charge(&mut work)?;
-                    matches |= self.owners.get(&declaration.file) == Some(&edge.recipe)
+                    let exact = self.owners.get(&declaration.file) == Some(&edge.recipe)
                         && source_edge.concrete == dependency
                         && architecture_expression(&source_edge.raw_expression).as_deref()
                             == Some(edge.dependency.as_str());
+                    if exact && (!declaration.virtual_target || declaration.claims_make_owner) {
+                        return Err(format!(
+                            "selector contract {} -> {} cannot reclassify a mandatory source dependency in {}",
+                            edge.target, edge.dependency, edge.recipe
+                        ));
+                    }
+                    matches |= exact;
                 }
             }
             if !matches || !native_meta_edges.contains(&(edge.target.clone(), dependency.clone())) {
@@ -418,6 +425,7 @@ impl NativeOwnerProjection {
                         continue;
                     }
                     claims += 1;
+                    justified &= declaration.virtual_target && !declaration.claims_make_owner;
                     let recipe = self.bound_recipe(&declaration.file)?;
                     if let Some(expression) = architecture_expression(&source_edge.raw_expression) {
                         justified &= evidence.verified_selector_contracts.contains(
@@ -504,7 +512,8 @@ impl NativeOwnerProjection {
                     // borrow another file's optional selector proof.
                     if expression.is_none()
                         || (seed && !exact_seed)
-                        || (!seed && (!declaration.virtual_target || declaration.claims_make_owner))
+                        || !declaration.virtual_target
+                        || declaration.claims_make_owner
                     {
                         justified = false;
                     }
