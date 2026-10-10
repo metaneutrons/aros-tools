@@ -48,6 +48,52 @@ fn bounded_regular_reader_rejects_an_oversized_control_document() {
 
 #[cfg(unix)]
 #[test]
+fn bounded_regular_digest_preserves_bytes_and_rejects_unsafe_inputs() {
+    let temporary = tempfile::tempdir().unwrap();
+    let document = temporary.path().join("tool");
+    std::fs::write(&document, b"12345").unwrap();
+    let (_, measured) = measure_regular_file_digest_bounded(&document, 5).unwrap();
+    assert_eq!(measured.size, 5);
+    assert_eq!(measured.digest, sha256_bytes(b"12345"));
+    assert!(measure_regular_file_digest_bounded(&document, 4).is_err());
+    assert!(measure_regular_file_digest_bounded(&temporary.path().join("missing"), 5).is_err());
+    assert!(measure_regular_file_digest_bounded(temporary.path(), 5).is_err());
+    let link = temporary.path().join("alias");
+    std::os::unix::fs::symlink(&document, &link).unwrap();
+    assert!(measure_regular_file_digest_bounded(&link, 5).is_err());
+    assert_eq!(std::fs::read(document).unwrap(), b"12345");
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_regular_digest_rejects_in_place_writes_and_path_replacement() {
+    let temporary = tempfile::tempdir().unwrap();
+    let document = temporary.path().join("tool");
+    for replace in [false, true] {
+        std::fs::write(&document, b"before").unwrap();
+        let result = at_boundary(
+            "digest-before-final-stat",
+            |_| true,
+            move |path| {
+                if replace {
+                    let replacement = path.with_extension("new");
+                    std::fs::write(&replacement, b"before").unwrap();
+                    std::fs::rename(&replacement, path).unwrap();
+                } else {
+                    std::fs::write(path, b"changed").unwrap();
+                }
+            },
+            || measure_regular_file_digest_bounded(&document, 16),
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("changed while hashing"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn nofollow_regular_readers_refuse_a_fifo_without_waiting_for_a_writer() {
     let temporary = tempfile::tempdir().unwrap();
     let fifo = temporary.path().join("raced-input.csv");
@@ -64,7 +110,7 @@ fn nofollow_regular_readers_refuse_a_fifo_without_waiting_for_a_writer() {
     );
     // A child deadline makes regression safe: removing NONBLOCK must fail
     // this test instead of permanently hanging the test harness.
-    let outputs = ["open", "bounded", "unbounded"]
+    let outputs = ["open", "bounded", "unbounded", "digest"]
         .into_iter()
         .map(|reader| {
             let mut child = std::process::Command::new(std::env::current_exe().unwrap());
@@ -108,6 +154,7 @@ fn nofollow_fifo_probe_child() {
         "open" => open_regular_file_nofollow(Path::new(&path)).unwrap_err(),
         "bounded" => measure_regular_file_bounded(Path::new(&path), 1024).unwrap_err(),
         "unbounded" => measure_regular_file(Path::new(&path)).unwrap_err(),
+        "digest" => measure_regular_file_digest_bounded(Path::new(&path), 1024).unwrap_err(),
         reader => panic!("unknown regular-file reader probe: {reader}"),
     };
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);

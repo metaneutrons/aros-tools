@@ -82,6 +82,35 @@ foreach(probe unregistered duplicate flags escape collision file-collision no-co
         message(FATAL_ERROR "archive refusal probe ${probe} failed: ${log}")
     endif()
 endforeach()
+foreach(_probe_and_error IN ITEMS
+        "build-contract-changed|contract changed after validation"
+        "build-bool-without-validation|source validation must run first"
+        "consumer-bool-without-validation|requires fresh validation in this configure"
+        "consumer-contract-changed|contract changed after validation"
+        "consumer-selector-changed|configuration changed after validation"
+        "consumer-build-coexistence|build and consumer selections")
+    string(REPLACE "|" ";" _parts "${_probe_and_error}")
+    list(GET _parts 0 _consumer_probe)
+    list(GET _parts 1 _expected_error)
+    configure("${root}/${_consumer_probe}" "${_consumer_probe}")
+    if(result STREQUAL "0" OR NOT log MATCHES "${_expected_error}")
+        message(FATAL_ERROR
+            "consumer source-selection refusal probe ${_consumer_probe} failed: ${log}")
+    endif()
+endforeach()
+configure("${root}/consumer-archive" consumer-archive)
+if(NOT result STREQUAL "0")
+    message(FATAL_ERROR "consumer source archive configure failed: ${log}")
+endif()
+build_archive("${root}/consumer-archive")
+execute_process(
+    COMMAND "${AR}" t "${root}/consumer-archive/SYS/Developer/lib/libsource.a"
+    RESULT_VARIABLE result OUTPUT_VARIABLE members)
+string(REPLACE "__.SYMDEF SORTED\n" "" members "${members}")
+if(NOT result STREQUAL "0" OR NOT members STREQUAL "two.o\none.o\n")
+    message(FATAL_ERROR
+        "consumer-selected archive lost source member order: ${members}")
+endif()
 configure("${root}/linked" link-consumer)
 if(NOT result STREQUAL "0")
     message(FATAL_ERROR "archive consumer configure failed: ${log}")

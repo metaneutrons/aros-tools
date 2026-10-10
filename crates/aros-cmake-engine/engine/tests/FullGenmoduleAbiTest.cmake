@@ -123,6 +123,73 @@ else()
     endif()
 endif()
 
+function(_exercise_publication_roots _mode)
+    set(_probe_build "${_root}/publication-root-probes/${_mode}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_probe_build}" -G Ninja
+            "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+            "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+            "-DAROS_HOST_GENMODULE=${_host_genmodule}"
+            "-DAROS_PUBLICATION_ROOT_PROBE=${_mode}"
+            ${AROS_TEST_TOOL_ARGS}
+        RESULT_VARIABLE _configure_result
+        OUTPUT_VARIABLE _configure_stdout
+        ERROR_VARIABLE _configure_stderr
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT})
+    if(NOT _configure_result EQUAL 0)
+        message(FATAL_ERROR
+            "${_mode} public-root fixture configure failed (${_configure_result})\n"
+            "${_configure_stdout}\n${_configure_stderr}")
+    endif()
+
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" --build "${_probe_build}"
+            --target publication-root-probe-includes-generated
+        RESULT_VARIABLE _build_result
+        OUTPUT_VARIABLE _build_stdout
+        ERROR_VARIABLE _build_stderr
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT})
+    if(NOT _build_result EQUAL 0)
+        message(FATAL_ERROR
+            "${_mode} public-root Ninja build failed (${_build_result})\n"
+            "${_build_stdout}\n${_build_stderr}")
+    endif()
+
+    set(_public_root "${_probe_build}/publication-roots/public")
+    set(_geninc_root "${_probe_build}/publication-roots/geninc")
+    foreach(_root "${_public_root}" "${_geninc_root}")
+        foreach(_relative
+                "clib/tiff_protos.h" "inline/tiff.h" "defines/tiff.h"
+                "defines/tiff_LVO.h" "proto/tiff.h")
+            if(NOT EXISTS "${_root}/${_relative}" OR
+               IS_DIRECTORY "${_root}/${_relative}")
+                message(FATAL_ERROR
+                    "${_mode} public-root build omitted ${_root}/${_relative}")
+            endif()
+        endforeach()
+    endforeach()
+
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" --build "${_probe_build}"
+            --target publication-root-probe-includes-generated
+        RESULT_VARIABLE _noop_result
+        OUTPUT_VARIABLE _noop_stdout
+        ERROR_VARIABLE _noop_stderr
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT})
+    if(NOT _noop_result EQUAL 0 OR
+       NOT _noop_stdout MATCHES "no work to do")
+        message(FATAL_ERROR
+            "${_mode} public-root build was not incremental/no-op (${_noop_result})\n"
+            "${_noop_stdout}\n${_noop_stderr}")
+    endif()
+endfunction()
+
+# Ninja rejects duplicate outputs on one edge. Exercise both an exactly
+# coincident SDK/Developer root and a lexical alias, while requiring the
+# distinct generated-include root to retain its own five outputs.
+_exercise_publication_roots(coincident)
+_exercise_publication_roots(lexical-alias)
+
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_build}" -G Ninja
         "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
@@ -204,6 +271,7 @@ endforeach()
 _configure_archive_probe("case-variant-private" accept "")
 _configure_archive_probe("case-variant-sdk" reject "already owned by")
 _configure_archive_probe("abi-without-fd" accept "")
+_configure_archive_probe("positive-consumer-suppressed" accept "")
 
 # All three valid native suppression modes retain the runtime and ABI support
 # graph. The all-suppressed case is built below to prove actual headers, FD,

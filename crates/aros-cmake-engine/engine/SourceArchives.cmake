@@ -1,5 +1,6 @@
 include_guard(GLOBAL)
 include("${CMAKE_CURRENT_LIST_DIR}/LiteralObjects.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/NativeConsumerContract.cmake")
 
 # A source-proven archive rule, with a finite ordered list of registered object
 # producers. There is deliberately no filesystem glob or implicit AR flag.
@@ -23,7 +24,8 @@ function(aros_source_archive)
             message(FATAL_ERROR "Source archive: duplicate keyword ${keyword}")
         endif()
     endforeach()
-    if(NOT AROS_NATIVE_BUILD_CONTRACT_VALIDATED OR NOT AROS_TOOLCHAIN STREQUAL "gnu")
+    _aros_native_source_selection_validated(_source_selected)
+    if(NOT _source_selected OR NOT AROS_TOOLCHAIN STREQUAL "gnu")
         message(FATAL_ERROR "Source archive: validated native GNU contract required")
     endif()
     if(CMAKE_CONFIGURATION_TYPES)

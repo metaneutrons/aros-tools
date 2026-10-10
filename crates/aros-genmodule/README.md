@@ -17,9 +17,14 @@ A complete generator run is one durable publication transaction. The shared
 publisher serializes writers, retains existing files as sibling inode backups,
 records the complete intent in an fsynced journal, and recovers an interrupted
 run before scanning the next one. `--output-inc` selects a stable writable build
-root: `<build>/SDK/include` uses `<build>`, while `<build>/include` uses its
-parent. Optional `--output-gen`, `--output-linklib`, and `--output-libbases`
-paths must remain below that root and never change the journal/lock namespace.
+root: `<build>/SDK/include` and `<build>/include` both use `<build>`. Pass
+`--output-root <build>` when a target's include path does not fit
+that layout, such as `<build>/SYS/Developer/include`. The declared root must be
+a normalized path other than the filesystem root. The include directory and
+every optional `--output-gen`, `--output-linklib`, and `--output-libbases`
+target must be strictly below it. Without `--output-root`, the inferred
+`--output-inc` behavior remains in effect. Optional outputs never change the
+journal/lock namespace.
 Generated path components use a portable case-folded namespace; configuration
 names cannot traverse that root and every explicit `conffile`/`confoverride`
 source must canonicalize below the scan root.

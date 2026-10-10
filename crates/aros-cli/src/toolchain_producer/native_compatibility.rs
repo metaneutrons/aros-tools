@@ -20,9 +20,10 @@ use aros_toolchain::source_cache;
 use aros_toolchain::source_cache_request::SourceCacheRequest;
 use clap::Args;
 
+use super::compatibility_export::{self, PublishedCompatibilityExport};
 use super::{
     native_error, package_context, print_json, read_regular_input, PackageContext,
-    PackageContextArgs, ResultFormat,
+    PackageContextArgs, PackageFormatArg, ResultFormat,
 };
 
 /// Inputs for one complete native six-phase package compatibility execution.
@@ -33,6 +34,9 @@ pub(super) struct CompatibilityArgs {
     /// Complete verified package set to extract twice independently
     #[arg(long)]
     package_dir: PathBuf,
+    /// Explicit package format; omitted keeps LLVM v1 and GNU family-v2 defaults
+    #[arg(long, value_enum)]
+    package_format: Option<PackageFormatArg>,
     /// Absent first relocation root for the CMake consumer
     #[arg(long)]
     first_root: PathBuf,
@@ -42,6 +46,9 @@ pub(super) struct CompatibilityArgs {
     /// Engine-free source directory used for the tools-owned CMake consumer
     #[arg(long)]
     source_dir: PathBuf,
+    /// Explicit source-owned preset from aros-targets.toml (required for GNU)
+    #[arg(long)]
+    source_preset: Option<String>,
     /// Existing work root where the embedded engine receives one fresh leaf
     #[arg(long)]
     engine_work_dir: PathBuf,
@@ -66,7 +73,8 @@ pub(super) struct CompatibilityArgs {
     /// Compatibility-ports-v2 lock selecting the exact upstream source inputs
     #[arg(long)]
     ports_lock: PathBuf,
-    /// Prepared direct cache containing the ports-lock-owned source inputs
+    /// Explicit absolute prepared cache containing ports-lock inputs and any source-declared
+    /// raw host-generator inputs, each verified by its own size/hash contract
     #[arg(long)]
     ports_cache_dir: PathBuf,
     /// Absent private directory materialized for upstream --with-portssources
@@ -97,6 +105,10 @@ pub(super) struct CompatibilityArgs {
     /// Absent durable phase-report directory
     #[arg(long)]
     reports_dir: PathBuf,
+    /// Absent absolute directory for inputs.json and evidence/ after complete
+    /// family-v2 execution; local byte evidence only, not authenticated origin
+    #[arg(long)]
+    evidence_dir: Option<PathBuf>,
     /// Positive explicit Make parallelism
     #[arg(long, value_parser = parse_jobs)]
     jobs: usize,
@@ -111,7 +123,12 @@ pub(super) struct CompatibilityArgs {
 /// Execute the complete native compatibility contract for one package lane.
 pub(super) async fn compatibility(args: CompatibilityArgs) -> miette::Result<()> {
     let format = args.format;
+    preflight_export(&args)?;
+    if let Some(format) = args.package_format {
+        validate_export_format(args.evidence_dir.is_some(), format.into())?;
+    }
     let context = package_context(args.context.clone())?;
+    let package_format = resolve_package_format(&context, &args)?;
     let host_tools = parse_host_tools(&args.host_tools)?;
     let ports_lock_bytes = read_regular_input(&args.ports_lock, "compatibility ports lock")?;
     let ports_lock =
@@ -123,9 +140,16 @@ pub(super) async fn compatibility(args: CompatibilityArgs) -> miette::Result<()>
     let cancellation = CancellationToken::default();
     let worker_token = cancellation.clone();
     let mut worker = tokio::task::spawn_blocking(move || {
-        execute_compatibility(context, args, host_tools, ports_lock, &worker_token)
+        execute_compatibility(
+            context,
+            args,
+            host_tools,
+            ports_lock,
+            package_format,
+            &worker_token,
+        )
     });
-    let report = tokio::select! {
+    let result = tokio::select! {
         result = &mut worker => result.map_err(|_| miette::miette!("native compatibility worker terminated unexpectedly"))?,
         signal = tokio::signal::ctrl_c() => {
             if signal.is_ok() {
@@ -133,8 +157,8 @@ pub(super) async fn compatibility(args: CompatibilityArgs) -> miette::Result<()>
             }
             (&mut worker).await.map_err(|_| miette::miette!("native compatibility worker terminated unexpectedly"))?
         }
-    }
-    .map_err(|error| native_error(&error))?;
+    }?;
+    let report = &result.report;
     let phases = report
         .probes
         .reports
@@ -148,21 +172,109 @@ pub(super) async fn compatibility(args: CompatibilityArgs) -> miette::Result<()>
         .cloned()
         .collect::<Vec<_>>();
     match format {
-        ResultFormat::Human => aros_common::outputln!(
-            "Native compatibility: {} phases, {} standalone target(s)\nReceipt: {}\nSHA-256: {}",
-            phases.len(),
-            standalone_targets.len(),
-            report.receipt.path.display(),
-            report.receipt.sha256,
-        ),
-        ResultFormat::Json => print_json(&serde_json::json!({
-            "schema": "aros-toolchain-producer-stage-v1",
-            "operation": "compatibility",
-            "phases": phases,
-            "standalone_targets": standalone_targets,
-            "receipt": report.receipt.path,
-            "receipt_sha256": report.receipt.sha256,
-        }))?,
+        ResultFormat::Human => {
+            aros_common::outputln!(
+                "Native compatibility: {} phases, {} standalone target(s)\nReceipt: {}\nSHA-256: {}",
+                phases.len(), standalone_targets.len(), report.receipt.path.display(), report.receipt.sha256,
+            );
+            if let Some(export) = &result.export {
+                aros_common::outputln!(
+                    "Local evidence: {}\nInputs SHA-256: {}\nEvidence manifest SHA-256: {}",
+                    export.directory.display(),
+                    export.inputs_sha256,
+                    export.manifest_sha256,
+                );
+            }
+        }
+        ResultFormat::Json => {
+            let mut document = serde_json::json!({
+                "schema": "aros-toolchain-producer-stage-v1",
+                "operation": "compatibility",
+                "phases": phases,
+                "standalone_targets": standalone_targets,
+                "receipt": report.receipt.path,
+                "receipt_sha256": report.receipt.sha256,
+            });
+            if let Some(export) = &result.export {
+                document["local_evidence"] = serde_json::json!({
+                    "directory": export.directory,
+                    "inputs_sha256": export.inputs_sha256,
+                    "manifest_sha256": export.manifest_sha256,
+                });
+            }
+            print_json(&document)?;
+        }
+    }
+    Ok(())
+}
+
+struct CompatibilityResult {
+    report: compatibility::NativeCompatibilityReport,
+    export: Option<PublishedCompatibilityExport>,
+}
+
+fn preflight_export(args: &CompatibilityArgs) -> miette::Result<()> {
+    let Some(destination) = &args.evidence_dir else {
+        return Ok(());
+    };
+    compatibility_export::preflight(
+        destination,
+        &[
+            &args.context.recipe,
+            &args.context.source_lock,
+            &args.context.profiles,
+            &args.context.build_environment,
+            &args.package_dir,
+            &args.first_root,
+            &args.second_root,
+            &args.source_dir,
+            &args.engine_work_dir,
+            &args.helpers_dir,
+            &args.cmake_program,
+            &args.ninja_program,
+            &args.upstream_source_dir,
+            &args.upstream_build_dir,
+            &args.python_cache_dir,
+            &args.ports_lock,
+            &args.ports_cache_dir,
+            &args.ports_sources_dir,
+            &args.python_environment_dir,
+            &args.host_tools_dir,
+            &args.cmake_build_dir,
+            &args.c_fixture,
+            &args.cxx_fixture,
+            &args.standalone_output_dir,
+            &args.reports_dir,
+        ],
+    )?;
+    for entry in &args.host_tools {
+        if let Some((_, path)) = entry.split_once('=') {
+            compatibility_export::preflight(destination, &[std::path::Path::new(path)])?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_package_format(
+    context: &PackageContext,
+    args: &CompatibilityArgs,
+) -> miette::Result<aros_toolchain::package::PackageFormat> {
+    let format = args.package_format.map_or_else(
+        || aros_toolchain::package::PackageFormat::default_for(context.source_lock.family()),
+        Into::into,
+    );
+    validate_export_format(args.evidence_dir.is_some(), format)?;
+    Ok(format)
+}
+
+fn validate_export_format(
+    export: bool,
+    format: aros_toolchain::package::PackageFormat,
+) -> miette::Result<()> {
+    if export && format != aros_toolchain::package::PackageFormat::CompilerFamilyV2 {
+        return Err(miette::miette!(
+            "compatibility --evidence-dir requires --package-format family-v2; legacy-v1 cannot export portable evidence"
+        ));
     }
     Ok(())
 }
@@ -172,8 +284,10 @@ fn execute_compatibility(
     args: CompatibilityArgs,
     host_tool_entries: Vec<CompatibilityHostTool>,
     ports_lock: CompatibilityPortsLock,
+    package_format: aros_toolchain::package::PackageFormat,
     cancellation: &CancellationToken,
-) -> Result<compatibility::NativeCompatibilityReport, aros_toolchain::ContractError> {
+) -> miette::Result<CompatibilityResult> {
+    let package_source_commit = context.recipe.source().0.clone();
     let verification = package_verify::PackageVerificationRequest {
         package_dir: args.package_dir,
         release_id: context.release_id,
@@ -184,59 +298,94 @@ fn execute_compatibility(
         build_environment: context.build_environment,
         forbidden_prefixes: context.forbidden_prefixes,
     };
-    let relocation = compatibility::extract_two_roots(&TwoRootRelocationRequest {
-        verification: verification.clone(),
-        first_root: args.first_root,
-        second_root: args.second_root,
-    })?;
+    let relocation = compatibility::extract_two_roots_with_format(
+        &TwoRootRelocationRequest {
+            verification: verification.clone(),
+            first_root: args.first_root,
+            second_root: args.second_root,
+        },
+        package_format,
+    )
+    .map_err(|error| native_error(&error))?;
     let preparation = compatibility::prepare(&CompatibilityPreparationRequest {
         source_root: args.source_dir,
         work_root: args.engine_work_dir,
         helpers_root: args.helpers_dir,
-    })?;
+    })
+    .map_err(|error| native_error(&error))?;
     let python = PythonEnvironment::prepare(
         &verification.source_lock,
         &args.python_cache_dir,
         &args.python_environment_dir,
-    )?;
+    )
+    .map_err(|error| native_error(&error))?;
     let ports_sources = compatibility_ports::materialize(
         &args.ports_cache_dir,
         &ports_lock,
         &context.upstream_commit,
         verification.profile.name(),
         &args.ports_sources_dir,
-    )?;
+    )
+    .map_err(|error| native_error(&error))?;
     drop(ports_lock);
     let host_tools = compatibility::prepare_host_tool_closure(&HostToolClosureRequest {
         output_root: args.host_tools_dir,
         tools: host_tool_entries,
-    })?;
-    compatibility::execute_native_compatibility(
-        &NativeCompatibilityRequest {
-            preparation,
-            relocation,
-            profile: verification.profile,
-            cmake_program: args.cmake_program,
-            ninja_program: args.ninja_program,
-            cmake_build_root: args.cmake_build_dir,
-            upstream_source_root: args.upstream_source_dir,
-            upstream_source_commit: context.upstream_commit,
-            upstream_build_root: args.upstream_build_dir,
-            host_python: python,
-            host_tools,
-            ports_sources,
-            host: context.host,
-            make_jobs: args.jobs,
-            standalone_fixtures: StandaloneFixtures {
-                c: args.c_fixture,
-                cxx: args.cxx_fixture,
-            },
-            standalone_output_root: args.standalone_output_dir,
-            reports_root: args.reports_dir,
-            timeout: Duration::from_secs(args.timeout_seconds),
+    })
+    .map_err(|error| native_error(&error))?;
+    let request = NativeCompatibilityRequest {
+        package_source_commit: Some(package_source_commit),
+        source_preset: args.source_preset,
+        host_generator_cache_root: Some(args.ports_cache_dir),
+        preparation,
+        relocation,
+        profile: verification.profile,
+        cmake_program: args.cmake_program,
+        ninja_program: args.ninja_program,
+        cmake_build_root: args.cmake_build_dir,
+        upstream_source_root: args.upstream_source_dir,
+        upstream_source_commit: context.upstream_commit,
+        upstream_build_root: args.upstream_build_dir,
+        host_python: python,
+        host_tools,
+        ports_sources,
+        host: context.host,
+        make_jobs: args.jobs,
+        standalone_fixtures: StandaloneFixtures {
+            c: args.c_fixture,
+            cxx: args.cxx_fixture,
         },
-        cancellation,
-    )
+        standalone_output_root: args.standalone_output_dir,
+        reports_root: args.reports_dir,
+        timeout: Duration::from_secs(args.timeout_seconds),
+    };
+    if let Some(destination) = args.evidence_dir {
+        let execution = compatibility::execute_native_compatibility_with_export(
+            &request,
+            &context.profiles,
+            cancellation,
+        )
+        .map_err(|error| native_error(&error))?;
+        if cancellation.is_cancelled() {
+            return Err(miette::miette!("compatibility cancelled before evidence publication; retained execution outputs are not exported"));
+        }
+        let export = compatibility_export::publish(&destination, &execution)?;
+        Ok(CompatibilityResult {
+            report: execution.report().clone(),
+            export: Some(export),
+        })
+    } else {
+        let report = compatibility::execute_native_compatibility_with_readback(
+            &request,
+            &context.profiles,
+            cancellation,
+        )
+        .map_err(|error| native_error(&error))?;
+        Ok(CompatibilityResult {
+            report,
+            export: None,
+        })
+    }
 }
 
 fn parse_host_tools(entries: &[String]) -> miette::Result<Vec<CompatibilityHostTool>> {
@@ -274,4 +423,119 @@ fn parse_jobs(value: &str) -> Result<usize, String> {
         return Err("expected an integer from 1 through 64".to_owned());
     }
     Ok(jobs)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory as _;
+
+    #[test]
+    fn compatibility_export_is_explicit_optional_and_not_origin_authentication() {
+        let root = crate::Cli::command();
+        let command = root
+            .find_subcommand("toolchain")
+            .unwrap()
+            .find_subcommand("producer")
+            .unwrap()
+            .find_subcommand("compatibility")
+            .unwrap();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "evidence_dir")
+            .unwrap();
+        assert_eq!(argument.get_long(), Some("evidence-dir"));
+        assert!(!argument.is_required_set());
+        assert!(argument.get_default_values().is_empty());
+        let help = argument
+            .get_long_help()
+            .or_else(|| argument.get_help())
+            .unwrap()
+            .to_string();
+        assert!(help.contains("family-v2"));
+        assert!(help.contains("not authenticated origin"));
+    }
+
+    #[test]
+    fn compatibility_export_rejects_legacy_without_changing_ordinary_execution() {
+        use aros_toolchain::package::PackageFormat::{CompilerFamilyV2, LegacyLlvmV1};
+        assert!(super::validate_export_format(false, LegacyLlvmV1).is_ok());
+        assert!(super::validate_export_format(false, CompilerFamilyV2).is_ok());
+        assert!(super::validate_export_format(true, CompilerFamilyV2).is_ok());
+        let error = super::validate_export_format(true, LegacyLlvmV1).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("requires --package-format family-v2"));
+    }
+
+    #[test]
+    fn compatibility_documents_the_explicit_source_declared_input_cache() {
+        let root = crate::Cli::command();
+        let command = root
+            .find_subcommand("toolchain")
+            .unwrap()
+            .find_subcommand("producer")
+            .unwrap()
+            .find_subcommand("compatibility")
+            .unwrap();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "ports_cache_dir")
+            .unwrap();
+        assert_eq!(argument.get_long(), Some("ports-cache-dir"));
+        assert!(argument.is_required_set());
+        assert!(argument.get_default_values().is_empty());
+        let help = argument
+            .get_long_help()
+            .or_else(|| argument.get_help())
+            .unwrap()
+            .to_string();
+        assert!(help.contains("source-declared"));
+        assert!(help.contains("size/hash"));
+        assert!(help.contains("absolute"));
+    }
+
+    #[test]
+    fn compatibility_exposes_closed_package_formats_without_implicit_detection() {
+        let root = crate::Cli::command();
+        let command = root
+            .find_subcommand("toolchain")
+            .unwrap()
+            .find_subcommand("producer")
+            .unwrap()
+            .find_subcommand("compatibility")
+            .unwrap();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "package_format")
+            .unwrap();
+        assert_eq!(argument.get_long(), Some("package-format"));
+        assert!(!argument.is_required_set());
+        assert!(argument.get_default_values().is_empty());
+        let values = argument
+            .get_value_parser()
+            .possible_values()
+            .unwrap()
+            .map(|value| value.get_name().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["legacy-v1", "family-v2"]);
+    }
+
+    #[test]
+    fn compatibility_exposes_an_explicit_source_preset_without_changing_legacy_defaults() {
+        let root = crate::Cli::command();
+        let command = root
+            .find_subcommand("toolchain")
+            .unwrap()
+            .find_subcommand("producer")
+            .unwrap()
+            .find_subcommand("compatibility")
+            .unwrap();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "source_preset")
+            .unwrap();
+        assert_eq!(argument.get_long(), Some("source-preset"));
+        assert!(!argument.is_required_set());
+        assert!(argument.get_default_values().is_empty());
+    }
 }

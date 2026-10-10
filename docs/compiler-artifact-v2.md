@@ -35,8 +35,18 @@ contract in addition to the existing source/producer/tools identities.
 
 ## Packaging
 
-LLVM retains its existing schema-1 manifest and asset names. GNU's separate
-schema-2 name is:
+The default LLVM package operation retains its schema-1 manifest and asset
+name. The local package and read-back commands also accept the explicit
+`--package-format family-v2` option for LLVM, producing the schema-2 compiler
+identity described above (without `llvm_version`) and this canonical asset
+name:
+
+```text
+aros-toolchain-v2-llvm<VERSION>-<HOST>-<PROFILE>.tar.xz
+```
+
+The selector's `legacy-v1` value keeps historical LLVM packaging and is not
+valid for GNU. GNU's default schema-2 asset name is:
 
 ```text
 aros-toolchain-v2-gcc<GCC>-binutils<BINUTILS>-<HOST>-<PROFILE>.tar.xz
@@ -47,7 +57,10 @@ packaging accepts only Linux x86-64, Linux ARM64 and macOS ARM64 hosts. The
 same deterministic tar/XZ writer, closed four-file package inventory, embedded
 manifest, SHA sidecar, SPDX source graph and bounded read-back/extraction
 implementation serve both families. Mixed source/profile families fail before
-filesystem mutation.
+filesystem mutation. LLVM family-v2 uses the same three active build hosts and
+requires recipe-bound source-lock and profiles bytes plus profile CPU/triple
+consistency. The explicit local LLVM v2 format does not expand current release
+index, publication, qualification, or recovery support.
 
 ## Installed GNU executable layout
 

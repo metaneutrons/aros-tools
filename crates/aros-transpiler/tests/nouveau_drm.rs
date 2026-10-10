@@ -43,8 +43,8 @@ fn production_nouveau_drm_is_closed_and_canonical_for_all_current_architectures(
     .map(str::to_owned)
     .collect::<Vec<_>>();
     let expected_includes = [
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+        "${AROS_SDK_INCLUDE_DIR}/aros/posixc",
+        "${AROS_SDK_INCLUDE_DIR}/aros/stdc",
         "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include",
         "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi",
         "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm",

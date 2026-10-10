@@ -339,6 +339,81 @@ pub struct PackageComparisonReport {
     pub members: Vec<PackageSetComparisonMember>,
 }
 
+impl PackageComparisonReport {
+    /// Parse a bounded, closed report for one exact four-member package set.
+    ///
+    /// Direct typed deserialization rejects duplicate struct keys before any
+    /// intermediate JSON map could discard them. Semantic validation checks
+    /// the ordered member set and its canonical digest. Parsed hash claims are
+    /// not measurements of release files, authentication of the report's author,
+    /// or proof that independent builds actually took place.
+    ///
+    /// # Errors
+    /// Returns AX0702 for oversized, malformed, duplicate-key, unknown-field,
+    /// noncanonical or internally inconsistent comparison declarations.
+    pub fn parse(bytes: &[u8]) -> Result<Self, ContractError> {
+        if bytes.is_empty() || bytes.len() as u64 > MAX_METADATA_BYTES {
+            return Err(ContractError::comparison(
+                "native comparison report is empty or exceeds its metadata limit",
+            ));
+        }
+        let report = serde_json::from_slice(bytes).map_err(|_| {
+            ContractError::comparison("native comparison report is not a closed JSON document")
+        })?;
+        validate_comparison_report(&report)?;
+        Ok(report)
+    }
+
+    /// Bind all four comparison claims to independently measured final files.
+    ///
+    /// The selected artifact must come from a validated compiler-family index.
+    /// Every name, digest and size is matched against the complete checksum
+    /// read-back, including manifest, SHA sidecar and SBOM, not just the archive.
+    /// Publicly mutable report fields are revalidated before they are used.
+    ///
+    /// This is an in-memory join of previous measurements, not a fresh file
+    /// snapshot, package verification, executor authentication or proof of two
+    /// independent builds. The caller must separately bind report bytes and
+    /// enforce source, package, executor and publication policies.
+    ///
+    /// # Errors
+    /// Returns AX0702 for a malformed report, wrong indexed lane, absent file,
+    /// or any hash/size claim that differs from the measured release bytes.
+    pub fn validate_against_checksums_v2(
+        &self,
+        artifact: &crate::release_index_v2::NativeReleaseArtifactV2,
+        readback: &crate::release_checksums_v2::FinalChecksumsReadbackV2,
+    ) -> Result<(), ContractError> {
+        validate_comparison_report(self)?;
+        let archive = &self.members[0];
+        if archive.name != artifact.asset()
+            || &archive.sha256 != artifact.sha256()
+            || archive.size != artifact.size()
+        {
+            return Err(ContractError::comparison(
+                "native comparison report differs from the selected indexed archive",
+            ));
+        }
+        for claim in &self.members {
+            let measured = readback
+                .members()
+                .iter()
+                .find(|member| member.name() == claim.name)
+                .ok_or_else(|| {
+                    ContractError::comparison(
+                        "native comparison member is absent from the measured release inventory",
+                    )
+                })?;
+            if measured.sha256() != &claim.sha256 || measured.size() != claim.size {
+                return Err(ContractError::comparison(
+                    "native comparison member differs from its measured release bytes",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Freshly persisted and read-back-verified comparison evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageComparisonReportOutput {
@@ -389,6 +464,28 @@ pub fn compare_package_sets(
     })
 }
 
+// Single-package transport measurements use the same closed inventory, limits
+// and digest encoding as comparisons, without claiming two independent outputs.
+pub(crate) fn measure_single_package_set(
+    directory: &Path,
+) -> Result<PackageSetComparison, ContractError> {
+    let directory = comparison_directory(directory)?;
+    let mut members = Vec::with_capacity(4);
+    for name in package_set_members(&directory)? {
+        let limit = if name.ends_with(".tar.xz") {
+            MAX_ARCHIVE_BYTES
+        } else {
+            MAX_METADATA_BYTES
+        };
+        let (sha256, size) = measure_asset(&directory.join(&name), limit)?;
+        members.push(PackageSetComparisonMember { name, sha256, size });
+    }
+    Ok(PackageSetComparison {
+        package_set_sha256: sha256_bytes(&comparison_canonical_bytes(&members)?),
+        members,
+    })
+}
+
 /// Persist canonical, read-back-verified admission evidence for a comparison.
 ///
 /// The caller supplies the in-memory result returned by
@@ -423,10 +520,7 @@ pub fn write_package_comparison_report(
             "persisted native comparison report bytes changed after publication",
         ));
     }
-    let parsed: PackageComparisonReport = serde_json::from_slice(&persisted).map_err(|_| {
-        ContractError::comparison("persisted native comparison report is not valid JSON")
-    })?;
-    validate_comparison_report(&parsed)?;
+    let parsed = PackageComparisonReport::parse(&persisted)?;
     if parsed != report {
         return Err(ContractError::comparison(
             "persisted native comparison report differs from its requested evidence",

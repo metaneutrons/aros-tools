@@ -13,6 +13,145 @@ fn source_tree(path: &Path, generated_subtree: Option<&str>) -> TreeContentCas {
     .unwrap()
 }
 
+#[test]
+fn prepared_tree_measures_regular_files_and_symlinks() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = create_source_root(&temporary);
+    std::fs::create_dir(root.join("bin")).unwrap();
+    std::fs::write(root.join("bin/collector"), b"fixture collector").unwrap();
+    symlink("collector", root.join("bin/collect")).unwrap();
+
+    let measured =
+        measure_tree_content_cas_bounded(&root, TreeTraversalLimits::new(16, 1024).unwrap())
+            .unwrap();
+    assert_eq!(measured.entry_count(), 3);
+    assert!(measured.has_symlinks());
+}
+
+#[test]
+fn prepared_tree_enforces_entry_byte_and_depth_limits() {
+    let entry_temporary = tempfile::tempdir().unwrap();
+    let entry_root = create_source_root(&entry_temporary);
+    std::fs::write(entry_root.join("one"), b"1").unwrap();
+    std::fs::write(entry_root.join("two"), b"2").unwrap();
+    let error =
+        measure_tree_content_cas_bounded(&entry_root, TreeTraversalLimits::new(1, 1024).unwrap())
+            .unwrap_err();
+    assert!(error.to_string().contains("entry traversal limit"));
+
+    let byte_temporary = tempfile::tempdir().unwrap();
+    let byte_root = create_source_root(&byte_temporary);
+    std::fs::write(byte_root.join("oversized.bin"), b"12345").unwrap();
+    let error =
+        measure_tree_content_cas_bounded(&byte_root, TreeTraversalLimits::new(8, 4).unwrap())
+            .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("4-byte regular-file traversal limit"));
+
+    let depth_temporary = tempfile::tempdir().unwrap();
+    let depth_root = create_source_root(&depth_temporary);
+    let max_depth = 128;
+    let mut nested = depth_root.clone();
+    for _ in 0..max_depth {
+        nested.push("d");
+        std::fs::create_dir(&nested).unwrap();
+    }
+    let depth_limits = TreeTraversalLimits::new(512, 1024).unwrap();
+    let measured = measure_tree_content_cas_bounded(&depth_root, depth_limits).unwrap();
+    assert_eq!(measured.entry_count(), max_depth);
+
+    let leaf = nested.join("leaf");
+    std::fs::write(&leaf, b"leaf").unwrap();
+    let error = measure_tree_content_cas_bounded(&depth_root, depth_limits).unwrap_err();
+    assert!(error.to_string().contains("128-component depth limit"));
+    std::fs::remove_file(leaf).unwrap();
+
+    let link = nested.join("link");
+    symlink("unused", &link).unwrap();
+    let error = measure_tree_content_cas_bounded(&depth_root, depth_limits).unwrap_err();
+    assert!(error.to_string().contains("128-component depth limit"));
+    std::fs::remove_file(link).unwrap();
+
+    nested.push("d");
+    std::fs::create_dir(&nested).unwrap();
+    let error = measure_tree_content_cas_bounded(&depth_root, depth_limits).unwrap_err();
+    assert!(error.to_string().contains("128-component depth limit"));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn prepared_tree_fifo_swap_during_open_exits_without_blocking() {
+    use std::time::Duration;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = create_source_root(&temporary);
+    let target = root.join("payload.bin");
+    std::fs::write(&target, b"payload").unwrap();
+    let replacement = root.join("replacement.fifo");
+    create_fifo(&replacement);
+    let ready = temporary.path().join("pause-ready");
+
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child
+        .args([
+            "--exact",
+            "publication::source_tree_tests::prepared_tree_fifo_swap_probe_child",
+            "--nocapture",
+        ])
+        .env("AROS_TEST_PREPARED_TREE_FIFO_SWAP", &root)
+        .env(
+            "AROS_PUBLICATION_TEST_PAUSE_AT",
+            "tree-content-cas-before-file-open",
+        )
+        .env("AROS_PUBLICATION_TEST_PAUSE_MS", "1200")
+        .env(
+            "AROS_PUBLICATION_TEST_PAUSE_READY_AT",
+            "tree-content-cas-before-file-open",
+        )
+        .env("AROS_PUBLICATION_TEST_PAUSE_READY_FILE", &ready);
+    let runner = std::thread::spawn(move || {
+        crate::run_output_with_timeout(&mut child, 4096, Duration::from_secs(5)).unwrap()
+    });
+    let marker_deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while !ready.exists() && !runner.is_finished() && std::time::Instant::now() < marker_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pause_reached = ready.exists();
+    if pause_reached {
+        std::fs::rename(replacement, target).unwrap();
+    }
+    let output = runner.join().unwrap();
+
+    assert!(
+        pause_reached,
+        "FIFO swap probe never reached the pre-open pause"
+    );
+    assert!(
+        !output.timed_out,
+        "prepared-tree measurement blocked on a FIFO"
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(output.stdout.exact_bytes().unwrap()).contains("1 passed"),
+        "FIFO child probe was not selected: {output:?}"
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn prepared_tree_fifo_swap_probe_child() {
+    let Some(root) = std::env::var_os("AROS_TEST_PREPARED_TREE_FIFO_SWAP") else {
+        return;
+    };
+    let error = measure_tree_content_cas_bounded(
+        Path::new(&root),
+        TreeTraversalLimits::new(16, 1024).unwrap(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unsupported"));
+}
+
 fn create_source_root(temporary: &tempfile::TempDir) -> PathBuf {
     let root = temporary.path().join("source");
     std::fs::create_dir(&root).unwrap();
@@ -273,9 +412,10 @@ fn assert_rejected_link(
 }
 
 fn create_fifo(path: &Path) {
-    let status = std::process::Command::new(which::which("mkfifo").unwrap())
-        .arg(path)
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let mut command = std::process::Command::new(which::which("mkfifo").unwrap());
+    command.arg(path);
+    let output =
+        crate::run_output_with_timeout(&mut command, 4096, std::time::Duration::from_secs(5))
+            .unwrap();
+    assert!(!output.timed_out && output.status.success(), "{output:?}");
 }

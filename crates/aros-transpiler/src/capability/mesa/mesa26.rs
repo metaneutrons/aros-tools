@@ -207,8 +207,8 @@ fn common_defines(profile: &str) -> Vec<String> {
 
 fn common_includes() -> Vec<String> {
     [
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+        "${AROS_SDK_INCLUDE_DIR}/aros/posixc",
+        "${AROS_SDK_INCLUDE_DIR}/aros/stdc",
         "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include",
         "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include/GL",
         "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src",

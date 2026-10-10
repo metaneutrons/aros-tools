@@ -22,7 +22,7 @@ use aros_common::{
 use crate::filesystem::open_directory;
 use crate::inspection::{self, Checkout};
 use crate::package::validate_link_target;
-use crate::recipe::{GitObjectId, Recipe};
+use crate::recipe::GitObjectId;
 use crate::source_audit::{self, Budget};
 use crate::ContractError;
 
@@ -31,12 +31,21 @@ const MATERIALIZATION_TIMEOUT: Duration = Duration::from_mins(5);
 /// Inputs for one non-overwriting engine-free compatibility source snapshot.
 #[derive(Debug, Clone)]
 pub struct EngineFreeSourceRequest {
-    /// Clean recursively audited AROS checkout selected by the producer recipe.
+    /// Clean recursively audited AROS checkout selected for compatibility.
     pub source_root: PathBuf,
-    /// Recipe whose source commit and tree must bind the selected checkout.
-    pub recipe: Recipe,
+    /// Explicit committed identity that must bind the selected checkout.
+    pub expected_source: CommittedSourceIdentity,
     /// Absent output root for the source-owned (but engine-free) probe input.
     pub output_root: PathBuf,
+}
+
+/// Explicit identity of a committed source checkout selected for compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedSourceIdentity {
+    /// Expected commit object.
+    pub commit: GitObjectId,
+    /// Expected root tree object.
+    pub tree: GitObjectId,
 }
 
 /// Measured identity of one newly materialized compatibility source snapshot.
@@ -79,9 +88,9 @@ pub fn materialize_engine_free_source(
         })?;
     let source_root = inspection::directory(&request.source_root)?;
     let (commit, tree) = observed_identity(&source_root, deadline)?;
-    if request.recipe.source().0 != &commit || request.recipe.source().1 != &tree {
+    if request.expected_source.commit != commit || request.expected_source.tree != tree {
         return Err(ContractError::identity(
-            "compatibility source checkout differs from the selected recipe source identity",
+            "compatibility source checkout differs from the selected source identity",
         ));
     }
     let checkout = Checkout::inspect(&source_root, (&commit, &tree), deadline)?;
@@ -376,8 +385,8 @@ mod tests {
     use aros_common::{run_output, run_status, sha256_bytes};
     use serde_json::json;
 
-    use super::{materialize_engine_free_source, EngineFreeSourceRequest};
-    use crate::recipe::Recipe;
+    use super::{materialize_engine_free_source, CommittedSourceIdentity, EngineFreeSourceRequest};
+    use crate::recipe::{GitObjectId, Recipe};
 
     fn git(root: &Path, arguments: &[&str]) {
         let mut command = Command::new("git");
@@ -426,6 +435,28 @@ mod tests {
         Recipe::parse(&serde_json::to_vec(&document).unwrap()).unwrap()
     }
 
+    fn identity_for_recipe(recipe: &Recipe) -> CommittedSourceIdentity {
+        let (commit, tree) = recipe.source();
+        CommittedSourceIdentity {
+            commit: commit.clone(),
+            tree: tree.clone(),
+        }
+    }
+
+    fn identity_at_head(source: &Path) -> CommittedSourceIdentity {
+        CommittedSourceIdentity {
+            commit: GitObjectId::try_from(git_text(source, &["rev-parse", "HEAD^0"])).unwrap(),
+            tree: GitObjectId::try_from(git_text(source, &["rev-parse", "HEAD:"])).unwrap(),
+        }
+    }
+
+    fn different_object_id(id: &GitObjectId) -> GitObjectId {
+        let mut value = id.as_str().to_owned();
+        let replacement = if value.starts_with('0') { '1' } else { '0' };
+        value.replace_range(0..1, &replacement.to_string());
+        GitObjectId::try_from(value).unwrap()
+    }
+
     #[test]
     fn materializes_only_committed_engine_free_source_without_overwriting() {
         let temporary = tempfile::tempdir().unwrap();
@@ -455,7 +486,7 @@ mod tests {
         let rejected_output = temporary.path().join("rejected-engine-free");
         assert!(materialize_engine_free_source(&EngineFreeSourceRequest {
             source_root: source.clone(),
-            recipe: recipe.clone(),
+            expected_source: identity_for_recipe(&recipe),
             output_root: rejected_output.clone(),
         })
         .is_err());
@@ -465,7 +496,7 @@ mod tests {
         let overlap = source.join("engine-free-inside-source");
         assert!(materialize_engine_free_source(&EngineFreeSourceRequest {
             source_root: source.clone(),
-            recipe: recipe.clone(),
+            expected_source: identity_for_recipe(&recipe),
             output_root: overlap.clone(),
         })
         .is_err());
@@ -474,7 +505,7 @@ mod tests {
         let output = temporary.path().join("engine-free");
         let result = materialize_engine_free_source(&EngineFreeSourceRequest {
             source_root: source.clone(),
-            recipe: recipe.clone(),
+            expected_source: identity_for_recipe(&recipe),
             output_root: output.clone(),
         })
         .unwrap();
@@ -494,13 +525,13 @@ mod tests {
         );
         assert!(materialize_engine_free_source(&EngineFreeSourceRequest {
             source_root: result.root,
-            recipe: recipe.clone(),
+            expected_source: identity_for_recipe(&recipe),
             output_root: temporary.path().join("second"),
         })
         .is_err());
         assert!(materialize_engine_free_source(&EngineFreeSourceRequest {
             source_root: source,
-            recipe,
+            expected_source: identity_for_recipe(&recipe),
             output_root: output,
         })
         .is_err());
@@ -525,7 +556,7 @@ mod tests {
         let output = temporary.path().join("engine-free");
         let result = materialize_engine_free_source(&EngineFreeSourceRequest {
             source_root: source,
-            recipe,
+            expected_source: identity_for_recipe(&recipe),
             output_root: output,
         })
         .unwrap();
@@ -535,5 +566,94 @@ mod tests {
             fs::read(result.root.join("arch/source.c")).unwrap(),
             b"int main(void) { return 0; }\n"
         );
+    }
+
+    #[test]
+    fn accepts_an_independently_selected_later_source_without_rewriting_package_recipe() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        fs::create_dir(source.join("arch")).unwrap();
+        fs::write(source.join("arch/source.c"), "int old_source(void);\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-qm", "test: package source"]);
+        let package_recipe = recipe_for(&source);
+        let (package_commit, package_tree) = package_recipe.source();
+        let package_commit = package_commit.clone();
+        let package_tree = package_tree.clone();
+
+        fs::write(source.join("arch/source.c"), "int later_source(void);\n").unwrap();
+        git(&source, &["add", "."]);
+        git(
+            &source,
+            &["commit", "-qm", "test: later compatibility source"],
+        );
+        let selected_source = identity_at_head(&source);
+        assert_ne!(selected_source.commit, package_commit);
+        assert_ne!(selected_source.tree, package_tree);
+        assert_eq!(package_recipe.source().0, &package_commit);
+        assert_eq!(package_recipe.source().1, &package_tree);
+
+        let output = temporary.path().join("engine-free-later");
+        let result = materialize_engine_free_source(&EngineFreeSourceRequest {
+            source_root: source,
+            expected_source: selected_source.clone(),
+            output_root: output,
+        })
+        .unwrap();
+
+        assert_eq!(result.source_commit, selected_source.commit.as_str());
+        assert_eq!(result.source_tree, selected_source.tree.as_str());
+        assert_eq!(package_recipe.source().0, &package_commit);
+        assert_eq!(package_recipe.source().1, &package_tree);
+    }
+
+    #[test]
+    fn rejects_mismatched_expected_commit_or_tree_before_publication() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        fs::create_dir(source.join("arch")).unwrap();
+        fs::write(
+            source.join("arch/source.c"),
+            "int main(void) { return 0; }\n",
+        )
+        .unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-qm", "test: source"]);
+        let observed_source = identity_at_head(&source);
+        let mismatches = [
+            (
+                "mismatched-commit",
+                CommittedSourceIdentity {
+                    commit: different_object_id(&observed_source.commit),
+                    tree: observed_source.tree.clone(),
+                },
+            ),
+            (
+                "mismatched-tree",
+                CommittedSourceIdentity {
+                    commit: observed_source.commit.clone(),
+                    tree: different_object_id(&observed_source.tree),
+                },
+            ),
+        ];
+
+        for (name, expected_source) in mismatches {
+            let output = temporary.path().join(name);
+            let error = materialize_engine_free_source(&EngineFreeSourceRequest {
+                source_root: source.clone(),
+                expected_source,
+                output_root: output.clone(),
+            })
+            .unwrap_err();
+
+            assert!(error.to_string().contains(
+                "compatibility source checkout differs from the selected source identity"
+            ));
+            assert!(!output.exists());
+        }
     }
 }

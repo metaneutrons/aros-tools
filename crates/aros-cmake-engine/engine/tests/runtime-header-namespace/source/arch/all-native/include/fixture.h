@@ -1,0 +1,1 @@
+/* Minimal native architecture include root for the namespace fixture. */

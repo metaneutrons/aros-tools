@@ -770,7 +770,7 @@ fn expand_arch_expression(
         "TOP" => Some("${AROS_BUILD_DIR}".into()),
         "GENINCDIR" => Some("${CMAKE_BINARY_DIR}/GENINCDIR".into()),
         "GENDIR" => Some("${CMAKE_BINARY_DIR}/gen".into()),
-        "AROS_INCLUDES" => Some("${CMAKE_BINARY_DIR}/SDK/include".into()),
+        "AROS_INCLUDES" => Some("${AROS_SDK_INCLUDE_DIR}".into()),
         "PORTSDIR" => Some("${AROS_PORTS_DIR}".into()),
         "PORTSSOURCEDIR" => Some("${AROS_PORTS_SOURCE_DIR}".into()),
         "CPU" => Some("${AROS_TARGET_CPU}".into()),

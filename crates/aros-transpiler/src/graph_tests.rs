@@ -45,6 +45,8 @@ fn port_directory_copy_binds_its_unique_fetch_owner() {
         suffixes: "tar.gz".to_owned(),
         origins: "https://example.invalid/boost.tar.gz".to_owned(),
         checksums: String::new(),
+        normalization: String::new(),
+        normalized_size: String::new(),
         location: "${AROS_PORTS_SOURCE_DIR}".to_owned(),
         destination: "${AROS_PORTS_DIR}/boost".to_owned(),
         base: String::new(),
@@ -1266,7 +1268,7 @@ fn a_meta_cycle_becomes_one_shared_external_dependency_closure() {
         dependencies: vec!["a".to_owned(), "y".to_owned()],
     });
 
-    let reports = graph.flatten_meta_cycles();
+    let reports = graph.flatten_meta_cycles().unwrap();
     assert_eq!(reports.len(), 1);
     let expected: HashSet<String> = ["x", "y"].into_iter().map(str::to_owned).collect();
     assert_eq!(graph.meta_targets["a"], expected);
@@ -1285,7 +1287,7 @@ fn an_acyclic_meta_graph_is_unchanged() {
         dependencies: vec!["leaf".to_owned()],
     });
     let before = graph.meta_targets.clone();
-    assert!(graph.flatten_meta_cycles().is_empty());
+    assert!(graph.flatten_meta_cycles().unwrap().is_empty());
     assert_eq!(graph.meta_targets, before);
 }
 
@@ -1297,12 +1299,218 @@ fn a_meta_self_loop_is_removed_without_losing_other_dependencies() {
         dependencies: vec!["test".to_owned(), "test-leaf".to_owned()],
     });
 
-    let reports = graph.flatten_meta_cycles();
+    let reports = graph.flatten_meta_cycles().unwrap();
     assert_eq!(reports.len(), 1);
     assert_eq!(
         graph.meta_targets["test"],
         std::iter::once("test-leaf".to_owned()).collect()
     );
+}
+
+fn cyclic_directory_copy_graph() -> DependencyGraph {
+    let mut graph = DependencyGraph::new();
+    graph.add_meta_rule(MetaTargetRule {
+        name: "includes".into(),
+        dependencies: vec!["public-copy".into()],
+    });
+    graph.add_meta_rule(MetaTargetRule {
+        name: "public-copy".into(),
+        dependencies: vec!["includes".into(), "source-fetch".into()],
+    });
+    assert!(graph
+        .add_copy_directories(vec![CopyDirectoryDecl {
+            name: "public-copy".into(),
+            source: "${AROS_SOURCE_DIR}/public/include".into(),
+            destination: "${AROS_SDK_INCLUDE_DIR}".into(),
+            file: "public/mmakefile.src".into(),
+            line: 9,
+            dependencies: vec!["source-fetch".into()],
+        }])
+        .is_empty());
+    graph
+}
+
+#[test]
+fn a_cyclic_directory_copy_keeps_its_body_and_all_public_entrypoints() {
+    let mut graph = cyclic_directory_copy_graph();
+    let original = graph.copy_directories[0].clone();
+    let reports = graph.flatten_meta_cycles().unwrap();
+    let action = graph.copy_directories[0].name.clone();
+    assert!(action.starts_with("aros-meta-copy-action-"));
+    assert_ne!(action, original.name);
+    assert_eq!(graph.copy_directories[0].source, original.source);
+    assert_eq!(graph.copy_directories[0].destination, original.destination);
+    assert_eq!(graph.copy_directories[0].file, original.file);
+    assert_eq!(graph.copy_directories[0].line, original.line);
+    assert_eq!(
+        graph.copy_directories[0].dependencies,
+        original.dependencies
+    );
+    let expected = HashSet::from([action.clone(), "source-fetch".into()]);
+    assert_eq!(graph.meta_targets["includes"], expected);
+    assert_eq!(graph.meta_targets["public-copy"], expected);
+    assert_eq!(
+        graph.meta_targets[&action],
+        HashSet::from(["source-fetch".into()])
+    );
+    assert!(reports
+        .iter()
+        .any(|line| line.contains("preserved recursive copy action public-copy")));
+    assert!(graph.flatten_meta_cycles().unwrap().is_empty());
+    assert_eq!(graph.copy_directories[0].name, action);
+}
+
+#[test]
+fn cyclic_copy_lifting_rejects_an_occupied_internal_name() {
+    let mut graph = cyclic_directory_copy_graph();
+    let action = format!(
+        "aros-meta-copy-action-{}",
+        aros_common::sha256_bytes(b"public-copy")
+    );
+    graph.add_meta_rule(MetaTargetRule {
+        name: action.clone(),
+        dependencies: Vec::new(),
+    });
+    let error = graph.flatten_meta_cycles().unwrap_err().to_string();
+    assert!(error.contains("occupied internal endpoint"), "{error}");
+    assert!(error.contains(&action), "{error}");
+    assert_eq!(graph.copy_directories[0].name, "public-copy");
+}
+
+#[test]
+fn cyclic_copy_lifting_cannot_drop_an_action_prerequisite() {
+    let mut graph = cyclic_directory_copy_graph();
+    graph.copy_directories[0]
+        .dependencies
+        .push("includes".into());
+    let error = graph.flatten_meta_cycles().unwrap_err().to_string();
+    assert!(error.contains("action prerequisite includes"), "{error}");
+    assert!(error.contains("public/mmakefile.src:9"), "{error}");
+    assert_eq!(graph.copy_directories[0].name, "public-copy");
+}
+
+#[test]
+fn cyclic_copy_lifting_cannot_satisfy_a_missing_source_prerequisite() {
+    let mut graph = cyclic_directory_copy_graph();
+    let action = super::private_meta_copy_action("public-copy");
+    graph.add_meta_rule(MetaTargetRule {
+        name: "other-request".into(),
+        dependencies: vec![action.clone()],
+    });
+    assert!(!graph.meta_targets.contains_key(&action));
+    let error = graph.flatten_meta_cycles().unwrap_err().to_string();
+    assert!(error.contains("occupied internal endpoint"), "{error}");
+    assert_eq!(graph.copy_directories[0].name, "public-copy");
+}
+
+#[test]
+fn cyclic_copy_lifting_reserves_even_an_explicit_edge_without_a_meta_key() {
+    let mut graph = cyclic_directory_copy_graph();
+    let action = super::private_meta_copy_action("public-copy");
+    graph
+        .explicit_meta_edges
+        .insert(("other-request".into(), action));
+    let error = graph.flatten_meta_cycles().unwrap_err().to_string();
+    assert!(error.contains("occupied internal endpoint"), "{error}");
+    assert_eq!(graph.copy_directories[0].name, "public-copy");
+}
+
+#[test]
+fn acyclic_directory_copy_keeps_its_original_execution_identity() {
+    let mut graph = cyclic_directory_copy_graph();
+    graph
+        .meta_targets
+        .get_mut("public-copy")
+        .unwrap()
+        .remove("includes");
+    let before = graph.copy_directories.clone();
+    assert!(graph.flatten_meta_cycles().unwrap().is_empty());
+    assert_eq!(graph.copy_directories, before);
+}
+
+fn normalized_nonvirtual_copy_graph() -> DependencyGraph {
+    let mut graph = cyclic_directory_copy_graph();
+    graph.make_meta_providers.insert("public-copy".into());
+    graph.add_meta_rule(MetaTargetRule {
+        name: "source-fetch".into(),
+        dependencies: Vec::new(),
+    });
+    graph.flatten_meta_cycles().unwrap();
+    graph
+}
+
+#[test]
+fn normalized_copy_keeps_its_nonvirtual_source_provider_proof() {
+    let mut graph = normalized_nonvirtual_copy_graph();
+    let action = super::private_meta_copy_action("public-copy");
+    let context = TargetContext::default();
+    let roots = vec!["public-copy".into()];
+    let selected = graph
+        .selected_dependency_closure(&roots, &context, &[])
+        .unwrap();
+    assert!(selected.contains(&action));
+    assert!(selected.contains("source-fetch"));
+    assert!(graph.make_meta_providers.contains("public-copy"));
+    assert!(graph.writefiles_has_other_producer("public-copy"));
+    let audit = graph.audit_native_dependency_graph(&roots, &context, &[]);
+    assert!(audit.unproven_make_providers.is_empty(), "{audit:?}");
+    graph.retain_native_selection(&selected, &context).unwrap();
+    assert_eq!(
+        graph
+            .selected_dependency_closure(&roots, &context, &[])
+            .unwrap(),
+        selected
+    );
+}
+
+#[test]
+fn normalized_copy_without_its_body_is_still_an_unproven_provider() {
+    let mut graph = normalized_nonvirtual_copy_graph();
+    graph.copy_directories.clear();
+    let error = graph
+        .selected_dependency_closure(&["public-copy".into()], &TargetContext::default(), &[])
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("nonvirtual Make provider public-copy"));
+    assert!(!graph.writefiles_has_other_producer("public-copy"));
+}
+
+#[test]
+fn normalized_copy_without_its_action_edge_is_still_an_unproven_provider() {
+    let mut graph = normalized_nonvirtual_copy_graph();
+    let action = super::private_meta_copy_action("public-copy");
+    assert!(graph
+        .meta_targets
+        .get_mut("public-copy")
+        .unwrap()
+        .remove(&action));
+    let error = graph
+        .selected_dependency_closure(&["public-copy".into()], &TargetContext::default(), &[])
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("nonvirtual Make provider public-copy"));
+}
+
+#[test]
+fn private_looking_copy_name_cannot_prove_an_arbitrary_make_alias() {
+    let mut graph = cyclic_directory_copy_graph();
+    let action = super::private_meta_copy_action("public-copy");
+    graph.copy_directories[0].name.clone_from(&action);
+    graph.make_meta_providers.insert("public-copy".into());
+    graph
+        .meta_targets
+        .get_mut("public-copy")
+        .unwrap()
+        .insert(action);
+    let error = graph
+        .selected_dependency_closure(&["public-copy".into()], &TargetContext::default(), &[])
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("nonvirtual Make provider public-copy"));
+    assert!(!graph.writefiles_has_other_producer("public-copy"));
 }
 
 #[test]

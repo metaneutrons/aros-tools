@@ -116,8 +116,8 @@ pub(crate) fn parse_glapi(
     }
     expected_defines.extend(["MAPI_MODE_GLAPI", "MAPI_MODE_UTIL"]);
     let mut expected_includes = vec![
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+        "${AROS_SDK_INCLUDE_DIR}/aros/posixc",
+        "${AROS_SDK_INCLUDE_DIR}/aros/stdc",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/GL",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src",
@@ -405,8 +405,8 @@ pub(crate) fn parse_mesautil(
     }
     expected_defines.extend(["MAPI_MODE_GLAPI", "MAPI_MODE_UTIL"]);
     let expected_includes = [
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+        "${AROS_SDK_INCLUDE_DIR}/aros/posixc",
+        "${AROS_SDK_INCLUDE_DIR}/aros/stdc",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/GL",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src",

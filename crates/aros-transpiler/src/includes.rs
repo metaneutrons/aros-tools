@@ -79,7 +79,7 @@ fn map_known_var(name: &str) -> Option<&'static str> {
         // Generated output root. OBJDIR is handled separately because GNU
         // Make defines it as $(GENDIR)/$(CURDIR), not as an alias of GENDIR.
         "GENDIR" => Some("${CMAKE_BINARY_DIR}/gen"),
-        "AROS_INCLUDES" => Some("${CMAKE_BINARY_DIR}/SDK/include"),
+        "AROS_INCLUDES" => Some("${AROS_SDK_INCLUDE_DIR}"),
         // Target parameters are passed through as CMake variables so the
         // transpiler stays target-agnostic.
         "CPU" => Some("${AROS_TARGET_CPU}"),

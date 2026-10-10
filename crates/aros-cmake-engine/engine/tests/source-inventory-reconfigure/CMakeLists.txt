@@ -14,6 +14,8 @@ set(AROS_FETCH_BIN "${CMAKE_BINARY_DIR}/fake-aros-fetch")
 file(WRITE "${AROS_FETCH_BIN}" [=[#!/bin/sh
 destination=
 patches=
+normalization=
+normalized_size=
 while test "$#" -gt 0; do
     if test "$1" = --destination; then
         destination=$2
@@ -21,22 +23,39 @@ while test "$#" -gt 0; do
     elif test "$1" = --patches; then
         patches=$2
         shift 2
+    elif test "$1" = --normalization; then
+        normalization=$2
+        shift 2
+    elif test "$1" = --normalized-size; then
+        normalized_size=$2
+        shift 2
     else
         shift
     fi
 done
 test "$patches" = "::" || exit 23
+test "$normalization" = "canonical-tar-gzip-v1" || exit 24
+test "$normalized_size" = "42" || exit 25
 mkdir -p "$destination/package"
 : > "$destination/package/source.c"
 ]=])
 file(CHMOD "${AROS_FETCH_BIN}"
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
 
+aros_fetch_representation_arguments(_legacy_arguments "" "")
+if(NOT "${_legacy_arguments}" STREQUAL "")
+    message(FATAL_ERROR "legacy fetch acquired an inferred representation policy")
+endif()
+set(_representation NORMALIZATION canonical-tar-gzip-v1 NORMALIZED_SIZE 42)
+if(TEST_OMIT_REPRESENTATION)
+    set(_representation "")
+endif()
 aros_fetch_source_inventory(
     NAME fixture-fetch
     ARCHIVE fixture
     SUFFIXES tar.xz
     ORIGINS cache://
+    ${_representation}
     LOCATION "${CMAKE_BINARY_DIR}/portssources"
     DESTINATION "${_destination}"
     BASE "${_destination}"

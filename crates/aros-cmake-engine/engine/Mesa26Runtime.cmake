@@ -4,6 +4,14 @@ include_guard(GLOBAL)
 # selects it through SYS/GL.default. This closes that runtime edge; linking
 # the GL client archive alone cannot establish a usable guest GL library.
 function(aros_configure_mesa26_runtime)
+    if(AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)
+        # Consumer graphs select SDK producers, not a guest runtime. A GL
+        # client declaration can be reachable through linklibs without the
+        # source-selected implementation. Recheck the current source binding;
+        # neither a cached flag nor an SDK configure grants runtime authority.
+        _aros_native_source_selection_validated(_consumer_selected)
+        return()
+    endif()
     if(NOT AROS_MESA_VERSION STREQUAL "26.0.0" OR
        NOT TARGET workbench-libs-gl)
         return()

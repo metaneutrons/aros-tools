@@ -25,6 +25,8 @@ pub mod idf_bootloader;
 mod inspection;
 pub mod metamake_fetch;
 #[cfg(unix)]
+pub mod native_candidate;
+#[cfg(unix)]
 mod native_compiler_cache;
 pub mod native_declaration;
 mod native_family;
@@ -47,12 +49,32 @@ pub mod producer_environment;
 pub mod profiles;
 pub mod python_environment;
 pub mod qualification_evidence;
+pub mod qualification_evidence_v2;
+#[cfg(unix)]
+pub mod qualification_readback_v2;
+#[cfg(unix)]
+pub mod qualification_recording_v2;
 pub mod recipe;
 #[cfg(unix)]
 pub mod recipe_builder;
 pub mod recovery;
+#[cfg(unix)]
+pub mod recovery_v2;
+#[cfg(unix)]
+pub mod release_attestation_manifest_v2;
+pub mod release_checksums_v2;
+#[cfg(unix)]
+pub mod release_checksums_v2_writer;
 pub mod release_index;
+pub mod release_index_v2;
+pub mod release_index_v2_builder;
+pub mod release_index_v2_readback;
+#[cfg(unix)]
+pub mod release_index_v2_writer;
+pub mod release_inputs;
 pub mod repackage;
+#[cfg(unix)]
+pub mod repackage_v2;
 pub mod snapshot;
 #[cfg(unix)]
 mod source_audit;

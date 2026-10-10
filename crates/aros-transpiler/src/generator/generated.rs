@@ -495,7 +495,7 @@ pub(super) fn emit_sdk_object_groups<'a>(
         writeln!(out, ")\n").unwrap();
     }
     if !graph.sdk_object_groups.is_empty() {
-        writeln!(out, "if(AROS_NATIVE_BUILD_CONTRACT_VALIDATED)\n    aros_bind_source_sdk_program_inputs()\nendif()\n").unwrap();
+        writeln!(out, "if(AROS_NATIVE_BUILD_CONTRACT_VALIDATED OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)\n    aros_bind_source_sdk_program_inputs()\nendif()\n").unwrap();
     }
     Ok(sdk_paths)
 }

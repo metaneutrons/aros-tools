@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,80 @@ fn fixture() -> (tempfile::TempDir, String) {
     archive.into_inner().unwrap().finish().unwrap();
     let digest = sha256_file(&archive_path).unwrap().digest.to_string();
     (root, digest)
+}
+
+fn canonical_tar_gzip_fixture() -> Vec<u8> {
+    let encoder = flate2::GzBuilder::new()
+        .mtime(0)
+        .operating_system(255)
+        .write(Vec::new(), Compression::none());
+    let mut archive = tar::Builder::new(encoder);
+
+    let mut directory = tar::Header::new_gnu();
+    directory.set_path("fixture-src").unwrap();
+    directory.set_uid(0);
+    directory.set_gid(0);
+    directory.set_mtime(0);
+    directory.set_entry_type(tar::EntryType::Directory);
+    directory.set_size(0);
+    directory.set_mode(0o755);
+    directory.set_cksum();
+    archive
+        .append_data(&mut directory, "fixture-src", std::io::empty())
+        .unwrap();
+
+    let content = b"canonical payload\n";
+    let mut file = tar::Header::new_gnu();
+    file.set_path("fixture-src/value.txt").unwrap();
+    file.set_uid(0);
+    file.set_gid(0);
+    file.set_mtime(0);
+    file.set_entry_type(tar::EntryType::Regular);
+    file.set_size(u64::try_from(content.len()).unwrap());
+    file.set_mode(0o644);
+    file.set_cksum();
+    archive
+        .append_data(&mut file, "fixture-src/value.txt", &content[..])
+        .unwrap();
+
+    archive.into_inner().unwrap().finish().unwrap()
+}
+
+fn run_canonical_cli(
+    root: &std::path::Path,
+    origin: &std::path::Path,
+    normalized_size: u64,
+    digest: &str,
+    offline: bool,
+) -> Output {
+    let destination = root.join("ports");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aros-fetch"));
+    command
+        .args(["--archive", "fixture.tar.gz", "--archive-origins"])
+        .arg(origin)
+        .arg("--checksums")
+        .arg(format!("fixture.tar.gz=sha256:{digest}"))
+        .arg("--location")
+        .arg(root.join("cache"))
+        .arg("--destination")
+        .arg(&destination)
+        .arg("--base")
+        .arg(&destination)
+        .args(["--normalization", "canonical-tar-gzip-v1"])
+        .arg("--normalized-size")
+        .arg(normalized_size.to_string())
+        .args(["--diagnostic-format", "json"]);
+    if offline {
+        command.arg("--offline");
+    }
+    command.output().unwrap()
+}
+
+fn seed_preserved_destination(root: &std::path::Path) -> std::path::PathBuf {
+    let destination = root.join("ports");
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("keep.txt"), b"preexisting\n").unwrap();
+    destination
 }
 
 #[test]
@@ -256,6 +330,216 @@ fn offline_miss_is_a_cache_diagnostic_and_never_attempts_network() {
     assert!(!output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(value["diagnostics"][0]["code"], "AF0201");
+}
+
+#[test]
+fn canonical_offline_cache_payload_is_verified_and_forced_through_extraction() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = seed_preserved_destination(root.path());
+    let bytes = canonical_tar_gzip_fixture();
+    let digest = sha256_bytes(&bytes).to_string();
+    let cache = root.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("fixture.tar.gz"), &bytes).unwrap();
+
+    let output = run_canonical_cli(
+        root.path(),
+        std::path::Path::new("https://127.0.0.1:9/releases"),
+        u64::try_from(bytes.len()).unwrap(),
+        &digest,
+        true,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(destination.join("fixture-src/value.txt")).unwrap(),
+        b"canonical payload\n"
+    );
+    assert_eq!(
+        fs::read(destination.join("keep.txt")).unwrap(),
+        b"preexisting\n"
+    );
+}
+
+#[test]
+fn canonical_local_origin_must_already_match_the_final_pinned_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = seed_preserved_destination(root.path());
+    let origin = root.path().join("origin");
+    fs::create_dir(&origin).unwrap();
+    let bytes = canonical_tar_gzip_fixture();
+    let digest = sha256_bytes(&bytes).to_string();
+    fs::write(origin.join("fixture.tar.gz"), &bytes).unwrap();
+
+    let output = run_canonical_cli(
+        root.path(),
+        &origin,
+        u64::try_from(bytes.len()).unwrap(),
+        &digest,
+        true,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(destination.join("fixture-src/value.txt")).unwrap(),
+        b"canonical payload\n"
+    );
+}
+
+#[test]
+fn canonical_cache_hash_and_size_mismatches_do_not_mutate_the_destination() {
+    let bytes = canonical_tar_gzip_fixture();
+    let digest = sha256_bytes(&bytes).to_string();
+    for (case, declared_size, declared_digest) in [
+        (
+            "wrong-hash",
+            u64::try_from(bytes.len()).unwrap(),
+            "0".repeat(64),
+        ),
+        (
+            "wrong-size",
+            u64::try_from(bytes.len()).unwrap() + 1,
+            digest,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let destination = seed_preserved_destination(root.path());
+        let cache = root.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(cache.join("fixture.tar.gz"), &bytes).unwrap();
+
+        let output = run_canonical_cli(
+            root.path(),
+            std::path::Path::new("https://127.0.0.1:9/releases"),
+            declared_size,
+            &declared_digest,
+            true,
+        );
+        assert!(!output.status.success(), "case unexpectedly passed: {case}");
+        assert_eq!(
+            fs::read(destination.join("keep.txt")).unwrap(),
+            b"preexisting\n",
+            "destination changed for {case}"
+        );
+        assert!(!destination.join("fixture-src/value.txt").exists());
+    }
+}
+
+#[test]
+fn canonical_offline_cache_miss_does_not_attempt_transport_or_publish() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = seed_preserved_destination(root.path());
+    fs::create_dir(root.path().join("cache")).unwrap();
+    let bytes = canonical_tar_gzip_fixture();
+    let digest = sha256_bytes(&bytes).to_string();
+    let output = run_canonical_cli(
+        root.path(),
+        std::path::Path::new("https://127.0.0.1:9/releases"),
+        u64::try_from(bytes.len()).unwrap(),
+        &digest,
+        true,
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read(destination.join("keep.txt")).unwrap(),
+        b"preexisting\n"
+    );
+    assert!(!destination.join("fixture-src/value.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_cache_symlink_is_rejected_without_mutating_the_destination() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let destination = seed_preserved_destination(root.path());
+    let bytes = canonical_tar_gzip_fixture();
+    let digest = sha256_bytes(&bytes).to_string();
+    let cache = root.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("real-payload"), &bytes).unwrap();
+    symlink("real-payload", cache.join("fixture.tar.gz")).unwrap();
+
+    let output = run_canonical_cli(
+        root.path(),
+        std::path::Path::new("https://127.0.0.1:9/releases"),
+        u64::try_from(bytes.len()).unwrap(),
+        &digest,
+        true,
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read(destination.join("keep.txt")).unwrap(),
+        b"preexisting\n"
+    );
+    assert!(!destination.join("fixture-src/value.txt").exists());
+}
+
+#[test]
+fn canonical_cache_bad_archive_is_rejected_before_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = seed_preserved_destination(root.path());
+    let bytes = b"not a gzip tar archive";
+    let digest = sha256_bytes(bytes).to_string();
+    let cache = root.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("fixture.tar.gz"), bytes).unwrap();
+
+    let output = run_canonical_cli(
+        root.path(),
+        std::path::Path::new("https://127.0.0.1:9/releases"),
+        u64::try_from(bytes.len()).unwrap(),
+        &digest,
+        true,
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read(destination.join("keep.txt")).unwrap(),
+        b"preexisting\n"
+    );
+    assert!(!destination.join("fixture-src/value.txt").exists());
+}
+
+#[test]
+fn exact_bytes_cli_rejects_normalized_size_before_creating_cache_or_destination() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("cache");
+    let destination = root.path().join("ports");
+    let output = Command::new(env!("CARGO_BIN_EXE_aros-fetch"))
+        .args([
+            "--archive",
+            "fixture.tar.gz",
+            "--archive-origins",
+            "https://example.invalid/releases",
+            "--checksums",
+            &format!("fixture.tar.gz=sha256:{}", "0".repeat(64)),
+            "--location",
+        ])
+        .arg(&cache)
+        .arg("--destination")
+        .arg(&destination)
+        .args([
+            "--normalization",
+            "exact-bytes-v1",
+            "--normalized-size",
+            "42",
+            "--diagnostic-format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(diagnostic["diagnostics"][0]["code"], "AF0101");
+    assert!(!cache.exists());
+    assert!(!destination.exists());
 }
 
 #[test]

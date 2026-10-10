@@ -90,6 +90,9 @@ pub struct TargetProfile {
     /// Explicit source-relative native build export; never discovered by name.
     #[serde(default)]
     pub native_build_contract: Option<String>,
+    /// Source-owned native compiler-consumer graph, without boot/media claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_consumer_contract: Option<String>,
 }
 
 /// Public ABI configuration, independent of runtime SMP enablement.
@@ -157,6 +160,15 @@ impl TargetProfile {
                 message: format!("cannot read configuration: {error}"),
             })?;
         parse_config(&content, &path.display().to_string())
+    }
+
+    /// Parse an already bounded source-owned configuration without a fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed or invalid target declarations.
+    pub fn parse_config(content: &str, label: &str) -> Result<ArosConfig> {
+        parse_config(content, label)
     }
 
     /// Load a checkout override when present, otherwise use the profiles and
@@ -285,14 +297,18 @@ fn validate_config(label: &str, config: &ArosConfig) -> Result<()> {
                 )));
             }
         }
-        if let Some(path) = &target.native_build_contract {
+        for (field, path) in [
+            ("native_build_contract", &target.native_build_contract),
+            ("native_consumer_contract", &target.native_consumer_contract),
+        ] {
+            let Some(path) = path else { continue };
             if path.len() > 1024
                 || path.split('/').any(|part| {
                     !safe_token(part) || matches!(part, "." | "..") || part.starts_with('-')
                 })
             {
                 return Err(invalid(format!(
-                    "target {:?} has an unsafe native_build_contract path",
+                    "target {:?} has an unsafe {field} path",
                     target.name
                 )));
             }

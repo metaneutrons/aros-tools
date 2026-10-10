@@ -21,12 +21,14 @@ pub(super) fn emit_fetches(out: &mut String, graph: &DependencyGraph) {
             write!(
                 out,
                 "aros_fetch_archive(NAME \"{}\" ARCHIVE \"{}\" SUFFIXES \"{}\" ORIGINS \"{}\"\n\
-                 \x20   CHECKSUMS \"{}\" LOCATION \"{}\" DESTINATION \"{}\" BASE \"{}\" PATCH_ORIGINS \"{}\" PATCHES \"{}\"",
+                 \x20   CHECKSUMS \"{}\" NORMALIZATION \"{}\" NORMALIZED_SIZE \"{}\" LOCATION \"{}\" DESTINATION \"{}\" BASE \"{}\" PATCH_ORIGINS \"{}\" PATCHES \"{}\"",
                 f.name,
                 f.archive,
                 f.suffixes,
                 f.origins,
                 f.checksums,
+                f.normalization,
+                f.normalized_size,
                 f.location,
                 f.destination,
                 f.base,

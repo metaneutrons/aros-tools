@@ -1,11 +1,12 @@
 //! Source-owned literal MetaMake directory exclusions.
 
-use aros_common::{native_build_contract::LoadedNativeBuildContract, ArosError, Result};
+use crate::native_selection::LoadedNativeSelection;
+use aros_common::{ArosError, Result};
 use std::{collections::BTreeSet, path::Path};
 
 pub fn ignored_directories(
     root: &Path,
-    native: Option<&LoadedNativeBuildContract>,
+    native: Option<&LoadedNativeSelection>,
 ) -> Result<BTreeSet<String>> {
     let path = root.join("mmake.config.in");
     let Some((_, bytes)) = aros_common::measure_regular_file_bounded(&path, 64 * 1024)? else {
@@ -14,7 +15,7 @@ pub fn ignored_directories(
     let digest = aros_common::sha256_bytes(&bytes);
     if native.is_some_and(|bound| {
         !bound
-            .contract
+            .invocation()
             .inputs
             .iter()
             .any(|input| input.path == "mmake.config.in" && input.sha256 == digest)

@@ -5,7 +5,67 @@ use super::{
     tree::{validate_private_ancestor_chain, validate_private_regular_file},
     ErrorKind, FileIdentity, Mode, OFlags, Path,
 };
-use crate::digest::{sha256_bytes, Sha256Digest};
+use crate::digest::{sha256_bytes, sha256_reader, Sha256Digest, Sha256Result};
+
+pub(in crate::publication) fn digest_regular_bounded(
+    path: &Path,
+    max_bytes: u64,
+) -> std::io::Result<(FileIdentity, Sha256Result)> {
+    let parent = open_parent(path, false)?;
+    let fd = rfs::openat(
+        &parent.fd,
+        Path::new(&parent.leaf),
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let before = rfs::fstat(&fd)?;
+    if !rfs::FileType::from_raw_mode(before.st_mode).is_file() {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "measurement target '{}' is not a regular file",
+                path.display()
+            ),
+        ));
+    }
+    let limit_error = || {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "measurement target '{}' exceeds the {max_bytes}-byte hash limit",
+                path.display()
+            ),
+        )
+    };
+    if u64::try_from(before.st_size).map_err(std::io::Error::other)? > max_bytes {
+        return Err(limit_error());
+    }
+    let mut file = std::fs::File::from(fd);
+    let mut bounded = std::io::Read::take(&mut file, max_bytes.saturating_add(1));
+    let measured = sha256_reader(&mut bounded)?;
+    if measured.size > max_bytes {
+        return Err(limit_error());
+    }
+    #[cfg(test)]
+    crate::publication::publication_tests::run_boundary("digest-before-final-stat", path);
+    let after = rfs::fstat(&file)?;
+    let current = rfs::statat(
+        &parent.fd,
+        Path::new(&parent.leaf),
+        rfs::AtFlags::SYMLINK_NOFOLLOW,
+    )?;
+    let size = usize::try_from(measured.size).map_err(std::io::Error::other)?;
+    if !same_regular_snapshot(&before, &after, size)
+        || !rfs::FileType::from_raw_mode(current.st_mode).is_file()
+        || !same_regular_snapshot(&before, &current, size)
+    {
+        return Err(std::io::Error::other(format!(
+            "measurement target changed while hashing: '{}'",
+            path.display()
+        )));
+    }
+    Ok((identity_from_stat(&before), measured))
+}
 
 pub(in crate::publication) fn read_regular_bounded(
     path: &Path,

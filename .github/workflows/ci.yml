@@ -229,11 +229,17 @@ jobs:
           set -euo pipefail
           if [[ "$RUNNER_OS" == Linux ]]; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq xorriso make bison flex patch pkg-config ninja-build lld gobjc
+            sudo apt-get install -y -qq xorriso make bison flex patch pkg-config ninja-build lld llvm gobjc
           else
             # The GNU lifecycle fixtures require GNU Make >=4, not Apple's 3.81.
             # Homebrew's make formula exposes the selected executable as gmake.
-            brew install xorriso make bison flex pkg-config ninja gnu-sed
+            brew install xorriso make bison flex pkg-config ninja gnu-sed llvm
+            # A Clang host compiler makes AROS configure select LLVM archivers,
+            # even when the cross-compiler family being built is GNU.
+            llvm_bin="$(brew --prefix llvm)/bin"
+            test -x "$llvm_bin/llvm-ar"
+            test -x "$llvm_bin/llvm-ranlib"
+            printf '%s\n' "$llvm_bin" >> "$GITHUB_PATH"
             gmake --version
           fi
           xorriso -version

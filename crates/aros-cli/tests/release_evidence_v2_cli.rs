@@ -1,0 +1,2525 @@
+//! End-to-end CLI acquisition tests over synthetic, non-authenticating evidence.
+
+#![cfg(unix)]
+
+#[path = "support/release_evidence_v2.rs"]
+mod support;
+
+use std::fs;
+use std::os::unix::fs::symlink;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+
+use aros_common::sha256_bytes;
+use aros_toolchain::canonical;
+use aros_toolchain::package::PackageFormat;
+use aros_toolchain::package_verify::{verify_with_format, PackageVerificationRequest};
+use aros_toolchain::release_index::PackageComparisonReport;
+use aros_toolchain::release_index_v2::{NativeReleaseIndexV2, INDEX_NAME};
+use aros_toolchain::release_inputs::ReleaseInputs;
+use serde_json::{json, Value};
+use support::{Fixture, BASE_URL, RELEASE_ID};
+
+const RECOVERED_RELEASE_ID: &str = "release-evidence-v2-recovered";
+
+fn command(fixture: &Fixture, selection: &Value, name: &str) -> Output {
+    let (selection_path, selection_sha256) = fixture.write_selection(name, selection);
+    Command::new(env!("CARGO_BIN_EXE_aros"))
+        .args([
+            "toolchain",
+            "producer",
+            "verify-release-evidence",
+            "--directory",
+            fixture.release_directory.to_str().unwrap(),
+            "--release-id",
+            RELEASE_ID,
+            "--base-url",
+            BASE_URL,
+            "--inputs-sha256",
+            fixture.inputs_sha256.as_str(),
+            "--index-sha256",
+            fixture.index_sha256.as_str(),
+            "--selection",
+            selection_path.to_str().unwrap(),
+            "--selection-sha256",
+            selection_sha256.as_str(),
+            "--subject-manifest",
+            fixture.subject_manifest.to_str().unwrap(),
+            "--subject-manifest-sha256",
+            fixture.subject_manifest_sha256.as_str(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap()
+}
+
+fn assert_failure_is_read_only(
+    fixture: &Fixture,
+    selection: &Value,
+    name: &str,
+    expected_diagnostic: &str,
+) {
+    let output = command(fixture, selection, name);
+    assert!(!output.status.success(), "unexpected success for {name}");
+    assert!(
+        output.stdout.is_empty(),
+        "failure for {name} emitted a success-shaped stdout document: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_diagnostic),
+        "failure for {name} did not reach its intended rejection; expected {expected_diagnostic:?} in stderr:\n{stderr}"
+    );
+}
+
+fn assert_unchanged_after_failure(
+    fixture: &Fixture,
+    selection: &Value,
+    name: &str,
+    expected_diagnostic: &str,
+    extra_roots: &[PathBuf],
+) {
+    // Selection files are themselves transport inputs, so establish the exact
+    // bytes before taking the read-only baseline.
+    let _ = fixture.write_selection(name, selection);
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let extras_before = extra_roots
+        .iter()
+        .map(|root| support::snapshot_tree(root))
+        .collect::<Vec<_>>();
+    assert_failure_is_read_only(fixture, selection, name, expected_diagnostic);
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "CLI mutated the final release during failed {name} acquisition"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "CLI mutated selected transport evidence during failed {name} acquisition"
+    );
+    for (root, before) in extra_roots.iter().zip(extras_before) {
+        assert_eq!(
+            support::snapshot_tree(root),
+            before,
+            "CLI mutated selected external evidence during failed {name} acquisition"
+        );
+    }
+}
+
+fn asset_for_host(fixture: &Fixture, host: &str) -> String {
+    let mut matching = fixture.lanes.iter().filter(|(_, lane)| lane.host == host);
+    let (asset, _) = matching
+        .next()
+        .unwrap_or_else(|| panic!("fixture has no independently selected {host} lane"));
+    assert!(
+        matching.next().is_none(),
+        "fixture has more than one independently selected {host} lane"
+    );
+    asset.clone()
+}
+
+fn copy_compatibility_for_mutation(
+    fixture: &Fixture,
+    selection: &mut Value,
+    asset: &str,
+    label: &str,
+    member: &str,
+) -> PathBuf {
+    let source = PathBuf::from(
+        selection["lanes"][asset]["compatibility"]["directory"]
+            .as_str()
+            .unwrap(),
+    );
+    let destination = fixture
+        .transport_directory
+        .join(format!("compatibility-mutated-{label}"));
+    support::copy_tree(&source, &destination);
+    let member_path = destination.join(member);
+    let mut bytes = fs::read(&member_path).unwrap();
+    bytes.push(b'X');
+    fs::write(member_path, bytes).unwrap();
+    let manifest_sha256 = support::update_compatibility_manifest(&destination);
+    let destination = fs::canonicalize(destination).unwrap();
+    selection["lanes"][asset]["compatibility"]["directory"] = json!(destination);
+    selection["lanes"][asset]["compatibility"]["manifest_sha256"] = json!(manifest_sha256.as_str());
+    destination
+}
+
+fn write_json_input(fixture: &Fixture, name: &str, value: &Value) -> (PathBuf, String) {
+    let path = fixture.transport_directory.join(name);
+    let bytes = serde_json::to_vec(value).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    (
+        fs::canonicalize(path).unwrap(),
+        sha256_bytes(&bytes).to_string(),
+    )
+}
+
+fn qualification_claims(fixture: &Fixture, baseline: &Value) -> Value {
+    let inputs = ReleaseInputs::load(&fixture.release_directory).unwrap();
+    let index_bytes = fs::read(fixture.release_directory.join(INDEX_NAME)).unwrap();
+    let index = NativeReleaseIndexV2::parse(&index_bytes, &inputs).unwrap();
+    assert_eq!(
+        sha256_bytes(&index_bytes).as_str(),
+        fixture.index_sha256.as_str()
+    );
+
+    let actual_lanes = baseline["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lane| (lane["asset"].as_str().unwrap(), lane))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let lanes = index
+        .artifacts()
+        .iter()
+        .map(|artifact| {
+            let group = inputs
+                .groups()
+                .iter()
+                .find(|group| group.id() == artifact.group_id())
+                .unwrap();
+            let measured = actual_lanes.get(artifact.asset()).unwrap();
+            json!({
+                "group_id": artifact.group_id(),
+                "asset": artifact.asset(),
+                "host": artifact.host(),
+                "target_profile": artifact.target_profile(),
+                "target_triple": artifact.target_triple(),
+                "source_commit": artifact.source_commit(),
+                "compiler": artifact.compiler(),
+                "recipe_sha256": group.recipe().sha256(),
+                "source_lock_sha256": group.source_lock_reference().sha256(),
+                "profiles_sha256": group.profiles_reference().sha256(),
+                "archive_sha256": artifact.sha256(),
+                "archive_size": artifact.size(),
+                "tree_sha256": artifact.tree_sha256(),
+                "build_a_report_sha256": measured["measurement_sha256"][0],
+                "build_b_report_sha256": measured["measurement_sha256"][1],
+                "comparison_report_sha256": measured["comparison_sha256"],
+                // Qualification binds the raw compatibility manifest bytes,
+                // not the nested receipt's self-digest.
+                "compatibility_report_sha256": measured["compatibility_manifest_sha256"]
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lanes.len(), actual_lanes.len());
+
+    let repository = "https://github.com/example/aros-toolchains";
+    let workflow = ".github/workflows/qualification.yml";
+    json!({
+        "schema": "aros-toolchain-qualification-evidence-v2",
+        "created_at": 100,
+        "expires_at": 300,
+        "source_run": {
+            "repository": repository,
+            "workflow": workflow,
+            "run_id": 42,
+            "run_attempt": 1,
+            "producer_commit": index.producer_commit(),
+            "source_tag": "release-2026.10",
+            "tag_object": "9a".repeat(20)
+        },
+        "release": {
+            "release_id": index.release_id(),
+            "base_url": index.base_url(),
+            "inputs_sha256": inputs.collection_sha256(),
+            "release_index_sha256": sha256_bytes(&index_bytes),
+            "pre_attestation_checksums_sha256": baseline["subject_manifest_sha256"],
+            "checksums_sha256": baseline["checksums_sha256"],
+            "provenance_sha256": baseline["provenance_sha256"],
+            "producer_commit": index.producer_commit(),
+            "tools_commit": index.tools_commit()
+        },
+        "attestation": {
+            "repository": repository,
+            "workflow": workflow,
+            "signer": "github-actions",
+            "subject_manifest_sha256": baseline["subject_manifest_sha256"]
+        },
+        "lanes": lanes,
+        "coverage": "release-candidate"
+    })
+}
+
+fn qualification_command(
+    fixture: &Fixture,
+    selection: &Value,
+    name: &str,
+    evidence: &Value,
+    selected_evidence_sha256: Option<&str>,
+) -> Command {
+    let (selection_path, selection_sha256) =
+        fixture.write_selection(&format!("qualification-{name}.json"), selection);
+    let (evidence_path, evidence_sha256) = write_json_input(
+        fixture,
+        &format!("qualification-{name}-evidence.json"),
+        evidence,
+    );
+    let policy = json!({
+        "source_repository": "https://github.com/example/aros-toolchains",
+        "source_workflow": ".github/workflows/qualification.yml",
+        "signer_repository": "https://github.com/example/aros-toolchains",
+        "signer_workflow": ".github/workflows/qualification.yml",
+        "signer": "github-actions",
+        "now": 150
+    });
+    let (policy_path, policy_sha256) = write_json_input(
+        fixture,
+        &format!("qualification-{name}-policy.json"),
+        &policy,
+    );
+    let selected_evidence_sha256 = selected_evidence_sha256.unwrap_or(&evidence_sha256);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
+    command.args([
+        "toolchain",
+        "producer",
+        "verify-qualification",
+        "--directory",
+        fixture.release_directory.to_str().unwrap(),
+        "--release-id",
+        RELEASE_ID,
+        "--base-url",
+        BASE_URL,
+        "--inputs-sha256",
+        fixture.inputs_sha256.as_str(),
+        "--index-sha256",
+        fixture.index_sha256.as_str(),
+        "--selection",
+        selection_path.to_str().unwrap(),
+        "--selection-sha256",
+        selection_sha256.as_str(),
+        "--subject-manifest",
+        fixture.subject_manifest.to_str().unwrap(),
+        "--subject-manifest-sha256",
+        fixture.subject_manifest_sha256.as_str(),
+        "--qualification-evidence",
+        evidence_path.to_str().unwrap(),
+        "--qualification-sha256",
+        selected_evidence_sha256,
+        "--policy",
+        policy_path.to_str().unwrap(),
+        "--policy-sha256",
+        policy_sha256.as_str(),
+        "--format",
+        "json",
+    ]);
+    command
+}
+
+fn assert_qualification_failure_is_read_only(
+    fixture: &Fixture,
+    selection: &Value,
+    name: &str,
+    evidence: &Value,
+    selected_evidence_sha256: Option<&str>,
+    expected_diagnostic: &str,
+    expected_code: Option<&str>,
+) {
+    let mut command =
+        qualification_command(fixture, selection, name, evidence, selected_evidence_sha256);
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "unexpected qualification success for {name}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failure for {name} emitted a success-shaped stdout document: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_diagnostic),
+        "failure for {name} did not reach its intended rejection; expected {expected_diagnostic:?} in stderr:\n{stderr}"
+    );
+    if let Some(code) = expected_code {
+        assert!(
+            stderr.contains(code),
+            "failure for {name} did not include diagnostic code {code}:\n{stderr}"
+        );
+    }
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "CLI mutated the final release during failed {name} qualification"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "CLI mutated selected transport evidence during failed {name} qualification"
+    );
+}
+
+fn recovery_request(evidence: &Value, operation: &str, failed_stage: &str) -> Value {
+    let source_run = evidence["source_run"].clone();
+    let source_tag = json!({
+        "name": source_run["source_tag"],
+        "tag_object": source_run["tag_object"],
+        "peeled_commit": source_run["producer_commit"]
+    });
+    let handoff = (operation == "packaging-recovery").then(|| {
+        json!({
+            "release_id": "release-evidence-v2-recovered",
+            "tag": {
+                "name": "release-2026.10-recovered",
+                "tag_object": "ab".repeat(20),
+                "peeled_commit": source_run["producer_commit"]
+            },
+            "state": "absent"
+        })
+    });
+    json!({
+        "schema": aros_toolchain::recovery_v2::RECOVERY_V2_SCHEMA,
+        "qualification_sha256": sha256_bytes(&serde_json::to_vec(evidence).unwrap()),
+        "operation": operation,
+        "failed_stage": failed_stage,
+        "observed_run": source_run,
+        "source_tag": source_tag,
+        "observed_attestation": evidence["attestation"],
+        "handoff": handoff
+    })
+}
+
+fn recovery_command(
+    fixture: &Fixture,
+    selection: &Value,
+    name: &str,
+    evidence: &Value,
+    request: &Value,
+    selected_evidence_sha256: Option<&str>,
+    selected_request_sha256: Option<&str>,
+) -> Command {
+    let qualification =
+        qualification_command(fixture, selection, name, evidence, selected_evidence_sha256);
+    let mut arguments = command_arguments(&qualification);
+    let operation_position = argument_position(&arguments, "verify-qualification");
+    arguments[operation_position] = std::ffi::OsString::from("verify-recovery");
+    let (request_path, request_sha256) =
+        write_json_input(fixture, &format!("recovery-{name}-request.json"), request);
+    let mut command = command_from_arguments(arguments);
+    command.args([
+        "--recovery-request",
+        request_path.to_str().unwrap(),
+        "--recovery-request-sha256",
+        selected_request_sha256.unwrap_or(&request_sha256),
+    ]);
+    command
+}
+
+fn assert_recovery_failure_is_read_only(
+    fixture: &Fixture,
+    name: &str,
+    mut command: Command,
+    expected_diagnostic: &str,
+    expected_code: Option<&str>,
+) {
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "unexpected recovery success for {name}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "recovery failure for {name} emitted a success-shaped stdout document: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_diagnostic),
+        "recovery failure for {name} did not reach its intended rejection; expected {expected_diagnostic:?} in stderr:\n{stderr}"
+    );
+    if let Some(code) = expected_code {
+        assert!(
+            stderr.contains(code),
+            "recovery failure for {name} did not include diagnostic code {code}:\n{stderr}"
+        );
+    }
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "failed recovery {name} mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "failed recovery {name} mutated selected transport evidence"
+    );
+}
+
+fn record_qualification_command(
+    fixture: &Fixture,
+    selection: &Value,
+    name: &str,
+    output_path: &std::path::Path,
+) -> Command {
+    let (selection_path, selection_sha256) =
+        fixture.write_selection(&format!("record-{name}-selection.json"), selection);
+    let inputs = ReleaseInputs::load(&fixture.release_directory).unwrap();
+    let index_bytes = fs::read(fixture.release_directory.join(INDEX_NAME)).unwrap();
+    let index = NativeReleaseIndexV2::parse(&index_bytes, &inputs).unwrap();
+    let producer_commit = index.producer_commit().as_str();
+    let tag_object = "9a".repeat(20);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
+    command.args([
+        "--diagnostic-format=json",
+        "toolchain",
+        "producer",
+        "record-qualification",
+        "--release-dir",
+        fixture.release_directory.to_str().unwrap(),
+        "--release-format",
+        "family-v2",
+        "--inputs-sha256",
+        fixture.inputs_sha256.as_str(),
+        "--index-sha256",
+        fixture.index_sha256.as_str(),
+        "--selection",
+        selection_path.to_str().unwrap(),
+        "--selection-sha256",
+        selection_sha256.as_str(),
+        "--subject-manifest",
+        fixture.subject_manifest.to_str().unwrap(),
+        "--subject-manifest-sha256",
+        fixture.subject_manifest_sha256.as_str(),
+        "--source-repository",
+        "https://github.com/example/aros-toolchains",
+        "--source-workflow",
+        ".github/workflows/qualification.yml",
+        "--source-run-id",
+        "42",
+        "--source-run-attempt",
+        "1",
+        "--source-tag",
+        "release-2026.10",
+        "--source-tag-object",
+        tag_object.as_str(),
+        "--source-tag-commit",
+        producer_commit,
+        "--attestation-repository",
+        "https://github.com/example/aros-toolchains",
+        "--attestation-workflow",
+        ".github/workflows/qualification.yml",
+        "--attestation-signer",
+        "github-actions",
+        "--created-at",
+        "100",
+        "--expires-at",
+        "300",
+        "--output",
+        output_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    command
+}
+
+fn command_arguments(command: &Command) -> Vec<std::ffi::OsString> {
+    command
+        .get_args()
+        .map(std::ffi::OsStr::to_os_string)
+        .collect()
+}
+
+fn argument_position(arguments: &[std::ffi::OsString], name: &str) -> usize {
+    arguments
+        .iter()
+        .position(|argument| argument.to_str() == Some(name))
+        .unwrap_or_else(|| panic!("command lacks {name}"))
+}
+
+fn command_from_arguments(arguments: Vec<std::ffi::OsString>) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
+    command.args(arguments);
+    command
+}
+
+fn assert_record_failure_is_read_only(
+    fixture: &Fixture,
+    mut command: Command,
+    output_path: &std::path::Path,
+    expected_diagnostic: &str,
+    existing_output: Option<&[u8]>,
+) {
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "invalid record-qualification invocation unexpectedly succeeded"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed record-qualification emitted stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_diagnostic),
+        "record-qualification failed for the wrong reason; expected {expected_diagnostic:?}:\n{stderr}"
+    );
+    if let Some(expected) = existing_output {
+        assert_eq!(
+            fs::read(output_path).unwrap(),
+            expected,
+            "failed record-qualification replaced an existing output"
+        );
+    } else {
+        assert!(
+            !output_path.exists(),
+            "failed record-qualification created its output"
+        );
+    }
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "failed record-qualification mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "failed record-qualification mutated selected transport evidence"
+    );
+}
+
+#[test]
+fn process_collects_complete_synthetic_v2_closure_and_rejects_mutations_read_only() {
+    // This exercises the actual compiled CLI. All payloads below are synthetic
+    // byte declarations; success does not claim compilation or probe execution.
+    let fixture = Fixture::new();
+    let (selection_path, selection_sha256) = fixture.selection_path();
+    let release_before_success = support::snapshot_tree(&fixture.release_directory);
+    let transport_before_success = support::snapshot_tree(&fixture.transport_directory);
+    let success = Command::new(env!("CARGO_BIN_EXE_aros"))
+        .args([
+            "toolchain",
+            "producer",
+            "verify-release-evidence",
+            "--directory",
+            fixture.release_directory.to_str().unwrap(),
+            "--release-id",
+            RELEASE_ID,
+            "--base-url",
+            BASE_URL,
+            "--inputs-sha256",
+            fixture.inputs_sha256.as_str(),
+            "--index-sha256",
+            fixture.index_sha256.as_str(),
+            "--selection",
+            selection_path.to_str().unwrap(),
+            "--selection-sha256",
+            selection_sha256.as_str(),
+            "--subject-manifest",
+            fixture.subject_manifest.to_str().unwrap(),
+            "--subject-manifest-sha256",
+            fixture.subject_manifest_sha256.as_str(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        success.status.success(),
+        "synthetic process acquisition failed:\n{}",
+        String::from_utf8_lossy(&success.stderr)
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before_success,
+        "successful CLI acquisition mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before_success,
+        "successful CLI acquisition mutated selected transport evidence"
+    );
+    let document: Value = serde_json::from_slice(&success.stdout).unwrap();
+    assert_eq!(document["operation"], "verify-release-evidence");
+    assert_eq!(document["assurance"], "byte-consistency-only");
+    assert_eq!(document["lane_count"], 3);
+    assert_eq!(document["build_count"], 6);
+    assert_eq!(document["inputs_sha256"], fixture.inputs_sha256.as_str());
+    assert_eq!(document["index_sha256"], fixture.index_sha256.as_str());
+    assert_eq!(document["selection_sha256"], selection_sha256.as_str());
+    assert!(document["subject_manifest_sha256"].is_string());
+    assert!(document["checksums_sha256"].is_string());
+    let lanes = document["lanes"].as_array().unwrap();
+    assert_eq!(lanes.len(), 3);
+    for lane in lanes {
+        let selected = &fixture.selection["lanes"][lane["asset"].as_str().unwrap()];
+        assert_eq!(
+            lane["measurement_sha256"][0],
+            selected["builds"][0]["measurement"]["sha256"]
+        );
+        assert_eq!(
+            lane["measurement_sha256"][1],
+            selected["builds"][1]["measurement"]["sha256"]
+        );
+        assert_eq!(lane["comparison_sha256"], selected["comparison"]["sha256"]);
+        assert_eq!(
+            lane["compatibility_manifest_sha256"],
+            selected["compatibility"]["manifest_sha256"]
+        );
+        assert_eq!(
+            lane["compatibility_inputs_sha256"],
+            selected["compatibility"]["inputs"]["sha256"]
+        );
+        assert_eq!(lane["standalone"].as_object().unwrap().len(), 2);
+    }
+
+    // Exact index coverage is input-derived; neither a selected subset nor an
+    // appended synthetic lane is accepted.
+    let mut subset = fixture.selection.clone();
+    let subset_asset = asset_for_host(&fixture, "linux-x86_64");
+    subset["lanes"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&subset_asset);
+    assert_unchanged_after_failure(
+        &fixture,
+        &subset,
+        "subset.json",
+        "evidence selection must exactly cover",
+        &[],
+    );
+
+    let mut extra = fixture.selection.clone();
+    let source_lane = extra["lanes"][&subset_asset].clone();
+    extra["lanes"]["synthetic-extra.tar.xz"] = source_lane;
+    assert_unchanged_after_failure(
+        &fixture,
+        &extra,
+        "extra.json",
+        "evidence selection must exactly cover",
+        &[],
+    );
+
+    // Rehashing a changed declaration still cannot make it agree with the
+    // independently measured package environment or executor identity.
+    let mut environment = fixture.selection.clone();
+    environment["lanes"][&subset_asset]["build_environment"]["fixture-observation"] =
+        json!("changed-and-rehashed");
+    assert_unchanged_after_failure(
+        &fixture,
+        &environment,
+        "environment.json",
+        "native compiler-family package failed read-back verification",
+        &[],
+    );
+
+    let mut executor = fixture.selection.clone();
+    executor["lanes"][&subset_asset]["builds"][0]["executor"]["binary_sha256"] =
+        json!(sha256_bytes(b"different independently selected executor").as_str());
+    assert_unchanged_after_failure(
+        &fixture,
+        &executor,
+        "executor.json",
+        "portable package build result differs from selected executor or lane",
+        &[],
+    );
+
+    let mut changed_inputs = fixture.selection.clone();
+    let original_inputs = PathBuf::from(
+        changed_inputs["lanes"][&subset_asset]["compatibility"]["inputs"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let mut input_value: Value =
+        serde_json::from_slice(&fs::read(&original_inputs).unwrap()).unwrap();
+    input_value["engine_sha256"] = json!(sha256_bytes(b"different selected engine").as_str());
+    let changed_input_bytes = canonical::bytes(&input_value).unwrap();
+    let changed_input_path = fixture
+        .transport_directory
+        .join("compatibility-inputs-rehashed.json");
+    fs::write(&changed_input_path, &changed_input_bytes).unwrap();
+    let changed_input_path = fs::canonicalize(changed_input_path).unwrap();
+    changed_inputs["lanes"][&subset_asset]["compatibility"]["inputs"]["path"] =
+        json!(changed_input_path);
+    changed_inputs["lanes"][&subset_asset]["compatibility"]["inputs"]["sha256"] =
+        json!(sha256_bytes(&changed_input_bytes).as_str());
+    assert_unchanged_after_failure(
+        &fixture,
+        &changed_inputs,
+        "inputs-rehashed.json",
+        "native compatibility phase mixes engine, helper, or SDK source identities",
+        &[],
+    );
+
+    // A changed package copy and selected raw-digest mismatch are rejected
+    // without rewriting either the final inventory or downloaded package set.
+    let package_mutation = fixture.selection.clone();
+    let package_dir = PathBuf::from(
+        package_mutation["lanes"][&subset_asset]["builds"][0]["package_dir"]
+            .as_str()
+            .unwrap(),
+    );
+    let archive = package_dir.join(&subset_asset);
+    assert!(
+        archive.is_file(),
+        "selected package directory lacks its index asset"
+    );
+    let original_archive = fs::read(&archive).unwrap();
+    let mut changed_archive = original_archive.clone();
+    changed_archive.push(b'X');
+    fs::write(&archive, changed_archive).unwrap();
+    assert_unchanged_after_failure(
+        &fixture,
+        &package_mutation,
+        "package-bytes.json",
+        "package checksum sidecar does not match the measured archive",
+        std::slice::from_ref(&package_dir),
+    );
+    fs::write(&archive, original_archive).unwrap();
+
+    let mut bad_digest = fixture.selection.clone();
+    bad_digest["lanes"][&subset_asset]["comparison"]["sha256"] =
+        json!(sha256_bytes(b"wrong selected comparison bytes").as_str());
+    assert_unchanged_after_failure(
+        &fixture,
+        &bad_digest,
+        "bad-raw-digest.json",
+        "release build evidence differs from independently selected raw bytes",
+        &[],
+    );
+
+    // A coherently rehashed but changed comparison and compatibility member
+    // reaches the aggregate validator and fails on the measured content join.
+    let mut comparison_change = fixture.selection.clone();
+    let original_comparison = PathBuf::from(
+        comparison_change["lanes"][&subset_asset]["comparison"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let mut report: PackageComparisonReport =
+        serde_json::from_slice(&fs::read(&original_comparison).unwrap()).unwrap();
+    report.members[0].size += 1;
+    report.package_set_sha256 =
+        sha256_bytes(&canonical::bytes(&serde_json::to_value(&report.members).unwrap()).unwrap());
+    let mut comparison_bytes = canonical::bytes(&serde_json::to_value(&report).unwrap()).unwrap();
+    comparison_bytes.push(b'\n');
+    let comparison_copy = fixture.transport_directory.join("comparison-rehashed.json");
+    fs::write(&comparison_copy, &comparison_bytes).unwrap();
+    let comparison_copy = fs::canonicalize(comparison_copy).unwrap();
+    comparison_change["lanes"][&subset_asset]["comparison"]["path"] = json!(comparison_copy);
+    comparison_change["lanes"][&subset_asset]["comparison"]["sha256"] =
+        json!(sha256_bytes(&comparison_bytes).as_str());
+    assert_unchanged_after_failure(
+        &fixture,
+        &comparison_change,
+        "comparison-rehashed.json",
+        "release build comparison differs from measured A/B package bytes",
+        &[],
+    );
+
+    for (label, member) in [("log", "cmake-consumer.stdout.log"), ("elf", "c-x86_64.o")] {
+        let mut changed_compatibility = fixture.selection.clone();
+        let changed_root = copy_compatibility_for_mutation(
+            &fixture,
+            &mut changed_compatibility,
+            &subset_asset,
+            label,
+            member,
+        );
+        assert_unchanged_after_failure(
+            &fixture,
+            &changed_compatibility,
+            &format!("compatibility-{label}.json"),
+            if label == "log" {
+                "native compatibility retained command log bytes differ from their report hashes"
+            } else {
+                "native compatibility receipt standalone ELF output claim differs from verified bytes"
+            },
+            &[changed_root],
+        );
+    }
+}
+
+#[test]
+fn process_joins_v2_qualification_claims_to_measured_bytes_and_rejects_claim_substitutions() {
+    // The claims are assembled from a prior actual collector result and the
+    // fixture's parsed, input-bound index. This proves the CLI joins its own
+    // byte collection to claims instead of trusting a success-shaped input.
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "qualification-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic baseline collection failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    assert_eq!(baseline["operation"], "verify-release-evidence");
+    assert_eq!(baseline["assurance"], "byte-consistency-only");
+    assert!(baseline["provenance_sha256"].is_string());
+
+    let valid = qualification_claims(&fixture, &baseline);
+    assert_eq!(valid["source_run"]["run_id"], 42);
+    assert_eq!(valid["source_run"]["run_attempt"], 1);
+    let mut success = qualification_command(
+        &fixture,
+        &fixture.selection,
+        "qualification-success",
+        &valid,
+        None,
+    );
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let output = success.output().unwrap();
+    assert!(
+        output.status.success(),
+        "synthetic qualification byte join failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "successful qualification mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "successful qualification mutated selected transport evidence"
+    );
+    let joined: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(joined["operation"], "verify-qualification");
+    assert_eq!(joined["assurance"], "byte-consistency-only");
+    assert_eq!(joined["release_format"], "family-v2");
+    assert_eq!(joined["lane_count"], 3);
+    assert_eq!(joined["build_count"], 6);
+    assert_eq!(joined["inputs_sha256"], baseline["inputs_sha256"]);
+    assert_eq!(joined["index_sha256"], baseline["index_sha256"]);
+    assert_eq!(joined["checksums_sha256"], baseline["checksums_sha256"]);
+    assert_eq!(joined["provenance_sha256"], baseline["provenance_sha256"]);
+    for authority_claim in [
+        "execution_authenticated",
+        "signature_verified",
+        "job_origin_verified",
+        "publication_authorized",
+        "recovery_authorized",
+    ] {
+        assert!(
+            joined.get(authority_claim).is_none(),
+            "byte-only qualification result unexpectedly claims {authority_claim}"
+        );
+    }
+    assert_eq!(
+        joined["qualification_sha256"],
+        sha256_bytes(&serde_json::to_vec(&valid).unwrap()).as_str()
+    );
+
+    let mut wrong_report = valid.clone();
+    wrong_report["lanes"][0]["build_a_report_sha256"] =
+        json!(sha256_bytes(b"internally well-formed but unmeasured report claim").as_str());
+    assert_qualification_failure_is_read_only(
+        &fixture,
+        &fixture.selection,
+        "qualification-wrong-report",
+        &wrong_report,
+        None,
+        "qualification report claims differ from the complete measured evidence bytes",
+        Some("AX0901"),
+    );
+
+    let mut compatibility_self_hash = valid.clone();
+    let asset = compatibility_self_hash["lanes"][0]["asset"]
+        .as_str()
+        .unwrap();
+    let measured = baseline["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lane| lane["asset"] == asset)
+        .unwrap();
+    // The nested receipt digest is not the raw compatibility manifest digest.
+    compatibility_self_hash["lanes"][0]["compatibility_report_sha256"] =
+        measured["compatibility_receipt_sha256"].clone();
+    assert_qualification_failure_is_read_only(
+        &fixture,
+        &fixture.selection,
+        "qualification-compatibility-self-hash",
+        &compatibility_self_hash,
+        None,
+        "qualification report claims differ from the complete measured evidence bytes",
+        Some("AX0901"),
+    );
+
+    let mut missing_attempt = valid.clone();
+    missing_attempt["source_run"]
+        .as_object_mut()
+        .unwrap()
+        .remove("run_attempt");
+    assert_qualification_failure_is_read_only(
+        &fixture,
+        &fixture.selection,
+        "qualification-missing-attempt",
+        &missing_attempt,
+        None,
+        "qualification evidence is not a closed v2 JSON document",
+        Some("AX0901"),
+    );
+
+    let wrong_selected_digest =
+        sha256_bytes(b"not the selected qualification document").to_string();
+    assert_qualification_failure_is_read_only(
+        &fixture,
+        &fixture.selection,
+        "qualification-wrong-selected-digest",
+        &valid,
+        Some(&wrong_selected_digest),
+        "selected evidence metadata differs from its independently retained raw digest or identity",
+        None,
+    );
+
+    // A valid policy document is still an independent transport selector and
+    // cannot be placed inside a selected compatibility root.
+    let prepared = qualification_command(
+        &fixture,
+        &fixture.selection,
+        "qualification-policy-overlap",
+        &valid,
+        None,
+    );
+    let mut args = prepared
+        .get_args()
+        .map(std::ffi::OsStr::to_os_string)
+        .collect::<Vec<_>>();
+    let policy_position = args
+        .iter()
+        .position(|arg| arg.to_str() == Some("--policy"))
+        .unwrap();
+    let original_policy_path = PathBuf::from(args[policy_position + 1].clone());
+    let policy_bytes = fs::read(original_policy_path).unwrap();
+    let overlap_asset = asset_for_host(&fixture, "linux-x86_64");
+    let compatibility_root = PathBuf::from(
+        fixture.selection["lanes"][&overlap_asset]["compatibility"]["directory"]
+            .as_str()
+            .unwrap(),
+    );
+    let overlapping_policy_path = compatibility_root.join("selected-qualification-policy.json");
+    fs::write(&overlapping_policy_path, &policy_bytes).unwrap();
+    args[policy_position + 1] = overlapping_policy_path.as_os_str().to_os_string();
+    let policy_digest_position = args
+        .iter()
+        .position(|arg| arg.to_str() == Some("--policy-sha256"))
+        .unwrap();
+    args[policy_digest_position + 1] =
+        std::ffi::OsString::from(sha256_bytes(&policy_bytes).to_string());
+    let mut overlap = Command::new(env!("CARGO_BIN_EXE_aros"));
+    overlap.args(args);
+
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let output = overlap.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "qualification unexpectedly accepted a policy inside compatibility evidence"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "overlapping policy failure emitted success-shaped stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "independent evidence inputs must remain outside all selected release, package and compatibility roots"
+        ),
+        "policy overlap did not reach the intended selector rejection:\n{stderr}"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "overlapping policy rejection mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "overlapping policy rejection mutated selected transport evidence"
+    );
+}
+
+#[test]
+fn process_revalidates_v2_recovery_requests_against_fresh_complete_bytes() {
+    // Observations here are synthetic; passing is not provider, signer or
+    // owning-job authentication and must never be used as release evidence.
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "recovery-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic recovery baseline collection failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let qualification = qualification_claims(&fixture, &baseline);
+
+    let packaging_request = recovery_request(&qualification, "packaging-recovery", "packaging");
+    let mut packaging = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "packaging-recovery-success",
+        &qualification,
+        &packaging_request,
+        None,
+        None,
+    );
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let packaging_output = packaging.output().unwrap();
+    assert!(
+        packaging_output.status.success(),
+        "fresh absent packaging recovery failed:\n{}",
+        String::from_utf8_lossy(&packaging_output.stderr)
+    );
+    assert!(
+        packaging_output.stderr.is_empty(),
+        "successful recovery emitted diagnostics: {}",
+        String::from_utf8_lossy(&packaging_output.stderr)
+    );
+    let packaging_result: Value = serde_json::from_slice(&packaging_output.stdout).unwrap();
+    assert_eq!(packaging_result["operation"], "verify-recovery");
+    assert_eq!(packaging_result["assurance"], "byte-consistency-only");
+    assert_eq!(packaging_result["lane_count"], 3);
+    assert_eq!(packaging_result["build_count"], 6);
+    assert_eq!(
+        packaging_result["recovery_request_sha256"],
+        sha256_bytes(&serde_json::to_vec(&packaging_request).unwrap()).as_str()
+    );
+    assert_eq!(
+        packaging_result["decision"]["repackage"]["release_id"],
+        "release-evidence-v2-recovered"
+    );
+    assert_eq!(
+        packaging_result["decision"]["repackage"]["tag"]["name"],
+        "release-2026.10-recovered"
+    );
+    for authority_claim in [
+        "execution_authenticated",
+        "signature_verified",
+        "job_origin_verified",
+        "publication_authorized",
+        "recovery_authorized",
+    ] {
+        assert!(
+            packaging_result.get(authority_claim).is_none(),
+            "byte-only recovery result unexpectedly claims {authority_claim}"
+        );
+    }
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "successful packaging recovery mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "successful packaging recovery mutated selected transport evidence"
+    );
+
+    let replay_request = recovery_request(
+        &qualification,
+        "compatibility-replay",
+        "compatibility-harness",
+    );
+    let mut replay = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "compatibility-replay-success",
+        &qualification,
+        &replay_request,
+        None,
+        None,
+    );
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let replay_output = replay.output().unwrap();
+    assert!(
+        replay_output.status.success(),
+        "compatibility-harness replay failed:\n{}",
+        String::from_utf8_lossy(&replay_output.stderr)
+    );
+    let replay_result: Value = serde_json::from_slice(&replay_output.stdout).unwrap();
+    assert_eq!(replay_result["operation"], "verify-recovery");
+    assert_eq!(replay_result["decision"], "replay-compatibility");
+    assert_eq!(replay_result["lane_count"], 3);
+    assert_eq!(replay_result["build_count"], 6);
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "successful compatibility replay mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "successful compatibility replay mutated selected transport evidence"
+    );
+
+    let mut wrong_attempt = recovery_request(&qualification, "packaging-recovery", "packaging");
+    wrong_attempt["observed_run"]["run_attempt"] = json!(2);
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "wrong-attempt",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "wrong-attempt",
+            &qualification,
+            &wrong_attempt,
+            None,
+            None,
+        ),
+        "recovery provider observation differs from the exact source run attempt",
+        Some("AX0901"),
+    );
+
+    let mut wrong_tag = recovery_request(&qualification, "packaging-recovery", "packaging");
+    wrong_tag["source_tag"]["name"] = json!("release-2026.10-substituted");
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "wrong-tag",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "wrong-tag",
+            &qualification,
+            &wrong_tag,
+            None,
+            None,
+        ),
+        "observed source tag does not match the immutable qualification identity",
+        Some("AX0901"),
+    );
+
+    let mut wrong_attestation = recovery_request(&qualification, "packaging-recovery", "packaging");
+    wrong_attestation["observed_attestation"]["signer"] = json!("unverified-signer");
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "wrong-attestation",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "wrong-attestation",
+            &qualification,
+            &wrong_attestation,
+            None,
+            None,
+        ),
+        "recovery requires the exact external attestation observation",
+        Some("AX0901"),
+    );
+
+    let mut reused_handoff = recovery_request(&qualification, "packaging-recovery", "packaging");
+    reused_handoff["handoff"]["release_id"] = json!(RELEASE_ID);
+    reused_handoff["handoff"]["tag"]["name"] = qualification["source_run"]["source_tag"].clone();
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "reused-handoff",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "reused-handoff",
+            &qualification,
+            &reused_handoff,
+            None,
+            None,
+        ),
+        "recovery handoff conflicts with the original identity or an existing release",
+        Some("AX0901"),
+    );
+
+    for state in ["draft", "published"] {
+        let mut existing_handoff =
+            recovery_request(&qualification, "packaging-recovery", "packaging");
+        existing_handoff["handoff"]["state"] = json!(state);
+        assert_recovery_failure_is_read_only(
+            &fixture,
+            &format!("{state}-handoff"),
+            recovery_command(
+                &fixture,
+                &fixture.selection,
+                &format!("{state}-handoff"),
+                &qualification,
+                &existing_handoff,
+                None,
+                None,
+            ),
+            "recovery handoff conflicts with the original identity or an existing release",
+            Some("AX0901"),
+        );
+    }
+
+    for failed_stage in ["compiler", "comparison", "compatibility"] {
+        let invalid_stage = recovery_request(&qualification, "packaging-recovery", failed_stage);
+        assert_recovery_failure_is_read_only(
+            &fixture,
+            &format!("failed-{failed_stage}"),
+            recovery_command(
+                &fixture,
+                &fixture.selection,
+                &format!("failed-{failed_stage}"),
+                &qualification,
+                &invalid_stage,
+                None,
+                None,
+            ),
+            "recovery operation does not match the sole measured failed stage",
+            Some("AX0901"),
+        );
+    }
+
+    let valid_packaging = recovery_request(&qualification, "packaging-recovery", "packaging");
+    let protected_request = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "protected-request",
+        &qualification,
+        &valid_packaging,
+        None,
+        None,
+    );
+    let mut protected_arguments = command_arguments(&protected_request);
+    let protected_asset = asset_for_host(&fixture, "linux-x86_64");
+    let protected_root = PathBuf::from(
+        fixture.selection["lanes"][&protected_asset]["compatibility"]["directory"]
+            .as_str()
+            .unwrap(),
+    );
+    let request_bytes = serde_json::to_vec(&valid_packaging).unwrap();
+    let protected_path = protected_root.join("recovery-request.json");
+    fs::write(&protected_path, &request_bytes).unwrap();
+    let request_position = argument_position(&protected_arguments, "--recovery-request");
+    protected_arguments[request_position + 1] = protected_path.into_os_string();
+    assert_recovery_failure_is_read_only(
+        &fixture, "protected-request", command_from_arguments(protected_arguments),
+        "independent evidence inputs must remain outside all selected release, package and compatibility roots",
+        None,
+    );
+    fs::remove_file(protected_root.join("recovery-request.json")).unwrap();
+
+    let duplicate_request = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "duplicate-request",
+        &qualification,
+        &valid_packaging,
+        None,
+        None,
+    );
+    let mut duplicate_arguments = command_arguments(&duplicate_request);
+    let mut duplicate_bytes = format!(
+        "{{\"schema\":\"{}\",",
+        aros_toolchain::recovery_v2::RECOVERY_V2_SCHEMA
+    )
+    .into_bytes();
+    duplicate_bytes.extend_from_slice(&request_bytes[1..]);
+    let duplicate_path = fixture
+        .transport_directory
+        .join("duplicate-recovery-request.json");
+    fs::write(&duplicate_path, &duplicate_bytes).unwrap();
+    let request_position = argument_position(&duplicate_arguments, "--recovery-request");
+    duplicate_arguments[request_position + 1] = duplicate_path.into_os_string();
+    let digest_position = argument_position(&duplicate_arguments, "--recovery-request-sha256");
+    duplicate_arguments[digest_position + 1] = sha256_bytes(&duplicate_bytes).to_string().into();
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "duplicate-request",
+        command_from_arguments(duplicate_arguments),
+        "recovery request is not a closed v2 JSON document",
+        Some("AX0901"),
+    );
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "wrong-request-digest",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "wrong-request-digest",
+            &qualification,
+            &valid_packaging,
+            None,
+            Some(&"00".repeat(32)),
+        ),
+        "selected evidence metadata differs from its independently retained raw digest or identity",
+        None,
+    );
+
+    let mut v1_request = valid_packaging.clone();
+    v1_request["schema"] = json!("aros-toolchain-recovery-request-v1");
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "v1-request-schema",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "v1-request-schema",
+            &qualification,
+            &v1_request,
+            None,
+            None,
+        ),
+        "recovery request does not select the v2 schema",
+        Some("AX0901"),
+    );
+
+    let mut unknown_field_request = valid_packaging.clone();
+    unknown_field_request["unexpected_authority"] = json!(true);
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "unknown-request-field",
+        recovery_command(
+            &fixture,
+            &fixture.selection,
+            "unknown-request-field",
+            &qualification,
+            &unknown_field_request,
+            None,
+            None,
+        ),
+        "recovery request is not a closed v2 JSON document",
+        Some("AX0901"),
+    );
+
+    let asset = asset_for_host(&fixture, "linux-x86_64");
+    let measurement_path = PathBuf::from(
+        fixture.selection["lanes"][&asset]["builds"][0]["measurement"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let original_measurement = fs::read(&measurement_path).unwrap();
+    let mut changed_measurement = original_measurement.clone();
+    changed_measurement.push(b'X');
+    fs::write(&measurement_path, changed_measurement).unwrap();
+    let changed_report = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "changed-report",
+        &qualification,
+        &valid_packaging,
+        None,
+        None,
+    );
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "changed-report",
+        changed_report,
+        "portable package measurement differs from selected raw bytes",
+        Some("AX0801"),
+    );
+    fs::write(&measurement_path, original_measurement).unwrap();
+
+    let mut changed_log_selection = fixture.selection.clone();
+    let changed_log_root = copy_compatibility_for_mutation(
+        &fixture,
+        &mut changed_log_selection,
+        &asset,
+        "recovery-log",
+        "cmake-consumer.stdout.log",
+    );
+    let changed_log = recovery_command(
+        &fixture,
+        &changed_log_selection,
+        "changed-log",
+        &qualification,
+        &valid_packaging,
+        None,
+        None,
+    );
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "changed-log",
+        changed_log,
+        "native compatibility retained command log bytes differ from their report hashes",
+        Some("AX0703"),
+    );
+    let _ = changed_log_root;
+
+    let mut missing_selection = fixture.selection.clone();
+    let missing_asset = asset_for_host(&fixture, "linux-x86_64");
+    missing_selection["lanes"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&missing_asset);
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "missing-selection",
+        recovery_command(
+            &fixture,
+            &missing_selection,
+            "missing-selection",
+            &qualification,
+            &valid_packaging,
+            None,
+            None,
+        ),
+        "evidence selection must exactly cover the input-derived index and required paths",
+        None,
+    );
+
+    let expired = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "expired-policy",
+        &qualification,
+        &valid_packaging,
+        None,
+        None,
+    );
+    let mut expired_arguments = command_arguments(&expired);
+    let (expired_policy_path, expired_policy_sha256) = write_json_input(
+        &fixture,
+        "recovery-expired-policy.json",
+        &json!({
+            "source_repository": "https://github.com/example/aros-toolchains",
+            "source_workflow": ".github/workflows/qualification.yml",
+            "signer_repository": "https://github.com/example/aros-toolchains",
+            "signer_workflow": ".github/workflows/qualification.yml",
+            "signer": "github-actions",
+            "now": 300
+        }),
+    );
+    let policy_position = argument_position(&expired_arguments, "--policy");
+    expired_arguments[policy_position + 1] = expired_policy_path.into_os_string();
+    let policy_digest_position = argument_position(&expired_arguments, "--policy-sha256");
+    expired_arguments[policy_digest_position + 1] = std::ffi::OsString::from(expired_policy_sha256);
+    assert_recovery_failure_is_read_only(
+        &fixture,
+        "expired-policy",
+        command_from_arguments(expired_arguments),
+        "qualification evidence v2 is not valid at the policy epoch",
+        Some("AX0901"),
+    );
+}
+
+#[test]
+fn process_records_complete_family_v2_qualification_and_rejects_invalid_recording_inputs() {
+    let fixture = Fixture::new();
+    let output_root = tempfile::tempdir().unwrap();
+    let output_directory = output_root.path().canonicalize().unwrap();
+    let recorded_path = output_directory.join("recorded-family-v2-qualification.json");
+    let mut record = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "successful-recording",
+        &recorded_path,
+    );
+    let release_before_record = support::snapshot_tree(&fixture.release_directory);
+    let transport_before_record = support::snapshot_tree(&fixture.transport_directory);
+    let record_output = record.output().unwrap();
+    assert!(
+        record_output.status.success(),
+        "family-v2 record-qualification failed:\n{}",
+        String::from_utf8_lossy(&record_output.stderr)
+    );
+    assert!(
+        record_output.stderr.is_empty(),
+        "successful record-qualification wrote diagnostics: {}",
+        String::from_utf8_lossy(&record_output.stderr)
+    );
+    let record_result: Value = serde_json::from_slice(&record_output.stdout).unwrap();
+    assert_eq!(record_result["operation"], "record-qualification");
+    assert_eq!(record_result["release_format"], "family-v2");
+    assert_eq!(record_result["assurance"], "byte-consistency-only");
+    assert_eq!(record_result["lane_count"], 3);
+    assert_eq!(record_result["build_count"], 6);
+    assert_eq!(
+        PathBuf::from(record_result["qualification_evidence"].as_str().unwrap()),
+        recorded_path
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before_record,
+        "record-qualification mutated the final release"
+    );
+    let recorded_bytes = fs::read(&recorded_path).unwrap();
+    let recorded_sha256 = sha256_bytes(&recorded_bytes).to_string();
+    assert_eq!(
+        record_result["qualification_sha256"],
+        recorded_sha256.as_str()
+    );
+    let recorded_evidence: Value = serde_json::from_slice(&recorded_bytes).unwrap();
+    assert_eq!(
+        recorded_evidence["schema"],
+        "aros-toolchain-qualification-evidence-v2"
+    );
+    assert_eq!(recorded_evidence["source_run"]["run_id"], 42);
+    assert_eq!(recorded_evidence["source_run"]["run_attempt"], 1);
+    assert_eq!(
+        recorded_evidence["source_run"]["producer_commit"],
+        recorded_evidence["release"]["producer_commit"]
+    );
+    assert_eq!(recorded_evidence["lanes"].as_array().unwrap().len(), 3);
+    let transport_after_record = support::snapshot_tree(&fixture.transport_directory);
+    let mut published_members = support::snapshot_tree(&output_directory);
+    assert_eq!(
+        published_members
+            .remove(std::path::Path::new(
+                "recorded-family-v2-qualification.json"
+            ))
+            .unwrap(),
+        recorded_bytes,
+        "record-qualification wrote bytes other than its one selected evidence file"
+    );
+    // The shared durable publisher intentionally retains one empty advisory
+    // lock. It is output coordination, never a qualification/inventory member.
+    assert_eq!(published_members.len(), 1);
+    assert!(published_members.iter().all(|(name, bytes)| {
+        bytes.is_empty()
+            && name
+                .to_str()
+                .is_some_and(aros_common::publication::is_publication_journal_lock_name)
+    }));
+    assert!(
+        transport_after_record == transport_before_record,
+        "record-qualification changed existing transport evidence"
+    );
+
+    // Feed the actual recorded file and its separately measured raw digest to
+    // the complete verifier; the producer's claim file must survive that join.
+    let verify_prepared = qualification_command(
+        &fixture,
+        &fixture.selection,
+        "verify-recorded-qualification",
+        &recorded_evidence,
+        Some(&recorded_sha256),
+    );
+    let mut verify_arguments = command_arguments(&verify_prepared);
+    let evidence_position = argument_position(&verify_arguments, "--qualification-evidence");
+    verify_arguments[evidence_position + 1] = recorded_path.as_os_str().to_os_string();
+    let evidence_sha256_position = argument_position(&verify_arguments, "--qualification-sha256");
+    verify_arguments[evidence_sha256_position + 1] =
+        std::ffi::OsString::from(recorded_sha256.as_str());
+    let mut verify = command_from_arguments(verify_arguments);
+    let release_before_verify = support::snapshot_tree(&fixture.release_directory);
+    let transport_before_verify = support::snapshot_tree(&fixture.transport_directory);
+    let verify_output = verify.output().unwrap();
+    assert!(
+        verify_output.status.success(),
+        "recorded qualification failed its measured verifier join:\n{}",
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+    let verify_result: Value = serde_json::from_slice(&verify_output.stdout).unwrap();
+    assert_eq!(verify_result["operation"], "verify-qualification");
+    assert_eq!(verify_result["assurance"], "byte-consistency-only");
+    assert_eq!(
+        verify_result["qualification_sha256"],
+        recorded_sha256.as_str()
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before_verify,
+        "verification of recorded qualification mutated the final release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before_verify,
+        "verification of recorded qualification mutated transport evidence"
+    );
+
+    let missing_attempt_path = fixture
+        .transport_directory
+        .join("record-missing-attempt.json");
+    let missing_attempt = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "missing-attempt",
+        &missing_attempt_path,
+    );
+    let mut arguments = command_arguments(&missing_attempt);
+    let attempt_position = argument_position(&arguments, "--source-run-attempt");
+    arguments.drain(attempt_position..=attempt_position + 1);
+    assert_record_failure_is_read_only(
+        &fixture,
+        command_from_arguments(arguments),
+        &missing_attempt_path,
+        "--source-run-attempt",
+        None,
+    );
+
+    let v1_collision_path = fixture.transport_directory.join("record-v1-collision.json");
+    let v1_collision = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "v1-flag-collision",
+        &v1_collision_path,
+    );
+    let mut arguments = command_arguments(&v1_collision);
+    arguments.push(std::ffi::OsString::from("--source-lock-filename"));
+    arguments.push(std::ffi::OsString::from("source-lock.json"));
+    assert_record_failure_is_read_only(
+        &fixture,
+        command_from_arguments(arguments),
+        &v1_collision_path,
+        "--source-lock-filename",
+        None,
+    );
+
+    let wrong_producer_path = fixture
+        .transport_directory
+        .join("record-wrong-producer.json");
+    let wrong_producer = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "wrong-source-producer",
+        &wrong_producer_path,
+    );
+    let mut arguments = command_arguments(&wrong_producer);
+    let producer_position = argument_position(&arguments, "--source-tag-commit");
+    arguments[producer_position + 1] = std::ffi::OsString::from("44".repeat(20));
+    assert_record_failure_is_read_only(
+        &fixture,
+        command_from_arguments(arguments),
+        &wrong_producer_path,
+        "qualification recording source producer differs from the selected index",
+        None,
+    );
+
+    let invalid_time_path = fixture.transport_directory.join("record-invalid-time.json");
+    let invalid_time = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "invalid-time-order",
+        &invalid_time_path,
+    );
+    let mut arguments = command_arguments(&invalid_time);
+    let expires_position = argument_position(&arguments, "--expires-at");
+    arguments[expires_position + 1] = std::ffi::OsString::from("99");
+    assert_record_failure_is_read_only(
+        &fixture,
+        command_from_arguments(arguments),
+        &invalid_time_path,
+        "qualification recording has invalid creation, expiry or policy time",
+        None,
+    );
+
+    let asset = asset_for_host(&fixture, "linux-x86_64");
+    let changed_measurement = PathBuf::from(
+        fixture.selection["lanes"][&asset]["builds"][0]["measurement"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let original_measurement_bytes = fs::read(&changed_measurement).unwrap();
+    let mut changed_bytes = original_measurement_bytes.clone();
+    changed_bytes.push(b'X');
+    fs::write(&changed_measurement, changed_bytes).unwrap();
+    let changed_report_path = fixture
+        .transport_directory
+        .join("record-changed-measurement.json");
+    let changed_report = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "changed-measurement",
+        &changed_report_path,
+    );
+    assert_record_failure_is_read_only(
+        &fixture,
+        changed_report,
+        &changed_report_path,
+        "portable package measurement differs from selected raw bytes",
+        None,
+    );
+    fs::write(&changed_measurement, original_measurement_bytes).unwrap();
+
+    let mut changed_log_selection = fixture.selection.clone();
+    let _changed_log_root = copy_compatibility_for_mutation(
+        &fixture,
+        &mut changed_log_selection,
+        &asset,
+        "record-log",
+        "cmake-consumer.stdout.log",
+    );
+    let changed_log_path = fixture.transport_directory.join("record-changed-log.json");
+    let changed_log = record_qualification_command(
+        &fixture,
+        &changed_log_selection,
+        "changed-log",
+        &changed_log_path,
+    );
+    assert_record_failure_is_read_only(
+        &fixture,
+        changed_log,
+        &changed_log_path,
+        "native compatibility retained command log bytes differ from their report hashes",
+        None,
+    );
+
+    let protected_asset = asset_for_host(&fixture, "linux-x86_64");
+    let protected_root = PathBuf::from(
+        fixture.selection["lanes"][&protected_asset]["compatibility"]["directory"]
+            .as_str()
+            .unwrap(),
+    );
+    let protected_output = protected_root.join("qualification-protected-output.json");
+    let protected_command = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "protected-output",
+        &protected_output,
+    );
+    assert_record_failure_is_read_only(
+        &fixture,
+        protected_command,
+        &protected_output,
+        "qualification output must remain outside all selected release, package, compatibility and input paths",
+        None,
+    );
+
+    let existing_output = fixture
+        .transport_directory
+        .join("record-existing-output.json");
+    let existing_bytes = b"sentinel qualification output must be preserved\n";
+    fs::write(&existing_output, existing_bytes).unwrap();
+    let existing_command = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "existing-output",
+        &existing_output,
+    );
+    assert_record_failure_is_read_only(
+        &fixture,
+        existing_command,
+        &existing_output,
+        "qualification output already exists or is unavailable",
+        Some(existing_bytes),
+    );
+
+    let symlink_parent = fixture
+        .transport_directory
+        .join("record-output-parent-symlink");
+    symlink(&fixture.release_directory, &symlink_parent).unwrap();
+    let symlink_output = symlink_parent.join("record-through-symlink.json");
+    let symlink_command = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "symlink-parent",
+        &symlink_output,
+    );
+    assert_record_failure_is_read_only(
+        &fixture,
+        symlink_command,
+        &symlink_output,
+        "qualification output parent must have no symlink components",
+        None,
+    );
+}
+
+struct RepackageDestinations {
+    root: tempfile::TempDir,
+    first_extraction_dir: PathBuf,
+    second_extraction_dir: PathBuf,
+    first_output_dir: PathBuf,
+    second_output_dir: PathBuf,
+    comparison_output: PathBuf,
+}
+
+impl RepackageDestinations {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        Self {
+            first_extraction_dir: root_path.join("extract-a"),
+            second_extraction_dir: root_path.join("extract-b"),
+            first_output_dir: root_path.join("package-a"),
+            second_output_dir: root_path.join("package-b"),
+            comparison_output: root_path.join("comparison.json"),
+            root,
+        }
+    }
+
+    fn assert_package_destinations_absent(&self) {
+        for path in [
+            &self.first_extraction_dir,
+            &self.second_extraction_dir,
+            &self.first_output_dir,
+            &self.second_output_dir,
+        ] {
+            assert!(
+                !path.exists(),
+                "failed repackage created {}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn repackage_command(
+    recovery: &Command,
+    asset: &str,
+    destinations: &RepackageDestinations,
+) -> Command {
+    let mut arguments = command_arguments(recovery);
+    let operation_position = argument_position(&arguments, "verify-recovery");
+    arguments[operation_position] = "repackage".into();
+    let directory_position = argument_position(&arguments, "--directory");
+    arguments[directory_position] = "--release-dir".into();
+    let release_id_position = argument_position(&arguments, "--release-id");
+    arguments[release_id_position] = "--source-release-id".into();
+
+    let mut command = command_from_arguments(arguments);
+    command.args([
+        "--release-format",
+        "family-v2",
+        "--asset",
+        asset,
+        "--first-extraction-dir",
+        destinations.first_extraction_dir.to_str().unwrap(),
+        "--second-extraction-dir",
+        destinations.second_extraction_dir.to_str().unwrap(),
+        "--first-output-dir",
+        destinations.first_output_dir.to_str().unwrap(),
+        "--second-output-dir",
+        destinations.second_output_dir.to_str().unwrap(),
+        "--comparison-output",
+        destinations.comparison_output.to_str().unwrap(),
+    ]);
+    command
+}
+
+fn package_verification_request(
+    fixture: &Fixture,
+    asset: &str,
+    package_dir: PathBuf,
+    release_id: &str,
+) -> PackageVerificationRequest {
+    let inputs = ReleaseInputs::load(&fixture.release_directory).unwrap();
+    let index_bytes = fs::read(fixture.release_directory.join(INDEX_NAME)).unwrap();
+    let index = NativeReleaseIndexV2::parse(&index_bytes, &inputs).unwrap();
+    let artifact = index
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.asset() == asset)
+        .unwrap_or_else(|| panic!("asset {asset} is not in the fixture index"));
+    let group = inputs
+        .groups()
+        .iter()
+        .find(|group| group.id() == artifact.group_id())
+        .unwrap();
+    PackageVerificationRequest {
+        package_dir,
+        release_id: release_id.to_owned(),
+        host: artifact.host().to_owned(),
+        recipe: group.recipe().clone(),
+        source_lock: group.source_lock().clone(),
+        profile: group
+            .profiles()
+            .select(artifact.target_profile())
+            .unwrap()
+            .clone(),
+        build_environment: serde_json::from_value(
+            fixture.selection["lanes"][asset]["build_environment"].clone(),
+        )
+        .unwrap(),
+        forbidden_prefixes: Vec::new(),
+    }
+}
+
+fn assert_repackage_failure_is_read_only(
+    fixture: &Fixture,
+    destinations: &RepackageDestinations,
+    name: &str,
+    mut command: Command,
+    expected_diagnostic: &str,
+    expected_code: Option<&str>,
+) {
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let destinations_before = support::snapshot_tree(destinations.root.path());
+    let comparison_before = destinations
+        .comparison_output
+        .exists()
+        .then(|| fs::read(&destinations.comparison_output).unwrap());
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "unexpected repackage success for {name}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed repackage {name} emitted success-shaped stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_diagnostic),
+        "repackage {name} did not reach its intended rejection; expected {expected_diagnostic:?} in stderr:\n{stderr}"
+    );
+    if let Some(code) = expected_code {
+        assert!(
+            stderr.contains(code),
+            "repackage {name} did not include diagnostic code {code}:\n{stderr}"
+        );
+    }
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "failed repackage {name} mutated the original release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "failed repackage {name} mutated original transport evidence"
+    );
+    assert_eq!(
+        support::snapshot_tree(destinations.root.path()),
+        destinations_before,
+        "failed repackage {name} wrote into fresh destinations"
+    );
+    destinations.assert_package_destinations_absent();
+    if let Some(bytes) = comparison_before {
+        assert_eq!(
+            fs::read(&destinations.comparison_output).unwrap(),
+            bytes,
+            "failed repackage {name} changed existing comparison output"
+        );
+    } else {
+        assert_eq!(
+            fs::symlink_metadata(&destinations.comparison_output)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound,
+            "failed repackage {name} created comparison output"
+        );
+    }
+}
+
+fn assert_forbidden_destination_failure_is_read_only(
+    fixture: &Fixture,
+    destinations: &RepackageDestinations,
+    forbidden_root: &std::path::Path,
+    name: &str,
+    mut command: Command,
+) {
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let destinations_before = support::snapshot_tree(destinations.root.path());
+    let forbidden_before = support::snapshot_tree(forbidden_root);
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "unexpected repackage success for forbidden destination {name}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed forbidden-destination repackage {name} emitted stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "repackage destinations must remain outside each other and all selected evidence paths"
+        ),
+        "forbidden destination {name} did not reach its intended rejection:\n{stderr}"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before,
+        "forbidden destination {name} mutated the original release"
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before,
+        "forbidden destination {name} mutated transport evidence"
+    );
+    assert_eq!(
+        support::snapshot_tree(destinations.root.path()),
+        destinations_before,
+        "forbidden destination {name} wrote to the fresh destination root"
+    );
+    assert_eq!(
+        support::snapshot_tree(forbidden_root),
+        forbidden_before,
+        "forbidden destination {name} wrote into its protected root"
+    );
+    destinations.assert_package_destinations_absent();
+    assert!(
+        !destinations.comparison_output.exists(),
+        "forbidden destination {name} created comparison output"
+    );
+}
+
+#[test]
+fn process_repackages_every_selected_v2_host_asset_without_authenticating_execution() {
+    // Every package, compatibility output and provider claim is synthetic.
+    // The operation proves byte consistency and packaging only, not compiler
+    // execution, provider identity, signature validity or publication authority.
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "repackage-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic repackage baseline failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    assert_eq!(baseline["lane_count"], 3);
+    assert_eq!(baseline["build_count"], 6);
+    let evidence = qualification_claims(&fixture, &baseline);
+    let recovery = recovery_request(&evidence, "packaging-recovery", "packaging");
+    let inputs = ReleaseInputs::load(&fixture.release_directory).unwrap();
+    let index_bytes = fs::read(fixture.release_directory.join(INDEX_NAME)).unwrap();
+    let index = NativeReleaseIndexV2::parse(&index_bytes, &inputs).unwrap();
+
+    for host in ["linux-aarch64", "linux-x86_64", "macos-aarch64"] {
+        let asset = asset_for_host(&fixture, host);
+        let destinations = RepackageDestinations::new();
+        let recovery_command = recovery_command(
+            &fixture,
+            &fixture.selection,
+            &format!("repackage-{host}"),
+            &evidence,
+            &recovery,
+            None,
+            None,
+        );
+        let mut process = repackage_command(&recovery_command, &asset, &destinations);
+        if host == "linux-aarch64" {
+            let missing_prefix = destinations.root.path().join("unrelated-missing-prefix");
+            assert!(!missing_prefix.exists());
+            process.arg("--forbidden-prefix").arg(missing_prefix);
+        }
+        let release_before = support::snapshot_tree(&fixture.release_directory);
+        let transport_before = support::snapshot_tree(&fixture.transport_directory);
+        let result = process.output().unwrap();
+        assert!(
+            result.status.success(),
+            "family-v2 repackage failed for {host}:\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.stderr.is_empty(),
+            "successful repackage for {host} emitted diagnostics: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let result: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(result["operation"], "repackage");
+        assert_eq!(result["release_format"], "family-v2");
+        assert_eq!(result["assurance"], "byte-consistency-only");
+        assert_eq!(result["lane_count"], 3);
+        assert_eq!(result["build_count"], 6);
+        assert_eq!(result["source_release_id"], RELEASE_ID);
+        assert_eq!(result["release_id"], RECOVERED_RELEASE_ID);
+        assert_eq!(result["asset"], asset);
+        assert_eq!(
+            result["first_package_dir"],
+            destinations.first_output_dir.to_str().unwrap()
+        );
+        assert_eq!(
+            result["second_package_dir"],
+            destinations.second_output_dir.to_str().unwrap()
+        );
+        assert_eq!(
+            result["comparison_receipt"],
+            destinations.comparison_output.to_str().unwrap()
+        );
+        for authority_claim in [
+            "execution_authenticated",
+            "signature_verified",
+            "job_origin_verified",
+            "publication_authorized",
+            "recovery_authorized",
+        ] {
+            assert!(
+                result.get(authority_claim).is_none(),
+                "byte-only repackage unexpectedly claims {authority_claim}"
+            );
+        }
+
+        let original_package_dir = fixture.lanes[&asset].builds[0].package_dir.clone();
+        let original = verify_with_format(
+            &package_verification_request(&fixture, &asset, original_package_dir, RELEASE_ID),
+            PackageFormat::CompilerFamilyV2,
+        )
+        .unwrap();
+        let first = verify_with_format(
+            &package_verification_request(
+                &fixture,
+                &asset,
+                destinations.first_output_dir.clone(),
+                RECOVERED_RELEASE_ID,
+            ),
+            PackageFormat::CompilerFamilyV2,
+        )
+        .unwrap();
+        let second = verify_with_format(
+            &package_verification_request(
+                &fixture,
+                &asset,
+                destinations.second_output_dir.clone(),
+                RECOVERED_RELEASE_ID,
+            ),
+            PackageFormat::CompilerFamilyV2,
+        )
+        .unwrap();
+        let mut expected_manifest = original.manifest.clone();
+        expected_manifest.release_id = RECOVERED_RELEASE_ID.to_owned();
+        assert_eq!(first.manifest, expected_manifest);
+        assert_eq!(second.manifest, expected_manifest);
+        assert_eq!(first.manifest.tree_sha256, original.manifest.tree_sha256);
+        assert_eq!(second.manifest.tree_sha256, original.manifest.tree_sha256);
+        assert_eq!(first.archive_sha256, second.archive_sha256);
+
+        let first_members = support::snapshot_tree(&destinations.first_output_dir);
+        let second_members = support::snapshot_tree(&destinations.second_output_dir);
+        assert_eq!(
+            first_members.len(),
+            4,
+            "family-v2 package must have four members"
+        );
+        assert_eq!(first_members, second_members, "A/B package bytes differ");
+        let comparison_bytes = fs::read(&destinations.comparison_output).unwrap();
+        assert_eq!(
+            sha256_bytes(&comparison_bytes).as_str(),
+            result["comparison_receipt_sha256"].as_str().unwrap()
+        );
+        let comparison = PackageComparisonReport::parse(&comparison_bytes).unwrap();
+        assert!(comparison.byte_identical);
+        assert_eq!(comparison.members.len(), 4);
+        assert_eq!(
+            comparison.package_set_sha256.as_str(),
+            result["package_set_sha256"].as_str().unwrap()
+        );
+        let expected_comparison_members = first_members
+            .iter()
+            .map(
+                |(path, bytes)| aros_toolchain::release_index::PackageSetComparisonMember {
+                    name: path.to_str().unwrap().to_owned(),
+                    sha256: sha256_bytes(bytes),
+                    size: bytes.len() as u64,
+                },
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(comparison.members, expected_comparison_members);
+        assert_eq!(
+            result["source_archive_sha256"],
+            original.archive_sha256.as_str()
+        );
+        assert_eq!(
+            result["source_archive_size"].as_u64(),
+            Some(original.archive_size)
+        );
+        assert_eq!(
+            support::snapshot_tree(&fixture.release_directory),
+            release_before,
+            "repackage mutated the original release for {host}"
+        );
+        assert_eq!(
+            support::snapshot_tree(&fixture.transport_directory),
+            transport_before,
+            "repackage mutated original transport evidence for {host}"
+        );
+    }
+
+    assert_eq!(index.artifacts().len(), 3, "fixture host matrix changed");
+}
+
+#[test]
+fn process_repackage_protects_every_forbidden_destination_and_resolves_prefix_aliases() {
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "repackage-forbidden-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic repackage baseline failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let evidence = qualification_claims(&fixture, &baseline);
+    let recovery = recovery_request(&evidence, "packaging-recovery", "packaging");
+    let asset = asset_for_host(&fixture, "linux-x86_64");
+
+    for (case, destination) in [
+        ("first-extraction", 0),
+        ("second-extraction", 1),
+        ("first-output", 2),
+        ("second-output", 3),
+        ("comparison", 4),
+    ] {
+        let mut destinations = RepackageDestinations::new();
+        let forbidden_root = tempfile::tempdir().unwrap();
+        let forbidden_root_path = forbidden_root.path().canonicalize().unwrap();
+        fs::write(
+            forbidden_root_path.join("preserve-sentinel"),
+            b"forbidden output root must remain unchanged\n",
+        )
+        .unwrap();
+        let forbidden_destination = forbidden_root_path.join(format!("blocked-{case}"));
+        match destination {
+            0 => destinations.first_extraction_dir = forbidden_destination,
+            1 => destinations.second_extraction_dir = forbidden_destination,
+            2 => destinations.first_output_dir = forbidden_destination,
+            3 => destinations.second_output_dir = forbidden_destination,
+            4 => destinations.comparison_output = forbidden_destination,
+            _ => unreachable!("all repackage destinations are enumerated above"),
+        }
+
+        let prepared = recovery_command(
+            &fixture,
+            &fixture.selection,
+            &format!("repackage-forbidden-{case}"),
+            &evidence,
+            &recovery,
+            None,
+            None,
+        );
+        let mut process = repackage_command(&prepared, &asset, &destinations);
+        process.arg("--forbidden-prefix").arg(&forbidden_root_path);
+        assert_forbidden_destination_failure_is_read_only(
+            &fixture,
+            &destinations,
+            &forbidden_root_path,
+            case,
+            process,
+        );
+    }
+
+    let mut destinations = RepackageDestinations::new();
+    let forbidden_root = tempfile::tempdir().unwrap();
+    let forbidden_root_path = forbidden_root.path().canonicalize().unwrap();
+    fs::write(
+        forbidden_root_path.join("preserve-sentinel"),
+        b"forbidden output root must remain unchanged\n",
+    )
+    .unwrap();
+    let alias_parent = tempfile::tempdir().unwrap();
+    let forbidden_alias = alias_parent.path().join("forbidden-root-alias");
+    symlink(&forbidden_root_path, &forbidden_alias).unwrap();
+    destinations.first_output_dir = forbidden_root_path.join("blocked-through-alias");
+    let prepared = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-forbidden-symlink-alias",
+        &evidence,
+        &recovery,
+        None,
+        None,
+    );
+    let mut process = repackage_command(&prepared, &asset, &destinations);
+    process.arg("--forbidden-prefix").arg(&forbidden_alias);
+    assert_forbidden_destination_failure_is_read_only(
+        &fixture,
+        &destinations,
+        &forbidden_root_path,
+        "symlink-alias",
+        process,
+    );
+}
+
+#[test]
+fn process_repackage_rejects_replay_unselected_asset_bad_digest_and_unsafe_comparison_destinations()
+{
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "repackage-negative-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic repackage baseline failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let evidence = qualification_claims(&fixture, &baseline);
+    let asset = asset_for_host(&fixture, "linux-x86_64");
+    let packaging = recovery_request(&evidence, "packaging-recovery", "packaging");
+
+    let replay = recovery_request(&evidence, "compatibility-replay", "compatibility-harness");
+    let replay_destinations = RepackageDestinations::new();
+    let replay_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-replay",
+        &evidence,
+        &replay,
+        None,
+        None,
+    );
+    let replay_command = repackage_command(&replay_recovery, &asset, &replay_destinations);
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &replay_destinations,
+        "compatibility-replay",
+        replay_command,
+        "compatibility replay cannot execute packaging recovery",
+        Some("AX0901"),
+    );
+
+    let unknown_destinations = RepackageDestinations::new();
+    let unknown_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-unknown-asset",
+        &evidence,
+        &packaging,
+        None,
+        None,
+    );
+    let unknown_command = repackage_command(
+        &unknown_recovery,
+        "not-an-indexed-asset.tar.xz",
+        &unknown_destinations,
+    );
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &unknown_destinations,
+        "unknown-asset",
+        unknown_command,
+        "recovery asset is not a selected indexed lane",
+        Some("AX0901"),
+    );
+
+    let wrong_digest = "0000000000000000000000000000000000000000000000000000000000000000";
+    let digest_destinations = RepackageDestinations::new();
+    let digest_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-wrong-request-digest",
+        &evidence,
+        &packaging,
+        None,
+        Some(wrong_digest),
+    );
+    let digest_command = repackage_command(&digest_recovery, &asset, &digest_destinations);
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &digest_destinations,
+        "wrong-request-digest",
+        digest_command,
+        "selected evidence metadata differs from its independently retained raw digest or identity",
+        None,
+    );
+
+    let existing_destinations = RepackageDestinations::new();
+    let sentinel = b"existing comparison must remain unchanged\n";
+    fs::write(&existing_destinations.comparison_output, sentinel).unwrap();
+    let existing_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-existing-comparison",
+        &evidence,
+        &packaging,
+        None,
+        None,
+    );
+    let existing_command = repackage_command(&existing_recovery, &asset, &existing_destinations);
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &existing_destinations,
+        "existing-comparison",
+        existing_command,
+        "repackage destination already exists or is unavailable",
+        None,
+    );
+    assert_eq!(
+        fs::read(&existing_destinations.comparison_output).unwrap(),
+        sentinel
+    );
+
+    let mut overlap_destinations = RepackageDestinations::new();
+    overlap_destinations.comparison_output = fixture
+        .release_directory
+        .join("overlapping-repackage-comparison.json");
+    assert!(!overlap_destinations.comparison_output.exists());
+    let overlap_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-overlapping-comparison",
+        &evidence,
+        &packaging,
+        None,
+        None,
+    );
+    let overlap_command = repackage_command(&overlap_recovery, &asset, &overlap_destinations);
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &overlap_destinations,
+        "overlapping-comparison",
+        overlap_command,
+        "repackage destinations must remain outside each other and all selected evidence paths",
+        None,
+    );
+    assert!(!overlap_destinations.comparison_output.exists());
+}
+
+#[test]
+fn process_repackage_revalidates_stale_measurement_and_compatibility_bytes_from_other_lanes() {
+    let fixture = Fixture::new();
+    let baseline = command(&fixture, &fixture.selection, "repackage-stale-baseline");
+    assert!(
+        baseline.status.success(),
+        "synthetic repackage baseline failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let evidence = qualification_claims(&fixture, &baseline);
+    let recovery = recovery_request(&evidence, "packaging-recovery", "packaging");
+    let selected_asset = asset_for_host(&fixture, "linux-x86_64");
+    let changed_asset = asset_for_host(&fixture, "linux-aarch64");
+    assert_ne!(selected_asset, changed_asset);
+
+    let measurement = fixture.lanes[&changed_asset].builds[1].measurement.clone();
+    let original_measurement = fs::read(&measurement).unwrap();
+    let mut changed_measurement = original_measurement.clone();
+    changed_measurement.push(b'X');
+    fs::write(&measurement, changed_measurement).unwrap();
+    let measurement_destinations = RepackageDestinations::new();
+    let measurement_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-stale-other-lane-b-measurement",
+        &evidence,
+        &recovery,
+        None,
+        None,
+    );
+    let measurement_command = repackage_command(
+        &measurement_recovery,
+        &selected_asset,
+        &measurement_destinations,
+    );
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &measurement_destinations,
+        "stale-other-lane-b-measurement",
+        measurement_command,
+        "portable package measurement differs from selected raw bytes",
+        Some("AX0801"),
+    );
+    fs::write(&measurement, original_measurement).unwrap();
+
+    let compatibility_directory = PathBuf::from(
+        fixture.selection["lanes"][&changed_asset]["compatibility"]["directory"]
+            .as_str()
+            .unwrap(),
+    );
+    let compatibility_log = compatibility_directory.join("cmake-consumer.stdout.log");
+    let original_compatibility_log = fs::read(&compatibility_log).unwrap();
+    let mut changed_compatibility_log = original_compatibility_log.clone();
+    changed_compatibility_log.push(b'X');
+    fs::write(&compatibility_log, changed_compatibility_log).unwrap();
+    let compatibility_destinations = RepackageDestinations::new();
+    let compatibility_recovery = recovery_command(
+        &fixture,
+        &fixture.selection,
+        "repackage-stale-other-lane-compatibility",
+        &evidence,
+        &recovery,
+        None,
+        None,
+    );
+    let compatibility_command = repackage_command(
+        &compatibility_recovery,
+        &selected_asset,
+        &compatibility_destinations,
+    );
+    assert_repackage_failure_is_read_only(
+        &fixture,
+        &compatibility_destinations,
+        "stale-other-lane-compatibility",
+        compatibility_command,
+        "portable compatibility member differs from its selected manifest",
+        Some("AX0703"),
+    );
+    fs::write(&compatibility_log, original_compatibility_log).unwrap();
+}

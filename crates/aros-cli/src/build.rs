@@ -2,9 +2,8 @@
 
 use crate::{build_tools, toolchain};
 use aros_common::local_toolchain::{LocalToolchainDescriptor, LOCAL_TOOLCHAIN_DESCRIPTOR_FILE};
-use aros_common::native_build_contract::{
-    load_bound_native_build_contract, validate_native_build_compiler, LoadedNativeBuildContract,
-};
+use aros_common::native_build_contract::validate_native_build_compiler;
+use aros_common::native_consumer_contract::validate_native_consumer_compiler;
 use console::{style, Emoji};
 use miette::{IntoDiagnostic, Result, WrapErr};
 use std::path::{Path, PathBuf};
@@ -15,27 +14,14 @@ const MAX_LOCAL_TOOLCHAIN_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
 
 mod host_inputs;
 mod local_identity;
+mod native_contract;
 
-/// Source facts must pass before any compiler or build-tool subprocess runs.
-fn native_build_contract(
-    root: &Path,
-    profile: &aros_common::TargetProfile,
-) -> Result<Option<LoadedNativeBuildContract>> {
-    profile
-        .native_build_contract
-        .as_ref()
-        .map(|relative| {
-            load_bound_native_build_contract(root, Path::new(relative), profile)
-                .into_diagnostic()
-                .wrap_err("native source build contract is invalid")
-        })
-        .transpose()
-}
+use native_contract::NativeContractSelection;
 
 /// Forward only the exact validated source bytes. CMake revalidates the hash
 /// and inputs before translating their graph, independently of this frontend.
-fn native_build_variables(
-    binding: Option<&LoadedNativeBuildContract>,
+fn native_contract_variables(
+    binding: Option<&NativeContractSelection>,
     resolved: &toolchain::ResolvedToolchain,
     profile: &aros_common::TargetProfile,
 ) -> Result<Vec<(String, String)>> {
@@ -120,39 +106,41 @@ fn native_build_variables(
                 .compiler_identity()
                 .map_err(|error| miette::miette!(error))?
         };
-        validate_native_build_compiler(&binding.contract, &compiler, &resolved.target_triple)
-            .into_diagnostic()?;
-        if resolved
-            .paths
-            .executable_roles
-            .iter()
-            .filter(|(role, _)| *role == "objdump")
-            .count()
-            != 1
-        {
-            miette::bail!(
-                "native source contracts require one verified objdump role (toolchain-tools v3); no host fallback is permitted"
-            );
+        match binding {
+            NativeContractSelection::Build(loaded) => {
+                validate_native_build_compiler(
+                    &loaded.contract,
+                    &compiler,
+                    &resolved.target_triple,
+                )
+                .into_diagnostic()?;
+                if resolved
+                    .paths
+                    .executable_roles
+                    .iter()
+                    .filter(|(role, _)| *role == "objdump")
+                    .count()
+                    != 1
+                {
+                    miette::bail!(
+                        "native source build contracts require one verified objdump role (toolchain-tools v3); no host fallback is permitted"
+                    );
+                }
+            }
+            NativeContractSelection::Consumer(loaded) => {
+                validate_native_consumer_compiler(
+                    &loaded.contract,
+                    &compiler,
+                    &resolved.target_triple,
+                )
+                .into_diagnostic()?;
+            }
         }
-        let path = binding
-            .path
-            .to_str()
-            .filter(|path| !path.contains([';', '\n', '\r']))
-            .ok_or_else(|| miette::miette!("native contract path is unsafe for CMake"))?;
-        vec![
-            ("AROS_NATIVE_BUILD_CONTRACT".into(), path.into()),
-            (
-                "AROS_NATIVE_BUILD_CONTRACT_SHA256".into(),
-                binding.sha256.to_string(),
-            ),
-        ]
+        binding.cmake_variables()?
     } else {
-        // Clear stale native-contract cache entries when configuring a
-        // non-contract profile.
-        vec![
-            ("AROS_NATIVE_BUILD_CONTRACT".into(), String::new()),
-            ("AROS_NATIVE_BUILD_CONTRACT_SHA256".into(), String::new()),
-        ]
+        // Clear both contract kinds so a reused CMake cache cannot retain an
+        // inactive source binding.
+        NativeContractSelection::empty_cmake_variables()
     };
     variables.extend(local_variables);
     Ok(variables)
@@ -305,6 +293,21 @@ fn profile_cache_variables(
     variables
 }
 
+fn configure_cache_variables(
+    profile: &aros_common::TargetProfile,
+    build_type: BuildType,
+    build_tool_variables: Vec<(String, String)>,
+    compiler_variables: Vec<(String, String)>,
+    native_variables: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    profile_cache_variables(profile, build_type)
+        .into_iter()
+        .chain(build_tool_variables)
+        .chain(compiler_variables)
+        .chain(native_variables)
+        .collect()
+}
+
 /// Forward only executable roles already verified by toolchain resolution.
 /// GNU tools are never guessed from a triple or discovered on the host PATH.
 fn compiler_cache_variables(
@@ -434,17 +437,20 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         miette::bail!("parallel job count must be greater than zero");
     }
     let build_dir = build_dir(repo_root, &options.preset)?;
+    let profile = toolchain::target_profile(repo_root, &options.toolchain_preset)?;
+    let native_contract = NativeContractSelection::load(repo_root, &profile)?;
+    if let Some(contract) = &native_contract {
+        local_identity::validate_source_namespace(&profile, contract)?;
+    }
+    for definition in &options.cmake_definitions {
+        validate_cmake_definition(definition)?;
+    }
     let compiler_cache = aros_cache::resolve_managed_compiler_cache_for_build(
         options.compiler_cache,
         options.compiler_cache_dir.as_deref(),
     )
     .map_err(|error| miette::miette!(error))?;
     let compiler_cache_selection = compiler_cache.selection();
-    let profile = toolchain::target_profile(repo_root, &options.toolchain_preset)?;
-    let native_contract = native_build_contract(repo_root, &profile)?;
-    for definition in &options.cmake_definitions {
-        validate_cmake_definition(definition)?;
-    }
     let resolved = toolchain::resolve_for_build(
         repo_root,
         &options.toolchain_preset,
@@ -453,12 +459,10 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     )
     .await?;
     let lease = crate::toolchain_lifecycle::acquire_for_build(repo_root, &resolved)?;
-    let native_variables = native_build_variables(native_contract.as_ref(), &resolved, &profile)?;
+    let native_variables =
+        native_contract_variables(native_contract.as_ref(), &resolved, &profile)?;
     if resolved.source == toolchain::ToolchainSource::LocalCompilerOnly && native_contract.is_some()
     {
-        if let Some(contract) = &native_contract {
-            local_identity::validate_source_namespace(&profile, contract)?;
-        }
         aros_common::local_source::LocalSourceIdentity::validate_build_namespace(
             repo_root,
             &options.preset,
@@ -589,11 +593,13 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     }
     // General CMake definitions cannot change source/compiler/ABI contracts
     // already validated by this frontend.
-    for (key, value) in profile_cache_variables(&profile, options.build_type)
-        .into_iter()
-        .chain(compiler_variables)
-        .chain(native_variables)
-    {
+    for (key, value) in configure_cache_variables(
+        &profile,
+        options.build_type,
+        build_tools.cmake_variables(),
+        compiler_variables,
+        native_variables,
+    ) {
         configure.arg(format!("-D{key}={value}"));
     }
     for definition in compiler_cache_cmake_definitions(&compiler_cache_selection)? {
@@ -615,15 +621,20 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     let local_native = if resolved.source == toolchain::ToolchainSource::LocalCompilerOnly
         && native_contract.is_some()
     {
-        let identity = local_identity::LocalNativeInputs::capture(
-            repo_root,
-            &options.preset,
-            &profile,
-            &resolved.paths.root,
-            &engine,
-            &build_tools.bin_dir,
-            &configure,
-        )?;
+        let selected_contract = native_contract
+            .as_ref()
+            .ok_or_else(|| miette::miette!("local native build has no source contract"))?;
+        let identity =
+            local_identity::LocalNativeInputs::capture(&local_identity::LocalNativeCapture {
+                root: repo_root,
+                preset: &options.preset,
+                profile: &profile,
+                toolchain_root: &resolved.paths.root,
+                engine: &engine,
+                tools: &build_tools.bin_dir,
+                configure: &configure,
+                selected_contract,
+            })?;
         identity.bind_build_tree(&build_dir)?;
         local_identity::verify_configured_tree(&build_dir, false)?;
         Some(identity)
@@ -641,15 +652,20 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     )?;
 
     if let Some(expected) = &local_native {
-        let actual = local_identity::LocalNativeInputs::capture(
-            repo_root,
-            &options.preset,
-            &profile,
-            &resolved.paths.root,
-            &engine,
-            &build_tools.bin_dir,
-            &configure,
-        )?;
+        let selected_contract = native_contract
+            .as_ref()
+            .ok_or_else(|| miette::miette!("local native configure lost its source contract"))?;
+        let actual =
+            local_identity::LocalNativeInputs::capture(&local_identity::LocalNativeCapture {
+                root: repo_root,
+                preset: &options.preset,
+                profile: &profile,
+                toolchain_root: &resolved.paths.root,
+                engine: &engine,
+                tools: &build_tools.bin_dir,
+                configure: &configure,
+                selected_contract,
+            })?;
         expected.require_unchanged(&actual)?;
         expected.bind_build_tree(&build_dir)?;
         local_identity::verify_configured_tree(&build_dir, true)?;
@@ -677,15 +693,20 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     )?;
 
     if let Some(expected) = &local_native {
-        let actual = local_identity::LocalNativeInputs::capture(
-            repo_root,
-            &options.preset,
-            &profile,
-            &resolved.paths.root,
-            &engine,
-            &build_tools.bin_dir,
-            &configure,
-        )?;
+        let selected_contract = native_contract
+            .as_ref()
+            .ok_or_else(|| miette::miette!("local native build lost its source contract"))?;
+        let actual =
+            local_identity::LocalNativeInputs::capture(&local_identity::LocalNativeCapture {
+                root: repo_root,
+                preset: &options.preset,
+                profile: &profile,
+                toolchain_root: &resolved.paths.root,
+                engine: &engine,
+                tools: &build_tools.bin_dir,
+                configure: &configure,
+                selected_contract,
+            })?;
         expected.require_unchanged(&actual)?;
         expected.bind_build_tree(&build_dir)?;
         local_identity::verify_configured_tree(&build_dir, false)?;
@@ -846,12 +867,58 @@ pub fn detected_compiler_cache() -> Option<CompilerCache> {
 mod tests {
     use super::{
         build_dir, compiler_cache_cmake_definitions, compiler_cache_variables,
-        native_build_variables, profile_cache_variables, run, validate_cmake_definition,
-        validate_preset, BuildInputPolicy, BuildOptions, BuildType, CmakeDefinition,
+        configure_cache_variables, native_contract_variables, profile_cache_variables, run,
+        validate_cmake_definition, validate_preset, BuildInputPolicy, BuildOptions, BuildType,
+        CmakeDefinition, NativeContractSelection,
     };
 
+    pub(super) fn native_consumer_source_fixture() -> (
+        tempfile::TempDir,
+        aros_common::TargetProfile,
+        serde_json::Value,
+    ) {
+        use serde_json::json;
+        use std::fs;
+
+        let root = tempfile::tempdir().unwrap();
+        let profile_text = "[[targets]]\nname='fixture-target'\narch='riscv32'\nplatform='fixture'\nbsp='fixture'\nfloat_abi='ilp32f'\nnative_consumer_contract='consumer.json'\n[targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='gnu'\ncpu32=''\nuse_mmu=false\n[targets.bootstrap_abi]\nflavour='native'\nplatform_smp=false\n";
+        fs::write(root.path().join("aros-targets.toml"), profile_text).unwrap();
+        fs::write(root.path().join("policy.json"), b"{}").unwrap();
+        let profile = aros_common::TargetProfile::parse_config(profile_text, "fixture")
+            .unwrap()
+            .targets
+            .remove(0);
+        let contract = json!({
+            "schema": "aros-native-consumer-contract-v1",
+            "profile": "fixture-target",
+            "source_baseline": "0123456789abcdef0123456789abcdef01234567",
+            "roots": ["includes", "linklibs"],
+            "metamake_projection": "policy.json",
+            "inputs": [
+                {"path": "aros-targets.toml", "sha256": aros_common::sha256_bytes(profile_text.as_bytes())},
+                {"path": "policy.json", "sha256": aros_common::sha256_bytes(b"{}")}
+            ],
+            "abi": {
+                "source_cpu": "riscv",
+                "target_triple": "riscv-aros",
+                "isa": "rv32imafc_zicsr_zifencei_zaamo_zalrsc",
+                "abi": "ilp32f",
+                "code_model": "medany",
+                "flavour": "native",
+                "platform_smp": false,
+                "use_mmu": false
+            }
+        });
+        fs::write(
+            root.path().join("consumer.json"),
+            serde_json::to_vec(&contract).unwrap(),
+        )
+        .unwrap();
+        (root, profile, contract)
+    }
+
     #[cfg(unix)]
-    fn local_compiler_variables_fixture() -> (
+    pub(super) fn local_compiler_variables_fixture() -> (
         tempfile::TempDir,
         aros_common::TargetProfile,
         crate::toolchain::ResolvedToolchain,
@@ -885,6 +952,7 @@ mod tests {
             }),
             bootstrap_abi: None,
             native_build_contract: None,
+            native_consumer_contract: None,
         };
         let compiler = json!({
             "family": "gnu", "gcc_version": "16.2.0", "binutils_version": "2.47",
@@ -997,12 +1065,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn verified_gnu_collector_overrides_the_selected_suite_collector() {
+        let absent_override = tempfile::tempdir().unwrap();
+        let mut profile = aros_common::TargetProfile::load_config_or_builtin(
+            &absent_override.path().join("aros-targets.toml"),
+        )
+        .unwrap()
+        .targets
+        .remove(0);
+        profile.transpiler.as_mut().unwrap().toolchain = "gnu".into();
+
+        let variables = configure_cache_variables(
+            &profile,
+            BuildType::Release,
+            vec![("AROS_COLLECT_BIN".into(), "/suite/aros-collect".into())],
+            vec![(
+                "AROS_COLLECT_BIN".into(),
+                "/verified/bin/collect-aros".into(),
+            )],
+            Vec::new(),
+        );
+        let collectors = variables
+            .iter()
+            .filter(|(key, _)| key == "AROS_COLLECT_BIN")
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            collectors,
+            ["/suite/aros-collect", "/verified/bin/collect-aros"]
+        );
+        assert_eq!(collectors.last(), Some(&"/verified/bin/collect-aros"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn local_compiler_cmake_variables_bind_raw_descriptor_even_without_native_contract() {
         let (root, profile, resolved) = local_compiler_variables_fixture();
         let values: std::collections::HashMap<_, _> =
-            native_build_variables(None, &resolved, &profile)
+            native_contract_variables(None, &resolved, &profile)
                 .unwrap()
                 .into_iter()
                 .collect();
@@ -1020,6 +1122,8 @@ mod tests {
         );
         assert_eq!(values["AROS_NATIVE_BUILD_CONTRACT"], "");
         assert_eq!(values["AROS_NATIVE_BUILD_CONTRACT_SHA256"], "");
+        assert_eq!(values["AROS_NATIVE_CONSUMER_CONTRACT"], "");
+        assert_eq!(values["AROS_NATIVE_CONSUMER_CONTRACT_SHA256"], "");
     }
 
     #[test]
@@ -1041,7 +1145,7 @@ mod tests {
             source: crate::toolchain::ToolchainSource::LockedRelease,
         };
         let values: std::collections::HashMap<_, _> =
-            native_build_variables(None, &resolved, &profile)
+            native_contract_variables(None, &resolved, &profile)
                 .unwrap()
                 .into_iter()
                 .collect();
@@ -1050,9 +1154,103 @@ mod tests {
             "AROS_CROSS_TOOLCHAIN_LOCAL_SHA256",
             "AROS_NATIVE_BUILD_CONTRACT",
             "AROS_NATIVE_BUILD_CONTRACT_SHA256",
+            "AROS_NATIVE_CONSUMER_CONTRACT",
+            "AROS_NATIVE_CONSUMER_CONTRACT_SHA256",
         ] {
             assert_eq!(values[key], "", "{key}");
         }
+    }
+
+    #[test]
+    fn native_consumer_selection_forwards_exact_binding_and_clears_build_binding() {
+        let (root, profile, _) = native_consumer_source_fixture();
+        let selection = NativeContractSelection::load(root.path(), &profile)
+            .unwrap()
+            .unwrap();
+        let values: std::collections::HashMap<_, _> =
+            selection.cmake_variables().unwrap().into_iter().collect();
+        assert_eq!(
+            values["AROS_NATIVE_CONSUMER_CONTRACT"],
+            root.path()
+                .canonicalize()
+                .unwrap()
+                .join("consumer.json")
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            values["AROS_NATIVE_CONSUMER_CONTRACT_SHA256"],
+            aros_common::sha256_file(&root.path().join("consumer.json"))
+                .unwrap()
+                .digest
+                .to_string()
+        );
+        assert_eq!(values["AROS_NATIVE_BUILD_CONTRACT"], "");
+        assert_eq!(values["AROS_NATIVE_BUILD_CONTRACT_SHA256"], "");
+    }
+
+    #[test]
+    fn native_contract_selection_rejects_invalid_inputs_profile_drift_and_ambiguity() {
+        let (root, profile, mut contract) = native_consumer_source_fixture();
+        contract["roots"] = serde_json::json!([]);
+        std::fs::write(
+            root.path().join("consumer.json"),
+            serde_json::to_vec(&contract).unwrap(),
+        )
+        .unwrap();
+        assert!(NativeContractSelection::load(root.path(), &profile).is_err());
+
+        let (root, profile, _) = native_consumer_source_fixture();
+        std::fs::write(root.path().join("policy.json"), b"changed").unwrap();
+        assert!(NativeContractSelection::load(root.path(), &profile).is_err());
+
+        let (root, mut profile, _) = native_consumer_source_fixture();
+        profile.features.push("different-source-profile".into());
+        assert!(NativeContractSelection::load(root.path(), &profile).is_err());
+
+        let (root, mut profile, _) = native_consumer_source_fixture();
+        profile.native_build_contract = Some("missing-build.json".into());
+        let error = NativeContractSelection::load(root.path(), &profile).unwrap_err();
+        assert!(error.to_string().contains("both"));
+    }
+
+    #[test]
+    fn native_consumer_cannot_bind_inputs_from_generated_build_namespace() {
+        let (root, profile, _) = native_consumer_source_fixture();
+        let mut selection = NativeContractSelection::load(root.path(), &profile)
+            .unwrap()
+            .unwrap();
+        assert!(super::local_identity::validate_source_namespace(&profile, &selection).is_ok());
+        let NativeContractSelection::Consumer(binding) = &mut selection else {
+            panic!("fixture must select a consumer contract");
+        };
+        binding.contract.inputs[1].path = "build/policy.json".into();
+        assert!(super::local_identity::validate_source_namespace(&profile, &selection).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_consumer_binding_checks_the_verified_descriptor_compiler_identity() {
+        let (toolchain_root, _, resolved) = local_compiler_variables_fixture();
+        let (source_root, profile, mut contract) = native_consumer_source_fixture();
+        contract["abi"]["isa"] = serde_json::json!("rv32imafc");
+        std::fs::write(
+            source_root.path().join("consumer.json"),
+            serde_json::to_vec(&contract).unwrap(),
+        )
+        .unwrap();
+        let selection = NativeContractSelection::load(source_root.path(), &profile)
+            .unwrap()
+            .unwrap();
+        let error = native_contract_variables(Some(&selection), &resolved, &profile).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("verified triple/ISA/ABI/code model differs"));
+        // Keep the verified toolchain fixture alive while the binding is checked.
+        assert!(toolchain_root
+            .path()
+            .join(aros_common::local_toolchain::LOCAL_TOOLCHAIN_DESCRIPTOR_FILE)
+            .is_file());
     }
 
     #[test]
@@ -1239,5 +1437,35 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("greater than zero"));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_source_contract_selection_stops_before_toolchain_resolution() {
+        let checkout = tempfile::tempdir().unwrap();
+        std::fs::write(
+            checkout.path().join("aros-targets.toml"),
+            "[[targets]]\nname='fixture-target'\narch='riscv32'\nplatform='fixture'\nbsp='fixture'\nfloat_abi='ilp32f'\nnative_build_contract='build.json'\nnative_consumer_contract='consumer.json'\n[targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='gnu'\ncpu32=''\nuse_mmu=false\n[targets.bootstrap_abi]\nflavour='native'\nplatform_smp=false\n",
+        )
+        .unwrap();
+        let options = BuildOptions {
+            preset: "fixture".into(),
+            toolchain_preset: "fixture-target".into(),
+            target: None,
+            jobs: None,
+            clean: false,
+            verbose: false,
+            compiler_cache: aros_cache::CompilerBackendChoice::Off,
+            compiler_cache_dir: None,
+            input_policy: BuildInputPolicy {
+                offline: true,
+                require_fetch_checksums: true,
+            },
+            toolchain_dir: None,
+            cmake_definitions: Vec::new(),
+            build_type: BuildType::Release,
+            engine_dir: None,
+        };
+        let error = run(checkout.path(), &options).await.unwrap_err();
+        assert!(error.to_string().contains("both"));
     }
 }

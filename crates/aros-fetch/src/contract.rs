@@ -5,8 +5,9 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 use aros_common::{Diagnostic, DiagnosticCode, DiagnosticStage, Sha256Digest};
-use clap::Parser;
+use clap::{Arg, ArgMatches, Command, CommandFactory, Parser};
 
+use crate::engine::cache::CachePayloadNormalization;
 use crate::{FetchFailure, FetchResult};
 
 #[derive(Debug, Clone, Parser)]
@@ -15,7 +16,7 @@ use crate::{FetchFailure, FetchResult};
     version,
     about = "Fetch, verify, extract, and patch AROS third-party sources",
     long_about = "Fetch one declared AROS source archive into a local cache, verify every declared SHA-256 digest before use, extract without path escape, and apply a closed patch contract without shell evaluation.",
-    after_help = "CHECKSUM CONTRACT:\n  --checksums accepts whitespace-separated filename=sha256:<64-hex-digest> entries.\n  --require-checksums requires complete archive coverage and remote patch coverage.\n  A downloaded payload with another digest, or one that is not the declared\n  archive format, rejects that source and the next declared one is tried; the\n  fetch fails if none yields it. aros-fetch never rewrites or infers a pin.\n\nPATCH CONTRACT:\n  --patches accepts whitespace-separated name[:subdirectory[:option,...]] entries.\n  Supported options are -p0 through -p9, -f, -N, and --forward.\n\nOBSERVABILITY:\n  Diagnostics are written to stderr; --diagnostic-format=json selects the stable JSON contract.\n  Logging is off by default. A selected --log-file without a selected level uses info;\n  explicit --log-level off creates no sink. A non-off level requires --log-file.\n  --log-format selects human or jsonl.\n  Environment: AROS_FETCH_DIAGNOSTIC_FORMAT, AROS_FETCH_LOG_LEVEL,\n  AROS_FETCH_LOG_FORMAT, AROS_FETCH_LOG_FILE, AROS_FETCH_OFFLINE,\n  AROS_FETCH_REQUIRE_CHECKSUMS."
+    after_help = "CHECKSUM CONTRACT:\n  --checksums accepts whitespace-separated filename=sha256:<64-hex-digest> entries.\n  --require-checksums requires complete archive coverage and remote patch coverage.\n  A downloaded payload with another digest, or one that is not the declared\n  archive format, rejects that source and the next declared one is tried; the\n  fetch fails if none yields it. aros-fetch never rewrites or infers a pin.\n\nARCHIVE REPRESENTATION:\n  --normalization exact-bytes-v1 is the default and preserves received bytes.\n  canonical-tar-gzip-v1 requires exactly one .tar.gz or .tgz archive candidate,\n  its explicit SHA-256, and --normalized-size equal to the final cached bytes.\n  HTTPS responses are normalized; local origins and existing cache entries must\n  already be the declared canonical bytes. --offline uses only such verified\n  local/cache bytes and never fetches a missing payload.\n\nPATCH CONTRACT:\n  --patches accepts whitespace-separated name[:subdirectory[:option,...]] entries.\n  Supported options are -p0 through -p9, -f, -N, and --forward.\n\nOBSERVABILITY:\n  Diagnostics are written to stderr; --diagnostic-format=json selects the stable JSON contract.\n  Logging is off by default. A selected --log-file without a selected level uses info;\n  explicit --log-level off creates no sink. A non-off level requires --log-file.\n  --log-format selects human or jsonl.\n  Environment: AROS_FETCH_DIAGNOSTIC_FORMAT, AROS_FETCH_LOG_LEVEL,\n  AROS_FETCH_LOG_FORMAT, AROS_FETCH_LOG_FILE, AROS_FETCH_OFFLINE,\n  AROS_FETCH_REQUIRE_CHECKSUMS."
 )]
 pub struct Cli {
     /// Whitespace-separated local paths or supported remote origin prefixes.
@@ -119,6 +120,59 @@ pub struct FetchRequest {
     pub offline: bool,
 }
 
+/// Additional archive representation policy accepted by the ordinary CLI.
+///
+/// Kept separate from [`Cli`] and [`FetchRequest`] so existing Rust callers
+/// that construct those public structs retain source compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchivePayloadOptions {
+    pub normalization: CachePayloadNormalization,
+    pub normalized_size: Option<u64>,
+}
+
+impl Default for ArchivePayloadOptions {
+    fn default() -> Self {
+        Self {
+            normalization: CachePayloadNormalization::ExactBytesV1,
+            normalized_size: None,
+        }
+    }
+}
+
+/// Build the CLI command with the archive representation options while
+/// retaining the source-compatible public [`Cli`] struct.
+#[must_use]
+pub fn command_with_payload_options() -> Command {
+    Cli::command()
+        .arg(
+            Arg::new("normalization")
+                .long("normalization")
+                .value_name("POLICY")
+                .value_parser(clap::builder::EnumValueParser::<CachePayloadNormalization>::new())
+                .default_value("exact-bytes-v1")
+                .help("Archive representation policy (default: exact-bytes-v1)"),
+        )
+        .arg(
+            Arg::new("normalized_size")
+                .long("normalized-size")
+                .value_name("NONZERO_BYTES")
+                .value_parser(clap::value_parser!(u64))
+                .help("Expected final byte size for canonical-tar-gzip-v1"),
+        )
+}
+
+/// Read the two archive representation options from the extended CLI command.
+#[must_use]
+pub fn archive_payload_options(matches: &ArgMatches) -> ArchivePayloadOptions {
+    ArchivePayloadOptions {
+        normalization: matches
+            .get_one::<CachePayloadNormalization>("normalization")
+            .copied()
+            .unwrap_or_default(),
+        normalized_size: matches.get_one::<u64>("normalized_size").copied(),
+    }
+}
+
 impl FetchRequest {
     /// Validate command-line values and close them into a typed request.
     ///
@@ -214,6 +268,111 @@ impl FetchRequest {
             offline: cli.offline,
         })
     }
+
+    /// Validate the explicit representation options against this archive
+    /// selection without changing the exact-byte legacy default.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract diagnostic when the selected policy has an invalid
+    /// size, candidate set, checksum, or origin declaration.
+    pub fn validate_archive_payload_options(
+        &self,
+        options: ArchivePayloadOptions,
+    ) -> FetchResult<()> {
+        match options.normalization {
+            CachePayloadNormalization::ExactBytesV1 => {
+                if options.normalized_size.is_some() {
+                    return Err(contract_failure(
+                        "--normalized-size is valid only with --normalization canonical-tar-gzip-v1",
+                    ));
+                }
+            }
+            CachePayloadNormalization::CanonicalTarGzipV1 => {
+                let Some(size) = options.normalized_size else {
+                    return Err(contract_failure(
+                        "canonical-tar-gzip-v1 requires --normalized-size for the final cached bytes",
+                    ));
+                };
+                if size == 0 {
+                    return Err(contract_failure(
+                        "--normalized-size must be a nonzero byte count",
+                    ));
+                }
+                if self.archive_candidates.len() != 1 {
+                    return Err(contract_failure(
+                        "canonical-tar-gzip-v1 requires exactly one archive candidate",
+                    ));
+                }
+                let candidate = &self.archive_candidates[0];
+                let is_tar_gzip = [".tar.gz", ".tgz"].iter().any(|suffix| {
+                    candidate.len() >= suffix.len()
+                        && candidate[candidate.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+                });
+                if !is_tar_gzip {
+                    return Err(contract_failure(
+                        "canonical-tar-gzip-v1 requires one .tar.gz or .tgz archive candidate",
+                    ));
+                }
+                if !self.checksums.contains_key(candidate) {
+                    return Err(contract_failure(format!(
+                        "canonical-tar-gzip-v1 requires an explicit SHA-256 for '{candidate}'"
+                    )));
+                }
+                for origin in &self.archive_origins {
+                    validate_canonical_archive_origin(origin)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_canonical_archive_origin(origin: &str) -> FetchResult<()> {
+    if !origin.contains("://") {
+        return Ok(());
+    }
+    if origin.starts_with("https://") {
+        let parsed = reqwest::Url::parse(origin).map_err(|error| {
+            contract_failure(format!("invalid HTTPS archive origin '{origin}': {error}"))
+        })?;
+        if parsed.scheme() == "https"
+            && parsed.host_str().is_some()
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.query().is_none()
+            && parsed.fragment().is_none()
+        {
+            return Ok(());
+        }
+        return Err(contract_failure(
+            "canonical archive HTTPS origins must be credential-free and omit query or fragment",
+        ));
+    }
+    for prefix in [
+        "cache://",
+        "gnu://",
+        "archives://",
+        "sf://",
+        "sourceforge://",
+        "github://",
+    ] {
+        if let Some(path) = origin.strip_prefix(prefix) {
+            if path.contains(['\\', '?', '#', '%'])
+                || path
+                    .split('/')
+                    .any(|component| matches!(component, "." | ".."))
+            {
+                return Err(contract_failure(format!(
+                    "HTTPS archive alias '{origin}' contains an unsafe or ambiguous path"
+                )));
+            }
+            return Ok(());
+        }
+    }
+    Err(contract_failure(format!(
+        "canonical-tar-gzip-v1 accepts only HTTPS origins or local payload paths; unsupported origin '{origin}'"
+    )))
 }
 
 /// Translate the historical multi-character options accepted by fetch.sh.
@@ -401,6 +560,31 @@ impl FailureHint for FetchFailure {
 mod tests {
     use super::*;
 
+    fn canonical_request(
+        archive: &str,
+        suffixes: &str,
+        origin: &str,
+        checksums: &str,
+    ) -> FetchRequest {
+        let cli = Cli::try_parse_from([
+            "aros-fetch",
+            "--archive",
+            archive,
+            "--suffixes",
+            suffixes,
+            "--archive-origins",
+            origin,
+            "--checksums",
+            checksums,
+        ])
+        .unwrap();
+        FetchRequest::from_cli(&cli).unwrap()
+    }
+
+    fn digest() -> String {
+        "a".repeat(64)
+    }
+
     fn cli() -> Cli {
         Cli::try_parse_from([
             "aros-fetch",
@@ -449,5 +633,131 @@ mod tests {
 
         value.patches = ":src:-p1".to_owned();
         assert!(FetchRequest::from_cli(&value).is_err());
+    }
+
+    #[test]
+    fn archive_normalization_options_have_explicit_compatibility_default() {
+        let matches = command_with_payload_options()
+            .try_get_matches_from(["aros-fetch", "--archive", "pkg.tar.gz"])
+            .unwrap();
+        assert_eq!(
+            archive_payload_options(&matches),
+            ArchivePayloadOptions::default()
+        );
+
+        let matches = command_with_payload_options()
+            .try_get_matches_from([
+                "aros-fetch",
+                "--archive",
+                "pkg.tar.gz",
+                "--normalization",
+                "canonical-tar-gzip-v1",
+                "--normalized-size",
+                "42",
+            ])
+            .unwrap();
+        assert_eq!(
+            archive_payload_options(&matches),
+            ArchivePayloadOptions {
+                normalization: CachePayloadNormalization::CanonicalTarGzipV1,
+                normalized_size: Some(42),
+            }
+        );
+        assert!(command_with_payload_options()
+            .try_get_matches_from([
+                "aros-fetch",
+                "--archive",
+                "pkg.tar.gz",
+                "--normalization",
+                "future-policy",
+            ])
+            .is_err());
+    }
+
+    #[test]
+    fn canonical_archive_policy_requires_a_single_pinned_tarball_and_final_size() {
+        let options = ArchivePayloadOptions {
+            normalization: CachePayloadNormalization::CanonicalTarGzipV1,
+            normalized_size: Some(42),
+        };
+        let request = canonical_request(
+            "pkg.tar.gz",
+            "",
+            "https://example.test/releases",
+            &format!("pkg.tar.gz=sha256:{}", digest()),
+        );
+        assert!(request.validate_archive_payload_options(options).is_ok());
+        assert!(request
+            .validate_archive_payload_options(ArchivePayloadOptions {
+                normalized_size: None,
+                ..options
+            })
+            .is_err());
+        assert!(request
+            .validate_archive_payload_options(ArchivePayloadOptions {
+                normalized_size: Some(0),
+                ..options
+            })
+            .is_err());
+        assert!(request
+            .validate_archive_payload_options(ArchivePayloadOptions {
+                normalization: CachePayloadNormalization::ExactBytesV1,
+                normalized_size: Some(42),
+            })
+            .is_err());
+
+        let multiple = canonical_request(
+            "pkg",
+            "tar.gz tgz",
+            "https://example.test/releases",
+            &format!("pkg.tar.gz=sha256:{} pkg.tgz=sha256:{}", digest(), digest()),
+        );
+        assert!(multiple.validate_archive_payload_options(options).is_err());
+        let wrong_extension = canonical_request(
+            "pkg",
+            "zip",
+            "https://example.test/releases",
+            &format!("pkg.zip=sha256:{}", digest()),
+        );
+        assert!(wrong_extension
+            .validate_archive_payload_options(options)
+            .is_err());
+        let unpinned = canonical_request("pkg.tar.gz", "", "https://example.test", "");
+        assert!(unpinned.validate_archive_payload_options(options).is_err());
+    }
+
+    #[test]
+    fn canonical_archive_policy_rejects_non_https_and_ambiguous_origins() {
+        let options = ArchivePayloadOptions {
+            normalization: CachePayloadNormalization::CanonicalTarGzipV1,
+            normalized_size: Some(42),
+        };
+        for origin in [
+            "http://example.test/releases",
+            "ftp://example.test/releases",
+            "https://user@example.test/releases",
+            "https://example.test/releases?token=ambiguous",
+            "github://owner/repo/../archive",
+        ] {
+            let request = canonical_request(
+                "pkg.tar.gz",
+                "",
+                origin,
+                &format!("pkg.tar.gz=sha256:{}", digest()),
+            );
+            assert!(
+                request.validate_archive_payload_options(options).is_err(),
+                "origin unexpectedly accepted: {origin}"
+            );
+        }
+        for origin in ["https://example.test/releases", "cache://sources/pkg"] {
+            let request = canonical_request(
+                "pkg.tar.gz",
+                "",
+                origin,
+                &format!("pkg.tar.gz=sha256:{}", digest()),
+            );
+            assert!(request.validate_archive_payload_options(options).is_ok());
+        }
     }
 }

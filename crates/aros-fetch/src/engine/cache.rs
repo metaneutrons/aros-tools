@@ -45,13 +45,15 @@ const MAX_CANONICAL_TAR_DECODED_BYTES: u64 =
 /// metadata. Its cached object is a deterministic gzip/tar representation of
 /// the safely extracted tree, so the lock still binds exact bytes consumed by
 /// the downstream build.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum CachePayloadNormalization {
     /// The remote response bytes must equal the lock's size and SHA-256.
+    #[value(name = "exact-bytes-v1")]
     #[default]
     ExactBytesV1,
     /// Safely rearchive a gzip/tar source tree with deterministic metadata.
+    #[value(name = "canonical-tar-gzip-v1")]
     CanonicalTarGzipV1,
 }
 
@@ -666,22 +668,61 @@ async fn download_canonical_tar_gzip_https(
             .tempfile_in(cache_root)
             .map_err(|_| cache_failure("cannot create canonical source staging file"))?;
         canonicalize_tar_gzip(raw.path(), filename, cache_root, &mut normalized)?;
-        let prepared = PreparedPayload::import(normalized.path(), filename, expected_size)?;
-        if prepared.digest != *expected_sha256 {
-            last_failure = Some(format!(
-                "canonical source from {response_url} SHA-256 differs from the selected source lock"
-            ));
-            continue;
+        match publish_canonical_staging(
+            &normalized,
+            destination,
+            filename,
+            expected_size,
+            expected_sha256,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.diagnostic().code == aros_common::DiagnosticCode::FetchIntegrity =>
+            {
+                last_failure = Some(format!(
+                    "canonical source from {response_url} does not match the selected source lock: {}",
+                    error.diagnostic().message
+                ));
+            }
+            Err(error) => return Err(error),
         }
-        prepared.revalidate()?;
-        drop(prepared);
-        super::payload::publish_download_noclobber(normalized.path(), destination, filename)?;
-        return Ok(());
     }
     Err(network_failure(format!(
         "canonical locked HTTPS source transfer failed after {DIRECT_RETRIES} attempts: {}",
         last_failure.unwrap_or_else(|| "unknown transport failure".to_owned())
     )))
+}
+
+fn publish_canonical_staging(
+    normalized: &NamedTempFile,
+    destination: &Path,
+    filename: &str,
+    expected_size: u64,
+    expected_sha256: &Sha256Digest,
+) -> FetchResult<()> {
+    let actual_size = normalized
+        .as_file()
+        .metadata()
+        .map_err(|_| cache_failure("cannot measure canonical source staging file"))?
+        .len();
+    if actual_size != expected_size {
+        return Err(integrity_failure(
+            filename,
+            format!(
+                "canonical source byte count differs from the selected source lock (expected {expected_size}, actual {actual_size})"
+            ),
+        ));
+    }
+    let prepared = PreparedPayload::import(normalized.path(), filename, expected_size)?;
+    if prepared.digest != *expected_sha256 {
+        return Err(integrity_failure(
+            filename,
+            "canonical source SHA-256 differs from the selected source lock",
+        ));
+    }
+    prepared.revalidate()?;
+    drop(prepared);
+    super::payload::publish_download_noclobber(normalized.path(), destination, filename)
 }
 
 fn canonicalize_tar_gzip(
@@ -1470,6 +1511,38 @@ mod tests {
             fs::read(first_normalized.path()).unwrap(),
             fs::read(second_normalized.path()).unwrap()
         );
+
+        let canonical_bytes = fs::read(first_normalized.path()).unwrap();
+        let canonical_digest = sha256_bytes(&canonical_bytes);
+        let accepted_cache = temporary.path().join("accepted-cache");
+        fs::create_dir(&accepted_cache).unwrap();
+        let accepted = accepted_cache.join("fixture.tar.gz");
+        super::publish_canonical_staging(
+            &first_normalized,
+            &accepted,
+            "fixture.tar.gz",
+            u64::try_from(canonical_bytes.len()).unwrap(),
+            &canonical_digest,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&accepted).unwrap(), canonical_bytes);
+
+        let rejected_cache = temporary.path().join("rejected-cache");
+        fs::create_dir(&rejected_cache).unwrap();
+        let rejected = rejected_cache.join("fixture.tar.gz");
+        let error = super::publish_canonical_staging(
+            &second_normalized,
+            &rejected,
+            "fixture.tar.gz",
+            u64::try_from(canonical_bytes.len()).unwrap() + 1,
+            &canonical_digest,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.diagnostic().code,
+            aros_common::DiagnosticCode::FetchIntegrity
+        );
+        assert!(!rejected.exists());
     }
 
     #[test]

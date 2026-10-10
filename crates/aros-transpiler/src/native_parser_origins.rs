@@ -181,7 +181,13 @@ pub fn endpoints(parsed: &ParsedMmakefile, context: &TargetContext) -> BTreeSet<
     endpoints.extend(parsed.ilbm_sources.iter().map(|decl| decl.owner.clone()));
     endpoints.extend(parsed.catalogs.iter().map(|decl| decl.mmake.clone()));
     endpoints.extend(parsed.copy_includes.iter().map(|decl| decl.name.clone()));
-    endpoints.extend(parsed.copy_directories.iter().map(|decl| decl.name.clone()));
+    for declaration in &parsed.copy_directories {
+        endpoints.insert(declaration.name.clone());
+        // A metadata cycle may lift the copy body while keeping its public
+        // source owner as an alias. Both identities belong to this exact
+        // parsed declaration; no unrelated synthetic endpoint is admitted.
+        endpoints.insert(crate::graph::private_meta_copy_action(&declaration.name));
+    }
     endpoints.extend(parsed.bison_outputs.iter().map(|decl| decl.owner.clone()));
     endpoints.extend(parsed.icon_targets.iter().map(|decl| decl.mmake.clone()));
     endpoints.extend(parsed.icons.iter().map(|decl| decl.mmake.clone()));

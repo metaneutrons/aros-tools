@@ -182,6 +182,59 @@ unknown origins and global failures cannot be waived by this scope proof.
 The `*.native-invocation.json` sidecar records successful export/preparation scope;
 excluded capabilities remain unsupported, including unsealed `.d` includes.
 
+### SDK and compiler-consumer graphs
+
+A source profile can separately declare `native_consumer_contract`, using
+`aros-native-consumer-contract-v1`. This experimental contract lists real,
+sorted graph `roots`, an explicit ABI and measured invocation inputs, including
+`aros-targets.toml` and a sealed MetaMake policy. It has no core, package or media
+fields. Parsing it does not qualify a compiler, boot medium or board.
+
+The transpiler selects it explicitly with `--native-consumer-profile` and can
+bind its exact bytes with `--native-consumer-contract-sha256`. This mode cannot
+be combined with the full-build `--native-profile` selection. Both use the same
+strict dependency closure and source-owner checks; missing required endpoints,
+selected capability errors and unknown/global errors remain fatal. Contract
+files are limited to 1 MiB, inputs to 16 MiB each, and symlink or hardlinked
+input aliases are rejected. Native invocation sidecars identify the contract
+kind; they are scope evidence, not build or release evidence.
+
+The GNU compatibility runner selects a declared consumer contract for its SDK
+test. If the same source profile also declares a full-build contract, that
+contract is not used for this test. An invalid consumer contract fails; the
+runner does not fall back to a full or unscoped build.
+
+Direct CMake callers pass `AROS_NATIVE_CONSUMER_CONTRACT` and its
+`AROS_NATIVE_CONSUMER_CONTRACT_SHA256`, an explicit source profile and selectors,
+and the owned transpiler path. The engine checks the binding before compiler
+detection and the GNU ISA/ABI/code-model options afterwards. Both graph passes
+and the saved replay arguments retain the same selection. A configured tree
+cannot switch contracts or drop its retained binding; use a fresh build tree.
+
+`aros-transpiler --validate-native-consumer-only` emits read-only JSON for this
+pre-compiler check. It does not export a graph or prove that the selected roots
+build. `aros build` selects the consumer contract when the selected source
+profile declares only `native_consumer_contract`. A profile declaring both a
+build and a consumer contract is ambiguous and fails before toolchain
+resolution. A complete compiler-consumer run remains a separate qualification
+step.
+
+SDK consumers must seal `config/make.cfg.in`. The engine derives the public
+header root from its `AROS_INCLUDES` and `AROS_DEVELOPER` assignments and requires
+`AROS_DEVELOPER/include`, matching the GNU driver's explicit Developer sysroot.
+Bootstrap headers, source-declared header producers and target include paths
+use that same root. Unsafe or unresolved paths, incompatible layouts and native
+Make overrides of the SDK root variables fail validation. Nonconsumer builds
+retain the internal `SDK/include` layout.
+
+The engine passes the build directory to `aros-genmodule --output-root`, keeping
+the Developer includes, generated sources and symbol audit in one publication
+transaction. Every output must remain strictly below that root; symlinked
+parents and escaping paths are rejected.
+
+This resolves the native source-definition subset, not a configured GNU Make
+build. Build-local `make.opts` customizations are not imported.
+
 Directory-only producers support finite `%mkdirs_q` recipes and explicit
 `%rule_makedirs dirs=... setuptarget=...` declarations. They create directories
 under the configured generated, include or Developer-library roots; they do

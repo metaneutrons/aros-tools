@@ -10,17 +10,21 @@ string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef _suffix)
 set(_build "${_temp_root}/aros-always-cxx-link-${_suffix}")
 set(_source "${CMAKE_CURRENT_LIST_DIR}/always-cxx-link")
 
-foreach(_mode IN ITEMS development-no-lld development-lld locked locked-gnu locked-native-gnu)
+foreach(_mode IN ITEMS development-no-lld development-lld locked locked-gnu locked-native-gnu locked-consumer-gnu)
     set(_gnu OFF)
     set(_native OFF)
+    set(_consumer OFF)
     if(_mode MATCHES "^locked")
         set(_locked ON)
         set(_development_lld OFF)
         if(_mode MATCHES "gnu$")
             set(_gnu ON)
         endif()
-        if(_mode STREQUAL "locked-native-gnu")
+        if(_mode STREQUAL "locked-native-gnu" OR _mode STREQUAL "locked-consumer-gnu")
             set(_native ON)
+        endif()
+        if(_mode STREQUAL "locked-consumer-gnu")
+            set(_consumer ON)
         endif()
     elseif(_mode STREQUAL "development-lld")
         set(_locked OFF)
@@ -38,6 +42,7 @@ foreach(_mode IN ITEMS development-no-lld development-lld locked locked-gnu lock
             "-DTEST_LOCKED_TOOLCHAIN=${_locked}"
             "-DTEST_GNU_TOOLCHAIN=${_gnu}"
             "-DTEST_NATIVE_SDK_OBJECTS=${_native}"
+            "-DTEST_NATIVE_CONSUMER=${_consumer}"
             "-DTEST_DEVELOPMENT_LLD=${_development_lld}"
         RESULT_VARIABLE _result
         OUTPUT_VARIABLE _stdout
@@ -66,11 +71,32 @@ foreach(_mode IN ITEMS development-no-lld development-lld locked locked-gnu lock
         elseif(NOT _includes MATCHES "/aros/posixc")
             message(FATAL_ERROR "${_header_target} lost required POSIX headers: ${_includes}")
         endif()
-        if(_options MATCHES "-noposixc")
+        if(_gnu AND NOT _header_target STREQUAL "default-headers")
+            if(NOT _options MATCHES "-noposixc")
+                message(FATAL_ERROR "GNU specs lost source header opt-out: ${_options}")
+            endif()
+        elseif(_options MATCHES "-noposixc")
             message(FATAL_ERROR "runtime header policy leaked to the bare compiler: ${_options}")
         endif()
     endforeach()
 endforeach()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -S "${_source}"
+        -B "${_build}-consumer-stale-binding" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
+        -DTEST_LOCKED_TOOLCHAIN=ON -DTEST_GNU_TOOLCHAIN=ON
+        -DTEST_NATIVE_SDK_OBJECTS=ON -DTEST_NATIVE_CONSUMER=ON
+        -DTEST_CONSUMER_STALE_BINDING=ON
+    RESULT_VARIABLE _stale_result
+    OUTPUT_VARIABLE _stale_stdout ERROR_VARIABLE _stale_stderr)
+if(_stale_result EQUAL 0 OR
+   NOT "${_stale_stdout}\n${_stale_stderr}" MATCHES "contract changed after validation")
+    message(FATAL_ERROR
+        "stale SDK consumer reached startup producers\n${_stale_stdout}\n${_stale_stderr}")
+endif()
 
 function(_native_role_consumer_refusal role expected_message)
     set(_case_build "${_build}-native-missing-${role}")

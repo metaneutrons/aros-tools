@@ -18,6 +18,23 @@ engine, never from a source checkout's legacy `cmake/` copy. Source recipes,
 patches and input manifests remain source-owned. The contract fixtures exercise
 that boundary against isolated source trees without a CMake engine.
 
+Ordinary `%fetch` declarations can select `normalization=canonical-tar-gzip-v1`
+with `normalized_size=<bytes>` and an explicit archive SHA-256. The transpiler
+and both configure-time source inventory and build-time fetching preserve those
+fields. `aros-fetch` validates the final canonical bytes; local/cache inputs
+must already match that representation. Without a normalization declaration,
+received archive bytes remain unchanged. Neither the engine nor the transpiler
+infers this policy from a URL or replaces missing source checksums.
+
+Target libc header selection preserves the source's compile policy. LLVM uses
+ordinary POSIX-C, standard-C and SDK include paths in that order. GNU AROS
+drivers already declare SDK system paths, so the engine uses explicit system
+namespace paths to preserve the order despite GCC's duplicate-directory rules.
+Generated/private headers keep their own precedence. A source `-noposixc`
+disables the implicit POSIX namespace, including the GNU driver's specs; an
+explicit source include can still opt in. The focused runtime namespace fixture
+compiles C and C++ consumers and requires an explicit compiler for GNU probes.
+
 The Titan `opensbi-uefi-artifacts` target also emits a versioned
 `media-build-receipt.json` from its five staged files. The receipt generator
 measures the files after staging; `opensbi-uefi-verify` recomputes and compares

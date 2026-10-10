@@ -75,6 +75,22 @@ pub struct NativeBuildContract {
     pub media: NativeBuildMedia,
 }
 
+/// Shared source-owned invocation facts that can be validated independently
+/// of package, media and core build policy.
+#[derive(Clone, Copy)]
+pub(crate) struct NativeInvocationConfiguration<'a> {
+    pub(crate) inputs: &'a [NativeBuildInput],
+    pub(crate) make_variables: &'a BTreeMap<String, String>,
+    pub(crate) host_make_variables: &'a BTreeMap<String, BTreeMap<String, String>>,
+    pub(crate) make_include_bindings: &'a BTreeMap<String, String>,
+    pub(crate) generated_make_templates:
+        &'a BTreeMap<String, crate::native_make_template::GeneratedMakeTemplateBinding>,
+    pub(crate) metamake_projection: Option<&'a str>,
+    pub(crate) optional_meta_dependencies: &'a [NativeOptionalMetaDependency],
+    pub(crate) host_file_generators: &'a [crate::native_host_generator::NativeHostFileGenerator],
+    pub(crate) kernel_compiler_role: Option<&'a str>,
+}
+
 /// One source-owned MetaMake optional dependency selected by target identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,7 +141,7 @@ pub const NATIVE_RESERVED_MAKE_VARIABLES: &[&str] = &[
     "TARGET_RUST_VER",
 ];
 
-fn deserialize_make_variables<'de, D>(
+pub(crate) fn deserialize_make_variables<'de, D>(
     deserializer: D,
 ) -> std::result::Result<BTreeMap<String, String>, D::Error>
 where
@@ -166,7 +182,7 @@ where
 /// diagnostic ones a production build leaves empty (ESP32-P4: about 120).
 const MAX_MAKE_VARIABLES: usize = 256;
 
-fn deserialize_host_make_variables<'de, D>(
+pub(crate) fn deserialize_host_make_variables<'de, D>(
     deserializer: D,
 ) -> std::result::Result<BTreeMap<String, BTreeMap<String, String>>, D::Error>
 where
@@ -250,7 +266,7 @@ impl NativeBuildContract {
 // They may not be shared across actual hosts or resolved as target aliases.
 const NATIVE_HOST_MAKE_IDENTITIES: &[&str] = &["AROS_HOST_ARCH", "AROS_HOST_CPU"];
 
-fn deserialize_make_include_bindings<'de, D>(
+pub(crate) fn deserialize_make_include_bindings<'de, D>(
     deserializer: D,
 ) -> std::result::Result<BTreeMap<String, String>, D::Error>
 where
@@ -559,15 +575,9 @@ fn validate_contract(
             "profile and board must be portable code tokens".to_owned(),
         ));
     }
-    if contract
-        .kernel_compiler_role
-        .as_deref()
-        .is_some_and(|role| role != "target")
-    {
-        return Err(invalid(
-            "kernel_compiler_role admits only \"target\"".to_owned(),
-        ));
-    }
+    // Keep the full-contract diagnostic order stable. The shared invocation
+    // validator repeats this check for consumers that load only that subset.
+    validate_kernel_compiler_role(contract.kernel_compiler_role.as_deref(), &invalid)?;
     if contract.profile != profile.name {
         return Err(invalid(format!(
             "profile {:?} does not match selected target {:?}",
@@ -585,13 +595,59 @@ fn validate_contract(
             "source_baseline must be exactly 40 hexadecimal characters".to_owned(),
         ));
     }
-    if !(1..=MAX_NATIVE_BUILD_INPUTS).contains(&contract.inputs.len()) {
+    validate_native_invocation_configuration(
+        root,
+        NativeInvocationConfiguration {
+            inputs: &contract.inputs,
+            make_variables: &contract.make_variables,
+            host_make_variables: &contract.host_make_variables,
+            make_include_bindings: &contract.make_include_bindings,
+            generated_make_templates: &contract.generated_make_templates,
+            metamake_projection: contract.metamake_projection.as_deref(),
+            optional_meta_dependencies: &contract.optional_meta_dependencies,
+            host_file_generators: &contract.host_file_generators,
+            kernel_compiler_role: contract.kernel_compiler_role.as_deref(),
+        },
+        &invalid,
+    )?;
+    let inputs = contract
+        .inputs
+        .iter()
+        .map(|input| input.path.as_str())
+        .collect::<HashSet<_>>();
+
+    // The residency-width rule belongs to core build policy, not shared ABI
+    // validation. Check the common ABI prefix first to preserve its historical
+    // diagnostic priority, then retain the build-specific residency gate.
+    validate_native_abi_prefix(&contract.abi, profile, &invalid)?;
+    let width = profile.arch.pointer_width();
+    if width != 32 && contract.core.residency_policy.algorithm == "riscv32-xip-v1" {
+        return Err(invalid(
+            "riscv32-xip-v1 residency requires a 32-bit target".to_owned(),
+        ));
+    }
+    validate_native_abi(&contract.abi, profile, &invalid)?;
+    validate_core(&contract.core, &inputs, &invalid)?;
+    validate_package(&contract.package, &inputs, &invalid)?;
+    validate_media(&contract.media, &inputs, &invalid)?;
+    Ok(())
+}
+
+/// Validate the source inputs and invocation-only configuration shared by
+/// native consumers that do not load full build/package/media policy.
+pub(crate) fn validate_native_invocation_configuration(
+    root: &Path,
+    configuration: NativeInvocationConfiguration<'_>,
+    invalid: &impl Fn(String) -> ArosError,
+) -> Result<()> {
+    validate_kernel_compiler_role(configuration.kernel_compiler_role, invalid)?;
+    if !(1..=MAX_NATIVE_BUILD_INPUTS).contains(&configuration.inputs.len()) {
         return Err(invalid(format!(
             "inputs must contain between 1 and {MAX_NATIVE_BUILD_INPUTS} entries"
         )));
     }
 
-    if let Some(name) = contract
+    if let Some(name) = configuration
         .make_variables
         .keys()
         .find(|name| NATIVE_HOST_MAKE_IDENTITIES.contains(&name.as_str()))
@@ -600,7 +656,7 @@ fn validate_contract(
             "host identity {name:?} requires host_make_variables"
         )));
     }
-    for host in contract.host_make_variables.keys() {
+    for host in configuration.host_make_variables.keys() {
         if host.is_empty()
             || host.len() > 64
             || !host.bytes().all(|byte| {
@@ -612,8 +668,8 @@ fn validate_contract(
             )));
         }
     }
-    for (name, value) in contract.make_variables.iter().chain(
-        contract
+    for (name, value) in configuration.make_variables.iter().chain(
+        configuration
             .host_make_variables
             .values()
             .flat_map(|variables| variables.iter()),
@@ -641,10 +697,10 @@ fn validate_contract(
             )));
         }
     }
-    for variables in contract.host_make_variables.values() {
+    for variables in configuration.host_make_variables.values() {
         if variables
             .keys()
-            .any(|name| contract.make_variables.contains_key(name))
+            .any(|name| configuration.make_variables.contains_key(name))
         {
             return Err(invalid(
                 "shared and host Make configuration must not bind the same variable".into(),
@@ -655,7 +711,7 @@ fn validate_contract(
     let mut declared_paths = HashSet::new();
     let mut resolved_paths = HashSet::new();
     let mut inputs = HashSet::new();
-    for (index, input) in contract.inputs.iter().enumerate() {
+    for (index, input) in configuration.inputs.iter().enumerate() {
         let path = validate_source_relative_path(&input.path).map_err(|reason| {
             invalid(format!(
                 "inputs[{index}].path {:?} is unsafe: {reason}",
@@ -696,19 +752,19 @@ fn validate_contract(
         inputs.insert(input.path.as_str());
     }
 
-    if let Some(path) = &contract.metamake_projection {
-        require_inventoried_path("metamake_projection", path, &inputs, &invalid)?;
+    if let Some(path) = configuration.metamake_projection {
+        require_inventoried_path("metamake_projection", path, &inputs, invalid)?;
     }
 
     validate_optional_meta_dependencies(
         root,
-        &contract.optional_meta_dependencies,
+        configuration.optional_meta_dependencies,
         &inputs,
-        &invalid,
+        invalid,
     )?;
-    validate_make_include_bindings(root, &contract.make_include_bindings, &inputs, &invalid)?;
-    for path in contract.generated_make_templates.keys() {
-        if contract
+    validate_make_include_bindings(root, configuration.make_include_bindings, &inputs, invalid)?;
+    for path in configuration.generated_make_templates.keys() {
+        if configuration
             .make_include_bindings
             .keys()
             .any(|key| key.eq_ignore_ascii_case(path))
@@ -720,22 +776,30 @@ fn validate_contract(
     }
     crate::native_make_template::resolve_generated_make_templates(
         root,
-        &contract.generated_make_templates,
-        &contract
+        configuration.generated_make_templates,
+        &configuration
             .inputs
             .iter()
             .map(|input| (input.path.clone(), input.sha256.clone()))
             .collect(),
     )?;
     crate::native_host_generator::validate_generators(
-        &contract.host_file_generators,
+        configuration.host_file_generators,
         &inputs.iter().copied().collect(),
     )
     .map_err(invalid)?;
-    validate_abi(contract, profile, &invalid)?;
-    validate_core(&contract.core, &inputs, &invalid)?;
-    validate_package(&contract.package, &inputs, &invalid)?;
-    validate_media(&contract.media, &inputs, &invalid)?;
+    Ok(())
+}
+
+fn validate_kernel_compiler_role(
+    role: Option<&str>,
+    invalid: &impl Fn(String) -> ArosError,
+) -> Result<()> {
+    if role.is_some_and(|role| role != "target") {
+        return Err(invalid(
+            "kernel_compiler_role admits only \"target\"".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -935,44 +999,13 @@ fn validate_native_make_include_path(value: &str) -> std::result::Result<PathBuf
     validate_source_relative_path(value)
 }
 
-fn validate_abi(
-    contract: &NativeBuildContract,
+pub(crate) fn validate_native_abi(
+    abi: &NativeBuildAbi,
     profile: &TargetProfile,
     invalid: &impl Fn(String) -> ArosError,
 ) -> Result<()> {
-    let abi = &contract.abi;
-    for (field, value) in [
-        ("abi.source_cpu", abi.source_cpu.as_str()),
-        ("abi.target_triple", abi.target_triple.as_str()),
-        ("abi.isa", abi.isa.as_str()),
-        ("abi.abi", abi.abi.as_str()),
-        ("abi.code_model", abi.code_model.as_str()),
-        ("abi.flavour", abi.flavour.as_str()),
-    ] {
-        if !safe_token(value) {
-            return Err(invalid(format!("{field} must be a portable code token")));
-        }
-    }
-    if abi.source_cpu != profile.arch.source_cpu() {
-        return Err(invalid(format!(
-            "abi.source_cpu {:?} does not match architecture source CPU {:?}",
-            abi.source_cpu,
-            profile.arch.source_cpu()
-        )));
-    }
-    let expected_triple = format!("{}-aros", profile.arch.source_cpu());
-    if abi.target_triple != expected_triple {
-        return Err(invalid(format!(
-            "abi.target_triple {:?} does not match selected target {:?}",
-            abi.target_triple, expected_triple
-        )));
-    }
+    validate_native_abi_prefix(abi, profile, invalid)?;
     let width = profile.arch.pointer_width();
-    if width != 32 && contract.core.residency_policy.algorithm == "riscv32-xip-v1" {
-        return Err(invalid(
-            "riscv32-xip-v1 residency requires a 32-bit target".to_owned(),
-        ));
-    }
     if !(abi.isa.starts_with(&format!("rv{width}i"))
         || width == 64 && abi.isa.starts_with("rva") && abi.isa.ends_with("u64"))
     {
@@ -1027,6 +1060,40 @@ fn validate_abi(
         return Err(invalid(format!(
             "abi.platform_smp {} does not match profile bootstrap ABI platform_smp {}",
             abi.platform_smp, bootstrap_abi.platform_smp
+        )));
+    }
+    Ok(())
+}
+
+fn validate_native_abi_prefix(
+    abi: &NativeBuildAbi,
+    profile: &TargetProfile,
+    invalid: &impl Fn(String) -> ArosError,
+) -> Result<()> {
+    for (field, value) in [
+        ("abi.source_cpu", abi.source_cpu.as_str()),
+        ("abi.target_triple", abi.target_triple.as_str()),
+        ("abi.isa", abi.isa.as_str()),
+        ("abi.abi", abi.abi.as_str()),
+        ("abi.code_model", abi.code_model.as_str()),
+        ("abi.flavour", abi.flavour.as_str()),
+    ] {
+        if !safe_token(value) {
+            return Err(invalid(format!("{field} must be a portable code token")));
+        }
+    }
+    if abi.source_cpu != profile.arch.source_cpu() {
+        return Err(invalid(format!(
+            "abi.source_cpu {:?} does not match architecture source CPU {:?}",
+            abi.source_cpu,
+            profile.arch.source_cpu()
+        )));
+    }
+    let expected_triple = format!("{}-aros", profile.arch.source_cpu());
+    if abi.target_triple != expected_triple {
+        return Err(invalid(format!(
+            "abi.target_triple {:?} does not match selected target {:?}",
+            abi.target_triple, expected_triple
         )));
     }
     Ok(())
@@ -1154,7 +1221,9 @@ fn validate_unique_tokens(
     Ok(())
 }
 
-fn validate_source_relative_path(value: &str) -> std::result::Result<PathBuf, &'static str> {
+pub(crate) fn validate_source_relative_path(
+    value: &str,
+) -> std::result::Result<PathBuf, &'static str> {
     if value.is_empty() || value.starts_with('/') || value.contains('\\') || value.contains(':') {
         return Err("must be a non-empty portable relative path");
     }

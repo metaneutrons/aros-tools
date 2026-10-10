@@ -3,8 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::filesystem::open_directory;
+use crate::package::PackageFormat;
 use crate::package_extract::{
-    checked_absent_root, verify_and_extract, ExtractedPackage, PackageExtractionRequest,
+    checked_absent_root, verify_and_extract_with_format, ExtractedPackage, PackageExtractionRequest,
 };
 use crate::package_verify::PackageVerificationRequest;
 use crate::ContractError;
@@ -49,6 +50,25 @@ pub struct TwoRootRelocation {
 pub fn extract_two_roots(
     request: &TwoRootRelocationRequest,
 ) -> Result<TwoRootRelocation, ContractError> {
+    extract_two_roots_with_format(
+        request,
+        PackageFormat::default_for(request.verification.source_lock.family()),
+    )
+}
+
+/// Independently verify and extract both roots using one explicit package format.
+///
+/// The default entry point retains historical LLVM v1 and GNU v2 behavior.
+/// Explicit family-v2 selection also admits LLVM v2 packages without inferring
+/// format from filenames or falling back after verification errors.
+///
+/// # Errors
+/// Returns AX0602 for format, identity, inventory or destination violations.
+/// Failed roots are retained; this operation never publishes or adopts inputs.
+pub fn extract_two_roots_with_format(
+    request: &TwoRootRelocationRequest,
+    format: PackageFormat,
+) -> Result<TwoRootRelocation, ContractError> {
     let first_root = checked_absent_root(&request.first_root)?;
     let second_root = checked_absent_root(&request.second_root)?;
     if first_root == second_root {
@@ -62,14 +82,20 @@ pub fn extract_two_roots(
             "compatibility relocation root cannot be created inside the verified package directory",
         ));
     }
-    let first = verify_and_extract(&PackageExtractionRequest {
-        verification: request.verification.clone(),
-        output_root: first_root,
-    })?;
-    let second = verify_and_extract(&PackageExtractionRequest {
-        verification: request.verification.clone(),
-        output_root: second_root,
-    })?;
+    let first = verify_and_extract_with_format(
+        &PackageExtractionRequest {
+            verification: request.verification.clone(),
+            output_root: first_root,
+        },
+        format,
+    )?;
+    let second = verify_and_extract_with_format(
+        &PackageExtractionRequest {
+            verification: request.verification.clone(),
+            output_root: second_root,
+        },
+        format,
+    )?;
     if first.verified != second.verified {
         return Err(ContractError::verification(
             "compatibility relocation roots were not extracted from one measured package identity",

@@ -158,8 +158,8 @@ pub(crate) fn drm_compile_contract(
         .map(str::to_owned)
         .collect(),
         includes: [
-            "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
-            "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+            "${AROS_SDK_INCLUDE_DIR}/aros/posixc",
+            "${AROS_SDK_INCLUDE_DIR}/aros/stdc",
             "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include",
             "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi",
             "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm",
@@ -328,8 +328,8 @@ pub(crate) fn gallium_compile_contract(
         defines: base_defines(profile),
         undefines: Vec::new(),
         includes: [
-            "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
-            "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+            "${AROS_SDK_INCLUDE_DIR}/aros/posixc",
+            "${AROS_SDK_INCLUDE_DIR}/aros/stdc",
             "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include",
             "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/GL",
             "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src",

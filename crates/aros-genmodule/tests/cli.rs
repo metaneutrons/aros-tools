@@ -192,6 +192,72 @@ fn header_failure_is_nonzero_and_does_not_prune_stale_libdefs() {
 }
 
 #[test]
+fn explicit_output_root_publishes_the_rv32_sdk_and_symbol_audit_layout() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_library_fixture(&source, "rom/test", "test");
+    let output_root = directory.path().join("build");
+    let output_inc = output_root.join("SYS/Developer/include");
+    let output_gen = output_root.join("gen");
+    let output_libbases = output_root.join("symbol-audit/libbases.txt");
+
+    let result = run_json(&[
+        "--scan-dir",
+        source.to_str().unwrap(),
+        "--output-root",
+        output_root.to_str().unwrap(),
+        "--output-inc",
+        output_inc.to_str().unwrap(),
+        "--output-gen",
+        output_gen.to_str().unwrap(),
+        "--output-libbases",
+        output_libbases.to_str().unwrap(),
+    ]);
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(output_inc.join("proto/test.h").is_file());
+    assert!(output_gen.join("rom/test/test_libdefs.h").is_file());
+    assert_eq!(fs::read_to_string(output_libbases).unwrap(), "TestBase\n");
+}
+
+#[test]
+fn explicit_output_root_rejects_outside_and_traversing_outputs_before_writes() {
+    for traversing in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        write_library_fixture(&source, "rom/test", "test");
+        let output_root = directory.path().join("build");
+        let output_inc = output_root.join("SYS/Developer/include");
+        let output_gen = if traversing {
+            output_root.join("../escaped/gen")
+        } else {
+            directory.path().join("outside/gen")
+        };
+
+        let result = run_json(&[
+            "--scan-dir",
+            source.to_str().unwrap(),
+            "--output-root",
+            output_root.to_str().unwrap(),
+            "--output-inc",
+            output_inc.to_str().unwrap(),
+            "--output-gen",
+            output_gen.to_str().unwrap(),
+        ]);
+
+        assert!(!result.status.success());
+        assert_eq!(diagnostic_code(&result), "AG0201");
+        assert!(!output_root.exists());
+        assert!(!directory.path().join("outside").exists());
+        assert!(!directory.path().join("escaped").exists());
+    }
+}
+
+#[test]
 fn link_library_failure_is_nonzero() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
