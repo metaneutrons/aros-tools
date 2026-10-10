@@ -6225,7 +6225,9 @@ function(aros_add_linklib)
         # bootstrap directory or lib32, and several deliberately share one
         # libname.  Move an archive to the public target SDK only when the
         # transpiler proved this declaration uses the default target compiler,
-        # default libdir and uniquely fetch-owned port sources.
+        # default libdir and selected native SDK ownership, or a canonical
+        # consumer/fetch-owned archive contract.  The shared output registry
+        # rejects two declarations claiming the same public archive path.
         if(ARG_CANONICAL_OUTPUT)
             set_target_properties(${ARG_MMAKE_ID} PROPERTIES
                 OUTPUT_NAME "${ARG_TARGET}"

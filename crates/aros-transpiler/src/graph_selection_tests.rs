@@ -636,6 +636,62 @@ fn native_context() -> TargetContext {
 }
 
 #[test]
+fn native_selection_publishes_default_archives_without_an_in_tree_link_consumer() {
+    let mut graph = DependencyGraph::new();
+    let mut public = target("ordinary-sdk-archive", ModuleType::LinkLib);
+    public.target_name = "external-client-library".into();
+    public.canonical_linklib_eligible = true;
+    public.source_files = vec!["implementation".into()];
+    graph.targets.insert(public.mmake_name.clone(), public);
+    let mut unrelated = target("unselected-sdk-archive", ModuleType::LinkLib);
+    unrelated.canonical_linklib_eligible = true;
+    graph
+        .targets
+        .insert(unrelated.mmake_name.clone(), unrelated);
+
+    graph
+        .retain_native_selection(
+            &BTreeSet::from(["ordinary-sdk-archive".into()]),
+            &native_context(),
+        )
+        .unwrap();
+
+    assert!(graph.targets["ordinary-sdk-archive"].canonical_linklib_output);
+    assert!(!graph.targets.contains_key("unselected-sdk-archive"));
+    assert!(graph.targets["ordinary-sdk-archive"].link_libs.is_empty());
+    let cmake = crate::generator::generate_cmake(&graph);
+    assert!(cmake.contains(
+        "TARGET external-client-library\n    MMAKE_ID ordinary-sdk-archive\n    CANONICAL_OUTPUT"
+    ));
+}
+
+#[test]
+fn native_archive_publication_does_not_promote_private_host_or_companion_outputs() {
+    let mut graph = DependencyGraph::new();
+    for name in ["private", "host", "companion", "module"] {
+        let mut archive = target(name, ModuleType::LinkLib);
+        archive.canonical_linklib_eligible = true;
+        match name {
+            "private" => archive.linklib_output_dir = Some("${AROS_BUILD_DIR}/gen/private".into()),
+            "host" => archive.canonical_linklib_eligible = false,
+            "companion" => archive.variant_32bit = true,
+            "module" => archive.module_type = ModuleType::Library,
+            _ => unreachable!(),
+        }
+        graph.targets.insert(name.into(), archive);
+    }
+    graph
+        .retain_native_selection(
+            &BTreeSet::from_iter(graph.targets.keys().cloned()),
+            &native_context(),
+        )
+        .unwrap();
+    for archive in graph.targets.values() {
+        assert!(!archive.canonical_linklib_output, "{}", archive.mmake_name);
+    }
+}
+
+#[test]
 fn native_contract_roots_bind_exact_source_archive_names() {
     let mut graph = DependencyGraph::new();
     graph.source_archives.push(bound_source_archive(
