@@ -681,6 +681,18 @@ fn process_collects_complete_synthetic_v2_closure_and_rejects_mutations_read_onl
     // appended synthetic lane is accepted.
     let mut subset = fixture.selection.clone();
     let subset_asset = asset_for_host(&fixture, "linux-x86_64");
+    // This fixture has no ordinary source-v2 SDK proof. Independently requiring
+    // one must fail through the compiled CLI, even with a freshly rehashed
+    // selection; input observations cannot select a legacy opt-out.
+    let mut required_sdk = fixture.selection.clone();
+    required_sdk["lanes"][&subset_asset]["compatibility"]["native_sdk_required"] = json!(true);
+    assert_unchanged_after_failure(
+        &fixture,
+        &required_sdk,
+        "required-native-sdk.json",
+        "SDK requirement differs from independent source policy",
+        &[],
+    );
     subset["lanes"]
         .as_object_mut()
         .unwrap()

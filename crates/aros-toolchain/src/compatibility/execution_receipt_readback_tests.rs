@@ -28,6 +28,26 @@ const UPSTREAM_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PACKAGE_COMMIT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const UPSTREAM_TREE: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
+#[test]
+fn source_v2_requirement_cannot_accept_an_older_gnu_receipt() {
+    let fixture = Fixture::new(true);
+    let mut request = fixture.request();
+    request.native_sdk_required = true;
+    let failure = readback_native_compatibility_receipt(&request).unwrap_err();
+    assert!(failure.to_string().contains("schema does not match"));
+}
+
+#[test]
+fn llvm_cannot_select_the_gnu_sdk_proof_boundary() {
+    let fixture = Fixture::new(false);
+    let mut request = fixture.request();
+    request.native_sdk_required = true;
+    let failure = readback_native_compatibility_receipt(&request).unwrap_err();
+    assert!(failure
+        .to_string()
+        .contains("selected GNU consumer-v2 build"));
+}
+
 pub struct Fixture {
     pub(crate) manifest: ArosToolchainManifest,
     pub(crate) archive_sha256: Sha256Digest,
@@ -300,6 +320,8 @@ impl Fixture {
             profile: &self.profile,
             gnu_source_preset: self.source_preset.as_deref(),
             cmake_build_required: self.cmake_build_required,
+            native_sdk_required: false,
+            native_sdk: None,
             sdk_consumer_source_tree_sha256: &self.sdk_source_tree,
             engine_api_version: 3,
             engine_sha256: &self.engine_sha256,
@@ -373,6 +395,7 @@ impl Fixture {
                 })
                 .collect(),
             package: Some(package),
+            native_sdk: None,
         };
         document.validate().unwrap();
         self.receipt = crate::canonical::bytes(&serde_json::to_value(&document).unwrap()).unwrap();

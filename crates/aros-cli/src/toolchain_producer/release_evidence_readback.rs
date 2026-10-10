@@ -248,6 +248,9 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
                     },
                     group.profiles(),
                     profiles[artifact.asset()],
+                    selection.lanes[artifact.asset()]
+                        .compatibility
+                        .native_sdk_required,
                 )
                 .map_err(|error| native_error(&error))?;
             let selected = &selection.lanes[artifact.asset()].compatibility;

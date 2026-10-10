@@ -22,6 +22,7 @@ use crate::recipe::GitObjectId;
 use crate::ContractError;
 
 const SCHEMA: &str = "aros-toolchain-compatibility-inputs-v1";
+const SDK_SCHEMA: &str = "aros-toolchain-compatibility-inputs-v2";
 const MAX_STANDALONE_FIXTURE_BYTES: u64 = 1024 * 1024;
 
 /// Bounded content identity only; this makes no claim about a fixture path or
@@ -54,6 +55,8 @@ struct InputDocument {
     target_triple: String,
     source_preset: Option<String>,
     cmake_build_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_sdk: Option<crate::compatibility::NativeSdkLinkSelection>,
     sdk_source_tree_sha256: Sha256Digest,
     engine_api_version: u32,
     engine_sha256: Sha256Digest,
@@ -101,10 +104,22 @@ impl NativeCompatibilityInputClaims {
         reject_duplicate_json_keys(bytes)?;
         let document: InputDocument = serde_json::from_slice(bytes)
             .map_err(|_| error("compatibility input observation is not closed JSON"))?;
-        if document.schema != SCHEMA {
+        if (document.schema != SCHEMA && document.schema != SDK_SCHEMA)
+            || (document.schema == SDK_SCHEMA) != document.native_sdk.is_some()
+        {
             return Err(error(
                 "compatibility input observation has an unsupported schema",
             ));
+        }
+        if let Some(selection) = &document.native_sdk {
+            selection.validate()?;
+            if !document.cmake_build_required
+                || !matches!(document.compiler, ArosCompilerIdentity::Gnu { .. })
+            {
+                return Err(error(
+                    "SDK input observation requires a GNU native consumer build",
+                ));
+            }
         }
         if [
             document.standalone_c_fixture.size,
@@ -145,6 +160,8 @@ impl NativeCompatibilityInputClaims {
     /// selected profiles. Other measured identities remain unauthenticated
     /// claims until the owning-job/runtime/source evidence has been verified.
     /// Never select this document or its raw digest from a receipt's own fields.
+    /// `native_sdk_required` must be selected from the independently qualified
+    /// source contract, never inferred from this input document's SDK marker.
     ///
     /// # Errors
     /// Returns AX0703 for package/compiler/source/host/profile substitutions.
@@ -153,8 +170,14 @@ impl NativeCompatibilityInputClaims {
         package: NativeCompatibilityExpectedPackage<'a>,
         profiles: &'a Profiles,
         profile: &'a Profile,
+        native_sdk_required: bool,
     ) -> Result<NativeCompatibilityReceiptExpectations<'a>, ContractError> {
         let doc = &self.document;
+        if doc.native_sdk.is_some() != native_sdk_required {
+            return Err(error(
+                "SDK requirement differs from independent source policy",
+            ));
+        }
         let selected = profiles.select(profile.name())?;
         let manifest = crate::canonical::bytes(
             &serde_json::to_value(package.manifest)
@@ -182,6 +205,7 @@ impl NativeCompatibilityInputClaims {
             profile,
             gnu_source_preset: doc.source_preset.as_deref(),
             cmake_build_required: doc.cmake_build_required,
+            native_sdk: doc.native_sdk.as_ref(),
             sdk_consumer_source_tree_sha256: &doc.sdk_source_tree_sha256,
             engine_api_version: doc.engine_api_version,
             engine_sha256: &doc.engine_sha256,
@@ -204,7 +228,12 @@ impl NativeCompatibilityInputClaims {
                 .map_err(|_| error("cannot encode observed compatibility package manifest"))?,
         )?;
         let document = InputDocument {
-            schema: SCHEMA.into(),
+            schema: if expected.native_sdk.is_some() {
+                SDK_SCHEMA
+            } else {
+                SCHEMA
+            }
+            .into(),
             package_manifest_sha256: sha256_bytes(&manifest),
             archive_sha256: expected.package.archive_sha256.clone(),
             archive_size: expected.package.archive_size,
@@ -216,6 +245,7 @@ impl NativeCompatibilityInputClaims {
             target_triple: expected.profile.target_triple().into(),
             source_preset: expected.gnu_source_preset.map(str::to_owned),
             cmake_build_required: expected.cmake_build_required,
+            native_sdk: expected.native_sdk.cloned(),
             sdk_source_tree_sha256: expected.sdk_consumer_source_tree_sha256.clone(),
             engine_api_version: expected.engine_api_version,
             engine_sha256: expected.engine_sha256.clone(),
