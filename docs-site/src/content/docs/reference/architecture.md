@@ -49,6 +49,14 @@ for the selected profile and binds the consumers after target creation. Missing
 or noncompiling consumers fail instead of silently losing the dependency. The
 engine does not scan arbitrary source headers to infer these ordering contracts.
 
+Circular MetaMake aliases share their external prerequisites in the generated
+CMake graph. A recursive directory copy inside such a group remains an actual
+copy operation: its public source-owned name becomes an alias for a private
+execution target, shared by every entry point in the group. Source and
+destination paths and resolved fetch prerequisites remain unchanged. An
+internal-name collision or a copy prerequisite that would recreate the cycle
+fails explicitly rather than omitting the copy or its ordering.
+
 ## Process and publication boundaries
 
 `aros` resolves the complete installed tool suite from one directory, then

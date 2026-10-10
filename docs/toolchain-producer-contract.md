@@ -48,6 +48,14 @@ in `aros-toolchains` when T1 exists (M2/M6); M0 does not fabricate future SHAs
 or switch the current producer. The T1 -> P1/S1 -> release -> T2 sequence in
 the delivery plan avoids a circular commit dependency.
 
+The same execution protocol also accepts selection schema 2 for multiple
+compiler groups at that fixed declaration path. It validates every group's
+committed lock/profile bytes and resolves exactly one recipe-digest/preset
+match; malformed or ambiguous groups fail rather than selecting a default.
+The [versioned input-group contract](native-executor-input-groups-v2.md)
+defines its field set and limits. This does not change execution receipts or
+turn a local candidate into a qualified release.
+
 Native compiler production and the collector use the same exact tools commit. The
 executor's embedded identity plus measured binary hash is necessary but not
 proof of origin: release jobs also bind a verified, credential-free source
@@ -134,6 +142,24 @@ processes use the one whole-operation deadline and process-group cancellation;
 phase logs and all owned material are retained on failure. It has no package,
 publication, attestation or release authority.
 
+After publication, `finished-candidate.json` separately binds the complete
+finished tree, exact recipe/lock/profile and executor identity, and all six
+ordered phase-receipt digests. It measures regular bytes, link targets,
+directories and original descendant modes, including files outside the
+collector inventory. `BuildResult.outputs` remains collector-only; the
+`finished-candidate` evidence entry identifies the complete-tree receipt.
+The strict local reader and package join are documented in
+[finished-candidate evidence](compiler-family-finished-candidate-v2.md).
+Guarded local CLI packaging explicitly selects the complete serialized build
+result with `--build-result`, its external raw file digest with
+`--build-result-sha256`, and the original root with `--build-work-dir`.
+It requires `--package-format family-v2`; this selection does not authenticate
+execution or authorize a release.
+Its JSON result includes an exact portable measurement string and raw digest.
+The bounded collector reader validates retained documents and downloaded
+packages against independent selections; it does not open original roots,
+remeasure the raw candidate or verify artifact provenance.
+
 Low-level commands use `aros toolchain producer <operation>`. Common result and
 diagnostic options apply to all. Required options are frozen as follows:
 
@@ -165,6 +191,11 @@ from that namespace. For both families the helper consumes a private exact-name
 copy of the retained verified snapshot, with `AROS_FETCH_OFFLINE=1`, mandatory
 checksums and the lock-selected SHA-256. The original cache and snapshot are
 revalidated after the helper succeeds; only then is source use recorded.
+An omitted checksum or the source template's empty/ASCII-whitespace-only
+`-cs` placeholder is filled from that exact lock entry. A nonempty source
+declaration must match the single lock-selected filename and SHA-256 exactly;
+repeated checksum options are rejected even when their values are empty.
+This does not permit unverified inputs or source-owned direct network calls.
 The selected Rust vendor tree must match the exact external closure of the
 tools snapshot's `Cargo.lock`, including registry package checksums. A private
 host-Python environment records its interpreter and every lock-verified package
@@ -177,6 +208,10 @@ and origin of every declared module, not only the mandatory pair.
 Native GNU execution selects both GCC and binutils versions from the bound
 lock and uses the observed host C/C++ invocation paths. Its preflight rejects
 GNU Make older than 4.0 and observes bison, flex, patch, pkg-config and Ninja.
+For an LLVM/Clang host compiler selected by the source's compiler-name rules,
+GNU preflight also requires and records `llvm-ar` and `llvm-ranlib`. Their
+observed invocation directories enter the sanitized environment explicitly;
+the caller's remaining `PATH` is not a prerequisite fallback.
 These are local producer contracts, not evidence that the selected source
 runtime, all native hosts, GNU CMake consumer or a board has been qualified.
 

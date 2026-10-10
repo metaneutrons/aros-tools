@@ -249,7 +249,21 @@ build hosts and recipe-bound LLVM profiles that pass declarative CPU/triple
 validation; profile IDs are not a hardcoded allowlist. It requires the exact
 source-lock and profiles bytes to match the selected recipe. `legacy-v1` is
 retained for historical LLVM packages and is rejected for GNU packages. This
-local format option does not extend release-index or recovery support.
+package-format selection is separate from the release-index format and does
+not qualify publication or recovery.
+
+Guarded local packaging additionally requires `--build-result FILE`, its exact
+external file SHA-256 through `--build-result-sha256`, the original
+`--build-work-dir`, and explicit `--package-format family-v2`. The retained
+phase chain and complete finished candidate are revalidated before packaging.
+Guarded package JSON also carries a closed portable measurement and its exact
+raw digest. The library collector reader joins its eight retained documents to
+independent lane/executor/environment selections and a freshly verified package,
+without opening original build roots. It does not authenticate execution.
+The [finished-candidate contract](../../docs/compiler-family-finished-candidate-v2.md)
+also defines the original-host library join of two guarded packages to their
+candidates and selected V2 index/checksum inputs. These are byte-consistency
+checks, not authenticated execution or independent A/B evidence.
 
 The CLI consumer `install`, `list`, `verify` and `path` commands are unchanged.
 `toolchain build` defaults to the native lifecycle and requires a prepared,
@@ -271,8 +285,9 @@ is exposed. `--resume-from compiler` is the sole local recovery boundary: it
 remeasures the retained snapshots and
 compiler output, revalidates every predecessor receipt and starts the collector
 in a fresh Cargo target root. It never reuses a failed compiler tree or applies
-to release work. Trusted executor origin, full candidate inventory, real
-host/profile evidence and release qualification remain later gates.
+to release work. The finished record measures the complete raw candidate;
+trusted executor origin, real host/profile evidence and release qualification
+remain separate gates.
 
 See the [producer contract](../../docs/toolchain-producer-contract.md),
 [delivery plan](../../docs/toolchain-producer-plan.md),
