@@ -8,13 +8,14 @@
 use aros_common::{open_regular_file_nofollow, sha256_bytes, Sha256Digest};
 use aros_toolchain::compatibility::native_compatibility_host_tools;
 use aros_toolchain::compatibility_source::{
-    materialize_engine_free_source, EngineFreeSourceRequest,
+    materialize_engine_free_source, CommittedSourceIdentity, EngineFreeSourceRequest,
 };
 use aros_toolchain::profiles::Profiles;
 use aros_toolchain::qualification_evidence::{
     AttestationClaim, EvidenceCoverage, EvidencePolicy, QualificationEvidence, QualificationLane,
     ReleaseEvidence, SourceRunIdentity, QUALIFICATION_EVIDENCE_SCHEMA,
 };
+use aros_toolchain::recipe::GitObjectId;
 use aros_toolchain::recipe_builder::{self, RecipeBuildRequest};
 use aros_toolchain::recovery::{
     self, FailedStage, ObservedTag, RecoveryHandoff, RecoveryOperation, RecoveryRequest,
@@ -24,7 +25,7 @@ use aros_toolchain::release_index::{self, IndexRequest, IndexStage, NativeReleas
 use aros_toolchain::repackage::{self, VerifiedPackageRepackageRequest};
 use aros_toolchain::source_lock::SourceLock;
 use aros_toolchain::{package, package_verify, Recipe};
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read as _, Write as _};
@@ -32,7 +33,10 @@ use std::path::PathBuf;
 
 use crate::observability;
 
+mod finished_package;
 mod native_compatibility;
+#[cfg(unix)]
+mod release_index_family;
 
 /// Closed native producer stages exposed by `aros toolchain producer`.
 #[derive(Args)]
@@ -194,13 +198,23 @@ struct ProfileArgs {
 
 /// Inputs for one engine-free compatibility source snapshot.
 #[derive(Args)]
+#[command(group(ArgGroup::new("source_identity").args(["recipe", "source_commit"]).required(true)))]
+#[command(
+    after_help = "Source identity: select --recipe OR both --source-commit and --source-tree. Neither half of the explicit pair is valid alone. All identities bind a clean committed checkout; this command does not change a compiler package or its recipe."
+)]
 struct MaterializeEngineFreeSourceArgs {
-    /// Clean exact AROS checkout selected by the producer recipe
+    /// Clean exact committed AROS checkout to materialize
     #[arg(long)]
     source_dir: PathBuf,
-    /// Self-digesting recipe-v2 binding the selected source checkout
-    #[arg(long)]
-    recipe: PathBuf,
+    /// Bind to the recipe's build-source identity instead of a separate consumer
+    #[arg(long, conflicts_with_all = ["source_commit", "source_tree"])]
+    recipe: Option<PathBuf>,
+    /// Exact consumer source commit; requires --source-tree and excludes --recipe
+    #[arg(long, value_parser = parse_source_git_object, requires = "source_tree")]
+    source_commit: Option<GitObjectId>,
+    /// Exact consumer source tree; requires --source-commit
+    #[arg(long, value_parser = parse_source_git_object, requires = "source_commit")]
+    source_tree: Option<GitObjectId>,
     /// Absent output directory for the engine-free compatibility snapshot
     #[arg(long)]
     output_dir: PathBuf,
@@ -252,6 +266,15 @@ struct PackageArgs {
     /// Package metadata format; omitted selects the existing compiler-family default
     #[arg(long, value_enum)]
     package_format: Option<PackageFormatArg>,
+    /// Exact retained build JSON; requires its externally selected SHA-256 and original work root
+    #[arg(long, requires_all = ["build_result_sha256", "build_work_dir", "package_format"])]
+    build_result: Option<PathBuf>,
+    /// SHA-256 of the exact build-result file, not the finished receipt's self-digest
+    #[arg(long, value_parser = parse_build_result_digest, requires = "build_result")]
+    build_result_sha256: Option<Sha256Digest>,
+    /// Original native build work root; guarded packaging requires explicit family-v2 format
+    #[arg(long, requires = "build_result")]
+    build_work_dir: Option<PathBuf>,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -482,13 +505,22 @@ struct PrepareRecoveryArgs {
 /// Index operation stage selected explicitly by the protected workflow.
 #[derive(Clone, Copy, ValueEnum)]
 enum IndexStageArg {
-    /// Write the closed index and pre-attestation checksums.
+    /// Write the index and the format-specific pre-attestation subject list.
     PreAttestation,
-    /// Verify pre-attestation material and bind final checksums to provenance.
+    /// Verify unchanged subjects and write final checksums including provenance.
     Final,
 }
 
-/// Inputs for native v1 release-index advancement.
+/// Explicit local release inventory format; independent of release SemVer.
+#[derive(Clone, Copy, ValueEnum)]
+enum ReleaseFormatArg {
+    /// Historical single-group LLVM release index and checksum stages.
+    LegacyV1,
+    /// Compiler-family release inputs, measured index and external subject list.
+    FamilyV2,
+}
+
+/// Inputs for native release-index advancement without publication authority.
 #[derive(Args)]
 struct IndexArgs {
     /// Complete local release inventory directory
@@ -500,9 +532,24 @@ struct IndexArgs {
     /// Credential-free HTTPS root written into the index
     #[arg(long)]
     base_url: String,
-    /// Basename of the one selected source-lock document in the inventory
-    #[arg(long)]
-    source_lock_filename: String,
+    /// Local release format (default: legacy-v1; not the public release version)
+    #[arg(long, value_enum)]
+    release_format: Option<ReleaseFormatArg>,
+    /// V1 only: basename of the one source-lock document in the inventory
+    #[arg(long, required_unless_present = "release_format", required_if_eq("release_format", "legacy-v1"), conflicts_with_all = ["lane_inputs", "subject_manifest", "subject_manifest_sha256", "forbidden_prefixes"])]
+    source_lock_filename: Option<String>,
+    /// V2 only: closed independent archive environment/required-path map
+    #[arg(long, required_if_eq("release_format", "family-v2"))]
+    lane_inputs: Option<PathBuf>,
+    /// V2 only: absent pre-stage output or existing final-stage subject list, outside the release
+    #[arg(long, required_if_eq("release_format", "family-v2"))]
+    subject_manifest: Option<PathBuf>,
+    /// V2 final only: exact subject-list SHA-256 returned by pre-attestation
+    #[arg(long, required_if_eq_all = [("release_format", "family-v2"), ("stage", "final")])]
+    subject_manifest_sha256: Option<String>,
+    /// V2 only: absolute build root forbidden in archive payloads (repeatable)
+    #[arg(long = "forbidden-prefix")]
+    forbidden_prefixes: Vec<PathBuf>,
     /// Explicit closed inventory stage
     #[arg(long, value_enum)]
     stage: IndexStageArg,
@@ -520,7 +567,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::MaterializeEngineFreeSource(args) => {
             materialize_engine_free_source_stage(args)
         }
-        ProducerCommand::Package(args) => package(args),
+        ProducerCommand::Package(args) => package(&args),
         ProducerCommand::VerifyPackage(args) => verify_package(args),
         ProducerCommand::Compare(args) => compare(&args),
         ProducerCommand::Repackage(args) => repackage(args),
@@ -580,10 +627,25 @@ fn profile(args: &ProfileArgs) -> miette::Result<()> {
 fn materialize_engine_free_source_stage(
     args: MaterializeEngineFreeSourceArgs,
 ) -> miette::Result<()> {
+    let expected_source = match (args.recipe, args.source_commit, args.source_tree) {
+        (Some(path), None, None) => {
+            let recipe = Recipe::parse(&read_regular_input(&path, "recipe")?)
+                .map_err(|error| native_error(&error))?;
+            CommittedSourceIdentity {
+                commit: recipe.source().0.clone(),
+                tree: recipe.source().1.clone(),
+            }
+        }
+        (None, Some(commit), Some(tree)) => CommittedSourceIdentity { commit, tree },
+        _ => {
+            return Err(miette::miette!(
+                "select --recipe or both --source-commit and --source-tree"
+            ));
+        }
+    };
     let output = materialize_engine_free_source(&EngineFreeSourceRequest {
         source_root: args.source_dir,
-        recipe: Recipe::parse(&read_regular_input(&args.recipe, "recipe")?)
-            .map_err(|error| native_error(&error))?,
+        expected_source,
         output_root: args.output_dir,
     })
     .map_err(|error| native_error(&error))?;
@@ -604,6 +666,10 @@ fn materialize_engine_free_source_stage(
         }))?,
     }
     Ok(())
+}
+
+fn parse_source_git_object(value: &str) -> Result<GitObjectId, &'static str> {
+    GitObjectId::try_from(value.to_owned())
 }
 
 fn recipe(args: RecipeArgs) -> miette::Result<()> {
@@ -662,11 +728,18 @@ fn environment(args: &EnvironmentArgs) -> miette::Result<()> {
     Ok(())
 }
 
-fn package(args: PackageArgs) -> miette::Result<()> {
+fn package(args: &PackageArgs) -> miette::Result<()> {
+    if args.build_result.is_some()
+        && !matches!(args.package_format, Some(PackageFormatArg::FamilyV2))
+    {
+        return Err(miette::miette!(
+            "finished-build packaging requires --package-format family-v2"
+        ));
+    }
     let context = package_context(args.context.clone())?;
     let request = package::PackageRequest {
-        candidate_root: args.input_dir,
-        output_dir: args.output_dir,
+        candidate_root: args.input_dir.clone(),
+        output_dir: args.output_dir.clone(),
         release_id: context.release_id,
         host: context.host,
         recipe: context.recipe,
@@ -675,11 +748,15 @@ fn package(args: PackageArgs) -> miette::Result<()> {
         build_environment: context.build_environment,
         forbidden_prefixes: context.forbidden_prefixes,
     };
-    let result = args.package_format.map_or_else(
-        || package::package(&request),
-        |format| package::package_with_format(&request, format.into()),
-    );
-    let output = result.map_err(|error| native_error(&error))?;
+    let (output, finished_candidate) = if args.build_result.is_some() {
+        finished_package::run(&request, args)?
+    } else {
+        let result = args.package_format.map_or_else(
+            || package::package(&request),
+            |format| package::package_with_format(&request, format.into()),
+        );
+        (result.map_err(|error| native_error(&error))?, None)
+    };
     match args.format {
         ResultFormat::Human => aros_common::outputln!(
             "Native package: {}\nSHA-256: {}\nSize: {}",
@@ -687,7 +764,8 @@ fn package(args: PackageArgs) -> miette::Result<()> {
             output.archive_sha256,
             output.archive_size
         ),
-        ResultFormat::Json => print_json(&serde_json::json!({
+        ResultFormat::Json => {
+            let mut document = serde_json::json!({
             "schema": "aros-toolchain-producer-stage-v1",
             "operation": "package",
             "package_dir": output.output_dir,
@@ -697,9 +775,22 @@ fn package(args: PackageArgs) -> miette::Result<()> {
             "sbom": output.sbom,
             "sha256": output.archive_sha256,
             "size": output.archive_size,
-        }))?,
+            });
+            if let Some(proof) = finished_candidate {
+                document["finished_candidate"] = proof;
+            }
+            print_json(&document)?;
+        }
     }
     Ok(())
+}
+
+fn parse_build_result_digest(value: &str) -> Result<Sha256Digest, &'static str> {
+    let digest = Sha256Digest::parse(value).map_err(|_| "expected lowercase 64-hex SHA-256")?;
+    if digest.as_str() != value {
+        return Err("expected lowercase 64-hex SHA-256");
+    }
+    Ok(digest)
 }
 
 fn verify_package(args: VerifyPackageArgs) -> miette::Result<()> {
@@ -1362,6 +1453,25 @@ fn read_bounded_regular_input(path: &std::path::Path, label: &str) -> miette::Re
 }
 
 fn index(args: IndexArgs) -> miette::Result<()> {
+    match args.release_format.unwrap_or(ReleaseFormatArg::LegacyV1) {
+        ReleaseFormatArg::LegacyV1 => index_legacy(args),
+        ReleaseFormatArg::FamilyV2 => {
+            #[cfg(unix)]
+            {
+                release_index_family::run(args)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = args;
+                Err(miette::miette!(
+                    "family-v2 index stages require a native Unix host"
+                ))
+            }
+        }
+    }
+}
+
+fn index_legacy(args: IndexArgs) -> miette::Result<()> {
     let stage = match args.stage {
         IndexStageArg::PreAttestation => IndexStage::PreAttestation,
         IndexStageArg::Final => IndexStage::Final,
@@ -1370,7 +1480,9 @@ fn index(args: IndexArgs) -> miette::Result<()> {
         directory: args.directory,
         release_id: args.release_id,
         base_url: args.base_url,
-        source_lock_filename: args.source_lock_filename,
+        source_lock_filename: args
+            .source_lock_filename
+            .ok_or_else(|| miette::miette!("legacy-v1 index requires --source-lock-filename"))?,
         stage,
     })
     .map_err(|error| native_error(&error))?;
@@ -1396,6 +1508,7 @@ fn index(args: IndexArgs) -> miette::Result<()> {
 struct PackageContext {
     recipe: Recipe,
     source_lock: SourceLock,
+    profiles: Profiles,
     profile: aros_toolchain::profiles::Profile,
     upstream_commit: aros_toolchain::recipe::GitObjectId,
     release_id: String,
@@ -1455,6 +1568,7 @@ fn package_context(args: PackageContextArgs) -> miette::Result<PackageContext> {
         source_lock,
         profile,
         upstream_commit: profiles.upstream_commit().clone(),
+        profiles,
         release_id: args.release_id,
         host: args.host,
         build_environment,
@@ -1532,440 +1646,5 @@ fn print_json(document: &serde_json::Value) -> miette::Result<()> {
 mod toolchain_producer_active_matrix_tests;
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use clap::{error::ErrorKind, Parser};
-
-    use super::{
-        compare, compatibility_ports_source_closure, environment, CompareArgs, EnvironmentArgs,
-        ResultFormat,
-    };
-    use crate::Cli;
-
-    fn parse_package_format(command: &str, package_format: &str) -> Result<Cli, clap::Error> {
-        let mut args = vec![
-            "aros",
-            "toolchain",
-            "producer",
-            command,
-            "--recipe",
-            "/producer/recipe.json",
-            "--source-lock",
-            "/producer/toolchains/lock.sources.json",
-            "--profiles",
-            "/producer/toolchains/profiles.json",
-            "--preset",
-            "pc-x86_64",
-            "--release-id",
-            "candidate-1",
-            "--host",
-            "linux-x86_64",
-            "--build-environment",
-            "/evidence/environment.json",
-            "--input-dir",
-            "/candidate/toolchain",
-            "--package-format",
-            package_format,
-        ];
-        if command == "package" {
-            args.extend(["--output-dir", "/packages/candidate"]);
-        }
-        Cli::try_parse_from(args)
-    }
-
-    #[test]
-    fn package_format_option_is_closed_and_available_for_both_package_commands() {
-        for command in ["package", "verify-package"] {
-            for package_format in ["legacy-v1", "family-v2"] {
-                assert!(
-                    parse_package_format(command, package_format).is_ok(),
-                    "{command} should accept {package_format}"
-                );
-            }
-
-            let Err(error) = parse_package_format(command, "future-v3") else {
-                panic!("{command} unexpectedly accepted an unknown package format");
-            };
-            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{command}");
-        }
-    }
-
-    #[test]
-    fn producer_stage_surface_excludes_the_migrated_source_cache_frontends() {
-        let recipe = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "recipe",
-            "--source-dir",
-            "/source",
-            "--producer-dir",
-            "/producer",
-            "--tools-dir",
-            "/tools",
-            "--source-lock",
-            "/producer/toolchains/lock.sources.json",
-            "--profiles",
-            "/producer/toolchains/profiles.json",
-            "--output",
-            "/output/recipe.json",
-        ]);
-        assert!(recipe.is_ok());
-        let removed_cache = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "cache",
-            "--source-lock",
-            "/producer/toolchains/lock.sources.json",
-            "--cache-dir",
-            "/cache",
-            "--verify-only",
-        ]);
-        assert!(removed_cache.is_err());
-        let profile = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "profile",
-            "--recipe",
-            "/producer/recipe.json",
-            "--profiles",
-            "/producer/toolchains/profiles.json",
-            "--preset",
-            "pc-x86_64",
-            "--format",
-            "json",
-        ]);
-        assert!(profile.is_ok());
-        let package = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "package",
-            "--recipe",
-            "/producer/recipe.json",
-            "--source-lock",
-            "/producer/toolchains/lock.sources.json",
-            "--profiles",
-            "/producer/toolchains/profiles.json",
-            "--preset",
-            "pc-x86_64",
-            "--release-id",
-            "candidate-1",
-            "--host",
-            "linux-x86_64",
-            "--build-environment",
-            "/evidence/environment.json",
-            "--input-dir",
-            "/candidate/toolchain",
-            "--output-dir",
-            "/packages/first",
-        ]);
-        assert!(package.is_ok());
-        let compare = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "compare",
-            "--left",
-            "/packages/left",
-            "--right",
-            "/packages/right",
-            "--output",
-            "/evidence/comparison.json",
-        ]);
-        assert!(compare.is_ok());
-        let repackage = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "repackage",
-            "--recovery-request",
-            "/evidence/recovery.json",
-            "--source-package-dir",
-            "/packages/source",
-            "--source-release-id",
-            "toolchain-v1-source",
-            "--recipe",
-            "/producer/recipe.json",
-            "--source-lock",
-            "/producer/toolchains/lock.sources.json",
-            "--profiles",
-            "/producer/toolchains/profiles.json",
-            "--preset",
-            "pc-x86_64",
-            "--host",
-            "linux-x86_64",
-            "--build-environment",
-            "/evidence/environment.json",
-            "--first-extraction-dir",
-            "/work/extracted-a",
-            "--second-extraction-dir",
-            "/work/extracted-b",
-            "--first-output-dir",
-            "/packages/recovered-a",
-            "--second-output-dir",
-            "/packages/recovered-b",
-            "--comparison-output",
-            "/evidence/recovery-comparison.json",
-        ]);
-        assert!(repackage.is_ok());
-        let validation = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "validate-recovery",
-            "--recovery-request",
-            "/evidence/recovery.json",
-            "--release-dir",
-            "/release/source",
-            "--output",
-            "/evidence/recovery-validation.json",
-        ]);
-        assert!(validation.is_ok());
-        let qualification = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "record-qualification",
-            "--release-dir",
-            "/release/source",
-            "--source-lock-filename",
-            "llvm-11.0.0.sources.json",
-            "--lifecycle-reports-dir",
-            "/evidence/lifecycle",
-            "--comparison-reports-dir",
-            "/evidence/comparison",
-            "--compatibility-reports-dir",
-            "/evidence/compatibility",
-            "--source-repository",
-            "https://github.com/metaneutrons/aros-toolchains",
-            "--source-workflow",
-            ".github/workflows/toolchain-release.yml",
-            "--source-run-id",
-            "42",
-            "--source-tag",
-            "toolchain-v1-source",
-            "--source-tag-object",
-            "0123456789012345678901234567890123456789",
-            "--source-tag-commit",
-            "0123456789012345678901234567890123456789",
-            "--attestation-repository",
-            "https://github.com/metaneutrons/aros-toolchains",
-            "--attestation-workflow",
-            ".github/workflows/toolchain-release.yml",
-            "--attestation-signer",
-            "github-actions",
-            "--created-at",
-            "100",
-            "--expires-at",
-            "200",
-            "--output",
-            "/evidence/qualification.json",
-        ]);
-        assert!(qualification.is_ok());
-        let recovery_request = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "prepare-recovery",
-            "--qualification-evidence",
-            "/evidence/qualification.json",
-            "--release-dir",
-            "/release/source",
-            "--source-tag-object",
-            "0123456789012345678901234567890123456789",
-            "--source-tag-commit",
-            "0123456789012345678901234567890123456789",
-            "--recovery-release-id",
-            "toolchain-v1-recovered",
-            "--recovery-tag-object",
-            "1234567890123456789012345678901234567890",
-            "--recovery-tag-commit",
-            "0123456789012345678901234567890123456789",
-            "--source-repository",
-            "https://github.com/metaneutrons/aros-toolchains",
-            "--source-workflow",
-            ".github/workflows/toolchain-release.yml",
-            "--attestation-repository",
-            "https://github.com/metaneutrons/aros-toolchains",
-            "--attestation-workflow",
-            ".github/workflows/toolchain-release.yml",
-            "--attestation-signer",
-            "github-actions",
-            "--now",
-            "150",
-            "--output",
-            "/evidence/recovery.json",
-        ]);
-        assert!(recovery_request.is_ok());
-        let source = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "materialize-engine-free-source",
-            "--source-dir",
-            "/source",
-            "--recipe",
-            "/producer/recipe.json",
-            "--output-dir",
-            "/output/engine-free",
-        ]);
-        assert!(source.is_ok());
-        let index = Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "index",
-            "--directory",
-            "/release",
-            "--release-id",
-            "candidate-1",
-            "--base-url",
-            "https://aros-toolchains.metaneutrons.cc/releases/candidate-1",
-            "--source-lock-filename",
-            "lock.sources.json",
-            "--stage",
-            "pre-attestation",
-        ]);
-        assert!(index.is_ok());
-        assert!(Cli::try_parse_from([
-            "aros",
-            "toolchain",
-            "producer",
-            "compatibility-host-tools",
-            "--host",
-            "linux-x86_64",
-        ])
-        .is_ok());
-    }
-
-    #[test]
-    fn recovery_help_does_not_hard_code_the_historical_inventory_size() {
-        for command in [
-            "validate-recovery",
-            "record-qualification",
-            "prepare-recovery",
-        ] {
-            let Err(error) =
-                Cli::try_parse_from(["aros", "toolchain", "producer", command, "--help"])
-            else {
-                panic!("{command} help unexpectedly parsed as an invocation");
-            };
-            assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{command}");
-            let help = error.to_string();
-            assert!(
-                !help.contains("56-member"),
-                "{command} help must not hard-code the historical release shape"
-            );
-            if command != "record-qualification" {
-                assert!(
-                    help.contains("selected by its release index"),
-                    "{command} help must describe index-selected inventory shapes"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn environment_receipt_is_closed_and_non_overwriting() {
-        let temporary = tempfile::tempdir().unwrap();
-        let output = temporary
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("environment.json");
-        environment(&EnvironmentArgs {
-            host: "linux-x86_64".into(),
-            output: output.clone(),
-            format: ResultFormat::Human,
-        })
-        .unwrap();
-        let document: serde_json::Value =
-            serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
-        assert_eq!(
-            document,
-            serde_json::json!({
-                "schema": "aros-toolchain-build-environment-v1",
-                "host": "linux-x86_64",
-            })
-        );
-        assert!(environment(&EnvironmentArgs {
-            host: "linux-x86_64".into(),
-            output,
-            format: ResultFormat::Human,
-        })
-        .is_err());
-    }
-
-    #[test]
-    fn comparison_receipt_is_closed_and_non_overwriting() {
-        let temporary = tempfile::tempdir().unwrap();
-        let left = temporary.path().join("left");
-        let right = temporary.path().join("right");
-        fs::create_dir(&left).unwrap();
-        fs::create_dir(&right).unwrap();
-        for directory in [&left, &right] {
-            fs::write(directory.join("archive.tar.xz"), b"archive").unwrap();
-            fs::write(directory.join("archive.tar.xz.manifest.json"), b"manifest").unwrap();
-            fs::write(directory.join("archive.tar.xz.sha256"), b"checksum").unwrap();
-            fs::write(directory.join("archive.tar.xz.spdx.json"), b"sbom").unwrap();
-        }
-        let output = temporary
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("comparison.json");
-        let args = CompareArgs {
-            left,
-            right,
-            output: output.clone(),
-            format: ResultFormat::Human,
-        };
-        compare(&args).unwrap();
-        let document: serde_json::Value =
-            serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
-        assert_eq!(document["schema"], 1);
-        assert_eq!(document["operation"], "compare");
-        assert_eq!(document["members"].as_array().unwrap().len(), 4);
-        assert!(compare(&args).is_err());
-    }
-
-    #[test]
-    fn compatibility_receipt_closure_accepts_profiled_sources_and_rejects_tampering() {
-        let sources = vec![
-            serde_json::json!({
-                "id": "unicode-data",
-                "cache_filename": "UnicodeData.txt",
-                "relative_path": "UnicodeData.txt",
-                "fetch_marker": "",
-                "sha256": "a".repeat(64),
-                "size": 1,
-            }),
-            serde_json::json!({
-                "id": "mesa",
-                "cache_filename": "mesa-20.0.8.tar.xz",
-                "relative_path": "ports/mesa-20.0.8.tar.xz",
-                "fetch_marker": "ports/.mesa-20.0.8-fetched",
-                "sha256": "b".repeat(64),
-                "size": 2,
-            }),
-        ];
-        assert!(compatibility_ports_source_closure(&sources));
-
-        let mut duplicate_path = sources.clone();
-        duplicate_path[1]["relative_path"] = serde_json::json!("UnicodeData.txt");
-        assert!(!compatibility_ports_source_closure(&duplicate_path));
-
-        let mut unsafe_path = sources;
-        unsafe_path[1]["relative_path"] = serde_json::json!("../mesa-20.0.8.tar.xz");
-        assert!(!compatibility_ports_source_closure(&unsafe_path));
-
-        let mut unsafe_marker = unsafe_path;
-        unsafe_marker[1]["relative_path"] = serde_json::json!("ports/mesa-20.0.8.tar.xz");
-        unsafe_marker[1]["fetch_marker"] = serde_json::json!("ports/../.mesa-20.0.8-fetched");
-        assert!(!compatibility_ports_source_closure(&unsafe_marker));
-    }
-}
+#[path = "toolchain_producer_tests.rs"]
+mod tests;
