@@ -130,7 +130,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer prepare-recovery` | Create a closed recovery request from externally verified qualification facts |
 | `aros toolchain producer index` | Advance a complete local release inventory through an explicit index stage |
 | `aros toolchain producer compatibility-host-tools` | Print the measured command roles required for native compatibility |
-| `aros toolchain producer compatibility` | Execute all six local package-compatibility phases; optional `--evidence-dir` publishes complete family-v2 input/report/ELF evidence locally, never authenticated origin |
+| `aros toolchain producer compatibility` | Execute six package-compatibility phases; GNU consumer-v2 additionally requires ordinary C/C++ SDK links and relocation. `--evidence-dir` exports local evidence, not authenticated origin |
 | `aros toolchain producer verify-release-evidence` | Read back every family-v2 A/B package and compatibility lane against independent selections; byte consistency only, not authenticated execution |
 | `aros toolchain producer verify-qualification` | Bind complete family-v2 qualification claims to all measured release evidence; byte consistency only, not signature or execution authentication |
 | `aros toolchain producer verify-recovery` | Reacquire complete family-v2 qualification and check recovery observations; read-only, no authentication or recovery execution |
