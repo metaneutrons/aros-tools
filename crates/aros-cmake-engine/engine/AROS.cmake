@@ -1758,7 +1758,12 @@ function(aros_apply_includes target_name)
         endif()
     endforeach()
 
-    set(DIRS ${GEN_DIRS} ${ARCH_DIRS} ${GENERIC_DIRS} ${FALLBACK_DIRS})
+    # Implicit module paths are quote-only, just as compile_q's CFLAGS_IQUOTE.
+    # Making either the generated module tree or MODULE_DIR an -I directory
+    # lets private names (e.g. classes/string.h) shadow libc <string.h>, even
+    # when the runtime namespace is correctly marked SYSTEM. Explicit source
+    # INCLUDES and ARCH_INCLUDES retain their ordinary angle-header lookup.
+    set(DIRS ${ARCH_DIRS} ${GENERIC_DIRS})
 
     if(DIRS)
         list(REMOVE_DUPLICATES DIRS)

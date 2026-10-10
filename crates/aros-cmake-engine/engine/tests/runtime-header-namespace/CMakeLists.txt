@@ -11,14 +11,20 @@ endif()
 set(AROS_TOOLCHAIN "${TEST_AROS_TOOLCHAIN}" CACHE STRING "" FORCE)
 set(AROS_TARGET_CPU riscv32)
 set(AROS_TARGET_PLATFORM pc)
-set(AROS_SOURCE_DIR "${TEST_SOURCE_ROOT}")
+set(AROS_SOURCE_DIR "${CMAKE_BINARY_DIR}/fixture-source")
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
 file(MAKE_DIRECTORY
     "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc"
     "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc"
     "${CMAKE_BINARY_DIR}/GENINCDIR"
-    "${CMAKE_BINARY_DIR}/gen/module")
+    "${CMAKE_BINARY_DIR}/gen/module"
+    "${AROS_SOURCE_DIR}/module"
+    "${AROS_SOURCE_DIR}/compiler/startup")
+file(WRITE "${AROS_SOURCE_DIR}/compiler/startup/startup.c"
+    "int unused_startup;\n")
+file(WRITE "${AROS_SOURCE_DIR}/compiler/startup/detach.c"
+    "int unused_detach;\n")
 file(WRITE "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc/namespace_order.h"
     "#define AROS_NAMESPACE_ID 1\n")
 file(WRITE "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc/namespace_order.h"
@@ -37,10 +43,37 @@ file(WRITE "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc/private_order.h"
     "#define AROS_PRIVATE_ID 2\n")
 file(WRITE "${CMAKE_BINARY_DIR}/SDK/include/private_order.h"
     "#define AROS_PRIVATE_ID 3\n")
+file(WRITE "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc/private_angle_order.h"
+    "#define AROS_PRIVATE_ANGLE_ID 1\n")
+file(WRITE "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc/private_angle_order.h"
+    "#define AROS_PRIVATE_ANGLE_ID 2\n")
+file(WRITE "${CMAKE_BINARY_DIR}/SDK/include/private_angle_order.h"
+    "#define AROS_PRIVATE_ANGLE_ID 3\n")
 file(WRITE "${CMAKE_BINARY_DIR}/GENINCDIR/generated_order.h"
     "#define AROS_GENERATED_ID 4\n")
 file(WRITE "${CMAKE_BINARY_DIR}/gen/module/private_order.h"
     "#define AROS_PRIVATE_ID 5\n")
+file(WRITE "${CMAKE_BINARY_DIR}/gen/module/private_angle_order.h"
+    "#define AROS_PRIVATE_ANGLE_ID 5\n")
+file(WRITE "${AROS_SOURCE_DIR}/module/private_order.h"
+    "#define AROS_PRIVATE_ID 6\n")
+file(WRITE "${AROS_SOURCE_DIR}/module/private_angle_order.h"
+    "#define AROS_PRIVATE_ANGLE_ID 6\n")
+file(WRITE "${AROS_SOURCE_DIR}/module/module_order.h"
+    "#define AROS_MODULE_PRIVATE_ID 6\n")
+file(WRITE "${AROS_SOURCE_DIR}/explicit-module-angle.c" [=[
+#include <module_order.h>
+#if AROS_MODULE_PRIVATE_ID != 6
+#error explicit source include did not enable module angle lookup
+#endif
+int aros_explicit_module_angle_probe;
+]=])
+file(WRITE "${AROS_SOURCE_DIR}/explicit-module-angle.cpp" [=[
+#include <module_order.h>
+static_assert(AROS_MODULE_PRIVATE_ID == 6,
+              "explicit source include did not enable module angle lookup");
+int aros_explicit_module_angle_probe;
+]=])
 
 # The namespace fixture builds only object files. Give the engine an owned
 # sentinel so configure never resolves a host aros-collect from PATH; invoking
@@ -67,7 +100,9 @@ function(_add_namespace_probe target source expected_namespace expected_generate
     target_compile_definitions("${target}" PRIVATE
         "EXPECTED_NAMESPACE_ID=${expected_namespace}"
         "EXPECTED_GENERATED_ID=${expected_generated}"
+        "EXPECTED_PRIVATE_ANGLE_ID=${expected_namespace}"
         EXPECTED_PRIVATE_ID=5)
+    target_compile_definitions("${target}" PRIVATE EXPECTED_MODULE_PRIVATE_ID=6)
     aros_apply_includes("${target}" MODULE_DIR "${_module_dir}")
     if(target MATCHES "^noposixc")
         aros_apply_flags("${target}" COMPILE_OPTIONS -noposixc)
@@ -94,3 +129,16 @@ _add_namespace_probe(explicit-posixc-c
     "${_probe_source}" 1 "${_explicit_generated_id}")
 _add_namespace_probe(explicit-posixc-cxx
     "${_probe_cpp_source}" 1 "${_explicit_generated_id}")
+
+foreach(_language IN ITEMS c cpp)
+    set(_target "explicit-module-angle-${_language}")
+    add_library("${_target}" OBJECT
+        "${AROS_SOURCE_DIR}/explicit-module-angle.${_language}")
+    aros_apply_includes("${_target}"
+        MODULE_DIR "${_module_dir}" INCLUDES "${_module_dir}")
+
+    set(_target "implicit-module-angle-${_language}")
+    add_library("${_target}" OBJECT
+        "${AROS_SOURCE_DIR}/explicit-module-angle.${_language}")
+    aros_apply_includes("${_target}" MODULE_DIR "${_module_dir}")
+endforeach()
