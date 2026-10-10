@@ -179,7 +179,8 @@ rather than claiming full host coverage. PRs always receive the stable Linux
 gate; only a narrow, tested documentation-only path avoids the additional three
 native hosts. Executable, workflow, contract and unclassified changes use the
 active three-host matrix. macOS Intel is not an `aros-tools` native release
-target.
+target. Main release-version merges also run all three hosts before admission;
+ordinary main checkpoints remain Linux-only.
 See the [test stages and acceptance policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints)
 for when full Linux and macOS evidence is mandatory.
 
@@ -203,9 +204,16 @@ are consumers of those immutable, measured artifacts – never independent binar
 builds.
 
 Release Please derives the workspace SemVer and changelog from Conventional
-Commits. It opens a reviewable release pull request but never creates a tag or
-GitHub Release. Only a separately protected annotated tag on qualified `main`
-starts release production and promotion.
+Commits. Merging its reviewed release pull request is the human promotion gate.
+A read-only admission job verifies the exact protected-main merge, its Release
+Please PR, successful Workspace CI and CodeQL runs, and the immutable tag policy.
+It emits a short-lived candidate receipt. A separate write job runs only when
+admission is ready; it rechecks that receipt and source before Release Please
+creates the private draft, then rechecks the exact Release Please outputs before
+creating one annotated tag and dispatching qualification once. Admission uses
+the governance credential only for read-only ruleset requests; the writer has
+no repository-secret access. The qualification workflow has no tag-push
+trigger, and independently verifies the tag object and exact source SHA.
 
 The first stable tag required every supported native archive and downstream
 package path to pass its own gate:

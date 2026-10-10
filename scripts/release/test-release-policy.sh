@@ -276,6 +276,9 @@ case "$1" in
             wrong-pattern)
                 printf '%s\n' '{"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["refs/tags/release-*"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}'
                 ;;
+            hidden-bypass)
+                printf '%s\n' '{"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}'
+                ;;
             *)
                 printf '%s\n' '{"target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}'
                 ;;
@@ -360,11 +363,14 @@ for invalid_ruleset in missing-deletion bypass wrong-pattern; do
         AROS_RELEASE_POLICY_FIXTURE=1 GH_TOKEN=fixture \
         PATH="$work/mock-bin:$PATH" "${verify_fixture_identity[@]}"
 done
+MOCK_BAD_RULESET=hidden-bypass AROS_RELEASE_POLICY_FIXTURE=1 \
+    GH_TOKEN=fixture PATH="$work/mock-bin:$PATH" \
+    "${verify_fixture_identity[@]}" >/dev/null
 expect_failure env GH_TOKEN=fixture PATH="$work/mock-bin:$PATH" \
     "${verify_fixture_ref[@]}"
 AROS_RELEASE_POLICY_FIXTURE=1 GH_TOKEN=fixture PATH="$work/mock-bin:$PATH" \
     "${verify_fixture_ref[@]}" >/dev/null
-for invalid_ruleset in missing-deletion bypass wrong-pattern; do
+for invalid_ruleset in missing-deletion bypass wrong-pattern hidden-bypass; do
     expect_failure env MOCK_BAD_RULESET="$invalid_ruleset" \
         AROS_RELEASE_POLICY_FIXTURE=1 GH_TOKEN=fixture PATH="$work/mock-bin:$PATH" \
         "${verify_fixture_ref[@]}"

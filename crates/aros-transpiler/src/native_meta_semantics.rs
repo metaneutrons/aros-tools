@@ -24,6 +24,10 @@ pub use empty_library_lists::VerifiedEmptyLibraryList;
 mod library_aliases;
 pub use library_aliases::VerifiedNativeLibraryAlias;
 
+#[path = "native_archive_preparation.rs"]
+mod archive_preparation;
+pub use archive_preparation::SourceArchivePreparation;
+
 // Reviewed full GenMF definition-block fingerprints. Hashing the complete
 // block makes added calls or side effects invalidate the caller-chain proof,
 // not only edits to the visible callsite. Each macro lists every reviewed
@@ -97,6 +101,8 @@ pub struct VerifiedTemplateHook {
 /// Source-backed metadata routing, never executable producer qualification.
 #[derive(Debug, Default, Serialize)]
 pub struct NativeMetaSemanticsEvidence {
+    /// Ordered source-wrapper prerequisites bound to actual archive compilers.
+    pub archive_preparations: Vec<SourceArchivePreparation>,
     pub virtual_aliases: Vec<SourceVirtualAlias>,
     pub architecture_hook_omissions: Vec<SourceArchitectureHookOmission>,
     pub verified_selector_contracts: BTreeSet<VerifiedSelectorContract>,
@@ -340,10 +346,17 @@ impl NativeOwnerProjection {
                 charge(&mut work)?;
                 for source_edge in &declaration.dependencies {
                     charge(&mut work)?;
-                    matches |= self.owners.get(&declaration.file) == Some(&edge.recipe)
+                    let exact = self.owners.get(&declaration.file) == Some(&edge.recipe)
                         && source_edge.concrete == dependency
                         && architecture_expression(&source_edge.raw_expression).as_deref()
                             == Some(edge.dependency.as_str());
+                    if exact && (!declaration.virtual_target || declaration.claims_make_owner) {
+                        return Err(format!(
+                            "selector contract {} -> {} cannot reclassify a mandatory source dependency in {}",
+                            edge.target, edge.dependency, edge.recipe
+                        ));
+                    }
+                    matches |= exact;
                 }
             }
             if !matches || !native_meta_edges.contains(&(edge.target.clone(), dependency.clone())) {
@@ -418,6 +431,7 @@ impl NativeOwnerProjection {
                         continue;
                     }
                     claims += 1;
+                    justified &= declaration.virtual_target && !declaration.claims_make_owner;
                     let recipe = self.bound_recipe(&declaration.file)?;
                     if let Some(expression) = architecture_expression(&source_edge.raw_expression) {
                         justified &= evidence.verified_selector_contracts.contains(
@@ -504,7 +518,8 @@ impl NativeOwnerProjection {
                     // borrow another file's optional selector proof.
                     if expression.is_none()
                         || (seed && !exact_seed)
-                        || (!seed && (!declaration.virtual_target || declaration.claims_make_owner))
+                        || !declaration.virtual_target
+                        || declaration.claims_make_owner
                     {
                         justified = false;
                     }
@@ -566,6 +581,38 @@ impl NativeOwnerProjection {
                 // native edges retain their independently supplied origins.
                 meta_edge_origins: &edge_origins,
             },
+        )?;
+        let mut omitted_preparations = BTreeSet::new();
+        for omission in &evidence.architecture_hook_omissions {
+            for recipe in &omission.recipes {
+                omitted_preparations.insert((
+                    recipe.clone(),
+                    omission.target.clone(),
+                    omission.dependency.clone(),
+                ));
+            }
+        }
+        omitted_preparations.extend(
+            evidence
+                .empty_library_list_omissions
+                .iter()
+                .map(|omission| {
+                    (
+                        omission.recipe.clone(),
+                        omission.target.clone(),
+                        omission.dependency.clone(),
+                    )
+                }),
+        );
+        let selected_endpoints = graph
+            .audit_native_dependency_graph(roots, context, diagnostics)
+            .reachable;
+        evidence.archive_preparations = self.bind_archive_preparations(
+            graph,
+            parser_origins,
+            &omitted_preparations,
+            &selected_endpoints,
+            context,
         )?;
         Ok(evidence)
     }

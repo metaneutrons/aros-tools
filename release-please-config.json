@@ -6,7 +6,9 @@
   "include-component-in-tag": false,
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
-  "skip-github-release": true,
+  "skip-github-release": false,
+  "draft": true,
+  "force-tag-creation": false,
   "bootstrap-sha": "fb6ba7807c859c6ca20f0f019f1100c94df1375a",
   "group-pull-request-title-pattern": "chore${scope}: release${component} ${version}",
   "packages": {

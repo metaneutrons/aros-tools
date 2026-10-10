@@ -484,10 +484,10 @@ elif (root / 'release.yml').exists():
     errors.append(f'{root / "release.yml"}: Release Please finalizer is missing')
 rp_path = root / 'release-please.yml'
 if rp_path.exists():
-    rp_job = workflow_jobs(rp_path).get('release-pr', '')
+    rp_jobs = workflow_jobs(rp_path)
+    rp_job = rp_jobs.get('release-pr', '')
     required_rp = (
-        'environment: release-please',
-        "if: github.ref == 'refs/heads/main'",
+        "if: github.ref == 'refs/heads/main' && github.event_name != 'workflow_run'",
         'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
         'client-id: ${{ vars.RELEASE_PLEASE_CLIENT_ID }}',
         'private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}',
@@ -501,6 +501,8 @@ if rp_path.exists():
     for marker in required_rp:
         if marker not in rp_job:
             errors.append(f'{rp_path}: missing Release Please App contract: {marker}')
+    if re.findall(r'^    environment:\s*([^\s#]+)', rp_job, re.MULTILINE) != ['release-please']:
+        errors.append(f'{rp_path}: Release Please PR job must bind only environment release-please')
     for field, value in (('owner', 'metaneutrons'), ('repositories', 'aros-tools')):
         if re.findall(rf'^\s+{field}:\s*([^\n]+)', rp_job, re.MULTILINE) != [value]:
             errors.append(f'{rp_path}: Release Please App target must be exactly {field}: {value}')
@@ -514,6 +516,113 @@ if rp_path.exists():
             errors.append(f'{rp_path}: forbidden Release Please credential or duplicate dispatch: {forbidden}')
     if set(re.findall(r'secrets\.([A-Z_]+)', rp_job)) != {'RELEASE_PLEASE_APP_PRIVATE_KEY'}:
         errors.append(f'{rp_path}: Release Please must use only its own private key')
+    if declared_permissions(rp_job, 4) != {'contents': 'read'}:
+        errors.append(f'{rp_path}: Release Please PR job must retain contents-read-only job permissions')
+
+    release_admission = rp_jobs.get('release-admission', '')
+    required_admission = (
+        "if: github.ref == 'refs/heads/main' && github.event_name != 'push'",
+        'ready: ${{ steps.admission.outputs.ready }}',
+        'candidate: ${{ steps.admission.outputs.candidate }}',
+        'ref: main',
+        'persist-credentials: false',
+        'GH_TOKEN: ${{ github.token }}',
+        'GOVERNANCE_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}',
+        'trap cleanup EXIT',
+        "trap 'exit 130' HUP INT TERM",
+        'python3 scripts/release/release-automation.py admit',
+        '--output "$RUNNER_TEMP/release-admission.json" --github-output "$GITHUB_OUTPUT"',
+    )
+    for marker in required_admission:
+        if marker not in release_admission:
+            errors.append(f'{rp_path}: release-admission contract is missing {marker}')
+    if re.findall(r'^    environment:\s*([^\s#]+)', release_admission, re.MULTILINE) != ['release']:
+        errors.append(f'{rp_path}: release-admission contract is missing environment: release')
+    if re.findall(r'^\s+ref:\s*([^\s#]+)', release_admission, re.MULTILINE) != ['main']:
+        errors.append(f'{rp_path}: release-admission must check out only protected main')
+    if declared_permissions(release_admission, 4) != {
+        'contents': 'read', 'pull-requests': 'read', 'actions': 'read',
+    }:
+        errors.append(
+            f'{rp_path}: release-admission must request exactly Contents, Pull requests and Actions read'
+        )
+    if set(re.findall(r'secrets\.([A-Z_]+)', release_admission)) != {'RELEASE_ADMIN_READ_TOKEN'}:
+        errors.append(f'{rp_path}: release-admission must use only the release governance read token')
+    for forbidden in ('actions/create-github-app-token@', 'googleapis/release-please-action@',
+                      'gh workflow run', 'git push ', 'issues: write', 'contents: write',
+                      'pull-requests: write', 'actions: write'):
+        if forbidden in release_admission:
+            errors.append(f'{rp_path}: release-admission must remain read-only: {forbidden}')
+
+    release_start = rp_jobs.get('release-start', '')
+    ready_guard = "if: github.ref == 'refs/heads/main' && github.event_name != 'push' && needs.release-admission.outputs.ready == 'true'"
+    required_start = (
+        'needs: release-admission',
+        ready_guard,
+        'ref: main',
+        'persist-credentials: false',
+        'GH_TOKEN: ${{ github.token }}',
+        'ADMISSION_JSON: ${{ needs.release-admission.outputs.candidate }}',
+        'python3 scripts/release/release-automation.py recheck',
+        '--output "$RUNNER_TEMP/release-admission.json"',
+        'id: candidate',
+        'googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7',
+        'token: ${{ github.token }}',
+        'skip-github-pull-request: true',
+        'skip-github-release: false',
+        'skip-labeling: true',
+        'RP_CREATED: ${{ steps.candidate.outputs.release_created }}',
+        'RP_TAG: ${{ steps.candidate.outputs.tag_name }}',
+        'RP_SHA: ${{ steps.candidate.outputs.sha }}',
+        'RP_ID: ${{ steps.candidate.outputs.id }}',
+        'RP_VERSION: ${{ steps.candidate.outputs.version }}',
+        'python3 scripts/release/release-automation.py start',
+        '--admission "$RUNNER_TEMP/release-admission.json"',
+    )
+    for marker in required_start:
+        if marker not in release_start:
+            errors.append(f'{rp_path}: release-start contract is missing {marker}')
+    if re.findall(r'^    environment:\s*([^\s#]+)', release_start, re.MULTILINE) != ['release-please']:
+        errors.append(f'{rp_path}: release-start must bind only environment release-please')
+    if re.findall(r'^\s+ref:\s*([^\s#]+)', release_start, re.MULTILINE) != ['main']:
+        errors.append(f'{rp_path}: release-start must check out only protected main')
+    if 'python3 scripts/release/release-automation.py admit' in release_start:
+        errors.append(f'{rp_path}: release-start must consume and recheck read-only admission output')
+    if re.search(r'^        if:', release_start, re.MULTILINE):
+        errors.append(f'{rp_path}: release-start steps must rely on the job-level ready gate')
+    recheck_position = release_start.find('python3 scripts/release/release-automation.py recheck')
+    candidate_position = release_start.find('googleapis/release-please-action@')
+    start_position = release_start.find('python3 scripts/release/release-automation.py start')
+    if not (0 <= recheck_position < candidate_position < start_position):
+        errors.append(f'{rp_path}: release-start must recheck admission before Release Please and tag start')
+    if declared_permissions(release_start, 4) != {
+        'contents': 'write', 'pull-requests': 'write', 'actions': 'write',
+    }:
+        errors.append(
+            f'{rp_path}: release-start must request exactly Contents, Pull requests and Actions write'
+        )
+    for forbidden in ('actions/create-github-app-token@', 'gh workflow run', 'git push '):
+        if forbidden in release_start:
+            errors.append(f'{rp_path}: release-start bypasses its single adapter: {forbidden}')
+    if re.search(r'\bsecrets\.', release_start):
+        errors.append(f'{rp_path}: release-start must not access repository secrets')
+
+    trigger = rp_path.read_text().split('\npermissions:', 1)[0]
+    for marker in ('workflow_run:', 'workflows: [Workspace CI, CodeQL]',
+                   'types: [completed]', 'branches: [main]'):
+        if marker not in trigger:
+            errors.append(f'{rp_path}: release-start trigger is missing {marker}')
+    if re.search(r'^  pull_request:', trigger, re.MULTILINE):
+        errors.append(f'{rp_path}: Release Please must not run on pull requests')
+    release_path = root / 'release.yml'
+    if release_path.exists():
+        release_trigger = release_path.read_text().split('\npermissions:', 1)[0]
+        if re.search(r'^  push:', release_trigger, re.MULTILINE) or 'tags:' in release_trigger:
+            errors.append(
+                f'{release_path}: release-start must be the only production qualification producer'
+            )
+        if 'workflow_dispatch:' not in release_trigger:
+            errors.append(f'{release_path}: explicit recovery dispatch is missing')
 
 # The local composite is the sole Homebrew credential factory. Its underlying
 # pinned action revokes every token at job end (including failure/cancellation).

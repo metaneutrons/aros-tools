@@ -100,10 +100,12 @@ immutable_ruleset=false
 for ruleset_id in "${ruleset_ids[@]}"; do
     [[ "$ruleset_id" =~ ^[1-9][0-9]*$ ]] || fail 'tag ruleset has a malformed ID'
     ruleset=$(gh api "repos/${repository}/rulesets/${ruleset_id}")
-    if jq -e '
+    if jq -e --arg mode "$mode" '
         .target == "tag" and
         .enforcement == "active" and
-        ((.bypass_actors // []) | length == 0) and
+        (if $mode == "governance" then
+            has("bypass_actors") and (.bypass_actors | type == "array" and length == 0)
+         else ((.bypass_actors // []) | length == 0) end) and
         ((.conditions.ref_name.include // []) | index("refs/tags/v*") != null) and
         ((.conditions.ref_name.exclude // []) | length == 0) and
         ([.rules[]?.type] | index("update") != null) and

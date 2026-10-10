@@ -3,9 +3,10 @@
 
 The planner is deliberately fail-closed.  Only a narrow documentation-only
 allowlist may use the inexpensive Linux lane; an empty, malformed or unfamiliar
-change list always receives the active native three-host matrix. Intel macOS
-qualification is intentionally suspended until the initial toolchain release
-has been published; see metaneutrons/aros-toolchains#27.
+change list cannot authorize a reduced gate. Main pushes that change the
+Release Please version manifest receive all three native hosts before release
+admission; ordinary main checkpoints remain inexpensive. Intel macOS is not an
+active native release target.
 """
 
 from __future__ import annotations
@@ -95,6 +96,9 @@ def plan(*, event: str, changed_paths: tuple[str, ...] | None, dispatch_scope: s
             return "fast", "documentation-only pull request", matrix("fast", source_qualification=False)
         return "full", "pull request changes executable or unclassified inputs", matrix("full", source_qualification=True)
     if event == "push":
+        require(changed_paths is not None, "push planning requires changed paths")
+        if not changed_paths or ".release-please-manifest.json" in changed_paths:
+            return "full", "release version or unknown main changes", matrix("full", source_qualification=True)
         return "fast", "integrated main checkpoint", matrix("fast", source_qualification=True)
     if event == "schedule":
         return "full", "scheduled native host sweep", matrix("full", source_qualification=True)
@@ -135,7 +139,7 @@ def main(argv: list[str]) -> int:
     try:
         paths = (
             read_changed_paths(args.changed_paths)
-            if args.event == "pull_request" and args.changed_paths
+            if args.event in {"pull_request", "push"} and args.changed_paths
             else None
         )
         scope, reason, value = plan(

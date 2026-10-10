@@ -42,13 +42,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Resolve pull-request paths as bounded inert data
+      - name: Resolve changed paths as bounded inert data
         id: paths
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          PUSH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           output="$RUNNER_TEMP/changed-paths.txt"
@@ -57,6 +59,17 @@ jobs:
               echo '::error::pull-request event has no bounded base/head identity'; exit 1;
             }
             git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$output"
+          elif [[ "$EVENT_NAME" == push ]]; then
+            [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ && "$PUSH_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo '::error::push event has no bounded before/head identity'; exit 1;
+            }
+            if [[ "$BEFORE_SHA" == 0000000000000000000000000000000000000000 ]]; then
+              # A first push has no parent snapshot; its manifest requires
+              # the same full host qualification as a release merge.
+              git ls-tree -r --name-only "$PUSH_SHA" > "$output"
+            else
+              git diff --name-only --no-renames "$BEFORE_SHA" "$PUSH_SHA" > "$output"
+            fi
           else
             : > "$output"
           fi

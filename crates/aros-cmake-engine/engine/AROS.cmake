@@ -1758,7 +1758,12 @@ function(aros_apply_includes target_name)
         endif()
     endforeach()
 
-    set(DIRS ${GEN_DIRS} ${ARCH_DIRS} ${GENERIC_DIRS} ${FALLBACK_DIRS})
+    # Implicit module paths are quote-only, just as compile_q's CFLAGS_IQUOTE.
+    # Making either the generated module tree or MODULE_DIR an -I directory
+    # lets private names (e.g. classes/string.h) shadow libc <string.h>, even
+    # when the runtime namespace is correctly marked SYSTEM. Explicit source
+    # INCLUDES and ARCH_INCLUDES retain their ordinary angle-header lookup.
+    set(DIRS ${ARCH_DIRS} ${GENERIC_DIRS})
 
     if(DIRS)
         list(REMOVE_DUPLICATES DIRS)
@@ -5259,17 +5264,26 @@ function(aros_add_library)
         # stubs second, and precompiled linklibobjs last. CMake places
         # $<TARGET_OBJECTS:...> before ordinary sources regardless of its
         # textual position, so linklibobjs are appended explicitly below.
+        # Classic publishes linklibname as the primary archive, with the
+        # module spelling additionally emitted only when the lower-case
+        # names differ. Keep the source's explicit case for the primary.
+        set(_client_archive_name "${ARG_TARGET}")
+        if(ARG_LINKLIB_NAME)
+            set(_client_archive_name "${ARG_LINKLIB_NAME}")
+        endif()
+        string(TOLOWER "${_client_archive_name}" _client_archive_name_lower)
+        string(TOLOWER "${ARG_TARGET}" _client_module_name_lower)
         set(_client_link_targets "")
         if(NOT ARG_NO_NORMAL_CLIENT_ARCHIVE)
         set(_normal_client_sources
             ${_linklib_sources}
             ${_gm_NORMAL_LINKLIB_SOURCES})
         _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
-            "${_client_archive_dir}" "${ARG_TARGET}")
+            "${_client_archive_dir}" "${_client_archive_name}")
         add_library("${ARG_MMAKE_ID}-linklib" STATIC
             ${_normal_client_sources})
         set_target_properties("${ARG_MMAKE_ID}-linklib" PROPERTIES
-            OUTPUT_NAME "${ARG_TARGET}"
+            OUTPUT_NAME "${_client_archive_name}"
             ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
             LINKER_LANGUAGE C)
         list(APPEND _client_link_targets "${ARG_MMAKE_ID}-linklib")
@@ -5288,11 +5302,11 @@ function(aros_add_library)
                 ${_linklib_sources}
                 ${_gm_REL_LINKLIB_SOURCES})
             _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib-rel"
-                "${_client_archive_dir}" "${ARG_TARGET}_rel")
+                "${_client_archive_dir}" "${_client_archive_name}_rel")
             add_library("${ARG_MMAKE_ID}-linklib-rel" STATIC
                 ${_rel_client_sources})
             set_target_properties("${ARG_MMAKE_ID}-linklib-rel" PROPERTIES
-                OUTPUT_NAME "${ARG_TARGET}_rel"
+                OUTPUT_NAME "${_client_archive_name}_rel"
                 ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
                 LINKER_LANGUAGE C)
             list(APPEND _client_link_targets
@@ -5361,35 +5375,34 @@ function(aros_add_library)
                 "${ARG_MMAKE_ID}-includes" "${_gm_GENMODFILES_TARGET}")
         endforeach()
 
-        # linklibname= is a second public archive spelling for the generated
-        # client interface. Keep one compilation owner per variant and publish
-        # both aliases as tracked byproducts.
-        if(ARG_LINKLIB_NAME AND NOT ARG_LINKLIB_NAME STREQUAL ARG_TARGET)
+        # Both required source spellings share one compilation owner per
+        # variant. Never suppress the module spelling to conceal a collision.
+        if(NOT _client_archive_name_lower STREQUAL _client_module_name_lower)
             if(TARGET "${ARG_MMAKE_ID}-linklib")
             _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
-                "${_client_archive_dir}" "${ARG_LINKLIB_NAME}")
+                "${_client_archive_dir}" "${ARG_TARGET}")
             set(_linklib_alias
-                "${_client_archive_dir}/lib${ARG_LINKLIB_NAME}.a")
+                "${_client_archive_dir}/lib${ARG_TARGET}.a")
             add_custom_command(TARGET "${ARG_MMAKE_ID}-linklib" POST_BUILD
                 BYPRODUCTS "${_linklib_alias}"
                 COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                     "$<TARGET_FILE:${ARG_MMAKE_ID}-linklib>"
                     "${_linklib_alias}"
-                COMMENT "Publishing ${ARG_LINKLIB_NAME} client link library"
+                COMMENT "Publishing ${ARG_TARGET} client link library"
                 VERBATIM)
             endif()
             if(TARGET "${ARG_MMAKE_ID}-linklib-rel")
                 _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib-rel"
-                    "${_client_archive_dir}" "${ARG_LINKLIB_NAME}_rel")
+                    "${_client_archive_dir}" "${ARG_TARGET}_rel")
                 set(_rel_linklib_alias
-                    "${_client_archive_dir}/lib${ARG_LINKLIB_NAME}_rel.a")
+                    "${_client_archive_dir}/lib${ARG_TARGET}_rel.a")
                 add_custom_command(
                     TARGET "${ARG_MMAKE_ID}-linklib-rel" POST_BUILD
                     BYPRODUCTS "${_rel_linklib_alias}"
                     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                         "$<TARGET_FILE:${ARG_MMAKE_ID}-linklib-rel>"
                         "${_rel_linklib_alias}"
-                COMMENT "Publishing ${ARG_LINKLIB_NAME}_rel client link library"
+                COMMENT "Publishing ${ARG_TARGET}_rel client link library"
                     VERBATIM)
             endif()
         endif()
@@ -6220,7 +6233,9 @@ function(aros_add_linklib)
         # bootstrap directory or lib32, and several deliberately share one
         # libname.  Move an archive to the public target SDK only when the
         # transpiler proved this declaration uses the default target compiler,
-        # default libdir and uniquely fetch-owned port sources.
+        # default libdir and selected native SDK ownership, or a canonical
+        # consumer/fetch-owned archive contract.  The shared output registry
+        # rejects two declarations claiming the same public archive path.
         if(ARG_CANONICAL_OUTPUT)
             set_target_properties(${ARG_MMAKE_ID} PROPERTIES
                 OUTPUT_NAME "${ARG_TARGET}"
