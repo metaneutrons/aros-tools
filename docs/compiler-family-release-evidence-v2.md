@@ -38,6 +38,7 @@ The external selection is bounded to 16 MiB and uses the closed JSON schema
 | `lanes[asset].compatibility.directory` | Canonical closed `evidence/` directory from the owning-host export |
 | `lanes[asset].compatibility.inputs` | Selected-file record for the separate pre-execution `inputs.json` |
 | `lanes[asset].compatibility.manifest_sha256` | Independently retained raw compatibility manifest digest |
+| `lanes[asset].compatibility.native_sdk_required` | Required boolean selected from the qualified source contract; true for consumer-v2 application-link lanes, never inferred from `inputs.json` or reports |
 
 Unknown or duplicate object keys are rejected at every nesting depth, including
 environment objects. Selected paths must be absolute and free of parent
@@ -53,6 +54,11 @@ selected release inputs, not the downloaded build export. Compatibility input
 claims are rebound to actually verified indexed archives and selected profiles
 before the complete report/log/ELF join. The collector rereads selection,
 index, collection and compatibility input bytes before reporting success.
+The SDK policy must agree with the observed SDK selection. Omitting the boolean
+or substituting legacy inputs for a required consumer-v2 lane is rejected before
+report read-back. The protected workflow must derive and authenticate this
+policy from its pinned source contract; the selection document cannot
+authenticate itself.
 
 ## Result and release boundary
 

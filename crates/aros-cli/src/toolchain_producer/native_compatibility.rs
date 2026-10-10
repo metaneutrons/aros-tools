@@ -177,6 +177,12 @@ pub(super) async fn compatibility(args: CompatibilityArgs) -> miette::Result<()>
                 "Native compatibility: {} phases, {} standalone target(s)\nReceipt: {}\nSHA-256: {}",
                 phases.len(), standalone_targets.len(), report.receipt.path.display(), report.receipt.sha256,
             );
+            if let Some(sdk) = &report.native_sdk {
+                aros_common::outputln!(
+                    "Native SDK: four application links, {} inventory entries\nSDK receipt: {}\nSDK receipt SHA-256: {}",
+                    sdk.sdk_entries, sdk.receipt.display(), sdk.receipt_sha256,
+                );
+            }
             if let Some(export) = &result.export {
                 aros_common::outputln!(
                     "Local evidence: {}\nInputs SHA-256: {}\nEvidence manifest SHA-256: {}",
@@ -195,6 +201,14 @@ pub(super) async fn compatibility(args: CompatibilityArgs) -> miette::Result<()>
                 "receipt": report.receipt.path,
                 "receipt_sha256": report.receipt.sha256,
             });
+            if let Some(sdk) = &report.native_sdk {
+                document["native_sdk"] = serde_json::json!({
+                    "receipt": sdk.receipt,
+                    "receipt_sha256": sdk.receipt_sha256,
+                    "sdk_inventory_sha256": sdk.sdk_inventory_sha256,
+                    "sdk_entries": sdk.sdk_entries,
+                });
+            }
             if let Some(export) = &result.export {
                 document["local_evidence"] = serde_json::json!({
                     "directory": export.directory,

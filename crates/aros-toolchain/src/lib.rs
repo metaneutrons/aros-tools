@@ -82,6 +82,8 @@ pub mod source_cache;
 #[cfg(unix)]
 pub mod source_cache_request;
 pub mod source_lock;
+#[cfg(unix)]
+pub mod source_policy;
 pub mod source_usage;
 #[cfg(unix)]
 pub mod wheel_environment;

@@ -13,9 +13,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const SCHEMA: &str = "aros-native-consumer-contract-v1";
+const SCHEMA_V1: &str = "aros-native-consumer-contract-v1";
+const SCHEMA_V2: &str = "aros-native-consumer-contract-v2";
 const MAX_BYTES: u64 = 1024 * 1024;
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_NATIVE_SDK_PROBE_SOURCE_BYTES: usize = 1024;
+const MAX_NATIVE_SDK_PROBE_LIBRARIES: usize = 16;
+const MAX_NATIVE_SDK_PROBE_LIBRARY_BYTES: usize = 128;
 
 /// Exact source facts for a selected native SDK/consumer graph.
 ///
@@ -60,6 +64,43 @@ pub struct NativeConsumerContract {
     pub host_file_generators: Vec<crate::native_host_generator::NativeHostFileGenerator>,
     #[serde(default)]
     pub kernel_compiler_role: Option<String>,
+    /// Ordinary default-driver links against the selected source-owned SDK.
+    /// Required only by v2 contracts; historical v1 graph contracts remain
+    /// loadable without this field.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_native_sdk_link_probes",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub native_sdk_link_probes: Option<NativeSdkLinkProbes>,
+}
+
+/// The two ordinary application links required by a v2 native SDK contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSdkLinkProbes {
+    pub c: NativeSdkLinkProbe,
+    pub cxx: NativeSdkLinkProbe,
+}
+
+/// One sealed application source and its ordered, explicit additional libraries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSdkLinkProbe {
+    pub source: String,
+    pub libraries: Vec<String>,
+}
+
+// A custom deserializer distinguishes an omitted field from explicit JSON
+// null. Omission is the v1-compatible default; a present field must be an
+// actual, closed probe object.
+fn deserialize_native_sdk_link_probes<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<NativeSdkLinkProbes>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    NativeSdkLinkProbes::deserialize(deserializer).map(Some)
 }
 
 /// Contract measured and validated against one exact source target profile.
@@ -71,6 +112,25 @@ pub struct LoadedNativeConsumerContract {
 }
 
 impl NativeConsumerContract {
+    /// Require the ordinary native SDK link probes introduced by contract v2.
+    ///
+    /// # Errors
+    /// Rejects historical v1 contracts and v2 contracts without probe inputs.
+    pub fn require_native_sdk_link_probes(&self) -> Result<&NativeSdkLinkProbes> {
+        if self.schema != SCHEMA_V2 {
+            return Err(invalid(
+                "native_sdk_link_probes",
+                "ordinary SDK links require contract v2",
+            ));
+        }
+        self.native_sdk_link_probes.as_ref().ok_or_else(|| {
+            invalid(
+                "native_sdk_link_probes",
+                "v2 contract is missing ordinary SDK link probes",
+            )
+        })
+    }
+
     /// Merge explicit shared and actual-host configuration without fallback.
     ///
     /// # Errors
@@ -159,11 +219,28 @@ fn validate_contract(
             "caller profile differs from the measured source declaration",
         ));
     }
-    if contract.schema != SCHEMA || contract.profile != profile.name {
+    if !matches!(contract.schema.as_str(), SCHEMA_V1 | SCHEMA_V2)
+        || contract.profile != profile.name
+    {
         return Err(invalid(
             "identity",
             "schema or selected source profile differs",
         ));
+    }
+    match contract.schema.as_str() {
+        SCHEMA_V1 if contract.native_sdk_link_probes.is_some() => {
+            return Err(invalid(
+                "native_sdk_link_probes",
+                "v1 contract must not declare ordinary SDK links",
+            ));
+        }
+        SCHEMA_V2 if contract.native_sdk_link_probes.is_none() => {
+            return Err(invalid(
+                "native_sdk_link_probes",
+                "v2 contract requires ordinary SDK links",
+            ));
+        }
+        _ => {}
     }
     if contract.source_baseline.len() != 40
         || !contract
@@ -210,6 +287,9 @@ fn validate_contract(
     }
     let reject = |message: String| invalid("configuration", &message);
     validate_nofollow_inputs(root, &contract.inputs)?;
+    if let Some(probes) = &contract.native_sdk_link_probes {
+        validate_native_sdk_link_probes(probes, &contract.inputs)?;
+    }
     native_build_contract::validate_native_invocation_configuration(
         root,
         NativeInvocationConfiguration {
@@ -226,6 +306,65 @@ fn validate_contract(
         &reject,
     )?;
     native_build_contract::validate_native_abi(&contract.abi, profile, &reject)
+}
+
+fn validate_native_sdk_link_probes(
+    probes: &NativeSdkLinkProbes,
+    inputs: &[NativeBuildInput],
+) -> Result<()> {
+    validate_native_sdk_link_probe("c", &probes.c, "c", inputs)?;
+    validate_native_sdk_link_probe("cxx", &probes.cxx, "cpp", inputs)
+}
+
+fn validate_native_sdk_link_probe(
+    language: &str,
+    probe: &NativeSdkLinkProbe,
+    suffix: &str,
+    inputs: &[NativeBuildInput],
+) -> Result<()> {
+    let field = "native_sdk_link_probes";
+    if probe.source.len() > MAX_NATIVE_SDK_PROBE_SOURCE_BYTES {
+        return Err(invalid(field, "probe source path exceeds its byte bound"));
+    }
+    let source = native_build_contract::validate_source_relative_path(&probe.source)
+        .map_err(|reason| invalid(field, reason))?;
+    if source.extension().and_then(|extension| extension.to_str()) != Some(suffix) {
+        return Err(invalid(
+            field,
+            &format!("{language} probe source must use the .{suffix} suffix"),
+        ));
+    }
+    if !inputs.iter().any(|input| input.path == probe.source) {
+        return Err(invalid(
+            field,
+            &format!("{language} probe source must be a sealed input"),
+        ));
+    }
+    if probe.libraries.len() > MAX_NATIVE_SDK_PROBE_LIBRARIES {
+        return Err(invalid(field, "probe libraries exceed the 16-item bound"));
+    }
+    let mut libraries = std::collections::BTreeSet::new();
+    for library in &probe.libraries {
+        if library.is_empty()
+            || library.len() > MAX_NATIVE_SDK_PROBE_LIBRARY_BYTES
+            || !library
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            || !library
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte))
+        {
+            return Err(invalid(
+                field,
+                "libraries must be bounded bare literal names, not flags or paths",
+            ));
+        }
+        if !libraries.insert(library) {
+            return Err(invalid(field, "probe library names must be unique"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_nofollow_inputs(root: &Path, inputs: &[NativeBuildInput]) -> Result<()> {

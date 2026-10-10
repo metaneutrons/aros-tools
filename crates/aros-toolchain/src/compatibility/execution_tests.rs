@@ -50,6 +50,7 @@ fn receipt_accepts_safe_nested_upstream_fetch_markers() {
         phase_reports: Vec::new(),
         standalone_targets: BTreeMap::new(),
         package: None,
+        native_sdk: None,
     };
 
     let error = document.validate().unwrap_err();
@@ -69,6 +70,10 @@ fn executes_every_phase_with_two_roots_and_closed_environments() {
     .unwrap();
 
     assert_eq!(report.probes.reports.len(), 6);
+    assert!(
+        report.native_sdk.is_none(),
+        "legacy execution must not gain a source-v2 SDK gate"
+    );
     assert!(report
         .probes
         .reports

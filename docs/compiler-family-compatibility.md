@@ -169,6 +169,14 @@ Each fixture must be a stable, no-follow regular file of at most 1 MiB; its
 contents are rechecked before execution, after execution and after export.
 Changed fixtures prevent a successful export.
 
+Source consumer-v2 GNU lanes additionally require four ordinary C/C++ SDK
+application links and a complete SDK relocation proof. Their pre-execution
+input document is `aros-toolchain-compatibility-inputs-v2`, their aggregate is
+receipt-v5, and their portable manifest is measurement-v3. The export adds 21
+closed `sdk-` files. Rootless read-back checks them without reopening runner
+roots and requires a separately selected source policy; legacy input documents
+cannot disable the gate. See [native SDK link evidence](native-sdk-link-evidence.md).
+
 The CLI exposes this owning-host operation through optional
 `producer compatibility --package-format family-v2 --evidence-dir ABSENT_DIR`.
 The directory must be absolute, have an existing non-symlink parent, and remain

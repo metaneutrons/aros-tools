@@ -97,6 +97,12 @@ pub struct NativeCompatibilityReceiptReadbackRequest<'a> {
     /// Derive this from its source-native-consumer contract, not the reports.
     /// LLVM must set this to false.
     pub cmake_build_required: bool,
+    /// Ordinary SDK links required by the independently selected consumer-v2
+    /// source contract. Never infer this policy from the result receipt.
+    pub native_sdk_required: bool,
+    /// Complete SDK bytes already independently joined to the selected source,
+    /// compiler, binding, inventory, reports, logs and actual application ELFs.
+    pub native_sdk: Option<&'a crate::compatibility::NativeSdkPortableProof>,
     /// Measured content-only CAS of the engine-free SDK consumer source tree.
     pub sdk_consumer_source_tree_sha256: &'a Sha256Digest,
     /// Embedded tools-owned CMake engine API version expected by every phase.
@@ -175,6 +181,9 @@ pub fn readback_native_compatibility_receipt(
     )?;
 
     let expected_schema = match request.package.compiler {
+        ArosCompilerIdentity::Gnu { .. } if request.native_sdk_required => {
+            super::GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+        }
         ArosCompilerIdentity::Gnu { .. } => super::GNU_COMPATIBILITY_RECEIPT_SCHEMA,
         ArosCompilerIdentity::Llvm { .. } => super::LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA,
     };
@@ -188,6 +197,19 @@ pub fn readback_native_compatibility_receipt(
     validate_receipt_ports(&document, request.ports_sources)?;
     validate_receipt_standalone(&document, request)?;
     validate_phase_readbacks(&document, request)?;
+    match (document.native_sdk.as_ref(), request.native_sdk) {
+        (Some(claim), Some(proof))
+            if request.native_sdk_required
+                && &claim.receipt_sha256 == proof.receipt_sha256()
+                && &claim.inventory_sha256 == proof.inventory_sha256()
+                && claim.entries == proof.entries() => {}
+        (None, None) if !request.native_sdk_required => {}
+        _ => {
+            return Err(readback_error(
+                "native compatibility SDK evidence differs from its independently required complete proof",
+            ));
+        }
+    }
 
     let phases = super::super::REQUIRED_PROBE_PHASES.into_iter().collect();
     Ok(NativeCompatibilityReceiptReadback {
@@ -255,6 +277,14 @@ fn validate_expectations(
     {
         return Err(readback_error(
             "LLVM compatibility cannot require the GNU source-native-consumer CMake build command",
+        ));
+    }
+    if request.native_sdk_required
+        && (!request.cmake_build_required
+            || !matches!(request.package.compiler, ArosCompilerIdentity::Gnu { .. }))
+    {
+        return Err(readback_error(
+            "ordinary native SDK evidence requires a selected GNU consumer-v2 build",
         ));
     }
     let selected_compiler_matches = match request.package.compiler {

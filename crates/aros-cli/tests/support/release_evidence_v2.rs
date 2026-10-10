@@ -1091,7 +1091,8 @@ pub fn selection_document(lanes: &BTreeMap<String, LaneSelection>) -> Value {
                     "compatibility":{
                         "directory":lane.compatibility_directory,
                         "inputs":{"path":lane.compatibility_inputs,"sha256":lane.compatibility_inputs_sha256},
-                        "manifest_sha256":lane.compatibility_manifest_sha256
+                        "manifest_sha256":lane.compatibility_manifest_sha256,
+                        "native_sdk_required":false
                     }
                 }),
             )
