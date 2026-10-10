@@ -100,10 +100,19 @@ struct Args {
     #[arg(short, long, default_value = ".")]
     scan_dir: PathBuf,
 
+    /// Explicit stable root for the complete generated-output transaction.
+    ///
+    /// Every output path must be below this directory. Without this option,
+    /// the root is inferred from `--output-inc` for compatibility.
+    #[arg(long)]
+    output_root: Option<PathBuf>,
+
     /// Target SDK include directory (e.g. build/pc-x86_64/SDK/include).
     ///
-    /// This and every optional output must share a writable build root. The
-    /// generator journals the complete run at their deepest common parent.
+    /// This and every optional output must be below one writable build root.
+    /// Use `--output-root` for SDK layouts whose root cannot be inferred from
+    /// this path. Without it, `<build>/SDK/include` anchors at `<build>` and
+    /// a standalone `<build>/include` anchors at `<build>`.
     #[arg(short, long)]
     output_inc: PathBuf,
 
@@ -1339,19 +1348,22 @@ fn execute(
     output_paths.extend(args.output_gen.as_deref());
     output_paths.extend(args.output_linklib.as_deref());
     output_paths.extend(args.output_libbases.as_deref());
-    let mut transaction = FileTransaction::for_output_paths(&args.output_inc, &output_paths)
-        .map_err(|error| {
-            let diagnostic = if aros_common::is_rollback_incomplete(&error) {
-                rollback_incomplete_diagnostic(&args.output_inc, &error)
-            } else {
-                publication_diagnostic(
-                    "open or recover generated-output transaction",
-                    &args.output_inc,
-                    &error,
-                )
-            };
-            DiagnosticSet::single(diagnostic)
-        })?;
+    let transaction_result = args.output_root.as_deref().map_or_else(
+        || FileTransaction::for_output_paths(&args.output_inc, &output_paths),
+        |output_root| FileTransaction::for_output_paths_with_root(output_root, &output_paths),
+    );
+    let mut transaction = transaction_result.map_err(|error| {
+        let diagnostic = if aros_common::is_rollback_incomplete(&error) {
+            rollback_incomplete_diagnostic(&args.output_inc, &error)
+        } else {
+            publication_diagnostic(
+                "open or recover generated-output transaction",
+                &args.output_inc,
+                &error,
+            )
+        };
+        DiagnosticSet::single(diagnostic)
+    })?;
     let recovery = transaction.recovery_outcome();
     if recovery.recovered() {
         if let Err(error) = logger.event(

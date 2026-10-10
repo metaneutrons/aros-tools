@@ -28,7 +28,9 @@ impl FileTransaction {
     /// one build tree. The required include output defines that stable build
     /// root: `<build>/SDK/include` anchors at `<build>`, while a standalone
     /// `<build>/include` anchors at `<build>`. Optional output switches never
-    /// change the journal/lock namespace.
+    /// change the journal/lock namespace. Call
+    /// [`Self::for_output_paths_with_root`] when the SDK layout needs an
+    /// explicitly declared transaction root.
     pub fn for_output_paths(output_inc: &Path, paths: &[&Path]) -> std::io::Result<Self> {
         let output_inc = normalized_absolute(output_inc)?;
         let include_parent = output_inc.parent().ok_or_else(|| {
@@ -57,13 +59,34 @@ impl FileTransaction {
         } else {
             include_parent
         };
+        Self::for_root(root, paths, Some(&output_inc))
+    }
+
+    /// Create a transaction using an explicitly declared stable output root.
+    ///
+    /// The root is normalized to an absolute path and must not be the
+    /// filesystem root. Every output target must be normalized and strictly
+    /// below it. Durable publication still validates the root and its parents
+    /// without following symlinks before acquiring the journal lock.
+    pub fn for_output_paths_with_root(
+        output_root: &Path,
+        paths: &[&Path],
+    ) -> std::io::Result<Self> {
+        Self::for_root(output_root, paths, None)
+    }
+
+    fn for_root(
+        output_root: &Path,
+        paths: &[&Path],
+        required_output: Option<&Path>,
+    ) -> std::io::Result<Self> {
+        let root = normalized_absolute(output_root)?;
         if root.parent().is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "generated outputs cannot use the filesystem root as their transaction namespace",
             ));
         }
-
         let absolute = paths
             .iter()
             .map(|path| normalized_absolute(path))
@@ -74,33 +97,12 @@ impl FileTransaction {
                 "generated-output transaction requires at least one target",
             ));
         }
-        for path in &absolute {
-            if !path.starts_with(root) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!(
-                        "generated output '{}' escapes stable build root '{}' selected by --output-inc",
-                        path.display(),
-                        root.display()
-                    ),
-                ));
-            }
-            if path.parent().is_none() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("output path '{}' has no transaction parent", path.display()),
-                ));
-            }
+        if let Some(required_output) = required_output {
+            let required_output = normalized_absolute(required_output)?;
+            validate_output_below_root(&required_output, &root)?;
         }
-        if !output_inc.starts_with(root) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "include output '{}' escapes stable build root '{}'",
-                    output_inc.display(),
-                    root.display()
-                ),
-            ));
+        for path in &absolute {
+            validate_output_below_root(path, &root)?;
         }
         let anchor = root.join(".aros-genmodule-publication-root");
         Ok(Self {
@@ -125,11 +127,33 @@ impl FileTransaction {
     }
 }
 
+fn validate_output_below_root(path: &Path, root: &Path) -> std::io::Result<()> {
+    let below_root = path.starts_with(root) && path != root;
+    if !below_root {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "generated output '{}' must be below stable output root '{}'",
+                path.display(),
+                root.display()
+            ),
+        ));
+    }
+    if path.parent().is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("output path '{}' has no transaction parent", path.display()),
+        ));
+    }
+    Ok(())
+}
+
 fn normalized_absolute(path: &Path) -> std::io::Result<PathBuf> {
-    if path
+    let has_dot_component = path
         .components()
         .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-    {
+        || has_embedded_dot_component(path);
+    if has_dot_component {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("output path '{}' is not normalized", path.display()),
@@ -140,6 +164,23 @@ fn normalized_absolute(path: &Path) -> std::io::Result<PathBuf> {
     } else {
         std::env::current_dir().map(|directory| directory.join(path))
     }
+}
+
+#[cfg(unix)]
+fn has_embedded_dot_component(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str()
+        .as_bytes()
+        .split(|byte| *byte == b'/')
+        .any(|component| component == b".")
+}
+
+#[cfg(not(unix))]
+fn has_embedded_dot_component(path: &Path) -> bool {
+    path.to_string_lossy()
+        .split(|character| character == '/' || character == '\\')
+        .any(|component| component == ".")
 }
 
 #[cfg(test)]
@@ -187,5 +228,121 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn explicit_root_accepts_the_rv32_sdk_layout_and_separate_audit_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let include = root.path().join("SYS/Developer/include");
+        let generated = root.path().join("gen");
+        let symbol_audit = root.path().join("symbol-audit/libbases.txt");
+
+        FileTransaction::for_output_paths_with_root(
+            root.path(),
+            &[&include, &generated, &symbol_audit],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn explicit_root_rejects_outside_and_traversing_outputs_before_creating_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("build");
+        let outside = directory.path().join("outside/output");
+        let traversing = root.join("../escaped/output");
+
+        for output in [&outside, &traversing] {
+            let error = FileTransaction::for_output_paths_with_root(&root, &[output]).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::PermissionDenied
+            ));
+            assert!(!root.exists());
+        }
+        assert!(!outside.exists());
+        assert!(!directory.path().join("escaped").exists());
+    }
+
+    #[test]
+    fn explicit_root_rejects_the_filesystem_root_and_the_root_as_an_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = FileTransaction::for_output_paths_with_root(
+            Path::new("/"),
+            &[&directory.path().join("output")],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        let root = directory.path().join("build");
+        let error = FileTransaction::for_output_paths_with_root(&root, &[&root]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!root.exists());
+
+        let unnormalized_root = directory.path().join("build/./nested");
+        let error = FileTransaction::for_output_paths_with_root(
+            &unnormalized_root,
+            &[&unnormalized_root.join("include")],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!directory.path().join("build").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_root_rejects_symlinked_root_and_parent_components() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let real_root = directory.path().join("real-root");
+        std::fs::create_dir(&real_root).unwrap();
+        let root_link = directory.path().join("root-link");
+        symlink(&real_root, &root_link).unwrap();
+        let output_below_root_link = root_link.join("include");
+        assert!(FileTransaction::for_output_paths_with_root(
+            &root_link,
+            &[&output_below_root_link]
+        )
+        .is_err());
+
+        let parent_link = directory.path().join("parent-link");
+        symlink(directory.path(), &parent_link).unwrap();
+        let root_below_parent_link = parent_link.join("build");
+        let output_below_parent_link = root_below_parent_link.join("include");
+        assert!(FileTransaction::for_output_paths_with_root(
+            &root_below_parent_link,
+            &[&output_below_parent_link]
+        )
+        .is_err());
+        assert!(!directory.path().join("build").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_root_serializes_writers_with_different_output_subsets() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("build");
+        let include = root.join("SYS/Developer/include");
+        let generated = root.join("gen");
+        let first = FileTransaction::for_output_paths_with_root(&root, &[&include]).unwrap();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let worker_root = root;
+        let worker_output = generated;
+        let worker = std::thread::spawn(move || {
+            let transaction =
+                FileTransaction::for_output_paths_with_root(&worker_root, &[&worker_output])
+                    .unwrap();
+            acquired_tx.send(()).unwrap();
+            drop(transaction);
+        });
+
+        assert!(acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(150))
+            .is_err());
+        drop(first);
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        worker.join().unwrap();
     }
 }
