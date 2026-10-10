@@ -73,7 +73,7 @@ pub(super) fn preflight(destination: &Path, protected: &[&Path]) -> miette::Resu
 /// Prospective suffixes are compared conservatively without ASCII case, since
 /// an absent output leaf cannot yet supply a filesystem identity.
 #[cfg(unix)]
-fn filesystem_overlap(left: &Path, right: &Path) -> miette::Result<bool> {
+pub(super) fn filesystem_overlap(left: &Path, right: &Path) -> miette::Result<bool> {
     use std::os::unix::fs::MetadataExt;
 
     let ancestors = |path: &Path| -> miette::Result<Vec<(PathBuf, u64, u64)>> {
@@ -122,7 +122,7 @@ fn filesystem_overlap(left: &Path, right: &Path) -> miette::Result<bool> {
 }
 
 #[cfg(not(unix))]
-fn filesystem_overlap(_left: &Path, _right: &Path) -> miette::Result<bool> {
+pub(super) fn filesystem_overlap(_left: &Path, _right: &Path) -> miette::Result<bool> {
     Err(miette::miette!(
         "compatibility evidence export requires Unix path identities"
     ))

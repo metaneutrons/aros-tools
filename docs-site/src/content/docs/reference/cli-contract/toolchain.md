@@ -201,6 +201,17 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer verify-package` | input_dir | --input-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | package_format | --package-format | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
 | `aros toolchain producer verify-package` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros toolchain producer verify-release-evidence` | directory | --directory | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-release-evidence` | release_id | --release-id | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-release-evidence` | base_url | --base-url | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-release-evidence` | inputs_sha256 | --inputs-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-release-evidence` | index_sha256 | --index-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-release-evidence` | selection | --selection | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-release-evidence` | selection_sha256 | --selection-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-release-evidence` | subject_manifest | --subject-manifest | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-release-evidence` | subject_manifest_sha256 | --subject-manifest-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-release-evidence` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer verify-release-evidence` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain register` | source | --source | — | required | 1 |  |  | — |  |
 | `aros toolchain register` | store | --store | — | optional | 1 |  |  | — |  |
 | `aros toolchain register` | apply | --apply | — | optional | 1 |  |  | — |  |

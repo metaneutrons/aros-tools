@@ -205,10 +205,10 @@ six phase receipts, finished record and four package measurements. Preserve its
 bytes unchanged; these receipts belong in protected evidence artifacts, not
 public package metadata. This transport does not authenticate execution.
 
-The library can join the complete indexed A/B export set to measured packages,
-comparison reports, final checksums and unchanged pre-attestation subjects.
-This is not a release-qualification CLI: authenticated job/artifact origin,
-compatibility and recovery integration remain separate gates.
+`producer verify-release-evidence` joins the complete indexed A/B export set to
+measured packages, comparisons, compatibility reports/logs/ELFs, final checksums
+and unchanged pre-attestation subjects. It requires external lane selections
+and retained raw digests; it does not qualify a release or authenticate jobs.
 
 A local file hash is not authenticated execution provenance. Hashing an
 untrusted result does not make it trusted; a release workflow must separately
@@ -303,15 +303,16 @@ JSON adds the output directory, input-document digest and evidence-manifest
 digest under `local_evidence`; retain those digests outside the uploaded files.
 Keep this evidence private, outside the public release inventory.
 
-The library can read back this evidence on another host using independently
-selected package, source, runtime and environment identities. The aggregate
-collector is not yet a CLI command. Valid bytes do not authenticate the owning
-job or qualify a release.
-
-The complete library collector also binds every compatibility lane to the
-actual indexed package and its A/B byte evidence. Its lane set comes from the
-release inputs, not downloaded reports. Qualification and recovery still
-require separately authenticated evidence; this collector is not a CLI command.
+`producer verify-release-evidence` reads the complete evidence on a collector
+host without reopening original runner roots. Supply `--directory`,
+`--release-id`, `--base-url`, `--inputs-sha256`, `--index-sha256`, `--selection`,
+`--selection-sha256`, `--subject-manifest` and `--subject-manifest-sha256`.
+The selection schema is `aros-toolchain-release-evidence-selection-v2`; it
+contains every indexed archive's independent environment/required-path map,
+two build exports and executor digests, comparison and compatibility inputs.
+The lane set comes from release inputs, not discovered reports. JSON reports
+`assurance: byte-consistency-only`; authentication, qualification and recovery
+remain separate gates.
 
 The v2 library also binds comparison-report claims for all four package members
 to measured final checksum entries. This check does not authenticate independent

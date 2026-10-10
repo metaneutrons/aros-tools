@@ -34,8 +34,8 @@ stage rules; they must not become a second hard-coded workflow inventory.
 | Input selection | `release_inputs.rs`, `native_declaration.rs` | The library binds multiple compiler groups; the producer must supply and consume the same reviewed group set. |
 | Local execution | `native_lifecycle.rs`, `executor.rs`, `native_candidate.rs` | `publish`/result outputs remain collector-only; a separate finished record measures the complete tree and ordered chain. Its guarded package join is local library evidence, not authenticated workflow admission. |
 | Packaging and index | `release_index_v2_builder.rs`, `release_index_v2_readback.rs`, `toolchain_producer/release_index_family.rs` | Explicit family-v2 CLI stages measure packages and index/checksum inputs. They do not qualify execution or authenticate provenance. |
-| A/B comparison | `native_candidate/comparison.rs`, `native_candidate/release_readback.rs`, `release_index.rs::PackageComparisonReport` | Local proofs and complete portable byte acquisition join both packages, retained exports/reports, selected groups and final checksum/subject bytes. The CLI still needs integration; external execution/artifact authentication remains separate. |
-| Compatibility | `compatibility/execution_retained.rs`, `compatibility/execution_portable.rs`, `native_candidate/release_compatibility.rs` | Owning-host export and rootless read-back validate the exact report/log/ELF closure against independent expectations. The CLI exposes complete local exports through explicit `--evidence-dir`. Complete indexed acquisition joins actual packages, A/B and compatibility bytes. Aggregate collector CLI and authenticated recovery admission still need integration; byte consistency is not proof of execution. |
+| A/B comparison | `native_candidate/comparison.rs`, `native_candidate/release_readback.rs`, `release_index.rs::PackageComparisonReport` | Local proofs and complete portable byte acquisition join both packages, retained exports/reports, selected groups and final checksum/subject bytes. `verify-release-evidence` exposes the complete byte collector; external execution/artifact authentication remains separate. |
+| Compatibility | `compatibility/execution_retained.rs`, `compatibility/execution_portable.rs`, `native_candidate/release_compatibility.rs` | Owning-host export and rootless read-back validate the exact report/log/ELF closure against independent expectations. The CLI exposes owning-host exports through `--evidence-dir` and complete indexed acquisition through `verify-release-evidence`. Authenticated recovery admission remains incomplete; byte consistency is not proof of execution. |
 | Qualification | `qualification_evidence_v2.rs` | The V2 record validates claims and their index/policy joins, not actual report acquisition. `record-qualification` still uses V1. |
 | Recovery | `recovery.rs`, `toolchain_producer.rs` | Admission, inventory measurement and CLI still select the V1 index/evidence and active/historical V1 inventory shapes. |
 
@@ -66,9 +66,9 @@ The [finished-candidate boundary](compiler-family-finished-candidate-v2.md)
 provides the local full-tree/chain reader and guarded V2 package operation.
 The producer CLI can explicitly select the guarded operation through a complete
 build-result file, external file digest and original work root. Ordinary
-packaging remains separate. The aggregate release collector still needs to
-consume that proof explicitly; local read-back does not close
-the external provenance or independent A/B requirements.
+packaging remains separate. The complete byte collector consumes these
+portable measurements explicitly; local read-back does not close the external
+provenance or independent A/B requirements.
 
 ### Local consistency and portable admission are different
 
@@ -120,10 +120,11 @@ package bytes and rebinds all lane selectors to the selected input groups.
 It admits no diagnostic subset and does not authenticate execution.
 The owning-host CLI can now atomically publish the separate input observation
 and exact portable file set after complete execution. It does not admit the
-aggregate report set or authenticate the owning job. External origin,
-aggregate collector CLI integration and V2
-qualification/recovery admission remain implementation requirements, not
-authenticated evidence from this audit.
+aggregate report set or authenticate the owning job. The separate
+[`verify-release-evidence` CLI](compiler-family-release-evidence-v2.md) acquires
+the complete indexed build and compatibility bytes without authenticating
+execution. External origin and V2 qualification/recovery admission remain
+implementation requirements, not authenticated evidence from this audit.
 
 ### Producer audit boundary
 

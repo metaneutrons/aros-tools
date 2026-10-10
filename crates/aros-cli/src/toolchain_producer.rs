@@ -36,6 +36,10 @@ use crate::observability;
 mod compatibility_export;
 mod finished_package;
 mod native_compatibility;
+mod release_evidence;
+#[cfg(unix)]
+mod release_evidence_readback;
+mod release_evidence_selection;
 #[cfg(unix)]
 mod release_index_family;
 
@@ -72,6 +76,9 @@ impl ProducerArgs {
                 "toolchain.producer.compatibility-host-tools"
             }
             ProducerCommand::Compatibility(_) => "toolchain.producer.compatibility",
+            ProducerCommand::VerifyReleaseEvidence(_) => {
+                "toolchain.producer.verify-release-evidence"
+            }
         }
     }
 }
@@ -110,6 +117,8 @@ enum ProducerCommand {
     },
     /// Execute all six native package-compatibility phases locally
     Compatibility(Box<native_compatibility::CompatibilityArgs>),
+    /// Read back every selected family-v2 build and compatibility lane; no execution authentication
+    VerifyReleaseEvidence(Box<release_evidence::EvidenceArgs>),
 }
 
 /// Machine- or human-readable local stage result.
@@ -578,6 +587,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::Index(args) => index(args),
         ProducerCommand::CompatibilityHostTools { host } => compatibility_host_tools(&host),
         ProducerCommand::Compatibility(args) => native_compatibility::compatibility(*args).await,
+        ProducerCommand::VerifyReleaseEvidence(args) => release_evidence::run(&args),
     }
 }
 

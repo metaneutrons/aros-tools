@@ -130,6 +130,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer index` | Advance a complete local release inventory through an explicit index stage |
 | `aros toolchain producer compatibility-host-tools` | Print the measured command roles required for native compatibility |
 | `aros toolchain producer compatibility` | Execute all six local package-compatibility phases; optional `--evidence-dir` publishes complete family-v2 input/report/ELF evidence locally, never authenticated origin |
+| `aros toolchain producer verify-release-evidence` | Read back every family-v2 A/B package and compatibility lane against independent selections; byte consistency only, not authenticated execution |
 
 The local `package`, `verify-package` and `compatibility` commands accept the optional
 `--package-format legacy-v1|family-v2`. When omitted, LLVM keeps its historical
@@ -152,6 +153,12 @@ The default V1 path requires `--source-lock-filename`. V2 requires independent
 `--lane-inputs` and an external `--subject-manifest`; its final stage also
 requires the original `--subject-manifest-sha256`. Indexing verifies local bytes,
 not signer identity or publication eligibility.
+
+`producer verify-release-evidence` requires the complete final family-v2
+inventory, an external closed lane selection and independently retained raw
+digests for the selection, input collection, index and subject manifest. It
+checks every selected A/B package and compatibility report/log/ELF closure,
+without executing builds or modifying files. Its result is not release admission.
 
 Compatibility verifies the complete package set independently into both fresh
 relocation roots using the selected format. It never detects a different format
