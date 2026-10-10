@@ -12,7 +12,87 @@ list(INSERT CMAKE_MODULE_PATH 0 "${_bootstrap_stub_dir}")
 
 set(AROS_TARGET_CPU x86_64)
 set(AROS_TARGET_PLATFORM pc)
+include("${AROS_TEST_ENGINE_DIR}/tests/NativeSourceSelectionFixture.cmake")
+if(AROS_ARCHIVE_PROBE STREQUAL "positive-consumer-suppressed")
+    # Exercise a consumer binding without writing any of its inputs into the
+    # caller's AROS checkout. The test owns this small source copy.
+    set(_consumer_source_root "${CMAKE_CURRENT_BINARY_DIR}/native-consumer-source")
+    file(MAKE_DIRECTORY
+        "${_consumer_source_root}/workbench/libs"
+        "${_consumer_source_root}/compiler/startup"
+        "${_consumer_source_root}/compiler/libinit")
+    file(COPY "${AROS_SOURCE_DIR}/workbench/libs/tiff"
+        DESTINATION "${_consumer_source_root}/workbench/libs")
+    file(COPY "${AROS_SOURCE_DIR}/compiler/startup/startup.c"
+        DESTINATION "${_consumer_source_root}/compiler/startup")
+    file(COPY "${AROS_SOURCE_DIR}/compiler/libinit/libentry.c"
+        DESTINATION "${_consumer_source_root}/compiler/libinit")
+    set(AROS_SOURCE_DIR "${_consumer_source_root}")
+    aros_test_prepare_native_consumer_selection("${AROS_SOURCE_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/native-consumer-contract-test.json")
+    include("${AROS_TEST_ENGINE_DIR}/NativeConsumerContract.cmake")
+    aros_validate_native_consumer_contract()
+endif()
 include("${AROS_TEST_ENGINE_DIR}/AROS.cmake")
+
+# Exercise the production module-support producer with overlapping SDK and
+# Developer roots, while retaining GENINCDIR as a distinct third destination.
+# The driver configures both exact and lexical-alias spellings in fresh Ninja
+# trees, then builds the real reference genmodule outputs.
+if(AROS_PUBLICATION_ROOT_PROBE)
+    if(NOT AROS_PUBLICATION_ROOT_PROBE MATCHES "^(coincident|lexical-alias)$")
+        message(FATAL_ERROR
+            "unknown public-root probe: ${AROS_PUBLICATION_ROOT_PROBE}")
+    endif()
+    set(_probe_module_dir "${AROS_SOURCE_DIR}/workbench/libs/tiff")
+    set(_probe_public_root "${CMAKE_BINARY_DIR}/publication-roots/public")
+    if(AROS_PUBLICATION_ROOT_PROBE STREQUAL "coincident")
+        set(AROS_SDK_INCLUDE_DIR "${_probe_public_root}")
+        set(AROS_DEVELOPER_INCLUDE_DIR "${_probe_public_root}")
+    else()
+        set(AROS_SDK_INCLUDE_DIR
+            "${CMAKE_BINARY_DIR}/publication-roots/lexical/../public")
+        set(AROS_DEVELOPER_INCLUDE_DIR "${_probe_public_root}")
+    endif()
+    set(AROS_GENINC_DIR "${CMAKE_BINARY_DIR}/publication-roots/geninc")
+
+    _aros_generate_module_support(_root_probe
+        TARGET tiff
+        MMAKE_ID publication-root-probe
+        DIRECTORY "${_probe_module_dir}"
+        MODTYPE library)
+    if(NOT TARGET publication-root-probe-includes-generated)
+        message(FATAL_ERROR "public-root probe lacks its generated includes target")
+    endif()
+    list(LENGTH _root_probe_HEADERS _actual_header_count)
+    set(_unique_headers "${_root_probe_HEADERS}")
+    list(REMOVE_DUPLICATES _unique_headers)
+    list(LENGTH _unique_headers _unique_header_count)
+    if(NOT _actual_header_count EQUAL 10 OR
+       NOT _unique_header_count EQUAL _actual_header_count)
+        message(FATAL_ERROR
+            "public-root probe expected ten unique headers across two roots, got "
+            "${_actual_header_count} outputs and ${_unique_header_count} unique")
+    endif()
+
+    set(_expected_public_headers "")
+    foreach(_root "${_probe_public_root}" "${AROS_GENINC_DIR}")
+        foreach(_relative
+                "clib/tiff_protos.h" "inline/tiff.h" "defines/tiff.h"
+                "defines/tiff_LVO.h" "proto/tiff.h")
+            list(APPEND _expected_public_headers "${_root}/${_relative}")
+        endforeach()
+    endforeach()
+    set(_sorted_expected "${_expected_public_headers}")
+    set(_sorted_actual "${_root_probe_HEADERS}")
+    list(SORT _sorted_expected)
+    list(SORT _sorted_actual)
+    if(NOT _sorted_actual STREQUAL _sorted_expected)
+        message(FATAL_ERROR
+            "public-root probe published unexpected paths: ${_root_probe_HEADERS}")
+    endif()
+    return()
+endif()
 
 # Keep archive-selection counterprobes in this fixture project so they load the
 # same production AROS.cmake as the main genmodule ABI test. The driver starts
@@ -39,7 +119,7 @@ if(AROS_ARCHIVE_PROBE)
         endif()
 
         if(_rejection_kind STREQUAL "no-contract")
-            set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED FALSE)
+            aros_test_clear_native_build_validation()
             aros_add_library(
                 TARGET tiff
                 MMAKE_ID archive-rejection
@@ -48,7 +128,8 @@ if(AROS_ARCHIVE_PROBE)
                 SOURCES "${_tiff_source}"
                 ${_archive_flags})
         else()
-            set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
+            aros_test_bind_native_build_validation("${AROS_SOURCE_DIR}"
+                "${CMAKE_CURRENT_BINARY_DIR}/native-build-contract-test.json")
             aros_add_library(
                 TARGET tiff
                 MMAKE_ID archive-rejection
@@ -64,7 +145,8 @@ if(AROS_ARCHIVE_PROBE)
        "^collision-(primary|relative|alias|alias-relative)-(client-first|implementation-first)$")
         set(_collision_kind "${CMAKE_MATCH_1}")
         set(_collision_order "${CMAKE_MATCH_2}")
-        set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
+        aros_test_bind_native_build_validation("${AROS_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/native-build-contract-test.json")
         set(_client_linklib_name "")
         if(_collision_kind STREQUAL "primary")
             set(_implementation_name tiff)
@@ -112,7 +194,8 @@ if(AROS_ARCHIVE_PROBE)
     if(AROS_ARCHIVE_PROBE MATCHES
        "^positive-(all|normal-suppressed|relative-suppressed)$")
         set(_suppression_kind "${CMAKE_MATCH_1}")
-        set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
+        aros_test_bind_native_build_validation("${AROS_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/native-build-contract-test.json")
         aros_genmodule_writefiles_manifest(_archive_manifest
             CONFIG "${_tiff_config}"
             MODULE tiff
@@ -218,12 +301,45 @@ if(AROS_ARCHIVE_PROBE)
         return()
     endif()
 
+    if(AROS_ARCHIVE_PROBE STREQUAL "positive-consumer-suppressed")
+        aros_add_library(
+            TARGET tiff
+            MMAKE_ID consumer-native
+            DIRECTORY "${_tiff_dir}"
+            GENMODULE_LINKLIBS
+            SOURCES "${_tiff_source}"
+            NO_CLIENT_ARCHIVES)
+        foreach(_required_target consumer-native consumer-native-includes
+                consumer-native-fd consumer-native-genmodfiles)
+            if(NOT TARGET "${_required_target}")
+                message(FATAL_ERROR
+                    "consumer NO_CLIENT_ARCHIVES lost ABI/runtime target ${_required_target}")
+            endif()
+        endforeach()
+        get_target_property(_runtime_dependencies consumer-native
+            MANUALLY_ADDED_DEPENDENCIES)
+        foreach(_required_dependency consumer-native-includes consumer-native-fd)
+            if(NOT _required_dependency IN_LIST _runtime_dependencies)
+                message(FATAL_ERROR
+                    "consumer runtime lost ${_required_dependency}: ${_runtime_dependencies}")
+            endif()
+        endforeach()
+        foreach(_absent_target consumer-native-linklib consumer-native-linklib-rel)
+            if(TARGET "${_absent_target}")
+                message(FATAL_ERROR
+                    "consumer NO_CLIENT_ARCHIVES retained ${_absent_target}")
+            endif()
+        endforeach()
+        return()
+    endif()
+
     # make.tmpl keeps a suffixed module's client archives in a private
     # directory. There they cannot take the place of an SDK archive whose
     # name differs only in case; in the SDK directory they must be refused.
     if(AROS_ARCHIVE_PROBE MATCHES "^case-variant-(private|sdk)$")
         set(_client_location "${CMAKE_MATCH_1}")
-        set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
+        aros_test_bind_native_build_validation("${AROS_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/native-build-contract-test.json")
         set(_private_dir "${CMAKE_BINARY_DIR}/gen/plugins")
         set(_client_arguments
             TARGET tiff
@@ -263,7 +379,8 @@ if(AROS_ARCHIVE_PROBE)
     # functions and writes no FD, in Make as here. The ABI form must still
     # publish its headers and client archive.
     if(AROS_ARCHIVE_PROBE STREQUAL "abi-without-fd")
-        set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
+        aros_test_bind_native_build_validation("${AROS_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/native-build-contract-test.json")
         aros_add_module_abi(
             TARGET dxtn
             MMAKE_ID abi-no-fd

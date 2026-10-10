@@ -176,19 +176,23 @@ pub fn inspect_with_timeout(
     let declaration_bytes = producer
         .required_file("toolchains/producer-executor-v1.toml")
         .map_err(|error| error.input("--producer-dir"))?;
-    let declaration = NativeExecutorDeclaration::parse(&declaration_bytes)
+    let inputs =
+        NativeExecutorDeclaration::select(&declaration_bytes, &recipe, &request.preset, |path| {
+            producer.required_file(path)
+        })
         .map_err(|error| error.input("--producer-dir"))?;
+    let declaration = inputs.declaration;
     let contract = tools
         .required_file(declaration.contract_path())
         .map_err(|error| error.input("--tools-dir"))?;
-    let source_lock = producer
-        .required_file(declaration.source_lock_path())
-        .map_err(|error| error.input("--producer-dir"))?;
-    let profiles = producer
-        .required_file(declaration.profiles_path())
-        .map_err(|error| error.input("--producer-dir"))?;
     declaration
-        .bind(&recipe, &contract, &source_lock, &profiles, &request.preset)
+        .bind(
+            &recipe,
+            &contract,
+            &inputs.source_lock,
+            &inputs.profiles,
+            &request.preset,
+        )
         .map_err(|error| error.input("--producer-dir"))?;
     let executor = Executor {
         contract_id: Some("aros-toolchain-producer-v1"),

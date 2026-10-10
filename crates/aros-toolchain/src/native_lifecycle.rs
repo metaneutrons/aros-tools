@@ -180,22 +180,21 @@ fn run_owned(
     run_dirs.revalidate(cancellation)?;
     let snapshots = SnapshotDigests::measure(source.root(), producer.root(), tools.root())?;
 
-    let declaration = NativeExecutorDeclaration::parse(&read_regular(
+    let declaration_bytes = read_regular(
         producer.root().join(CONTRACT_PATH),
         "native executor declaration",
-    )?)?;
+    )?;
+    let inputs =
+        NativeExecutorDeclaration::select(&declaration_bytes, recipe, &request.preset, |path| {
+            read_regular(producer.root().join(path), "native executor group input")
+        })?;
+    let declaration = inputs.declaration;
     let contract = read_regular(
         tools.root().join(declaration.contract_path()),
         "selected tools contract",
     )?;
-    let lock_bytes = read_regular(
-        producer.root().join(declaration.source_lock_path()),
-        "selected source lock",
-    )?;
-    let profiles = read_regular(
-        producer.root().join(declaration.profiles_path()),
-        "selected profile matrix",
-    )?;
+    let lock_bytes = inputs.source_lock;
+    let profiles = inputs.profiles;
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
     let host_compilers =
@@ -467,6 +466,22 @@ fn run_owned(
     run_dirs.revalidate(cancellation)?;
 
     plan.identity.executor.tools_commit = Some(declaration.tools_commit().clone());
+    let finished_receipt = record_finished_payload(
+        request,
+        recipe,
+        &plan.identity,
+        bound.source_lock(),
+        bound.selected_profile(),
+        [
+            &preflight_receipt,
+            &environment_receipt,
+            &configure_receipt,
+            &compiler_receipt,
+            &collector_receipt,
+            &publish_receipt,
+        ],
+    )?;
+    run_dirs.revalidate(cancellation)?;
     Ok(BuildResult {
         schema: "aros-toolchain-result-v1",
         operation: "build",
@@ -480,6 +495,7 @@ fn run_owned(
             receipt_evidence("compiler", compiler_receipt),
             receipt_evidence("collector", collector_receipt),
             receipt_evidence("publish", publish_receipt),
+            receipt_evidence("finished-candidate", finished_receipt),
             Evidence {
                 check: "origin",
                 status: "not-run",
@@ -526,22 +542,24 @@ fn resume_after_compiler(
     let tools_root = work.join("tools");
     let snapshots = SnapshotDigests::measure(&source_root, &producer_root, &tools_root)?;
 
-    let declaration = NativeExecutorDeclaration::parse(&read_regular(
+    let declaration_bytes = read_regular(
         producer_root.join(CONTRACT_PATH),
         "retained native executor declaration",
-    )?)?;
+    )?;
+    let inputs =
+        NativeExecutorDeclaration::select(&declaration_bytes, recipe, &request.preset, |path| {
+            read_regular(
+                producer_root.join(path),
+                "retained native executor group input",
+            )
+        })?;
+    let declaration = inputs.declaration;
     let contract = read_regular(
         tools_root.join(declaration.contract_path()),
         "retained selected tools contract",
     )?;
-    let lock_bytes = read_regular(
-        producer_root.join(declaration.source_lock_path()),
-        "retained selected source lock",
-    )?;
-    let profiles = read_regular(
-        producer_root.join(declaration.profiles_path()),
-        "retained selected profile matrix",
-    )?;
+    let lock_bytes = inputs.source_lock;
+    let profiles = inputs.profiles;
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
     let host_compilers =
@@ -632,6 +650,7 @@ fn resume_after_compiler(
         Some(&configure_receipt),
     )?;
     lifecycle.require_absent_receipt("collector")?;
+    lifecycle.require_absent_receipt("finished-candidate")?;
     run_dirs.revalidate(cancellation)?;
 
     let cargo = CargoVendorEnvironment::open_existing(
@@ -722,6 +741,22 @@ fn resume_after_compiler(
     )?;
     run_dirs.revalidate(cancellation)?;
     plan.identity.executor.tools_commit = Some(declaration.tools_commit().clone());
+    let finished_receipt = record_finished_payload(
+        request,
+        recipe,
+        &plan.identity,
+        bound.source_lock(),
+        bound.selected_profile(),
+        [
+            &preflight_receipt,
+            &environment_receipt,
+            &configure_receipt,
+            &compiler_receipt,
+            &collector_receipt,
+            &publish_receipt,
+        ],
+    )?;
+    run_dirs.revalidate(cancellation)?;
     Ok(BuildResult {
         schema: "aros-toolchain-result-v1",
         operation: "build",
@@ -735,6 +770,7 @@ fn resume_after_compiler(
             receipt_evidence("compiler", compiler_receipt),
             receipt_evidence("collector", collector_receipt),
             receipt_evidence("publish", publish_receipt),
+            receipt_evidence("finished-candidate", finished_receipt),
             Evidence {
                 check: "origin",
                 status: "not-run",
@@ -752,6 +788,29 @@ fn resume_after_compiler(
         qualification: "local-only",
         commit_state: "committed",
     })
+}
+
+fn record_finished_payload(
+    request: &BuildRequest,
+    recipe: &Recipe,
+    identity: &Identity,
+    source_lock: &crate::source_lock::SourceLock,
+    profile: &crate::profiles::Profile,
+    phases: [&Sha256Digest; 6],
+) -> Result<Sha256Digest, ContractError> {
+    let phases = phases.map(Clone::clone);
+    crate::native_candidate::persist_finished_candidate(
+        &crate::native_candidate::FinishedCandidateRequest {
+            work_dir: &request.work_dir,
+            output_dir: &request.output_dir,
+            recipe,
+            source_lock,
+            profile,
+            identity,
+            phase_receipt_digests: &phases,
+            candidate_receipt_digest: &sha256_bytes(b""),
+        },
+    )
 }
 
 fn selected_rustup_home() -> Option<PathBuf> {

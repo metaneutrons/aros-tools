@@ -61,7 +61,37 @@ pub fn rendered_cli_contract_section(command: &Command) -> String {
         &["aros".to_owned(), command.get_name().to_owned()],
         &mut document,
     );
+    let mut notes = String::new();
+    collect_command_notes(
+        command,
+        &["aros".to_owned(), command.get_name().to_owned()],
+        &mut notes,
+    );
+    if !notes.is_empty() {
+        document.push_str("\n## Command notes\n\n");
+        document.push_str(notes.trim_end());
+        document.push('\n');
+    }
     document
+}
+
+/// Preserve source-declared help for conditional parser rules that Clap does
+/// not expose through its stable argument introspection API.
+fn collect_command_notes(command: &Command, path: &[String], notes: &mut String) {
+    if !is_public_contract_command(command) {
+        return;
+    }
+    if let Some(help) = command.get_after_help() {
+        writeln!(notes, "### `{}`\n\n{help}\n", path.join(" "))
+            .expect("writing to a string cannot fail");
+    }
+    let mut children = command.get_subcommands().collect::<Vec<_>>();
+    children.sort_by_key(|child| child.get_name());
+    for child in children {
+        let mut child_path = path.to_vec();
+        child_path.push(child.get_name().to_owned());
+        collect_command_notes(child, &child_path, notes);
+    }
 }
 
 fn is_public_contract_argument(argument: &Arg) -> bool {
@@ -183,5 +213,41 @@ fn collect_command_contract(command: &Command, path: &[String], document: &mut S
         let mut child_path = path.to_vec();
         child_path.push(child.get_name().to_owned());
         collect_command_contract(child, &child_path, document);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rendered_cli_contract_section;
+    use clap::Command;
+
+    #[test]
+    fn command_notes_preserve_declared_conditional_help_in_sorted_order() {
+        let mut command = Command::new("toolchain")
+            .subcommand(Command::new("z-last").after_help("Last note."))
+            .subcommand(Command::new("a-first").after_help("Both identity halves are required."));
+        command.build();
+        let rendered = rendered_cli_contract_section(&command);
+        assert!(rendered.contains("## Command notes\n\n"));
+        assert!(rendered
+            .contains("### `aros toolchain a-first`\n\nBoth identity halves are required.\n"));
+        assert!(
+            rendered.find("aros toolchain a-first").unwrap()
+                < rendered.find("aros toolchain z-last").unwrap()
+        );
+    }
+
+    #[test]
+    fn command_notes_exclude_hidden_commands_and_their_descendants() {
+        let mut command = Command::new("toolchain").subcommand(
+            Command::new("internal")
+                .hide(true)
+                .after_help("Private parent note.")
+                .subcommand(Command::new("child").after_help("Private descendant note.")),
+        );
+        command.build();
+        let rendered = rendered_cli_contract_section(&command);
+        assert!(!rendered.contains("Command notes"));
+        assert!(!rendered.contains("Private"));
     }
 }

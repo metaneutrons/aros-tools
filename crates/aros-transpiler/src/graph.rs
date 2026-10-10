@@ -172,6 +172,10 @@ pub struct DependencyGraph {
     /// Every safe `%copy_dir_recursive` output declaration, deduplicated by
     /// concrete MetaMake owner.
     pub copy_directories: Vec<CopyDirectoryDecl>,
+    /// Source owners whose recursive-copy bodies were lifted by normalization.
+    /// Only normalization creates these bindings; phony alias spelling alone
+    /// never establishes a concrete recipe.
+    lifted_copy_aliases: HashMap<String, String>,
     /// Hand-written header staging rules found anywhere in the tree.
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,
     /// Safe hand-written header transforms, with graph-resolved ordering.
@@ -190,6 +194,15 @@ pub struct DependencyGraph {
     pub source_inventory_fetches: Vec<String>,
     /// `%make_package` and `%link_kickstart` declarations.
     pub packages: Vec<crate::packages::PackageDecl>,
+}
+
+/// Exact private execution identity derived from a source-owned copy endpoint.
+#[must_use]
+pub fn private_meta_copy_action(owner: &str) -> String {
+    format!(
+        "aros-meta-copy-action-{}",
+        aros_common::sha256_bytes(owner.as_bytes())
+    )
 }
 
 /// Splits an `arch/<cpu>-<platform>/...` path into its two components.

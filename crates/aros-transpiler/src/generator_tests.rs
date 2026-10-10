@@ -643,6 +643,8 @@ fn fetch_targets_survive_meta_dependency_filtering() {
         suffixes: "tar.gz".to_owned(),
         origins: "https://example.invalid".to_owned(),
         checksums: "example-1.0.tar.gz=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        normalization: "canonical-tar-gzip-v1".to_owned(),
+        normalized_size: "42".to_owned(),
         location: "${AROS_PORTS_SOURCE_DIR}".to_owned(),
         destination: "${AROS_PORTS_DIR}".to_owned(),
         base: String::new(),
@@ -663,6 +665,7 @@ fn fetch_targets_survive_meta_dependency_filtering() {
     assert!(cmake.contains(
         "CHECKSUMS \"example-1.0.tar.gz=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\""
     ));
+    assert!(cmake.contains("NORMALIZATION \"canonical-tar-gzip-v1\" NORMALIZED_SIZE \"42\""));
     assert_eq!(graph.source_inventory_fetches, ["example-fetch"]);
     assert!(cmake.contains("aros_add_target_dependency(\"consumer\" \"${dep}\")"));
     assert!(!cmake.contains("add_custom_target(\"example-fetch\")"));
@@ -677,6 +680,8 @@ fn recursive_directory_copy_emits_concrete_target_and_fetch_dependency() {
         suffixes: "tar.gz".to_owned(),
         origins: "https://example.invalid/boost.tar.gz".to_owned(),
         checksums: String::new(),
+        normalization: String::new(),
+        normalized_size: String::new(),
         location: "${AROS_PORTS_SOURCE_DIR}".to_owned(),
         destination: "${AROS_PORTS_DIR}/boost".to_owned(),
         base: String::new(),

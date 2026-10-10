@@ -114,8 +114,11 @@ function(aros_generate_asm_header sdk_inc geninc)
 endfunction()
 
 function(aros_bootstrap_sdk_includes)
-    set(SDK_INC "${CMAKE_BINARY_DIR}/SDK/include")
-    set(GEN_INC "${CMAKE_BINARY_DIR}/GENINCDIR")
+    if(NOT DEFINED AROS_SDK_INCLUDE_DIR OR "${AROS_SDK_INCLUDE_DIR}" STREQUAL "")
+        message(FATAL_ERROR "SDK bootstrap requires the resolved SDK include root")
+    endif()
+    set(SDK_INC "${AROS_SDK_INCLUDE_DIR}")
+    set(GEN_INC "${AROS_GENINC_DIR}")
     file(MAKE_DIRECTORY "${SDK_INC}/aros")
 
     # 1. Copy core system headers from compiler/include/
@@ -138,7 +141,7 @@ function(aros_bootstrap_sdk_includes)
         # compiler/include/mmakefile.src removes the fields an SMP Exec does
         # not keep, line by line, when it stages execbase.h. asm.c, which is
         # compiled below against this copy, must see the same layout.
-        if(AROS_NATIVE_BUILD_EXEC_SMP)
+        if(AROS_NATIVE_BUILD_EXEC_SMP OR AROS_NATIVE_CONSUMER_EXEC_SMP)
             file(READ "${SDK_INC}/exec/execbase.h" _execbase)
             string(ASCII 10 _nl)
             set(_smp_fields ThisTask Quantum Elapsed IDNestCnt TDNestCnt)
@@ -293,7 +296,7 @@ function(aros_bootstrap_sdk_includes)
     # The SMP execution path is a separate switch from the ABI padding above.
     # Only a native contract declares it, through ENABLE_EXECSMP.
     set(_aros_exec_smp "")
-    if(AROS_NATIVE_BUILD_EXEC_SMP)
+    if(AROS_NATIVE_BUILD_EXEC_SMP OR AROS_NATIVE_CONSUMER_EXEC_SMP)
         set(_aros_exec_smp "#define __AROSEXEC_SMP__")
     endif()
 
@@ -370,6 +373,7 @@ ${_aros_exec_smp}
     execute_process(
         COMMAND "${AROS_GENMODULE_BIN}"
                 "--scan-dir" "${AROS_SOURCE_DIR}"
+                "--output-root" "${CMAKE_BINARY_DIR}"
                 "--output-inc" "${SDK_INC}"
                 "--output-gen" "${AROS_GEN_DIR}"
                 # The library bases this tree declares, for `ninja symbol-audit`.

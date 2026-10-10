@@ -131,6 +131,46 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer compatibility-host-tools` | Print the measured command roles required for native compatibility |
 | `aros toolchain producer compatibility` | Execute all six local package-compatibility phases |
 
+The local `package`, `verify-package` and `compatibility` commands accept the optional
+`--package-format legacy-v1|family-v2`. When omitted, LLVM keeps its historical
+schema-v1 package format and GNU uses compiler-family schema v2. Explicit
+`family-v2` enables local LLVM schema-v2 packaging and compatibility extraction;
+`legacy-v1` is rejected for
+GNU. This format selector does not change release-index, publication,
+qualification, or recovery capability.
+
+For a finished-build-bound local package, add `--build-result FILE`,
+`--build-result-sha256 SHA` and `--build-work-dir DIR` with explicit
+`--package-format family-v2`. The SHA selects the exact build-result file bytes.
+The command checks the complete retained phase chain and candidate, not just
+the collectors. Guarded JSON output includes the joined result/receipt/raw-tree
+and package-tree digests. These options do not authenticate a build or qualify
+a release; ordinary packaging remains available without them.
+
+`producer index` independently selects `--release-format legacy-v1|family-v2`.
+The default V1 path requires `--source-lock-filename`. V2 requires independent
+`--lane-inputs` and an external `--subject-manifest`; its final stage also
+requires the original `--subject-manifest-sha256`. Indexing verifies local bytes,
+not signer identity or publication eligibility.
+
+Compatibility verifies the complete package set independently into both fresh
+relocation roots using the selected format. It never detects a different format
+from a filename or retries a rejected package under another format. LLVM
+family-v2 execution emits a package-bound schema-v4 receipt; legacy LLVM v1
+keeps its schema-v2 receipt and GNU keeps schema v3. A receipt alone does not
+authorize publication or recovery.
+For family-v2 packages, the command also reads back the retained reports,
+ordered logs and standalone ELF outputs against expectations derived before
+execution. Missing, extra or altered evidence fails the command.
+
+The six-phase `compatibility` adapter accepts LLVM and GNU packages. GNU requires
+`--source-preset`, an explicit declaration in the measured consumer source's
+`aros-targets.toml`; its `toolchain_profile`, CPU, platform and compiler family
+must match the package. Source selectors remain separate from compiler profiles.
+LLVM retains its legacy adapter and rejects this option. GNU's v3 compatibility
+receipt is local evidence, not release admission: V2 release-evidence and
+recovery integration remain unavailable.
+
 ### Physical-board workflow
 
 | Command | Effect and boundary |
@@ -351,6 +391,12 @@ sandbox. Exit 0 means inspection
 completed; inspect `readiness` and `findings`. Invalid inputs exit 1 with no
 result on stdout.
 
+Declaration schema 1 selects one lock/profile pair. Schema 2 can declare
+multiple compiler groups at the same execution-protocol pathname. All groups
+are hash checked and parsed; the recipe digests and `--preset` must select
+exactly one group. Duplicate profile names or damaged unselected inputs fail.
+No additional CLI selector or fallback is used.
+
 The native lifecycle is explicit about all material it controls:
 
 ```sh
@@ -378,8 +424,10 @@ online mode; it does not publish, tag, package or authorize a release.
 There is no backend switch or legacy fallback. The sole recovery boundary is
 `--resume-from compiler`: it revalidates retained ownership, predecessor
 receipts, snapshots, cache inputs, and measured compiler outputs before running
-only the collector phase. Generic receipt reuse, candidate inventory, and real
-host/profile qualification remain separately qualified capabilities.
+only the collector phase. Completed builds also record a separate complete-tree
+`finished-candidate.json`; collector-only result outputs are not the whole
+compiler inventory. Generic receipt reuse, release admission, and real
+host/profile qualification remain separate capabilities.
 
 For the required checkout layout, cache bootstrap, resource boundary and
 failure handling, follow the [native producer workflow](/aros-tools/workflows/toolchain-producer/).

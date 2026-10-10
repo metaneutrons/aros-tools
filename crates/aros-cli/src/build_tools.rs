@@ -12,14 +12,40 @@ use std::time::Duration;
 // build rather than at configure time. Generated build rules require these
 // exact executables; omitting either one makes a fresh checkout configure
 // successfully only to fail later or bypass required AROS semantics.
-const REQUIRED_BUILD_TOOLS: &[&str] = &[
-    "aros-transpiler",
-    "aros-genmodule",
-    "aros-romtool",
-    "aros-collect",
-    "aros-ahi-runner",
-    "aros-fetch",
-    "aros-verify",
+struct RequiredBuildTool {
+    name: &'static str,
+    cmake_variable: &'static str,
+}
+
+const REQUIRED_BUILD_TOOLS: &[RequiredBuildTool] = &[
+    RequiredBuildTool {
+        name: "aros-transpiler",
+        cmake_variable: "AROS_TRANSPILER_BIN",
+    },
+    RequiredBuildTool {
+        name: "aros-genmodule",
+        cmake_variable: "AROS_GENMODULE_BIN",
+    },
+    RequiredBuildTool {
+        name: "aros-romtool",
+        cmake_variable: "AROS_ROMTOOL_BIN",
+    },
+    RequiredBuildTool {
+        name: "aros-collect",
+        cmake_variable: "AROS_COLLECT_BIN",
+    },
+    RequiredBuildTool {
+        name: "aros-ahi-runner",
+        cmake_variable: "AROS_AHI_RUNNER_BIN",
+    },
+    RequiredBuildTool {
+        name: "aros-fetch",
+        cmake_variable: "AROS_FETCH_BIN",
+    },
+    RequiredBuildTool {
+        name: "aros-verify",
+        cmake_variable: "AROS_VERIFY_BIN",
+    },
 ];
 const BUILD_TOOL_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -61,6 +87,23 @@ impl BuildToolsCheck {
         }
         problems.join("; ")
     }
+
+    /// Bind each CMake helper to the exact executable in the selected suite.
+    #[must_use]
+    pub fn cmake_variables(&self) -> Vec<(String, String)> {
+        REQUIRED_BUILD_TOOLS
+            .iter()
+            .map(|tool| {
+                (
+                    tool.cmake_variable.to_owned(),
+                    self.bin_dir
+                        .join(executable_name(tool.name))
+                        .display()
+                        .to_string(),
+                )
+            })
+            .collect()
+    }
 }
 
 #[must_use]
@@ -88,13 +131,13 @@ pub fn check(repo_root: Option<&Path>) -> BuildToolsCheck {
 fn check_directory(bin_dir: PathBuf) -> BuildToolsCheck {
     let mut missing = Vec::new();
     let mut incompatible = Vec::new();
-    for name in REQUIRED_BUILD_TOOLS {
-        let path = bin_dir.join(executable_name(name));
+    for tool in REQUIRED_BUILD_TOOLS {
+        let path = bin_dir.join(executable_name(tool.name));
         if !is_executable(&path) {
             missing.push(path);
             continue;
         }
-        if let Err(detail) = validate_tool_version(name, &path) {
+        if let Err(detail) = validate_tool_version(tool.name, &path) {
             incompatible.push(BuildToolIssue { path, detail });
         }
     }
@@ -261,9 +304,9 @@ pub fn cargo_build_args() -> Vec<OsString> {
         OsString::from("--locked"),
         OsString::from("--release"),
     ];
-    for package in REQUIRED_BUILD_TOOLS {
+    for tool in REQUIRED_BUILD_TOOLS {
         args.push(OsString::from("--package"));
-        args.push(OsString::from(package));
+        args.push(OsString::from(tool.name));
     }
     args
 }
@@ -358,7 +401,7 @@ mod tests {
 
         assert_eq!(rendered[..3], ["build", "--locked", "--release"]);
         for tool in REQUIRED_BUILD_TOOLS {
-            assert!(rendered.iter().any(|argument| argument == tool));
+            assert!(rendered.iter().any(|argument| argument == tool.name));
         }
     }
 
@@ -378,8 +421,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("temporary directory");
         for tool in REQUIRED_BUILD_TOOLS {
             write_version_tool(
-                temp.path().join(tool).as_path(),
-                tool,
+                temp.path().join(tool.name).as_path(),
+                tool.name,
                 env!("CARGO_PKG_VERSION"),
                 "",
             );
@@ -394,12 +437,17 @@ mod tests {
     fn check_rejects_a_mixed_version_suite() {
         let temp = tempfile::tempdir().expect("temporary directory");
         for tool in REQUIRED_BUILD_TOOLS {
-            let version = if *tool == "aros-fetch" {
+            let version = if tool.name == "aros-fetch" {
                 "99.0.0"
             } else {
                 env!("CARGO_PKG_VERSION")
             };
-            write_version_tool(temp.path().join(tool).as_path(), tool, version, "");
+            write_version_tool(
+                temp.path().join(tool.name).as_path(),
+                tool.name,
+                version,
+                "",
+            );
         }
 
         let result = check_directory(temp.path().to_path_buf());
@@ -408,6 +456,61 @@ mod tests {
         assert_eq!(result.incompatible.len(), 1);
         assert!(result.problem_summary().contains("aros-fetch"));
         assert!(result.problem_summary().contains("99.0.0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmake_variables_bind_the_exact_validated_suite_in_a_directory_with_spaces() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let selected = temp.path().join("selected suite tools");
+        let old_cache = temp.path().join("old cached tools");
+        let expected_mappings = [
+            ("AROS_TRANSPILER_BIN", "aros-transpiler"),
+            ("AROS_GENMODULE_BIN", "aros-genmodule"),
+            ("AROS_ROMTOOL_BIN", "aros-romtool"),
+            ("AROS_COLLECT_BIN", "aros-collect"),
+            ("AROS_AHI_RUNNER_BIN", "aros-ahi-runner"),
+            ("AROS_FETCH_BIN", "aros-fetch"),
+            ("AROS_VERIFY_BIN", "aros-verify"),
+        ];
+        fs::create_dir_all(&selected).expect("selected suite directory");
+        fs::create_dir_all(&old_cache).expect("old cached suite directory");
+        for (_, name) in expected_mappings {
+            write_version_tool(
+                selected.join(name).as_path(),
+                name,
+                env!("CARGO_PKG_VERSION"),
+                "",
+            );
+            write_version_tool(
+                old_cache.join(name).as_path(),
+                name,
+                env!("CARGO_PKG_VERSION"),
+                "",
+            );
+        }
+
+        let check = check_directory(selected.clone());
+        assert!(check.is_complete(), "{}", check.problem_summary());
+        let variables = check.cmake_variables();
+        let expected = expected_mappings
+            .iter()
+            .map(|(variable, name)| {
+                (
+                    (*variable).to_owned(),
+                    selected.join(name).display().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(variables, expected);
+        assert_eq!(variables.len(), 7);
+        assert!(variables.iter().all(|(_, path)| {
+            !Path::new(path).starts_with(&old_cache) && Path::new(path).starts_with(&selected)
+        }));
+        assert!(!variables
+            .iter()
+            .any(|(variable, _)| variable == "AROS_RUST_TOOLS_DIR"));
     }
 
     #[cfg(unix)]

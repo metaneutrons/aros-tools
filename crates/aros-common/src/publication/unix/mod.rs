@@ -1175,7 +1175,8 @@ pub(in crate::publication) use locks::{
 mod regular;
 use regular::same_regular_snapshot;
 pub(in crate::publication) use regular::{
-    open_regular_file_nofollow, read_regular, read_regular_bounded, read_regular_with_mode,
+    digest_regular_bounded, open_regular_file_nofollow, read_regular, read_regular_bounded,
+    read_regular_with_mode,
 };
 mod journal;
 use journal::{cleanup_journal_stage, parse_journal, validate_journal, write_journal};
@@ -1269,6 +1270,22 @@ pub(super) fn test_fail_path(_path: &Path) -> std::io::Result<()> {
 #[cfg(debug_assertions)]
 fn test_pause_point(point: &str) {
     if test_point_matches("AROS_PUBLICATION_TEST_PAUSE_AT", point) {
+        if std::env::var("AROS_PUBLICATION_TEST_PAUSE_READY_AT")
+            .is_ok_and(|ready_at| ready_at == point)
+        {
+            if let Some(marker) = std::env::var_os("AROS_PUBLICATION_TEST_PAUSE_READY_FILE") {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&marker)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "cannot create test pause ready marker '{}': {error}",
+                            Path::new(&marker).display()
+                        )
+                    });
+            }
+        }
         let millis = std::env::var("AROS_PUBLICATION_TEST_PAUSE_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())

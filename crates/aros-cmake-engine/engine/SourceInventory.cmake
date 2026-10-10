@@ -24,8 +24,21 @@ endfunction()
 # reports only those exact owning fetches on its first cold pass; CMake
 # materialises them and runs the transpiler again before generated_targets.cmake
 # is included.
+function(aros_fetch_representation_arguments out_var normalization normalized_size)
+    set(_arguments "")
+    if(NOT "${normalization}" STREQUAL "")
+        list(APPEND _arguments --normalization "${normalization}")
+    endif()
+    if(NOT "${normalized_size}" STREQUAL "")
+        list(APPEND _arguments --normalized-size "${normalized_size}")
+    endif()
+    # aros-fetch validates the complete representation/size/hash contract.
+    # CMake never selects a representation from a URL or manufactures a pin.
+    set(${out_var} "${_arguments}" PARENT_SCOPE)
+endfunction()
+
 function(aros_fetch_source_inventory)
-    set(oneValueArgs NAME ARCHIVE SUFFIXES ORIGINS CHECKSUMS LOCATION DESTINATION BASE
+    set(oneValueArgs NAME ARCHIVE SUFFIXES ORIGINS CHECKSUMS NORMALIZATION NORMALIZED_SIZE LOCATION DESTINATION BASE
         PATCH_ORIGINS PATCHES)
     cmake_parse_arguments(SI "" "${oneValueArgs}" "" ${ARGN})
     if(SI_UNPARSED_ARGUMENTS OR NOT SI_NAME OR NOT SI_ARCHIVE OR
@@ -68,12 +81,15 @@ function(aros_fetch_source_inventory)
     if(AROS_FETCH_REQUIRE_CHECKSUMS)
         list(APPEND _fetch_policy_args --require-checksums)
     endif()
+    aros_fetch_representation_arguments(_representation_args
+        "${SI_NORMALIZATION}" "${SI_NORMALIZED_SIZE}")
     execute_process(
         COMMAND "${AROS_FETCH_BIN}"
             --archive-origins "${SI_ORIGINS}"
             --archive "${SI_ARCHIVE}"
             --suffixes "${SI_SUFFIXES}"
             --checksums "${SI_CHECKSUMS}"
+            ${_representation_args}
             --location "${_location}"
             --destination "${SI_DESTINATION}"
             --base "${_base}"

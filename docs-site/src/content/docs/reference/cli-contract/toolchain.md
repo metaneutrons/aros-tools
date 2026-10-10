@@ -63,9 +63,11 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer compatibility` | build_environment | --build-environment | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | package_dir | --package-dir | — | required | 1 |  |  | — |  |
+| `aros toolchain producer compatibility` | package_format | --package-format | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
 | `aros toolchain producer compatibility` | first_root | --first-root | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | second_root | --second-root | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | source_dir | --source-dir | — | required | 1 |  |  | — |  |
+| `aros toolchain producer compatibility` | source_preset | --source-preset | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | engine_work_dir | --engine-work-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | helpers_dir | --helpers-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | cmake_program | --cmake-program | — | required | 1 |  |  | — |  |
@@ -94,11 +96,18 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer index` | directory | --directory | — | required | 1 |  |  | — |  |
 | `aros toolchain producer index` | release_id | --release-id | — | required | 1 |  |  | — |  |
 | `aros toolchain producer index` | base_url | --base-url | — | required | 1 |  |  | — |  |
-| `aros toolchain producer index` | source_lock_filename | --source-lock-filename | — | required | 1 |  |  | — |  |
+| `aros toolchain producer index` | release_format | --release-format | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
+| `aros toolchain producer index` | source_lock_filename | --source-lock-filename | — | optional | 1 |  |  | — | lane_inputs, subject_manifest, subject_manifest_sha256, forbidden_prefixes |
+| `aros toolchain producer index` | lane_inputs | --lane-inputs | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer index` | subject_manifest | --subject-manifest | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer index` | subject_manifest_sha256 | --subject-manifest-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer index` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer index` | stage | --stage | — | required | 1 |  | pre-attestation, final | — |  |
 | `aros toolchain producer index` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer materialize-engine-free-source` | source_dir | --source-dir | — | required | 1 |  |  | — |  |
-| `aros toolchain producer materialize-engine-free-source` | recipe | --recipe | — | required | 1 |  |  | — |  |
+| `aros toolchain producer materialize-engine-free-source` | recipe | --recipe | — | exactly one of source_identity | 1 |  |  | — | source_commit, source_tree |
+| `aros toolchain producer materialize-engine-free-source` | source_commit | --source-commit | — | exactly one of source_identity | 1 |  |  | — |  |
+| `aros toolchain producer materialize-engine-free-source` | source_tree | --source-tree | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer materialize-engine-free-source` | output_dir | --output-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer materialize-engine-free-source` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer package` | recipe | --recipe | — | required | 1 |  |  | — |  |
@@ -111,6 +120,10 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer package` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer package` | input_dir | --input-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer package` | output_dir | --output-dir | — | required | 1 |  |  | — |  |
+| `aros toolchain producer package` | package_format | --package-format | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
+| `aros toolchain producer package` | build_result | --build-result | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer package` | build_result_sha256 | --build-result-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer package` | build_work_dir | --build-work-dir | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer package` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer prepare-recovery` | qualification_evidence | --qualification-evidence | — | required | 1 |  |  | — |  |
 | `aros toolchain producer prepare-recovery` | release_dir | --release-dir | — | required | 1 |  |  | — |  |
@@ -185,6 +198,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer verify-package` | build_environment | --build-environment | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | input_dir | --input-dir | — | required | 1 |  |  | — |  |
+| `aros toolchain producer verify-package` | package_format | --package-format | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
 | `aros toolchain producer verify-package` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain register` | source | --source | — | required | 1 |  |  | — |  |
 | `aros toolchain register` | store | --store | — | optional | 1 |  |  | — |  |
@@ -200,3 +214,9 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain select` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain verify` | preset | -p, --preset | — | required | 1 |  |  | — |  |
 | `aros toolchain verify` | local | --local | — | optional | 1 |  |  | — |  |
+
+## Command notes
+
+### `aros toolchain producer materialize-engine-free-source`
+
+Source identity: select --recipe OR both --source-commit and --source-tree. Neither half of the explicit pair is valid alone. All identities bind a clean committed checkout; this command does not change a compiler package or its recipe.

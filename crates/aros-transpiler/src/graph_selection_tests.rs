@@ -732,6 +732,8 @@ fn fetch(name: &str, destination: &str) -> FetchDecl {
         suffixes: "tar.gz".to_owned(),
         origins: "cache://".to_owned(),
         checksums: String::new(),
+        normalization: String::new(),
+        normalized_size: String::new(),
         location: "${AROS_PORTS_SOURCE_DIR}".to_owned(),
         destination: destination.to_owned(),
         base: destination.to_owned(),

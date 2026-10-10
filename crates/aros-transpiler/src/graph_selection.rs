@@ -870,6 +870,15 @@ impl DependencyGraph {
                 declaration.dependencies.clone(),
             );
         }
+        // A lifted copy's original source owner still owns a concrete recipe.
+        // Keep this typed edge even without metadata so strict provider checks,
+        // graph audits and optional-edge validation share the same proof.
+        // An arbitrary phony alias or private-looking name cannot supply it.
+        for owner in self.lifted_copy_aliases.keys() {
+            if let Some(action) = self.lifted_copy_action(owner) {
+                add(&mut edges, owner, [action.to_owned()]);
+            }
+        }
         for declaration in &self.copy_includes {
             let source = declaration.source_dir.trim_end_matches('/');
             let providers: Vec<_> = self
@@ -983,6 +992,7 @@ impl DependencyGraph {
             || self.icons.iter().any(|rule| rule.mmake == name)
             || self.binary_objects.iter().any(|rule| rule.name == name)
             || self.copy_directories.iter().any(|rule| rule.name == name)
+            || self.lifted_copy_action(name).is_some()
             || self.header_transforms.iter().any(|rule| rule.name == name)
             || self
                 .external_cmake

@@ -18,10 +18,25 @@ function(aros_stage_freetype_options)
             "aros_stage_freetype_options requires NAME, FETCH_TARGET, OWNER, "
             "INPUT and OUTPUT")
     endif()
-    # A native contract selects a subset of the product. Consumers it did not
-    # select are not built, so they cannot need the header; classic graphs are
-    # complete and keep the strict check.
-    if(AROS_NATIVE_BUILD_CONTRACT)
+    # Native source selections may omit consumers outside the validated
+    # product subset. Raw contract variables are not proof: require the shared
+    # validator whenever native selection state is present, and keep classic
+    # graphs strict.
+    set(_native_selection_present FALSE)
+    if(AROS_NATIVE_BUILD_CONTRACT OR AROS_NATIVE_BUILD_CONTRACT_VALIDATED OR
+       AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)
+        set(_native_selection_present TRUE)
+    endif()
+    set(_source_selection_validated FALSE)
+    if(_native_selection_present)
+        if(NOT COMMAND _aros_native_source_selection_validated)
+            message(FATAL_ERROR
+                "${FTO_NAME}: native build/consumer selection is present but "
+                "_aros_native_source_selection_validated is unavailable")
+        endif()
+        _aros_native_source_selection_validated(_source_selection_validated)
+    endif()
+    if(_source_selection_validated)
         set(_present_consumers "")
         foreach(_consumer IN LISTS FTO_CONSUMERS)
             if(TARGET "${_consumer}")

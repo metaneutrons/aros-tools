@@ -22,7 +22,7 @@ use clap::Args;
 
 use super::{
     native_error, package_context, print_json, read_regular_input, PackageContext,
-    PackageContextArgs, ResultFormat,
+    PackageContextArgs, PackageFormatArg, ResultFormat,
 };
 
 /// Inputs for one complete native six-phase package compatibility execution.
@@ -33,6 +33,9 @@ pub(super) struct CompatibilityArgs {
     /// Complete verified package set to extract twice independently
     #[arg(long)]
     package_dir: PathBuf,
+    /// Explicit package format; omitted keeps LLVM v1 and GNU family-v2 defaults
+    #[arg(long, value_enum)]
+    package_format: Option<PackageFormatArg>,
     /// Absent first relocation root for the CMake consumer
     #[arg(long)]
     first_root: PathBuf,
@@ -42,6 +45,9 @@ pub(super) struct CompatibilityArgs {
     /// Engine-free source directory used for the tools-owned CMake consumer
     #[arg(long)]
     source_dir: PathBuf,
+    /// Explicit source-owned preset from aros-targets.toml (required for GNU)
+    #[arg(long)]
+    source_preset: Option<String>,
     /// Existing work root where the embedded engine receives one fresh leaf
     #[arg(long)]
     engine_work_dir: PathBuf,
@@ -66,7 +72,8 @@ pub(super) struct CompatibilityArgs {
     /// Compatibility-ports-v2 lock selecting the exact upstream source inputs
     #[arg(long)]
     ports_lock: PathBuf,
-    /// Prepared direct cache containing the ports-lock-owned source inputs
+    /// Explicit absolute prepared cache containing ports-lock inputs and any source-declared
+    /// raw host-generator inputs, each verified by its own size/hash contract
     #[arg(long)]
     ports_cache_dir: PathBuf,
     /// Absent private directory materialized for upstream --with-portssources
@@ -174,6 +181,7 @@ fn execute_compatibility(
     ports_lock: CompatibilityPortsLock,
     cancellation: &CancellationToken,
 ) -> Result<compatibility::NativeCompatibilityReport, aros_toolchain::ContractError> {
+    let package_source_commit = context.recipe.source().0.clone();
     let verification = package_verify::PackageVerificationRequest {
         package_dir: args.package_dir,
         release_id: context.release_id,
@@ -184,11 +192,18 @@ fn execute_compatibility(
         build_environment: context.build_environment,
         forbidden_prefixes: context.forbidden_prefixes,
     };
-    let relocation = compatibility::extract_two_roots(&TwoRootRelocationRequest {
-        verification: verification.clone(),
-        first_root: args.first_root,
-        second_root: args.second_root,
-    })?;
+    let package_format = args.package_format.map_or_else(
+        || aros_toolchain::package::PackageFormat::default_for(verification.source_lock.family()),
+        Into::into,
+    );
+    let relocation = compatibility::extract_two_roots_with_format(
+        &TwoRootRelocationRequest {
+            verification: verification.clone(),
+            first_root: args.first_root,
+            second_root: args.second_root,
+        },
+        package_format,
+    )?;
     let preparation = compatibility::prepare(&CompatibilityPreparationRequest {
         source_root: args.source_dir,
         work_root: args.engine_work_dir,
@@ -211,8 +226,11 @@ fn execute_compatibility(
         output_root: args.host_tools_dir,
         tools: host_tool_entries,
     })?;
-    compatibility::execute_native_compatibility(
+    compatibility::execute_native_compatibility_with_readback(
         &NativeCompatibilityRequest {
+            package_source_commit: Some(package_source_commit),
+            source_preset: args.source_preset,
+            host_generator_cache_root: Some(args.ports_cache_dir),
             preparation,
             relocation,
             profile: verification.profile,
@@ -235,6 +253,7 @@ fn execute_compatibility(
             reports_root: args.reports_dir,
             timeout: Duration::from_secs(args.timeout_seconds),
         },
+        &context.profiles,
         cancellation,
     )
 }
@@ -274,4 +293,81 @@ fn parse_jobs(value: &str) -> Result<usize, String> {
         return Err("expected an integer from 1 through 64".to_owned());
     }
     Ok(jobs)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory as _;
+
+    #[test]
+    fn compatibility_documents_the_explicit_source_declared_input_cache() {
+        let root = crate::Cli::command();
+        let command = root
+            .find_subcommand("toolchain")
+            .unwrap()
+            .find_subcommand("producer")
+            .unwrap()
+            .find_subcommand("compatibility")
+            .unwrap();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "ports_cache_dir")
+            .unwrap();
+        assert_eq!(argument.get_long(), Some("ports-cache-dir"));
+        assert!(argument.is_required_set());
+        assert!(argument.get_default_values().is_empty());
+        let help = argument
+            .get_long_help()
+            .or_else(|| argument.get_help())
+            .unwrap()
+            .to_string();
+        assert!(help.contains("source-declared"));
+        assert!(help.contains("size/hash"));
+        assert!(help.contains("absolute"));
+    }
+
+    #[test]
+    fn compatibility_exposes_closed_package_formats_without_implicit_detection() {
+        let root = crate::Cli::command();
+        let command = root
+            .find_subcommand("toolchain")
+            .unwrap()
+            .find_subcommand("producer")
+            .unwrap()
+            .find_subcommand("compatibility")
+            .unwrap();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "package_format")
+            .unwrap();
+        assert_eq!(argument.get_long(), Some("package-format"));
+        assert!(!argument.is_required_set());
+        assert!(argument.get_default_values().is_empty());
+        let values = argument
+            .get_value_parser()
+            .possible_values()
+            .unwrap()
+            .map(|value| value.get_name().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["legacy-v1", "family-v2"]);
+    }
+
+    #[test]
+    fn compatibility_exposes_an_explicit_source_preset_without_changing_legacy_defaults() {
+        let root = crate::Cli::command();
+        let command = root
+            .find_subcommand("toolchain")
+            .unwrap()
+            .find_subcommand("producer")
+            .unwrap()
+            .find_subcommand("compatibility")
+            .unwrap();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "source_preset")
+            .unwrap();
+        assert_eq!(argument.get_long(), Some("source-preset"));
+        assert!(!argument.is_required_set());
+        assert!(argument.get_default_values().is_empty());
+    }
 }

@@ -14,6 +14,62 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn enable_grouped_native(&mut self) {
+        let llvm_lock_path = "toolchains/arbitrary-version.sources.json";
+        let llvm_profiles_path = "toolchains/profiles-v1.json";
+        let gnu_lock_path = "toolchains/gnu.sources.json";
+        let gnu_profiles_path = "toolchains/gnu-profiles.json";
+        let llvm_lock = fs::read(self.root.join("producer").join(llvm_lock_path)).unwrap();
+        let llvm_profiles = fs::read(self.root.join("producer").join(llvm_profiles_path)).unwrap();
+        let gnu_lock =
+            include_bytes!("../../aros-toolchain/tests/fixtures/gnu-source-lock-v3.json");
+        let gnu_profiles = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-profiles-v2", "family":"gnu",
+            "upstream_commit": self.recipe["source_commit"], "profiles":[{
+                "name":"rv32-esp32p4", "configure_target":"esp32p4-riscv",
+                "upstream_output_target":"esp32p4-riscv", "target_triple":"riscv-aros",
+                "cpu":"riscv", "platform":"esp32p4", "float_abi":"ilp32f",
+                "capabilities":["c", "libgcc", "standalone-collector"],
+                "target":{"schema":"aros-riscv-target-v1", "isa":"rv32imafc", "abi":"ilp32f",
+                    "code_model":"medany", "architecture":"rv32i2p1_m2p0_a2p1_f2p2_c2p0",
+                    "unaligned_access":false, "atomic_abi":0, "x3_reg_usage":0}
+            }]
+        }))
+        .unwrap();
+        fs::write(self.root.join("producer").join(gnu_lock_path), gnu_lock).unwrap();
+        fs::write(
+            self.root.join("producer").join(gnu_profiles_path),
+            &gnu_profiles,
+        )
+        .unwrap();
+        let contract =
+            fs::read(self.root.join("tools/contracts/toolchain-producer-v1.toml")).unwrap();
+        fs::write(
+            self.root.join("producer/toolchains/producer-executor-v1.toml"),
+            format!(
+                "schema_version = 2\ncontract_id = 'aros-toolchain-producer-v1'\ncontract_path = 'contracts/toolchain-producer-v1.toml'\ncontract_sha256 = '{}'\ntools_commit = '{}'\n\
+                [[groups]]\nid = 'gnu-rv32'\nsource_lock = '{gnu_lock_path}'\nsource_lock_sha256 = '{}'\nprofiles = '{gnu_profiles_path}'\nprofiles_sha256 = '{}'\n\
+                [[groups]]\nid = 'llvm'\nsource_lock = '{llvm_lock_path}'\nsource_lock_sha256 = '{}'\nprofiles = '{llvm_profiles_path}'\nprofiles_sha256 = '{}'\n",
+                sha256_bytes(&contract), self.recipe["tools_commit"].as_str().unwrap(),
+                sha256_bytes(gnu_lock), sha256_bytes(&gnu_profiles),
+                sha256_bytes(&llvm_lock), sha256_bytes(&llvm_profiles),
+            ),
+        ).unwrap();
+        self.recommit("producer");
+    }
+
+    fn select_gnu_recipe(&mut self) {
+        self.recipe["source_lock_sha256"] = json!(sha256_bytes(
+            &fs::read(self.root.join("producer/toolchains/gnu.sources.json")).unwrap(),
+        ));
+        self.recipe["profiles_sha256"] = json!(sha256_bytes(
+            &fs::read(self.root.join("producer/toolchains/gnu-profiles.json")).unwrap(),
+        ));
+        self.recipe["patches"] = json!([]);
+        sign(&mut self.recipe);
+        self.save();
+    }
+
     fn enable_native(&mut self) {
         let patch_path = "tools/crosstools/llvm/llvm-11.0.0.src-aros.diff";
         fs::create_dir_all(self.root.join("source/tools/crosstools/llvm")).unwrap();
@@ -184,6 +240,10 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
+        self.command_for("pc-x86_64")
+    }
+
+    fn command_for(&self, preset: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
         command
             .current_dir(&self.root)
@@ -196,7 +256,8 @@ impl Fixture {
                 "toolchain",
                 "plan",
                 "--format=json",
-                "--preset=pc-x86_64",
+                "--preset",
+                preset,
                 "--recipe=recipe.json",
                 "--source-dir=source",
                 "--producer-dir=producer",
@@ -278,6 +339,125 @@ fn inventory(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     result
 }
 
+fn first_inventory_difference(
+    root: &Path,
+    before: &[(PathBuf, Vec<u8>)],
+    after: &[(PathBuf, Vec<u8>)],
+) -> String {
+    let mut before_index = 0;
+    let mut after_index = 0;
+    loop {
+        match (before.get(before_index), after.get(after_index)) {
+            (Some((before_path, before_bytes)), Some((after_path, after_bytes))) => {
+                match before_path.cmp(after_path) {
+                    std::cmp::Ordering::Less => {
+                        return format!(
+                            "{} removed (before: {} bytes, sha256={})",
+                            before_path
+                                .strip_prefix(root)
+                                .unwrap_or(before_path)
+                                .display(),
+                            before_bytes.len(),
+                            sha256_bytes(before_bytes),
+                        );
+                    }
+                    std::cmp::Ordering::Greater => {
+                        return format!(
+                            "{} added (after: {} bytes, sha256={})",
+                            after_path
+                                .strip_prefix(root)
+                                .unwrap_or(after_path)
+                                .display(),
+                            after_bytes.len(),
+                            sha256_bytes(after_bytes),
+                        );
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if before_bytes != after_bytes {
+                            return format!(
+                                "{} content changed (before: {} bytes, sha256={}; after: {} bytes, sha256={})",
+                                before_path.strip_prefix(root).unwrap_or(before_path).display(),
+                                before_bytes.len(),
+                                sha256_bytes(before_bytes),
+                                after_bytes.len(),
+                                sha256_bytes(after_bytes),
+                            );
+                        }
+                    }
+                }
+                before_index += 1;
+                after_index += 1;
+            }
+            (Some((before_path, before_bytes)), None) => {
+                return format!(
+                    "{} removed (before: {} bytes, sha256={})",
+                    before_path
+                        .strip_prefix(root)
+                        .unwrap_or(before_path)
+                        .display(),
+                    before_bytes.len(),
+                    sha256_bytes(before_bytes),
+                );
+            }
+            (None, Some((after_path, after_bytes))) => {
+                return format!(
+                    "{} added (after: {} bytes, sha256={})",
+                    after_path
+                        .strip_prefix(root)
+                        .unwrap_or(after_path)
+                        .display(),
+                    after_bytes.len(),
+                    sha256_bytes(after_bytes),
+                );
+            }
+            (None, None) => return "inventories differed without a path difference".to_owned(),
+        }
+    }
+}
+
+#[test]
+fn first_inventory_difference_reports_changed_added_and_removed_entries() {
+    let root = PathBuf::from("/fixture");
+    let entry = |name: &str, bytes: &[u8]| (root.join(name), bytes.to_vec());
+    let common_before = entry("a-common", b"same");
+    let common_after = entry("a-common", b"same");
+
+    assert_eq!(
+        first_inventory_difference(
+            &root,
+            &[common_before.clone(), entry("b-changed", b"old")],
+            &[common_after.clone(), entry("b-changed", b"new")],
+        ),
+        format!(
+            "b-changed content changed (before: 3 bytes, sha256={}; after: 3 bytes, sha256={})",
+            sha256_bytes(b"old"),
+            sha256_bytes(b"new"),
+        ),
+    );
+    assert_eq!(
+        first_inventory_difference(
+            &root,
+            std::slice::from_ref(&common_before),
+            &[common_after.clone(), entry("c-added", b"new")],
+        ),
+        format!(
+            "c-added added (after: 3 bytes, sha256={})",
+            sha256_bytes(b"new"),
+        ),
+    );
+    assert_eq!(
+        first_inventory_difference(
+            &root,
+            &[common_before, entry("d-removed", b"old")],
+            &[common_after],
+        ),
+        format!(
+            "d-removed removed (before: 3 bytes, sha256={})",
+            sha256_bytes(b"old"),
+        ),
+    );
+}
+
 #[test]
 fn global_json_plan_has_exact_identity_and_no_filesystem_mutation() {
     let fixture = Fixture::new();
@@ -337,6 +517,73 @@ fn global_json_plan_has_exact_identity_and_no_filesystem_mutation() {
             "steps"
         ]
     );
+}
+
+#[test]
+fn v2_native_plan_selects_llvm_and_rv32_from_one_producer_without_mutation() {
+    let mut fixture = Fixture::new();
+    fixture.enable_grouped_native();
+    let producer_commit = fixture.recipe["producer_commit"].clone();
+    let llvm_recipe_digest = fixture.recipe["recipe_sha256"].clone();
+    let before = inventory(&fixture.root);
+    let llvm = fixture.plan();
+    assert_eq!(inventory(&fixture.root), before);
+    assert_eq!(llvm["identity"]["producer_commit"], producer_commit);
+    assert_eq!(llvm["identity"]["target_profile"], "pc-x86_64");
+    fixture.select_gnu_recipe();
+    assert_ne!(fixture.recipe["recipe_sha256"], llvm_recipe_digest);
+    let before = inventory(&fixture.root);
+    let output = fixture.command_for("rv32-esp32p4").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let gnu: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(gnu["identity"]["producer_commit"], producer_commit);
+    assert_eq!(gnu["identity"]["target_profile"], "rv32-esp32p4");
+    assert_eq!(
+        gnu["identity"]["recipe_sha256"],
+        fixture.recipe["recipe_sha256"]
+    );
+    assert_eq!(gnu["readiness"], "incomplete");
+    assert_eq!(inventory(&fixture.root), before);
+}
+
+#[test]
+fn v2_native_plan_rejects_changed_unselected_committed_group() {
+    let mut fixture = Fixture::new();
+    fixture.enable_grouped_native();
+    let path = fixture.root.join("producer/toolchains/gnu.sources.json");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.push(b' ');
+    fs::write(&path, bytes).unwrap();
+    // Rebind the producer commit/tree: the expected failure must be the
+    // declaration's stale digest, not an uncommitted-change or Git mismatch.
+    fixture.recommit("producer");
+    let before = inventory(&fixture.root);
+    let output = fixture.command().output().unwrap();
+    failure(&output, "AX0102");
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(diagnostic["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("declared digests"));
+    assert_eq!(inventory(&fixture.root), before);
+}
+
+#[test]
+fn v2_native_plan_rejects_preset_from_the_other_recipe_group() {
+    let mut fixture = Fixture::new();
+    fixture.enable_grouped_native();
+    let before = inventory(&fixture.root);
+    failure(
+        &fixture.command_for("rv32-esp32p4").output().unwrap(),
+        "AX0102",
+    );
+    failure(&fixture.command_for("unknown").output().unwrap(), "AX0102");
+    assert_eq!(inventory(&fixture.root), before);
 }
 
 #[test]
@@ -447,7 +694,12 @@ fn ignored_untracked_and_empty_directories_fail_without_cleanup() {
         let before = inventory(&fixture.root);
         let output = fixture.command().output().unwrap();
         failure(&output, "AX0102");
-        assert_eq!(inventory(&fixture.root), before);
+        let after = inventory(&fixture.root);
+        assert!(
+            after == before,
+            "filesystem inventory changed: {}",
+            first_inventory_difference(&fixture.root, &before, &after),
+        );
         assert!(!String::from_utf8_lossy(&output.stderr).contains("private"));
     }
 }

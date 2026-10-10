@@ -31,6 +31,24 @@ use std::fs;
 use std::process::Command;
 
 #[test]
+fn mesa26_runtime_publication_respects_verified_sdk_consumer_authority() {
+    let directory = tempfile::tempdir().expect("Mesa26 runtime authority fixture");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("exact embedded engine");
+    let output = Command::new("cmake")
+        .arg("-P")
+        .arg(engine.join("tests/Mesa26RuntimeTest.cmake"))
+        .output()
+        .expect("run Mesa26 runtime authority fixture");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn source_archives_preserve_order_and_refuse_unowned_members() {
     let directory = tempfile::tempdir().expect("source archive fixture");
     let engine = directory.path().join("engine");
@@ -190,13 +208,14 @@ fn cold_source_preparation_never_substitutes_for_the_full_graph_export() {
         .find("include(\"${GENERATED_TARGETS_CMAKE}\")")
         .unwrap();
     assert!(prepare < fetch && fetch < full && full < include);
-    // The full export is unconditional, including warm trees with no fetches.
-    assert!(cmake[fetch..full].contains("endforeach()\nendif()\nif(AROS_NATIVE_BUILD_CONTRACT OR AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)"));
+    // Both native selections require a complete graph export, including warm
+    // trees without fetches. Neither may mistake inventory for a usable graph.
+    assert!(cmake[fetch..full].contains("endforeach()\nendif()\nif(AROS_NATIVE_BUILD_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT OR\n   AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)"));
     assert!(cmake[..prepare].ends_with(
-        "if(AROS_NATIVE_BUILD_CONTRACT)\n    list(APPEND _aros_inventory_prepare_args "
+        "if(AROS_NATIVE_BUILD_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT)\n    list(APPEND _aros_inventory_prepare_args "
     ));
     assert!(cmake[prepare..fetch]
-        .contains("NOT AROS_NATIVE_BUILD_CONTRACT AND NOT EXISTS \"${GENERATED_TARGETS_CMAKE}\""));
+        .contains("NOT AROS_NATIVE_BUILD_CONTRACT AND NOT AROS_NATIVE_CONSUMER_CONTRACT AND\n    NOT EXISTS \"${GENERATED_TARGETS_CMAKE}\""));
     assert!(cmake[full..include]
         .contains("NOT TRANSPILER_RES EQUAL 0 OR NOT EXISTS \"${GENERATED_TARGETS_CMAKE}\""));
     assert!(cmake[full..include].contains("Fetched source inventories remain unresolved"));
@@ -811,6 +830,25 @@ fn generated_header_inputs_require_exact_producers_and_safe_runtime_paths() {
 #[test]
 fn source_declared_sdk_objects_compile_stage_and_refuse_unsafe_outputs() {
     run_embedded_kobj_contract_test("SdkObjectsTest.cmake");
+}
+
+#[test]
+fn runtime_header_namespace_precedence_is_verified_by_real_compiles() {
+    let directory = tempfile::tempdir().expect("runtime header namespace fixture");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize current engine");
+    let output = Command::new("cmake")
+        .arg("-DAROS_TEST_TOOLCHAIN=llvm")
+        .args(["-P"])
+        .arg(engine.join("tests/RuntimeHeaderNamespaceTest.cmake"))
+        .output()
+        .expect("run runtime header namespace fixture");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

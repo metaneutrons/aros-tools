@@ -837,10 +837,7 @@ fn safe_compile_flag(word: &str, dirs: &DirVars) -> Result<bool, String> {
                 .all(|byte| byte.is_ascii_alphanumeric() || b"_-=,+".contains(&byte)));
     }
     if word.starts_with("-m") {
-        return Ok(matches!(
-            word,
-            "-march=rv32imafc_zicsr_zifencei_zaamo_zalrsc" | "-mabi=ilp32f" | "-mcmodel=medany"
-        ));
+        return Ok(safe_source_machine_flag(word));
     }
     if let Some(value) = word.strip_prefix("-std=") {
         return Ok(matches!(
@@ -860,6 +857,31 @@ fn safe_compile_flag(word: &str, dirs: &DirVars) -> Result<bool, String> {
         ));
     }
     Ok(false)
+}
+
+fn safe_source_machine_flag(word: &str) -> bool {
+    if let Some(value) = word.strip_prefix("-march=") {
+        return safe_machine_value(value, 128, b"_.+-");
+    }
+    if let Some(value) = word.strip_prefix("-mabi=") {
+        return safe_machine_value(value, 32, b"_-");
+    }
+    if let Some(value) = word.strip_prefix("-mcmodel=") {
+        return safe_machine_value(value, 32, b"_-");
+    }
+    false
+}
+
+fn safe_machine_value(value: &str, max_len: usize, punctuation: &[u8]) -> bool {
+    value.len() <= max_len
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || punctuation.contains(&byte))
+        && !value.contains("..")
 }
 
 fn safe_macro(value: &str) -> bool {
@@ -1546,6 +1568,36 @@ $(OBJDIR)/%.o : %.c\n\
     }
 
     #[test]
+    fn hidd_projects_source_declared_rv64_isa_abi_and_code_model() {
+        let rv64_flags = "-march=rva22u64 -mabi=lp64d -mcmodel=medany";
+        let content = hidd_source("serial_stubs", "%make_hidd_stubs hidd=serial").replace(
+            "-march=rv32imafc_zicsr_zifencei_zaamo_zalrsc -mabi=ilp32f -mcmodel=medany",
+            rv64_flags,
+        );
+        let fixture = fixture("workbench/hidds/serial", &content, &["serial_stubs.c"]);
+        let (groups, rejected) = collect_from_snapshot(
+            &content,
+            &fixture.scope,
+            &fixture.dirs,
+            &fixture.root,
+            &fixture.relative_dir,
+            Some(&fixture.states),
+            &[],
+        );
+        assert!(rejected.is_empty(), "{rejected:#?}");
+        assert_eq!(groups.len(), 1);
+        let arguments = &groups[0].objects[0].arguments;
+        let position = arguments
+            .iter()
+            .position(|argument| argument == "-march=rva22u64")
+            .expect("source-declared RV64 ISA flag");
+        assert_eq!(
+            &arguments[position..position + 3],
+            ["-march=rva22u64", "-mabi=lp64d", "-mcmodel=medany"]
+        );
+    }
+
+    #[test]
     fn hidd_multi_source_shared_prerequisite_is_rejected() {
         let content = hidd_source("first_stubs second_stubs", "%make_hidd_stubs hidd=serial");
         let fixture = fixture(
@@ -1693,7 +1745,14 @@ $(OBJDIR)/%.o : %.c\n\
         assert!(groups.is_empty());
         assert!(rejected[0].reason.contains("outside the closed vocabulary"));
 
-        for flag in ["-fplugin=payload", "-march=armv7"] {
+        for flag in [
+            "-fplugin=payload",
+            "-march=rva22u64;touch",
+            "-mabi=lp64d/../../tmp",
+            "-mcmodel=medany -o/tmp/forged.o",
+            "-march=rva22u64 -Xclang",
+            "-mcpu=rva22u64",
+        ] {
             let unsupported = ordinary_source(&["autoinit-aros"], flag);
             let unsupported_fixture = fixture(REL, &unsupported, &["autoinit-aros.c"]);
             let (groups, rejected) = collect_from_snapshot(

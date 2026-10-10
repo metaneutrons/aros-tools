@@ -183,6 +183,15 @@ always fails. Patch declarations use `name[:subdirectory[:option,...]]`
 with the supported `-p0` through `-p9`, `-f`, `-N`, and `--forward`
 options. The generated build supplies these values from source recipes.
 
+Archive bytes are unchanged by default (`--normalization exact-bytes-v1`).
+For an explicitly declared `canonical-tar-gzip-v1` input, supply one `.tar.gz`
+or `.tgz` candidate, its SHA-256 and `--normalized-size BYTES`. The digest and
+size describe the final canonical archive, not the HTTP response. HTTPS inputs
+are normalized before verification; local origins and cache entries must
+already contain those exact bytes. Offline mode never obtains a missing input.
+Source recipes declare the same policy through `%fetch normalization=…
+normalized_size=… checksums=…`; the build does not infer it from the URL.
+
 `--rename-directory` is parsed for historical compatibility but rejects a
 nonempty value; renaming is not an implemented operation.
 

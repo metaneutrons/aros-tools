@@ -26,19 +26,23 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use xz2::read::XzDecoder;
 
-use crate::package::{spdx_bytes, validate_link_target};
+use crate::package::{spdx_bytes, validate_link_target, PackageFormat};
 use crate::profiles::Profile;
 use crate::source_lock::{CompilerFamily, SourceLock};
 use crate::{ContractError, Recipe};
 
 const ARCHIVE_ROOT: &str = "toolchain";
 const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: u64 = 500_000;
-const MAX_EXPANDED_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+pub(crate) const MAX_ARCHIVE_ENTRIES: u64 = 500_000;
+pub(crate) const MAX_EXPANDED_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_XZ_DECODER_MEMORY: u64 = 512 * 1024 * 1024;
-const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOOLCHAIN_TOOLS_BYTES: u64 = 16 * 1024;
 const SCAN_BUFFER_BYTES: usize = 128 * 1024;
+
+#[cfg(test)]
+#[path = "package_verify_structure_tests.rs"]
+mod structure_tests;
 
 /// Closed expected identity for one package-set read-back verification.
 #[derive(Debug, Clone)]
@@ -106,9 +110,30 @@ impl PackageAssetPaths {
 /// archives, identity mismatches, noncanonical headers, inventory divergence,
 /// or an inconsistent manifest, checksum, or SPDX document.
 pub fn verify(request: &PackageVerificationRequest) -> Result<VerifiedPackage, ContractError> {
-    validate_request(request)?;
-    let asset =
-        crate::package_identity::asset_name(&request.source_lock, &request.profile, &request.host)?;
+    verify_with_format(
+        request,
+        PackageFormat::default_for(request.source_lock.family()),
+    )
+}
+
+/// Verify a complete package set under an explicitly selected format.
+///
+/// The default [`verify`] entry point retains LLVM v1 and GNU v2 behavior.
+///
+/// # Errors
+/// Returns a verification diagnostic for invalid format/input bindings,
+/// unsafe archives, identity mismatches, or inconsistent package metadata.
+pub fn verify_with_format(
+    request: &PackageVerificationRequest,
+    format: PackageFormat,
+) -> Result<VerifiedPackage, ContractError> {
+    validate_request(request, format)?;
+    let asset = crate::package_identity::asset_name_for_format(
+        &request.source_lock,
+        &request.profile,
+        &request.host,
+        format,
+    )?;
     let paths = PackageAssetPaths::for_asset(&request.package_dir, &asset);
     let expected_members = [
         asset.clone(),
@@ -118,7 +143,7 @@ pub fn verify(request: &PackageVerificationRequest) -> Result<VerifiedPackage, C
     ];
     require_exact_outer_members(&request.package_dir, expected_members.iter())?;
 
-    verify_members_validated(request, &paths)
+    verify_members_validated(request, &paths, format)
 }
 
 /// Verify explicit members that are already part of a larger closed inventory.
@@ -130,13 +155,25 @@ pub(crate) fn verify_members(
     request: &PackageVerificationRequest,
     paths: &PackageAssetPaths,
 ) -> Result<VerifiedPackage, ContractError> {
-    validate_request(request)?;
-    verify_members_validated(request, paths)
+    let format = PackageFormat::default_for(request.source_lock.family());
+    verify_members_with_format(request, paths, format)
+}
+
+/// Verify explicit members with a format after the caller closes the larger
+/// outer inventory.
+pub(crate) fn verify_members_with_format(
+    request: &PackageVerificationRequest,
+    paths: &PackageAssetPaths,
+    format: PackageFormat,
+) -> Result<VerifiedPackage, ContractError> {
+    validate_request(request, format)?;
+    verify_members_validated(request, paths, format)
 }
 
 fn verify_members_validated(
     request: &PackageVerificationRequest,
     paths: &PackageAssetPaths,
+    format: PackageFormat,
 ) -> Result<VerifiedPackage, ContractError> {
     let (archive_file, archive_size, archive_sha256) = measure_archive(&paths.archive)?;
     let asset = paths
@@ -160,7 +197,7 @@ fn verify_members_validated(
             "external package manifest violates its compiler-family contract",
         )
     })?;
-    verify_manifest_identity(&manifest, request)?;
+    verify_manifest_identity(&manifest, request, format)?;
     let expected_sbom = spdx_bytes(&request.source_lock, &manifest)?;
     if read_metadata(&paths.sbom, "SPDX SBOM")? != expected_sbom {
         return Err(ContractError::verification(
@@ -205,13 +242,21 @@ fn verify_members_validated(
     })
 }
 
-fn validate_request(request: &PackageVerificationRequest) -> Result<(), ContractError> {
-    crate::package_identity::compiler_identity(&request.source_lock, &request.profile)
-        .map_err(|error| ContractError::verification(error.to_string()))?;
-    crate::package_identity::require_gnu_recipe_binding(
+fn validate_request(
+    request: &PackageVerificationRequest,
+    format: PackageFormat,
+) -> Result<(), ContractError> {
+    crate::package_identity::compiler_identity_for_format(
+        &request.source_lock,
+        &request.profile,
+        format,
+    )
+    .map_err(|error| ContractError::verification(error.to_string()))?;
+    crate::package_identity::require_recipe_binding(
         &request.recipe,
         &request.source_lock,
         &request.profile,
+        format,
     )
     .map_err(|error| ContractError::verification(error.to_string()))?;
     if !request.package_dir.is_absolute() {
@@ -229,9 +274,9 @@ fn validate_request(request: &PackageVerificationRequest) -> Result<(), Contract
     }
     request.source_lock.verify_recipe_patches(&request.recipe)?;
     for prefix in &request.forbidden_prefixes {
-        if !prefix.is_absolute() {
+        if !prefix.is_absolute() || prefix.to_str().is_none() {
             return Err(ContractError::verification(
-                "every forbidden verification prefix must be absolute",
+                "every forbidden verification prefix must be absolute UTF-8",
             ));
         }
     }
@@ -327,6 +372,7 @@ fn read_metadata(path: &Path, kind: &str) -> Result<Vec<u8>, ContractError> {
 fn verify_manifest_identity(
     manifest: &ArosToolchainManifest,
     request: &PackageVerificationRequest,
+    format: PackageFormat,
 ) -> Result<(), ContractError> {
     let expected = (
         &request.release_id,
@@ -354,7 +400,7 @@ fn verify_manifest_identity(
         manifest.tools_commit.as_str(),
         manifest.source_date_epoch,
     );
-    let expected_schema = if request.source_lock.family() == CompilerFamily::Gnu {
+    let expected_schema = if format == PackageFormat::CompilerFamilyV2 {
         aros_common::AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2
     } else {
         aros_common::AROS_TOOLCHAIN_MANIFEST_SCHEMA
@@ -364,7 +410,11 @@ fn verify_manifest_identity(
         || manifest
             .compiler_identity()
             .map_err(ContractError::verification)?
-            != crate::package_identity::compiler_identity(&request.source_lock, &request.profile)?
+            != crate::package_identity::compiler_identity_for_format(
+                &request.source_lock,
+                &request.profile,
+                format,
+            )?
         || manifest.capabilities != request.profile.capabilities()
         || manifest.build_environment != request.build_environment
     {
@@ -424,6 +474,7 @@ fn scan_archive<C: ArchiveConsumer>(
     let mut archive = tar::Archive::new(decoder);
     let mut entries = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut directories = BTreeSet::from([PathBuf::new()]);
     let mut previous = None;
     let mut embedded_manifest = None;
     let mut toolchain_tools = None;
@@ -483,10 +534,19 @@ fn scan_archive<C: ArchiveConsumer>(
                 "package tar contains a duplicate or case-folding path collision",
             ));
         }
+        let parent = relative.parent().ok_or_else(|| {
+            ContractError::verification("package tar entry has no relative parent")
+        })?;
+        if !directories.contains(parent) {
+            return Err(ContractError::verification(
+                "package tar entry has no previously declared real parent directory",
+            ));
+        }
         match entry_type.as_byte() {
             b'5' => {
                 verify_header(&header, manifest.source_date_epoch, Some(0o755), 0)?;
                 consumer.directory(&relative)?;
+                directories.insert(relative.clone());
                 entries.push(directory_entry(relative_text));
             }
             b'2' => {
@@ -949,7 +1009,13 @@ fn hash_entry_with_output<R: Read + ?Sized>(
 ) -> Result<Sha256Digest, ContractError> {
     let needles = forbidden_prefixes
         .iter()
-        .filter_map(|prefix| prefix.to_str())
+        .map(|prefix| {
+            prefix.to_str().ok_or_else(|| {
+                ContractError::verification("forbidden verification prefix is not UTF-8")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|prefix| !prefix.is_empty())
         .map(str::as_bytes)
         .collect::<Vec<_>>();

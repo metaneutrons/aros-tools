@@ -231,17 +231,35 @@ function(aros_compile_literal_object)
     _aros_literal_append_set(command_contents COMPILER "${driver}")
     _aros_literal_append_set(command_contents LANGUAGE "${L_LANGUAGE}")
     _aros_literal_append_set(command_contents OUTPUT_MODE "${L_OUTPUT_MODE}")
-    # The Make recipe finds SDK headers through the sysroot, which Make fills
-    # with every staged header. The native build stages them into the SDK and
-    # GENINCDIR roots and fills the sysroot only with what genmodule
-    # publishes, so name those roots after the declared arguments, in the order
-    # every other compile in this build searches them.
+    # Use the same resolved header roots as ordinary target compilation. A
+    # consumer selection exports headers in its source-declared Developer
+    # sysroot; never add a stale legacy SDK/include directory beside it.
     set(command_arguments ${L_ARGUMENTS})
-    if(AROS_NATIVE_BUILD_CONTRACT)
+    set(_native_source_selected FALSE)
+    if(COMMAND _aros_native_source_selection_validated)
+        _aros_native_source_selection_validated(_native_source_selected)
+    elseif(AROS_NATIVE_BUILD_CONTRACT OR AROS_NATIVE_BUILD_CONTRACT_VALIDATED OR
+           AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)
+        message(FATAL_ERROR
+            "Literal object: native source selection validator is required")
+    endif()
+    if(_native_source_selected)
+        foreach(_include IN ITEMS AROS_GENINC_DIR AROS_SDK_INCLUDE_DIR)
+            if(NOT DEFINED ${_include} OR "${${_include}}" STREQUAL "" OR
+               NOT IS_ABSOLUTE "${${_include}}")
+                message(FATAL_ERROR "Literal object: resolved native header roots are required")
+            endif()
+            cmake_path(IS_PREFIX build_root "${${_include}}" NORMALIZE _include_owned)
+            if(NOT _include_owned)
+                message(FATAL_ERROR "Literal object: native header root escaped the build")
+            endif()
+            _aros_literal_check_declared_path("${${_include}}"
+                "${source_root}" "${build_root}" "${source_directory}" "-I")
+        endforeach()
         list(APPEND command_arguments
-            "-I${build_root}/GENINCDIR"
-            "-I${build_root}/SDK/include/aros/stdc"
-            "-I${build_root}/SDK/include")
+            "-I${AROS_GENINC_DIR}"
+            "-I${AROS_SDK_INCLUDE_DIR}/aros/stdc"
+            "-I${AROS_SDK_INCLUDE_DIR}")
     endif()
     string(APPEND command_contents "set(ARGUMENTS\n")
     foreach(argument IN LISTS command_arguments)

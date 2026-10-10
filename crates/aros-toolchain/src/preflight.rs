@@ -18,6 +18,7 @@ use crate::ContractError;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const CAPTURE_LIMIT: usize = 16 * 1024;
+const LLVM_HOST_ARCHIVERS: [&str; 2] = ["llvm-ar", "llvm-ranlib"];
 
 /// One trusted-host tool observation, taken before any build phase starts.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -100,6 +101,13 @@ pub fn inspect(profile: &Profile) -> Result<HostPreflight, ContractError> {
         for name in ["bison", "flex", "patch", "pkg-config", "ninja"] {
             tools.push(probe(name)?);
         }
+        let host_cc = tools.iter().find(|tool| tool.name == "cc").ok_or_else(|| {
+            ContractError::prerequisite(
+                "native preflight did not retain the observed host C compiler",
+            )
+        })?;
+        let llvm_archivers = probe_llvm_host_archivers(host_cc, probe)?;
+        tools.extend(llvm_archivers);
     }
     Ok(HostPreflight {
         host,
@@ -124,6 +132,33 @@ fn require_gnu_make(version: &str) -> Result<(), ContractError> {
         ));
     }
     Ok(())
+}
+
+/// Probe host archivers selected by AROS's compiler-name/version policy.
+///
+/// GNU producer profiles can still use an LLVM host compiler. In that case
+/// `configure.in` selects `llvm-ar` and `llvm-ranlib`, unless the observed
+/// compiler executable is named exactly `gcc`; a later case-insensitive GCC
+/// version match also resets the host tool prefix to GNU. The observed
+/// invocation path matters here because its basename, not its canonical
+/// target, supplies `HOST_CC_NAME`.
+fn probe_llvm_host_archivers(
+    cc: &HostTool,
+    probe: impl FnMut(&'static str) -> Result<HostTool, ContractError>,
+) -> Result<Vec<HostTool>, ContractError> {
+    if !uses_llvm_host_archiver_prefix(cc) {
+        return Ok(Vec::new());
+    }
+    LLVM_HOST_ARCHIVERS.into_iter().map(probe).collect()
+}
+
+fn uses_llvm_host_archiver_prefix(cc: &HostTool) -> bool {
+    let host_cc_name_is_gcc = cc.invocation_path.file_name() == Some(std::ffi::OsStr::new("gcc"));
+    let version = cc.version.to_ascii_lowercase();
+    let is_llvm_or_clang = version.contains("llvm") || version.contains("clang");
+    let is_gcc = version.contains("gcc");
+
+    is_llvm_or_clang && !host_cc_name_is_gcc && !is_gcc
 }
 
 fn probe(name: &'static str) -> Result<HostTool, ContractError> {
@@ -217,8 +252,12 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{inspect, probe_selected, require_gnu_make};
+    use super::{
+        inspect, probe_llvm_host_archivers, probe_selected, require_gnu_make, HostPreflight,
+        HostTool,
+    };
     use crate::profiles::Profiles;
+    use crate::ContractError;
 
     #[test]
     fn gnu_make_gate_accepts_file_function_versions_and_rejects_legacy_or_unknown() {
@@ -233,6 +272,102 @@ mod tests {
             "GNU Make nope",
         ] {
             assert!(require_gnu_make(version).is_err(), "{version}");
+        }
+    }
+
+    #[test]
+    fn llvm_host_archiver_admission_matches_configure_name_and_version_rules() {
+        let mut requests = Vec::new();
+        let llvm_cc = test_host_tool("cc", "/usr/bin/cc", "Apple CLANG version 17.0.0");
+        let tools = probe_llvm_host_archivers(&llvm_cc, |name| {
+            requests.push(name);
+            Ok(test_host_tool(
+                name,
+                &format!("/opt/homebrew/opt/llvm/bin/{name}"),
+                "LLVM test archiver",
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(requests, ["llvm-ar", "llvm-ranlib"]);
+        assert_eq!(
+            tools.iter().map(|tool| tool.name).collect::<Vec<_>>(),
+            ["llvm-ar", "llvm-ranlib"]
+        );
+        let preflight = HostPreflight {
+            host: "test-host",
+            profile: "test-profile".to_owned(),
+            capabilities: Vec::new(),
+            tools,
+        };
+        assert_eq!(
+            preflight.tool_directories(),
+            [std::path::PathBuf::from("/opt/homebrew/opt/llvm/bin")]
+        );
+
+        for (name, version, required) in [
+            ("cc", "Apple clang version 17.0.0", true),
+            ("cc", "Apple LLVM version 17.0.0", true),
+            ("cc", "GCC version 14.2.0", false),
+            ("gcc", "Apple clang version 17.0.0", false),
+            ("cc", "Apple clang GCC compatibility version", false),
+        ] {
+            let cc = test_host_tool(name, &format!("/tool-bin/{name}"), version);
+            let mut observed = Vec::new();
+            let result = probe_llvm_host_archivers(&cc, |tool_name| {
+                observed.push(tool_name);
+                Ok(test_host_tool(
+                    tool_name,
+                    &format!("/llvm-bin/{tool_name}"),
+                    "test version",
+                ))
+            })
+            .unwrap();
+            assert_eq!(!result.is_empty(), required, "{name}: {version}");
+            assert_eq!(observed.is_empty(), !required, "{name}: {version}");
+        }
+    }
+
+    #[test]
+    fn missing_llvm_host_archiver_fails_closed() {
+        let cc = test_host_tool("cc", "/usr/bin/cc", "Apple clang version 17.0.0");
+        for missing in ["llvm-ar", "llvm-ranlib"] {
+            let mut attempted = Vec::new();
+            let error = probe_llvm_host_archivers(&cc, |name| {
+                attempted.push(name);
+                if name == missing {
+                    Err(ContractError::prerequisite(format!(
+                        "required native producer tool '{name}' is unavailable"
+                    )))
+                } else {
+                    Ok(test_host_tool(
+                        name,
+                        &format!("/llvm-bin/{name}"),
+                        "test version",
+                    ))
+                }
+            })
+            .unwrap_err();
+
+            assert!(error.to_string().contains(missing));
+            assert_eq!(
+                attempted,
+                if missing == "llvm-ar" {
+                    vec!["llvm-ar"]
+                } else {
+                    vec!["llvm-ar", "llvm-ranlib"]
+                }
+            );
+        }
+    }
+
+    fn test_host_tool(name: &'static str, path: &str, version: &str) -> HostTool {
+        let invocation_path = std::path::PathBuf::from(path);
+        HostTool {
+            name,
+            path: invocation_path.clone(),
+            invocation_path,
+            version: version.to_owned(),
         }
     }
 

@@ -86,6 +86,8 @@ aros_fetch_archive(
     SUFFIXES tar.gz
     ORIGINS "@ARCHIVE_ORIGIN@"
     CHECKSUMS "fixture.tar.gz=sha256:@ARCHIVE_SHA256@"
+    NORMALIZATION exact-bytes-v1
+    NORMALIZED_SIZE "${TEST_NORMALIZED_SIZE}"
     LOCATION "${CMAKE_BINARY_DIR}/archives"
     DESTINATION "${_ports}"
     BASE "${_ports}"
@@ -133,6 +135,7 @@ function(_configure_fixture label)
         # engine's containment check is measured against whatever is named here.
         "-DAROS_SOURCE_DIR=${_source}"
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        "-DTEST_NORMALIZED_SIZE=${TEST_NORMALIZED_SIZE}"
         ${AROS_TEST_TOOL_ARGS} -G Ninja
         RESULT_VARIABLE _result
         OUTPUT_VARIABLE _stdout
@@ -211,6 +214,21 @@ if(_noop_found LESS 0)
     message(FATAL_ERROR
         "final fetch/product build was not a Ninja no-op:\n${noop_LOG}")
 endif()
+
+# The size flag is forbidden with exact-byte mode. This must reach the actual
+# build-time fetch process, fail before source publication, and preserve both
+# already verified products. A dropped CMake argument would incorrectly pass.
+set(TEST_NORMALIZED_SIZE 42)
+_configure_fixture(invalid_representation)
+_build_fixture(invalid_representation FALSE)
+if(NOT invalid_representation_LOG MATCHES "AF0101" OR
+   NOT invalid_representation_LOG MATCHES "normalized-size is valid only")
+    message(FATAL_ERROR
+        "build-time representation contract did not fail at aros-fetch\n"
+        "${invalid_representation_LOG}")
+endif()
+_assert_contents("${_fetched_source}" "second\n" "source after rejected representation")
+_assert_contents("${_product}" "second\n" "product after rejected representation")
 
 file(REMOVE_RECURSE "${_root}")
 message(STATUS "direct fetch patch refresh test passed")

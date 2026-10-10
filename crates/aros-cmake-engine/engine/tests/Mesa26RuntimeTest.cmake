@@ -62,6 +62,26 @@ function(_configure case version loader provider expect_success expected_message
     set(_sys_dir "${_sys_dir}" PARENT_SCOPE)
 endfunction()
 
+function(_assert_consumer_loader_build case)
+    set(_build "${_root}/${case}")
+    set(_sys_dir "${_build}/SYS")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" --build "${_build}" --target workbench-libs-gl
+        RESULT_VARIABLE _result
+        OUTPUT_VARIABLE _stdout
+        ERROR_VARIABLE _stderr)
+    if(NOT _result EQUAL 0)
+        message(FATAL_ERROR
+            "Mesa26 consumer loader ${case} build failed (${_result})\n"
+            "${_stdout}\n${_stderr}")
+    endif()
+    if(EXISTS "${_build}/gen/mesa26-runtime/GL.default" OR
+       EXISTS "${_sys_dir}/Prefs/Env-Archive/SYS/GL.default")
+        message(FATAL_ERROR
+            "Mesa26 consumer loader ${case} published GL.default")
+    endif()
+endfunction()
+
 _source_inventory("${_source}" _source_before)
 
 _configure(positive 26.0.0 gl.library mesa3dgl26-0.library TRUE "")
@@ -112,6 +132,27 @@ _configure(wrong-provider 26.0.0 gl.library not-mesa.library FALSE
     "Mesa26 runtime identity mismatch: gl.library, not-mesa.library")
 _configure(missing-provider 26.0.0 gl.library mesa3dgl26-0.library FALSE
     "Mesa26 GL loader requires its source-selected implementation")
+
+# A source-bound SDK consumer can expose the GL loader without selecting the
+# source-owned Mesa runtime implementation. Exercise both shapes of the SDK
+# graph, including a missing implementation target.
+_configure(consumer-missing-provider 26.0.0 gl.library mesa3dgl26-0.library TRUE "")
+_assert_consumer_loader_build(consumer-missing-provider)
+_configure(consumer-present-provider 26.0.0 gl.library mesa3dgl26-0.library TRUE "")
+_assert_consumer_loader_build(consumer-present-provider)
+
+# A cache flag cannot manufacture configure-process validation. Current
+# bindings also reject a changed contract digest or changed target selector.
+_configure(consumer-cached-flag 26.0.0 gl.library mesa3dgl26-0.library FALSE
+    "requires fresh validation")
+_configure(consumer-changed-digest 26.0.0 gl.library mesa3dgl26-0.library FALSE
+    "configuration changed after validation")
+_configure(consumer-changed-selector 26.0.0 gl.library mesa3dgl26-0.library FALSE
+    "AROS_TARGET_PLATFORM changed after validation")
+_configure(consumer-changed-contract-bytes 26.0.0 gl.library mesa3dgl26-0.library FALSE
+    "contract changed after validation")
+_configure(consumer-and-build-contract 26.0.0 gl.library mesa3dgl26-0.library FALSE
+    "build and consumer selections")
 
 _configure(non26 25.3.0 gl.library mesa3dgl26-0.library TRUE "")
 set(_non26_build "${_build}")

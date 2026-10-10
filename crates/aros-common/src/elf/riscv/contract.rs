@@ -107,6 +107,12 @@ impl TargetContract {
         &self.code_model
     }
 
+    /// Whether generated code may use unaligned memory accesses.
+    #[must_use]
+    pub const fn unaligned_access(&self) -> bool {
+        self.unaligned_access
+    }
+
     /// Canonical architecture attribute required on measured output.
     #[must_use]
     pub fn architecture(&self) -> &str {

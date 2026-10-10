@@ -44,5 +44,23 @@ if(NOT _fetch_stamp_count EQUAL 1 OR
         "${_build_stdout}\n${_build_stderr}")
 endif()
 
+set(_counter_build "${_build}/counterprobe")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_counter_build}" -G Ninja
+        -DTEST_OMIT_REPRESENTATION=ON
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
+    RESULT_VARIABLE _counter_result
+    OUTPUT_VARIABLE _counter_stdout
+    ERROR_VARIABLE _counter_stderr)
+if(_counter_result EQUAL 0 OR
+   NOT _counter_stderr MATCHES "source-inventory fetch failed \\(24\\)" OR
+   EXISTS "${_counter_build}/Ports/fixture/package/source.c")
+    message(FATAL_ERROR
+        "missing representation was not rejected at the fetch boundary\n"
+        "${_counter_stdout}\n${_counter_stderr}")
+endif()
+
 file(REMOVE_RECURSE "${_build}")
 message(STATUS "fetched source inventory reconfigure test passed")

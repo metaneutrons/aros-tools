@@ -1477,6 +1477,7 @@ mod tests {
                 bootloader: None,
                 bootstrap_abi: None,
                 native_build_contract: None,
+                native_consumer_contract: None,
                 toolchain_profile: None,
             };
             assert_eq!(target_triple_for_profile(&profile), triple);

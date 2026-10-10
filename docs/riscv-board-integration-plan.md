@@ -327,3 +327,26 @@ waits, and is not a deadline; revise it after the compiler/native-build spike.
 
 Reviewed changes to scope or criteria must name their date, PR and affected
 evidence here. Milestone acceptance references an exact plan revision.
+
+### 2026-10-10: RV32-first release integration
+
+Maintainer direction prioritizes the first RV32/P4 compiler release; RV64 is a
+follow-on rather than a gate for that first release. The selected mixed release
+keeps all three existing LLVM profiles and adds GNU `rv32-esp32p4` on all three
+active hosts: twelve lanes, twenty-four first-baseline A/B builds, twelve
+comparisons and twelve compatibility/relocation lanes. Every selected lane must
+pass; deferring RV64 does not authorize a partial selected matrix. RV4's wider
+RV64 criteria and the initiative's hardware acceptance remain unchanged and
+cannot be closed solely by publishing RV32.
+
+The new release chain must use V2 inputs, package manifests, index,
+qualification and recovery without silently falling back to V1 release
+contracts. Unchanged independently versioned execution/tree/comparison
+contracts are not cosmetically renumbered. Historical V1 releases remain
+readable through an explicitly separate path.
+
+The [integration audit](compiler-family-integration-audit.md) identifies the
+remaining source-level joins and their implementation order. It does not grant
+release admission or claim that local tests satisfy remote qualification.
+This local plan revision still requires the normal checked PR review; no PR
+acceptance or milestone closure is claimed here.

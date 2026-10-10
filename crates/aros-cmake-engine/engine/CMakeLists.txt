@@ -56,11 +56,26 @@ endif()
 # Source contracts must be checked before project() can invoke a compiler.
 # An absent contract preserves the established LLVM/GNU consumer paths.
 include("${AROS_CMAKE_ENGINE_DIR}/NativeBuildContract.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/NativeConsumerContract.cmake")
+# A retained binding must never be dropped or switched to the other mode.
+foreach(_kind IN ITEMS BUILD CONSUMER)
+    foreach(_key IN ITEMS SOURCE_DIR PATH SHA256)
+        if(DEFINED AROS_NATIVE_${_kind}_CONTRACT_LOCKED_${_key} AND
+           NOT AROS_NATIVE_${_kind}_CONTRACT)
+            message(FATAL_ERROR "Retained native ${_kind} binding requires its contract; use a separate build tree")
+        endif()
+    endforeach()
+endforeach()
+if(AROS_NATIVE_BUILD_CONTRACT AND AROS_NATIVE_CONSUMER_CONTRACT)
+    message(FATAL_ERROR "Select a native build or native consumer contract, never both")
+endif()
 if(AROS_NATIVE_BUILD_CONTRACT)
     aros_validate_native_build_contract()
     aros_lock_native_build_contract_identity()
-elseif(AROS_NATIVE_BUILD_CONTRACT_SHA256 OR
-       DEFINED AROS_NATIVE_BUILD_CONTRACT_LOCKED_SHA256)
+elseif(AROS_NATIVE_CONSUMER_CONTRACT)
+    aros_validate_native_consumer_contract()
+    aros_lock_native_consumer_contract_identity()
+elseif(AROS_NATIVE_BUILD_CONTRACT_SHA256 OR AROS_NATIVE_CONSUMER_CONTRACT_SHA256)
     message(FATAL_ERROR
         "A native build contract digest or retained binding requires its contract; "
         "use a separate build tree for a different source contract")
@@ -72,6 +87,8 @@ project(AROS-NX
 )
 if(AROS_NATIVE_BUILD_CONTRACT)
     aros_validate_native_build_compiler_target()
+elseif(AROS_NATIVE_CONSUMER_CONTRACT)
+    aros_validate_native_consumer_compiler_target()
 endif()
 
 
@@ -284,7 +301,7 @@ else()
     set(_aros_transpiler_use_mmu "0")
 endif()
 set(_aros_inventory_prepare_args "")
-if(AROS_NATIVE_BUILD_CONTRACT)
+if(AROS_NATIVE_BUILD_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT)
     list(APPEND _aros_inventory_prepare_args "--source-inventory-only")
 endif()
 execute_process(
@@ -314,7 +331,8 @@ execute_process(
 set(_aros_source_inventory_manifest
     "${CMAKE_BINARY_DIR}/generated_targets.source-inventory.cmake")
 if(NOT TRANSPILER_RES EQUAL 0 OR NOT EXISTS "${_aros_source_inventory_manifest}" OR
-   (NOT AROS_NATIVE_BUILD_CONTRACT AND NOT EXISTS "${GENERATED_TARGETS_CMAKE}"))
+   (NOT AROS_NATIVE_BUILD_CONTRACT AND NOT AROS_NATIVE_CONSUMER_CONTRACT AND
+    NOT EXISTS "${GENERATED_TARGETS_CMAKE}"))
     message(FATAL_ERROR
         "AROS-NX source inventory preparation failed (${TRANSPILER_RES}): "
         "${_aros_source_inventory_manifest}.\n${_aros_transpiler_error}")
@@ -336,6 +354,8 @@ if(AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
             SUFFIXES "${AROS_SOURCE_INVENTORY_FETCH_${_index}_SUFFIXES}"
             ORIGINS "${AROS_SOURCE_INVENTORY_FETCH_${_index}_ORIGINS}"
             CHECKSUMS "${AROS_SOURCE_INVENTORY_FETCH_${_index}_CHECKSUMS}"
+            NORMALIZATION "${AROS_SOURCE_INVENTORY_FETCH_${_index}_NORMALIZATION}"
+            NORMALIZED_SIZE "${AROS_SOURCE_INVENTORY_FETCH_${_index}_NORMALIZED_SIZE}"
             LOCATION "${AROS_SOURCE_INVENTORY_FETCH_${_index}_LOCATION}"
             DESTINATION "${AROS_SOURCE_INVENTORY_FETCH_${_index}_DESTINATION}"
             BASE "${AROS_SOURCE_INVENTORY_FETCH_${_index}_BASE}"
@@ -343,7 +363,8 @@ if(AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
             PATCHES "${AROS_SOURCE_INVENTORY_FETCH_${_index}_PATCHES}")
     endforeach()
 endif()
-if(AROS_NATIVE_BUILD_CONTRACT OR AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
+if(AROS_NATIVE_BUILD_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT OR
+   AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
     execute_process(
         COMMAND "${TRANSPILER_BIN}"
                 ${_aros_native_transpiler_args}
@@ -883,14 +904,10 @@ include("${AROS_CMAKE_ENGINE_DIR}/OpenSbiUefi.cmake")
 # an incremental tree the old reference files may exist but be stale.
 aros_add_libdefs_audit_target()
 
-# Match MetaMake's configured default invocation. Every translated declaration
-# remains nameable, while the implicit CMake `all` target contains only the
-# exact dependency closure rooted at AROS.
-# A native contract selects its own product, and its graph has no MetaMake
-# default root; the selected targets are then what `all` builds.
-if(NOT AROS_NATIVE_BUILD_CONTRACT OR TARGET AROS)
-    aros_limit_all_to_metamake_root(AROS)
-endif()
+# Match MetaMake's configured default invocation for classic graphs. A
+# validated native selection may export only SDK producers without the AROS
+# product root; retain the strict classic closure whenever that root is present.
+aros_limit_all_for_selected_source_graph(AROS)
 
 if(AROS_NATIVE_BUILD_CONTRACT)
     # Use canonical source module/archive identities, never a board-name map

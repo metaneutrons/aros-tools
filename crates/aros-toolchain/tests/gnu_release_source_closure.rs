@@ -2,42 +2,26 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
 
-const RELEASE_RULE: &str = concat!(
-    "ifeq ($(AROS_TOOLCHAIN_RELEASE),1)\n",
-    "crosstools-release: tools\n",
-    "\t@+$(CALL) $(MMAKE) $(MMAKE_OPTIONS) AROS.tools-crosstools-gnu-release\n",
-    "else\n",
-    "crosstools-release:\n",
-    "\t@$(ECHO) 'crosstools-release requires --enable-toolchain-release' >&2\n",
-    "\t@exit 1\n",
-    "endif\n",
-    ".PHONY: crosstools-release\n",
-);
-
-const CROSSTOOLS_RULE: &str =
+const ORDINARY_CROSSTOOLS_RULE: &str =
     "crosstools : crosstools-toolchain features\n\t@$(MAKE) $(MKARGS) toolchain-linklibs\n";
 
-const META_GRAPH_SOURCE: &str = "#MM- tools-crosstools-gnu-release : tools-crosstools-gcc-libgcc\n\
-                                  #MM tools-crosstools-gcc-libgcc : tools-crosstools-gcc";
+const GENERIC_TOOLCHAIN_ROOT: &str =
+    "tools-crosstools : tools-crosstools-$(AROS_TOOLCHAIN)-$(AROS_TARGET_CPU) tools-crosstools-rust-$(TARGET_RUST)";
 
-const META_GRAPH_RULES: &str = "tools-crosstools-gnu-release : tools-crosstools-gcc-libgcc\n\
-                                tools-crosstools-gcc-libgcc : tools-crosstools-gcc\n";
+const GNU_RISCV_SOURCE_ROOT: &str =
+    "tools-crosstools-gnu-riscv : tools-crosstools-gcc crosstools-gcc";
 
-const LIBGCC_RULE: &str = concat!(
-    "tools-crosstools-gcc-libgcc :\n",
-    "\t$(MAKE) -C $(HOSTGENDIR)/$(CURDIR)/gcc all-target-libgcc $(crosstools-gcc-make-env)\n",
-    "\t$(MAKE) -j1 -C $(HOSTGENDIR)/$(CURDIR)/gcc install-target-libgcc $(crosstools-gcc-install-env)",
-);
+const GNU_GCC_PACKAGE_ROOT: &str = "crosstools-gcc : sdk-includes-$(AROS_TOOLCHAIN_RELEASE)";
 
-const RELEASE_MMAKE_ROOT: &str = "AROS.tools-crosstools-gnu-release";
-const GENERIC_MMAKE_ROOT: &str = "AROS.tools-crosstools-gnu-riscv";
+const RELEASE_LINKLIBS_ROOT: &str = "toolchain-linklibs-release : linklibs-atomic toolchain-linklibs-$(AROS_TOOLCHAIN)-release-$(AROS_TARGET_CPU) toolchain-linklibs-$(AROS_TOOLCHAIN)-release";
+
+const NORMAL_LINKLIBS_ROOT: &str = "toolchain-linklibs : linklibs-atomic toolchain-linklibs-$(AROS_TOOLCHAIN)-$(AROS_TARGET_CPU) toolchain-linklibs-$(AROS_TOOLCHAIN) toolchain-linklibs-$(AROS_TARGET_CPU)";
 
 fn source_root() -> PathBuf {
     PathBuf::from(
@@ -49,12 +33,19 @@ fn source_root() -> PathBuf {
 }
 
 fn read_source(root: &Path, file: &str) -> String {
-    fs::read_to_string(root.join(file)).unwrap_or_else(|error| {
+    let bytes = fs::read(root.join(file)).unwrap_or_else(|error| {
         panic!(
             "cannot read source-owned {file} under {}: {error}",
             root.display()
         )
-    })
+    });
+    match String::from_utf8(bytes) {
+        Ok(source) => source,
+        // Some historical source files contain ISO-8859-1 comments. Keep
+        // their byte values readable without changing the source recipes;
+        // all contract markers used here are ASCII.
+        Err(error) => error.into_bytes().into_iter().map(char::from).collect(),
+    }
 }
 
 fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -81,40 +72,68 @@ fn shell_list<'a>(source: &'a str, name: &str) -> &'a str {
     &tail[..end]
 }
 
-fn source_owned_release_rule(makefile: &str) -> &str {
-    let start_marker = "ifeq ($(AROS_TOOLCHAIN_RELEASE),1)\n";
-    let end_marker = ".PHONY: crosstools-release\n";
-    let start = makefile
-        .find(start_marker)
-        .expect("source-owned opt-in rule starts with its release selector");
-    let end = start
-        + makefile[start..]
-            .find(end_marker)
-            .expect("source-owned release rule declares its target phony")
-        + end_marker.len();
-    &makefile[start..end]
+fn source_target_rule<'a>(source: &'a str, target: &str) -> &'a str {
+    let mut offset = 0;
+    let start = source
+        .split_inclusive('\n')
+        .find_map(|line| {
+            let content = line.strip_suffix('\n').unwrap_or(line);
+            let is_target = content.strip_prefix(target).is_some_and(|rest| {
+                rest.starts_with(':') || rest.starts_with(' ') || rest.starts_with('\t')
+            });
+            let line_start = offset;
+            offset += line.len();
+            is_target.then_some(line_start)
+        })
+        .unwrap_or_else(|| panic!("missing source-owned make target: {target}"));
+    let tail = &source[start..];
+    let end = tail.find("\n\n").map_or(tail.len(), |at| at + 1);
+    &tail[..end]
 }
 
-fn release_meta_source(mmakefile: &str) -> &str {
-    section(mmakefile, "#MM- tools-crosstools-gnu-release", "\n\n")
-}
+fn meta_rule(source: &str, target: &str) -> String {
+    let lines = source.lines().collect::<Vec<_>>();
+    let declarations = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let declaration = line
+                .strip_prefix("#MM-")
+                .or_else(|| line.strip_prefix("#MM"))?
+                .trim();
+            let (name, _) = declaration.split_once(':')?;
+            (name.trim() == target).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        declarations.len(),
+        1,
+        "expected exactly one MetaMake declaration for {target}, found {}",
+        declarations.len()
+    );
 
-fn release_meta_rules(mmakefile: &str) -> String {
-    let mut rules = String::new();
-    for line in release_meta_source(mmakefile).lines() {
-        let declaration = line
+    let mut pieces = Vec::new();
+    for line in &lines[declarations[0]..] {
+        let Some(declaration) = line
             .strip_prefix("#MM-")
             .or_else(|| line.strip_prefix("#MM"))
-            .expect("release graph contains MetaMake declarations")
-            .trim();
-        rules.push_str(declaration);
-        rules.push('\n');
+        else {
+            break;
+        };
+        let declaration = declaration.trim();
+        let continued = declaration.ends_with('\\');
+        pieces.push(
+            declaration
+                .trim_end_matches('\\')
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        if !continued {
+            return pieces.join(" ");
+        }
     }
-    rules
-}
-
-fn source_libgcc_rule(mmakefile: &str) -> &str {
-    section(mmakefile, "tools-crosstools-gcc-libgcc :\n", "\n\n")
+    panic!("missing complete MetaMake declaration for {target}");
 }
 
 fn gnu_make() -> PathBuf {
@@ -136,54 +155,23 @@ fn gnu_make() -> PathBuf {
     panic!("this ignored source probe requires GNU make (gmake or make)");
 }
 
-fn fixture_makefile(release_rule: &str, mode: u8) -> String {
+fn fixture_makefile(variables: &str, source_rules: &str, fixture_rules: &str) -> String {
     format!(
-        "AROS_TOOLCHAIN_RELEASE := {mode}\n\
-         ECHO := echo\n\
-         CALL :=\n\
-         MMAKE := ./mmake-sentinel\n\
-         MMAKE_OPTIONS :=\n\
-         MKARGS := --no-print-directory -f Makefile\n\
-         \n\
-         .PHONY: all sdk default tools crosstools-toolchain features broad-sdk toolchain-linklibs\n\
-         all:\n\
-         \t@printf 'broad-sdk\\n' >> sentinels.log\n\
-         sdk:\n\
-         \t@printf 'broad-sdk\\n' >> sentinels.log\n\
-         default:\n\
-         \t@printf 'default\\n' >> sentinels.log\n\
-         tools:\n\
-         \t@printf 'tools\\n' >> sentinels.log\n\
-         crosstools-toolchain:\n\
-         \t@printf 'broad-toolchain\\n' >> sentinels.log\n\
-         features:\n\
-         \t@printf 'features\\n' >> sentinels.log\n\
-         broad-sdk:\n\
-         \t@printf 'broad-sdk\\n' >> sentinels.log\n\
-         toolchain-linklibs:\n\
-         \t@printf 'toolchain-linklibs\\n' >> sentinels.log\n\
+        "{variables}\n\
+         LOG := sentinels.log\n\
+         .PHONY: all tools features crosstools-toolchain crosstools crosstools-release \\\n          toolchain-linklibs toolchain-linklibs-release tools-crosstools AROS.tools-crosstools \\\n          tools-crosstools-gnu-riscv tools-crosstools-gcc crosstools-gcc tools-crosstools-rust-no \\\n          linklibs-atomic linklibs-libatomic linklibs-libatomic-yes linklibs-gnu-libatomic \\\n          tools-crosstools-gcc-libatomic crosstools-gcc--fetch tools-crosstools-autolibs \\\n          gnu-libatomic-cpu-linklibs-0 gnu-libatomic-cpu-linklibs-1 \\\n          toolchain-linklibs-gnu-release-riscv toolchain-linklibs-gnu-release \\\n          toolchain-linklibs-gnu-riscv toolchain-linklibs-gnu toolchain-linklibs-riscv \\\n          sdk-includes-0 sdk-includes-1 linklibs-riscv core-linklibs \\\n          gnu-libatomic-linklibs-0 gnu-libatomic-linklibs-1\n\
+         {source_rules}\n\
+         {fixture_rules}\n\
          .DEFAULT:\n\
-         \t@printf 'default:%s\\n' '$@' >> sentinels.log\n\
-         \t@exit 97\n\
-         \n\
-         {release_rule}\n\
-         {CROSSTOOLS_RULE}",
+         \t@printf 'unexpected:%s\\n' '$@' >> $(LOG)\n\
+         \t@exit 97\n"
     )
 }
 
-const MMAKE_SENTINEL: &str = r#"#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> mmake-roots.log
-case "$*" in
-  *AROS.tools-crosstools-gnu-release*)
-    printf '%s\n' release-root >> sentinels.log ;;
-  *AROS.tools-crosstools-gnu-riscv*)
-    printf '%s\n' generic-root broad-includes all-target-runtimes >> sentinels.log ;;
-  *)
-    printf '%s\n' default-mmake-root >> sentinels.log
-    exit 97 ;;
-esac
-"#;
+fn write_fixture(root: &Path, makefile: &str) {
+    fs::write(root.join("Makefile"), makefile).expect("write isolated GNU make fixture");
+    fs::write(root.join("config.status"), "").expect("write fixture config.status");
+}
 
 fn run_make(make: &Path, root: &Path, target: &str) -> Output {
     Command::new(make)
@@ -201,74 +189,87 @@ fn sentinels(root: &Path) -> Vec<String> {
         .collect()
 }
 
-fn write_fixture(root: &Path, release_rule: &str, mode: u8) {
-    fs::write(root.join("Makefile"), fixture_makefile(release_rule, mode))
-        .expect("write isolated GNU make fixture");
-    let sentinel = root.join("mmake-sentinel");
-    fs::write(&sentinel, MMAKE_SENTINEL).expect("write MMAKE root sentinel");
-    let mut permissions = fs::metadata(&sentinel).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(sentinel, permissions).unwrap();
-}
-
-fn meta_fixture_makefile(meta_rules: &str, libgcc_rule: &str) -> String {
-    let fixture_rule = libgcc_rule.replace("$(HOSTGENDIR)/$(CURDIR)/gcc", "$(GCC_FIXTURE)");
-    assert_eq!(
-        fixture_rule.matches("$(GCC_FIXTURE)").count(),
-        2,
-        "only the source path is rebound into the fake GCC tree"
-    );
+fn fixture_variables(release: u8) -> String {
     format!(
-        "GCC_FIXTURE := $(CURDIR)/gcc\n\
-         GRAPH_LOG := graph.log\n\
-         .PHONY: tools-crosstools-gnu-release tools-crosstools-gcc-libgcc tools-crosstools-gcc\n\
-         {meta_rules}\n\
-         tools-crosstools-gcc:\n\
-         \t@printf 'compiler\\n' >> $(GRAPH_LOG)\n\
-         {fixture_rule}\n\
-         .DEFAULT:\n\
-         \t@printf 'default:%s\\n' '$@' >> $(GRAPH_LOG)\n\
-         \t@exit 97\n"
+        "TOP := .\n\
+         CROSSTOOLSDIR := .\n\
+         CROSSTOOLS_BUILDFLAG := ./.installflag-crosstools\n\
+         AROS_TOOLCHAIN_DEPS :=\n\
+         CROSSTOOLS_TARGET := tools-crosstools\n\
+         AROS_TOOLCHAIN_RELEASE := {release}\n\
+         AROS_TOOLCHAIN := gnu\n\
+         AROS_TARGET_CPU := riscv\n\
+         TARGET_RUST := no\n\
+         TARGET_LIBATOMIC := yes\n\
+         IF := if\n\
+         TEST := test\n\
+         ECHO := echo\n\
+         TOUCH := touch\n\
+         NOP := :\n\
+         CALL :=\n\
+         MMAKE := $(MAKE)\n\
+         MMAKE_OPTIONS := --no-print-directory -f Makefile\n\
+         MKARGS := --no-print-directory -f Makefile\n"
     )
 }
 
-fn write_meta_fixture(root: &Path, meta_rules: &str, libgcc_rule: &str) -> PathBuf {
-    fs::write(
-        root.join("Makefile"),
-        meta_fixture_makefile(meta_rules, libgcc_rule),
-    )
-    .expect("write isolated MetaMake-graph fixture");
-    let gcc = root.join("gcc");
-    fs::create_dir(&gcc).unwrap();
-    fs::write(
-        gcc.join("Makefile"),
-        "GOALS_LOG := child-goals.log\n\
-         .PHONY: all-target-libgcc install-target-libgcc\n\
-         all-target-libgcc:\n\
-         \t@printf 'all-target-libgcc\\n' >> $(GOALS_LOG)\n\
-         install-target-libgcc:\n\
-         \t@printf 'install-target-libgcc\\n' >> $(GOALS_LOG)\n\
-         .DEFAULT:\n\
-         \t@printf 'unexpected:%s\\n' '$@' >> $(GOALS_LOG)\n\
-         \t@exit 97\n",
-    )
-    .expect("write fake child GCC Makefile");
-    gcc
+const fn fixture_recipes() -> &'static str {
+    "tools:\n\
+     \t@printf 'tools\\n' >> $(LOG)\n\
+     features:\n\
+     \t@printf 'features\\n' >> $(LOG)\n\
+     AROS.tools-crosstools: tools-crosstools\n\
+     tools-crosstools-gcc:\n\
+     \t@printf 'gnu-compiler-source\\n' >> $(LOG)\n\
+     crosstools-gcc:\n\
+     \t@printf 'gnu-compiler-package\\n' >> $(LOG)\n\
+     tools-crosstools-rust-no:\n\
+     \t@printf 'rust-disabled\\n' >> $(LOG)\n\
+     sdk-includes-0:\n\
+     \t@printf 'sdk-includes-classic\\n' >> $(LOG)\n\
+     sdk-includes-1:\n\
+     \t@printf 'sdk-includes-release\\n' >> $(LOG)\n\
+     crosstools-gcc--fetch:\n\
+     \t@printf 'gcc-fetch\\n' >> $(LOG)\n\
+     tools-crosstools-autolibs:\n\
+     \t@printf 'autolibs\\n' >> $(LOG)\n\
+     gnu-libatomic-cpu-linklibs-0: linklibs-riscv\n\
+     \t@printf 'libatomic-cpu-classic\\n' >> $(LOG)\n\
+     gnu-libatomic-cpu-linklibs-1:\n\
+     \t@printf 'libatomic-cpu-release\\n' >> $(LOG)\n\
+     linklibs-riscv:\n\
+     \t@printf 'classic-riscv-linklibs\\n' >> $(LOG)\n\
+     core-linklibs:\n\
+     \t@printf 'classic-core-linklibs\\n' >> $(LOG)\n\
+     tools-crosstools-gcc-libatomic:\n\
+     \t@printf 'gnu-libatomic-producer\\n' >> $(LOG)\n\
+     toolchain-linklibs-gnu-release-riscv:\n\
+     \t@printf 'selected-cpu-release-runtime\\n' >> $(LOG)\n\
+     toolchain-linklibs-gnu-release:\n\
+     \t@printf 'selected-toolchain-release-runtime\\n' >> $(LOG)\n\
+     toolchain-linklibs-gnu-riscv:\n\
+     \t@printf 'normal-toolchain-cpu-runtime\\n' >> $(LOG)\n\
+     toolchain-linklibs-gnu:\n\
+     \t@printf 'normal-toolchain-runtime\\n' >> $(LOG)\n\
+     toolchain-linklibs-riscv:\n\
+     \t@printf 'normal-cpu-runtime\\n' >> $(LOG)\n"
 }
 
 #[test]
-#[ignore = "requires AROS_TEST_P4_SOURCE; executes only extracted GNU make rules, not a compiler build"]
-fn actual_source_gnu_release_is_opt_in_and_keeps_the_legacy_crosstools_closure() {
+#[ignore = "requires AROS_TEST_P4_SOURCE; executes extracted GNU make rules, not a compiler build"]
+fn actual_source_gnu_release_keeps_producer_and_selected_runtime_closures_separate() {
     let source = source_root();
     let configure_in = read_source(&source, "configure.in");
     let configure = read_source(&source, "configure");
     let makefile = read_source(&source, "Makefile.in");
+    let target_cfg = read_source(&source, "config/target.cfg.in");
+    let generic_mmakefile = read_source(&source, "tools/crosstools/mmakefile.src");
     let gnu_mmakefile = read_source(&source, "tools/crosstools/gnu/mmakefile.src");
 
     let configure_contract = section(
         &configure_in,
-        "AC_MSG_CHECKING([whether to build the GNU compiler-only release closure])",
-        "\nif test \"${crosstools}\" = \"yes\"; then",
+        "AC_MSG_CHECKING([whether to build the minimal crosstools release closure])",
+        "AC_MSG_RESULT($aros_toolchain_release)",
     );
     for required in [
         "AC_ARG_ENABLE([toolchain-release],",
@@ -276,14 +277,18 @@ fn actual_source_gnu_release_is_opt_in_and_keeps_the_legacy_crosstools_closure()
         "yes) aros_toolchain_release=1 ;;",
         "no)  aros_toolchain_release=0 ;;",
         "*)   AC_MSG_ERROR([--enable-toolchain-release accepts only yes or no]) ;;",
-        "if test \"$crosstools\" != \"yes\"; then",
-        "if test \"$aros_toolchain\" != \"gnu\"; then",
     ] {
         assert!(
             configure_contract.contains(required),
             "configure.in release contract is missing {required:?}"
         );
     }
+    assert!(
+        configure_in.contains(
+            "if test \"$aros_toolchain_release\" = \"1\" && test \"${crosstools}\" != \"yes\"; then"
+        ),
+        "configure.in must require crosstools for the release producer"
+    );
     assert_eq!(
         configure_in
             .matches("AC_SUBST(aros_toolchain_release)")
@@ -295,21 +300,22 @@ fn actual_source_gnu_release_is_opt_in_and_keeps_the_legacy_crosstools_closure()
     let generated_contract = section(
         &configure,
         "# Check whether --enable-toolchain-release was given.",
-        "\nif test \"${crosstools}\" = \"yes\"; then",
+        "if test \"${crosstools}\" = \"yes\"; then",
     );
     for required in [
         "e) enable_toolchain_release=no ;;",
         "yes) aros_toolchain_release=1 ;;",
         "no)  aros_toolchain_release=0 ;;",
         "*)   as_fn_error $? \"--enable-toolchain-release accepts only yes or no\" \"$LINENO\" 5 ;;",
-        "if test \"$crosstools\" != \"yes\"; then",
-        "if test \"$aros_toolchain\" != \"gnu\"; then",
     ] {
         assert!(
             generated_contract.contains(required),
             "generated configure is missing {required:?}"
         );
     }
+    assert!(configure.contains(
+        "if test \"$aros_toolchain_release\" = \"1\" && test \"${crosstools}\" != \"yes\"; then"
+    ));
     assert!(
         shell_list(&configure, "ac_user_opts")
             .lines()
@@ -323,48 +329,145 @@ fn actual_source_gnu_release_is_opt_in_and_keeps_the_legacy_crosstools_closure()
         "generated configure must export the substitution"
     );
     assert_eq!(
-        makefile
+        target_cfg
             .lines()
-            .filter(|line| *line == "AROS_TOOLCHAIN_RELEASE := @aros_toolchain_release@")
+            .filter(|line| {
+                line.split_once(":=").is_some_and(|(name, value)| {
+                    name.trim() == "AROS_TOOLCHAIN_RELEASE"
+                        && value.trim() == "@aros_toolchain_release@"
+                })
+            })
             .count(),
         1,
-        "Makefile.in must substitute the configure result directly"
+        "config/target.cfg.in must substitute the configure result"
     );
 
-    let release_rule = source_owned_release_rule(&makefile);
+    let release_rule = source_target_rule(&makefile, "crosstools-release");
     assert_eq!(
-        release_rule, RELEASE_RULE,
-        "release closure must be disabled by default and call only the source-owned GNU release root"
+        release_rule.lines().next(),
+        Some("crosstools-release : crosstools-toolchain"),
+        "release must depend on the toolchain producer only"
+    );
+    for required in [
+        "$(AROS_TOOLCHAIN_RELEASE)\" = \"1\"",
+        "$(MAKE) $(MKARGS) toolchain-linklibs-release",
+        "crosstools-release requires configure --enable-toolchain-release",
+    ] {
+        assert!(
+            release_rule.contains(required),
+            "release rule is missing {required:?}"
+        );
+    }
+    assert!(
+        !release_rule.contains("features"),
+        "producer-only release must not depend on the broad feature target"
     );
     assert_eq!(
-        makefile.matches(CROSSTOOLS_RULE).count(),
-        1,
-        "ordinary crosstools must retain its feature and toolchain-linklibs path"
+        source_target_rule(&makefile, "crosstools"),
+        ORDINARY_CROSSTOOLS_RULE,
+        "ordinary crosstools must retain features and the normal linklib closure"
     );
+    let toolchain_rule = source_target_rule(&makefile, "crosstools-toolchain");
     assert_eq!(
-        release_meta_source(&gnu_mmakefile),
-        META_GRAPH_SOURCE,
-        "the release MetaMake root has a closed compiler/libgcc dependency chain"
+        toolchain_rule.lines().next(),
+        Some("crosstools-toolchain: tools $(CROSSTOOLS_BUILDFLAG)"),
+        "the release producer must enter through the ordinary toolchain target"
     );
-    let meta_rules = release_meta_rules(&gnu_mmakefile);
-    assert_eq!(meta_rules, META_GRAPH_RULES);
-    let libgcc_rule = source_libgcc_rule(&gnu_mmakefile);
-    assert_eq!(
-        libgcc_rule, LIBGCC_RULE,
-        "libgcc must use the two explicit target goals with serial installation"
+    let installflag_rule =
+        source_target_rule(&makefile, "$(CROSSTOOLSDIR)/.installflag-crosstools");
+    assert!(
+        installflag_rule.contains("AROS.$(CROSSTOOLS_TARGET)"),
+        "the toolchain install flag must invoke the source-selected MetaMake root"
+    );
+
+    let generic_toolchain_root = meta_rule(&generic_mmakefile, "tools-crosstools");
+    let gnu_riscv_source_root = meta_rule(&gnu_mmakefile, "tools-crosstools-gnu-riscv");
+    let gnu_gcc_package_root = meta_rule(&gnu_mmakefile, "crosstools-gcc");
+    assert_eq!(generic_toolchain_root, GENERIC_TOOLCHAIN_ROOT);
+    assert_eq!(gnu_riscv_source_root, GNU_RISCV_SOURCE_ROOT);
+    assert_eq!(gnu_gcc_package_root, GNU_GCC_PACKAGE_ROOT);
+    assert!(
+        gnu_mmakefile.contains("all-gcc $(crosstools-gcc--make-env)"),
+        "the separate GNU source producer must build the compiler source root"
     );
     assert!(
-        gnu_mmakefile.contains("#MM- tools-crosstools-gnu-riscv"),
-        "negative control expects the generic GNU architecture root"
+        gnu_mmakefile.contains("install-gcc $(crosstools-gcc--install_opts)"),
+        "the separate GNU source producer must install the compiler source root"
     );
     assert!(
-        gnu_mmakefile.contains("#MM crosstools-gcc : includes-copy"),
-        "negative control expects the generic runtime root's copied include edge"
+        gnu_mmakefile
+            .contains("%fetch_and_build mmake=crosstools-gcc package=gcc version=$(GCC_VERSION) compiler=host"),
+        "the second GNU root must build the configured GCC package and its target runtimes"
+    );
+    assert!(
+        gnu_mmakefile.contains("hostincludes=\"sdk-includes-$(AROS_TOOLCHAIN_RELEASE)\""),
+        "the GCC package must use the release-selected source/include closure"
+    );
+
+    let release_linklibs_root = meta_rule(&generic_mmakefile, "toolchain-linklibs-release");
+    let normal_linklibs_root = meta_rule(&generic_mmakefile, "toolchain-linklibs");
+    assert_eq!(release_linklibs_root, RELEASE_LINKLIBS_ROOT);
+    assert_eq!(normal_linklibs_root, NORMAL_LINKLIBS_ROOT);
+    assert!(
+        !release_linklibs_root.contains("toolchain-linklibs-$(AROS_TARGET_CPU)"),
+        "the producer-only release graph must not fall back to the broad CPU linklib aggregate"
+    );
+
+    let atomic_roots = [
+        meta_rule(&generic_mmakefile, "linklibs-atomic"),
+        meta_rule(&generic_mmakefile, "linklibs-libatomic"),
+        meta_rule(&generic_mmakefile, "linklibs-libatomic-yes"),
+        meta_rule(&gnu_mmakefile, "linklibs-gnu-libatomic"),
+        meta_rule(&gnu_mmakefile, "tools-crosstools-gcc-libatomic"),
+        meta_rule(&gnu_mmakefile, "gnu-libatomic-cpu-linklibs-0"),
+    ]
+    .join("\n");
+    assert!(
+        gnu_mmakefile.contains("gnu-libatomic-cpu-linklibs-1 :"),
+        "GNU release libatomic must keep its source-owned CPU runtime selector"
+    );
+    assert!(
+        gnu_mmakefile.contains("#MM- gnu-libatomic-linklibs-1 : tools-crosstools-autolibs"),
+        "GNU release libatomic must select the declared temporary SDK linklibs"
+    );
+    assert!(
+        gnu_mmakefile
+            .contains("targetlinklibs=\"gnu-libatomic-linklibs-$(AROS_TOOLCHAIN_RELEASE)\""),
+        "GNU libatomic configure must consume the selected target linklib closure"
+    );
+    let classic_libatomic_runtime = meta_rule(&gnu_mmakefile, "gnu-libatomic-linklibs-0");
+    let release_libatomic_runtime = meta_rule(&gnu_mmakefile, "gnu-libatomic-linklibs-1");
+    assert_eq!(
+        classic_libatomic_runtime,
+        "gnu-libatomic-linklibs-0 : core-linklibs"
+    );
+    assert_eq!(
+        release_libatomic_runtime,
+        "gnu-libatomic-linklibs-1 : tools-crosstools-autolibs"
     );
 
     let make = gnu_make();
+    let source_rules = [
+        release_rule,
+        source_target_rule(&makefile, "crosstools"),
+        toolchain_rule,
+        installflag_rule,
+        generic_toolchain_root.as_str(),
+        gnu_riscv_source_root.as_str(),
+        gnu_gcc_package_root.as_str(),
+        release_linklibs_root.as_str(),
+        normal_linklibs_root.as_str(),
+        atomic_roots.as_str(),
+        classic_libatomic_runtime.as_str(),
+        release_libatomic_runtime.as_str(),
+    ]
+    .join("\n");
+
     let disabled = tempfile::tempdir().unwrap();
-    write_fixture(disabled.path(), release_rule, 0);
+    write_fixture(
+        disabled.path(),
+        &fixture_makefile(&fixture_variables(0), &source_rules, fixture_recipes()),
+    );
     let result = run_make(&make, disabled.path(), "crosstools-release");
     assert!(
         !result.status.success(),
@@ -372,18 +475,31 @@ fn actual_source_gnu_release_is_opt_in_and_keeps_the_legacy_crosstools_closure()
     );
     assert!(
         String::from_utf8_lossy(&result.stderr)
-            .contains("crosstools-release requires --enable-toolchain-release"),
+            .contains("crosstools-release requires configure --enable-toolchain-release"),
         "{}\n{}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(
-        sentinels(disabled.path()).is_empty(),
-        "disabled target reached a prerequisite, broad SDK, or default recipe"
+    assert_eq!(
+        sentinels(disabled.path()),
+        [
+            "tools",
+            "gnu-compiler-source",
+            "sdk-includes-classic",
+            "gnu-compiler-package",
+            "rust-disabled"
+        ],
+        "the producer runs before the source-owned release-off gate; no runtime root runs"
     );
 
+    // GNU source has no separate #MM declarations for these two generic
+    // release selector leaves. Their fixture recipes test dispatch and edge
+    // reachability; the crosstools-gcc package is the GNU runtime build root.
     let enabled = tempfile::tempdir().unwrap();
-    write_fixture(enabled.path(), release_rule, 1);
+    write_fixture(
+        enabled.path(),
+        &fixture_makefile(&fixture_variables(1), &source_rules, fixture_recipes()),
+    );
     let result = run_make(&make, enabled.path(), "crosstools-release");
     assert!(
         result.status.success(),
@@ -391,88 +507,116 @@ fn actual_source_gnu_release_is_opt_in_and_keeps_the_legacy_crosstools_closure()
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(sentinels(enabled.path()), ["tools", "release-root"]);
     assert_eq!(
-        fs::read_to_string(enabled.path().join("mmake-roots.log"))
-            .unwrap()
-            .lines()
-            .collect::<Vec<_>>(),
-        [RELEASE_MMAKE_ROOT]
-    );
-
-    // Counterprobe the allowlist if features are attached to the release
-    // target; the prerequisite sentinel must make that broadened closure clear.
-    let features_rule = release_rule.replace(
-        "crosstools-release: tools\n",
-        "crosstools-release: tools features\n",
-    );
-    assert_ne!(features_rule, release_rule);
-    let features_counterprobe = tempfile::tempdir().unwrap();
-    write_fixture(features_counterprobe.path(), &features_rule, 1);
-    let result = run_make(&make, features_counterprobe.path(), "crosstools-release");
-    assert!(result.status.success(), "{result:?}");
-    assert_eq!(
-        sentinels(features_counterprobe.path()),
-        ["tools", "features", "release-root"]
-    );
-
-    let mmake_graph = tempfile::tempdir().unwrap();
-    let child_gcc = write_meta_fixture(mmake_graph.path(), &meta_rules, libgcc_rule);
-    let result = run_make(&make, mmake_graph.path(), "tools-crosstools-gnu-release");
-    assert!(
-        result.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(mmake_graph.path().join("graph.log"))
-            .unwrap()
-            .lines()
-            .collect::<Vec<_>>(),
-        ["compiler"]
-    );
-    assert_eq!(
-        fs::read_to_string(child_gcc.join("child-goals.log"))
-            .unwrap()
-            .lines()
-            .collect::<Vec<_>>(),
-        ["all-target-libgcc", "install-target-libgcc"]
-    );
-
-    // Counterprobe the top-level rule with the broad architecture root. Its
-    // include and runtime sentinels prove that an old root would be detected.
-    let broad_root_rule = release_rule.replace(RELEASE_MMAKE_ROOT, GENERIC_MMAKE_ROOT);
-    assert_ne!(
-        broad_root_rule, release_rule,
-        "counterprobe must alter the root"
-    );
-    let broad_root = tempfile::tempdir().unwrap();
-    write_fixture(broad_root.path(), &broad_root_rule, 1);
-    let result = run_make(&make, broad_root.path(), "crosstools-release");
-    assert!(result.status.success(), "{result:?}");
-    assert_eq!(
-        sentinels(broad_root.path()),
+        sentinels(enabled.path()),
         [
             "tools",
-            "generic-root",
-            "broad-includes",
-            "all-target-runtimes"
-        ]
+            "gnu-compiler-source",
+            "sdk-includes-release",
+            "gnu-compiler-package",
+            "rust-disabled",
+            "gcc-fetch",
+            "autolibs",
+            "libatomic-cpu-release",
+            "gnu-libatomic-producer",
+            "selected-cpu-release-runtime",
+            "selected-toolchain-release-runtime"
+        ],
+        "release enters the selected GNU source/package root, then every runtime dispatch edge"
     );
 
-    // Removing the explicit target exposes the top-level .DEFAULT fallback.
-    let default_fallback = tempfile::tempdir().unwrap();
-    write_fixture(default_fallback.path(), "", 0);
-    let result = run_make(&make, default_fallback.path(), "crosstools-release");
-    assert!(!result.status.success());
-    assert_eq!(
-        sentinels(default_fallback.path()),
-        ["default:crosstools-release"]
+    // An unexpected concrete dependency must reach .DEFAULT and fail before
+    // the release recipe can enter any selected runtime closure.
+    let unexpected_dependency_rule = release_rule.replace(
+        "crosstools-release : crosstools-toolchain",
+        "crosstools-release : crosstools-toolchain unimplemented-gnu-runtime",
     );
+    assert_ne!(unexpected_dependency_rule, release_rule);
+    let unexpected_dependency = tempfile::tempdir().unwrap();
+    let counterprobe_rules = source_rules.replacen(release_rule, &unexpected_dependency_rule, 1);
+    write_fixture(
+        unexpected_dependency.path(),
+        &fixture_makefile(
+            &fixture_variables(1),
+            &counterprobe_rules,
+            fixture_recipes(),
+        ),
+    );
+    let result = run_make(&make, unexpected_dependency.path(), "crosstools-release");
+    assert!(
+        !result.status.success(),
+        "unexpected dependency was accepted"
+    );
+    let unexpected_dependency_log = sentinels(unexpected_dependency.path());
+    assert!(unexpected_dependency_log.contains(&"unexpected:unimplemented-gnu-runtime".to_owned()));
+    for runtime_sentinel in [
+        "gcc-fetch",
+        "autolibs",
+        "libatomic-cpu-release",
+        "gnu-libatomic-producer",
+        "selected-cpu-release-runtime",
+        "selected-toolchain-release-runtime",
+    ] {
+        assert!(
+            !unexpected_dependency_log.contains(&runtime_sentinel.to_owned()),
+            "runtime sentinel {runtime_sentinel} ran despite the .DEFAULT rejection"
+        );
+    }
 
+    // Adding the broad feature aggregate to the source target must be visible
+    // in the fixture; the actual release target above has no such edge.
+    let feature_counterprobe_rule = release_rule.replace(
+        "crosstools-release : crosstools-toolchain",
+        "crosstools-release : crosstools-toolchain features",
+    );
+    assert_ne!(feature_counterprobe_rule, release_rule);
+    let feature_counterprobe = tempfile::tempdir().unwrap();
+    let counterprobe_rules = source_rules.replacen(release_rule, &feature_counterprobe_rule, 1);
+    write_fixture(
+        feature_counterprobe.path(),
+        &fixture_makefile(
+            &fixture_variables(1),
+            &counterprobe_rules,
+            fixture_recipes(),
+        ),
+    );
+    let result = run_make(&make, feature_counterprobe.path(), "crosstools-release");
+    assert!(result.status.success(), "{result:?}");
+    assert!(sentinels(feature_counterprobe.path()).contains(&"features".to_owned()));
+
+    // Replacing the release runtime root with the ordinary root must expose
+    // the extra generic CPU linklibs edge from the normal crosstools graph.
+    let broad_runtime_counterprobe_rule =
+        release_rule.replace("toolchain-linklibs-release", "toolchain-linklibs");
+    assert_ne!(broad_runtime_counterprobe_rule, release_rule);
+    let broad_runtime_counterprobe = tempfile::tempdir().unwrap();
+    let counterprobe_rules =
+        source_rules.replacen(release_rule, &broad_runtime_counterprobe_rule, 1);
+    write_fixture(
+        broad_runtime_counterprobe.path(),
+        &fixture_makefile(
+            &fixture_variables(1),
+            &counterprobe_rules,
+            fixture_recipes(),
+        ),
+    );
+    let result = run_make(
+        &make,
+        broad_runtime_counterprobe.path(),
+        "crosstools-release",
+    );
+    assert!(result.status.success(), "{result:?}");
+    let broad_runtime_log = sentinels(broad_runtime_counterprobe.path());
+    assert!(broad_runtime_log.contains(&"normal-cpu-runtime".to_owned()));
+    assert!(!broad_runtime_log.contains(&"selected-cpu-release-runtime".to_owned()));
+
+    // The ordinary crosstools path remains broad and keeps its feature target
+    // plus the non-release CPU/toolchain linklib closure.
     let ordinary = tempfile::tempdir().unwrap();
-    write_fixture(ordinary.path(), release_rule, 0);
+    write_fixture(
+        ordinary.path(),
+        &fixture_makefile(&fixture_variables(0), &source_rules, fixture_recipes()),
+    );
     let result = run_make(&make, ordinary.path(), "crosstools");
     assert!(
         result.status.success(),
@@ -480,8 +624,39 @@ fn actual_source_gnu_release_is_opt_in_and_keeps_the_legacy_crosstools_closure()
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(
-        sentinels(ordinary.path()),
-        ["broad-toolchain", "features", "toolchain-linklibs"]
+    let ordinary_log = sentinels(ordinary.path());
+    assert!(ordinary_log.contains(&"features".to_owned()));
+    assert!(ordinary_log.contains(&"classic-riscv-linklibs".to_owned()));
+    assert!(ordinary_log.contains(&"normal-toolchain-cpu-runtime".to_owned()));
+    assert!(ordinary_log.contains(&"normal-toolchain-runtime".to_owned()));
+    assert!(ordinary_log.contains(&"normal-cpu-runtime".to_owned()));
+    assert!(!ordinary_log.contains(&"selected-cpu-release-runtime".to_owned()));
+
+    // The configure-selected GNU libatomic target changes its own linklib
+    // closure from core-linklibs to the temporary producer SDK.
+    let release_atomic_sdk = tempfile::tempdir().unwrap();
+    let atomic_fixture_rules = "tools-crosstools-autolibs:\n\
+                                \t@printf 'autolibs\\n' >> $(LOG)\n\
+                                core-linklibs:\n\
+                                \t@printf 'core-linklibs\\n' >> $(LOG)\n";
+    let release_atomic_rule = fixture_makefile(
+        &fixture_variables(1),
+        &release_libatomic_runtime,
+        atomic_fixture_rules,
     );
+    write_fixture(release_atomic_sdk.path(), &release_atomic_rule);
+    let result = run_make(&make, release_atomic_sdk.path(), "gnu-libatomic-linklibs-1");
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(sentinels(release_atomic_sdk.path()), ["autolibs"]);
+
+    let classic_atomic_sdk = tempfile::tempdir().unwrap();
+    let classic_atomic_rule = fixture_makefile(
+        &fixture_variables(0),
+        &classic_libatomic_runtime,
+        atomic_fixture_rules,
+    );
+    write_fixture(classic_atomic_sdk.path(), &classic_atomic_rule);
+    let result = run_make(&make, classic_atomic_sdk.path(), "gnu-libatomic-linklibs-0");
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(sentinels(classic_atomic_sdk.path()), ["core-linklibs"]);
 }

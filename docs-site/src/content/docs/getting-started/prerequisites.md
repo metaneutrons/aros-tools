@@ -84,6 +84,12 @@ verified cache, and 0.17–0.21 GB for the resulting prefix, excluding the three
 input checkouts. These are observed values, not a capacity guarantee; reserve
 more space for retained diagnostics and other profiles.
 
+GNU compiler production additionally needs GNU Make 4.0 or newer, bison,
+flex, patch, pkg-config and Ninja. When the selected host compiler is Clang,
+put `llvm-ar` and `llvm-ranlib` on `PATH` as well. Preflight records these
+tools and retains their directories in the isolated build environment;
+an unrelated directory in your shell's `PATH` is not inherited automatically.
+
 The unchanged upstream AROS build uses a host Python interpreter and the
 lock-selected Mako modules. The producer creates a private import environment
 from verified cache archives; it does not use `pip`, ambient site packages, or

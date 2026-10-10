@@ -10,6 +10,17 @@ pub(super) fn measure_tree_content_at(
     prefix: &[u8],
     budget: &mut TreeMeasurementBudget,
 ) -> std::io::Result<BTreeMap<Vec<u8>, TreeContentEntry>> {
+    let depth = if prefix.is_empty() {
+        0
+    } else {
+        prefix.split(|byte| *byte == b'/').count()
+    };
+    if depth > SOURCE_TREE_MAX_DEPTH {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("tree exceeds the {SOURCE_TREE_MAX_DEPTH}-component depth limit"),
+        ));
+    }
     let directory_before = rfs::fstat(directory)?;
     let directory_identity = identity_from_stat(&directory_before);
     let names = directory_entry_names_with_budget(directory, budget)?;
@@ -27,6 +38,13 @@ pub(super) fn measure_tree_content_at(
             relative.push(b'/');
         }
         relative.extend_from_slice(name_bytes);
+        let entry_depth = relative.split(|byte| *byte == b'/').count();
+        if entry_depth > SOURCE_TREE_MAX_DEPTH {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("tree exceeds the {SOURCE_TREE_MAX_DEPTH}-component depth limit"),
+            ));
+        }
         let child_display = display_path.join(&name);
         let stat_before = rfs::statat(directory, Path::new(&name), AtFlags::SYMLINK_NOFOLLOW)?;
         let prepared = prepared_snapshot(&stat_before)?;
@@ -34,27 +52,48 @@ pub(super) fn measure_tree_content_at(
         let content = match prepared.kind {
             PreparedNodeKind::File => {
                 budget.reserve_regular_file_bytes(prepared.size, &child_display)?;
+                let expected_size = u64::try_from(snapshot.size).map_err(|_| {
+                    std::io::Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "tree file '{}' has a negative size",
+                            child_display.display()
+                        ),
+                    )
+                })?;
+                let read_limit = expected_size
+                    .checked_add(1)
+                    .ok_or_else(|| std::io::Error::other("tree file read limit overflowed"))?;
+                test_pause_point("tree-content-cas-before-file-open");
                 let fd = rfs::openat(
                     directory,
                     Path::new(&name),
-                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                     Mode::empty(),
                 )?;
-                if prepared_snapshot(&rfs::fstat(&fd)?)? != prepared {
+                if tree_node_snapshot(&rfs::fstat(&fd)?)? != snapshot {
                     return Err(std::io::Error::other(format!(
                         "tree file '{}' changed before hashing",
                         child_display.display()
                     )));
                 }
                 let mut file = std::fs::File::from(fd);
-                let digest = sha256_reader(&mut file)?.digest;
-                if prepared_snapshot(&rfs::fstat(&file)?)? != prepared {
+                let measured =
+                    sha256_reader(&mut std::io::Read::by_ref(&mut file).take(read_limit))?;
+                if measured.size != expected_size
+                    || tree_node_snapshot(&rfs::fstat(&file)?)? != snapshot
+                    || tree_node_snapshot(&rfs::statat(
+                        directory,
+                        Path::new(&name),
+                        AtFlags::SYMLINK_NOFOLLOW,
+                    )?)? != snapshot
+                {
                     return Err(std::io::Error::other(format!(
                         "tree file '{}' changed while hashing",
                         child_display.display()
                     )));
                 }
-                Some(digest)
+                Some(measured.digest)
             }
             PreparedNodeKind::Symlink => {
                 let target = rfs::readlinkat(directory, Path::new(&name), Vec::new())?;

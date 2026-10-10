@@ -47,6 +47,8 @@ pub fn render_source_inventory_manifest(graph: &DependencyGraph) -> String {
             ("SUFFIXES", fetch.suffixes.as_str()),
             ("ORIGINS", fetch.origins.as_str()),
             ("CHECKSUMS", fetch.checksums.as_str()),
+            ("NORMALIZATION", fetch.normalization.as_str()),
+            ("NORMALIZED_SIZE", fetch.normalized_size.as_str()),
             ("LOCATION", fetch.location.as_str()),
             ("DESTINATION", fetch.destination.as_str()),
             ("BASE", fetch.base.as_str()),
@@ -142,5 +144,36 @@ fn report_metadata(extension: &str) -> (&'static str, DiagnosticSeverity) {
         // Adding a report without assigning a stable code is an internal
         // contract error. Publication rejects Error-severity coverage entries.
         _ => ("AT1099", Error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_inventory_preserves_explicit_archive_representation() {
+        let mut graph = DependencyGraph::new();
+        let (fetches, skipped) = aros_transpiler::fetch::collect_fetches(
+            "%fetch mmake=fixture-fetch archive=fixture suffixes=tar.gz destination=$(PORTSDIR)/fixture normalization=canonical-tar-gzip-v1 normalized_size=42\n",
+            Path::new("external/fixture"),
+        );
+        assert!(skipped.is_empty());
+        graph.add_fetches(fetches);
+        graph
+            .source_inventory_fetches
+            .push("fixture-fetch".to_owned());
+        let manifest = render_source_inventory_manifest(&graph);
+        assert!(manifest.contains(
+            "set(AROS_SOURCE_INVENTORY_FETCH_0_NORMALIZATION \"canonical-tar-gzip-v1\")"
+        ));
+        assert!(manifest.contains("set(AROS_SOURCE_INVENTORY_FETCH_0_NORMALIZED_SIZE \"42\")"));
+
+        graph.fetches[0].normalization.clear();
+        graph.fetches[0].normalized_size.clear();
+        let manifest = render_source_inventory_manifest(&graph);
+        assert!(manifest.contains("set(AROS_SOURCE_INVENTORY_FETCH_0_NORMALIZATION \"\")"));
+        assert!(manifest.contains("set(AROS_SOURCE_INVENTORY_FETCH_0_NORMALIZED_SIZE \"\")"));
+        assert!(!manifest.contains("canonical-tar-gzip-v1"));
     }
 }

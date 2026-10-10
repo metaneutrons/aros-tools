@@ -101,6 +101,7 @@ run_quality() {
     require_quality_tools
     cargo fmt --all -- --check
     sh scripts/check-architecture.sh
+    python3 scripts/hooks/test-check-staged.py
     python3 scripts/check-environment-contract.py
     python3 -m unittest discover -s scripts -p '*_test.py'
     scripts/release/check-actions-policy.sh

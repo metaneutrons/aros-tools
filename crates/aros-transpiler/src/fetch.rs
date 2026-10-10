@@ -5,11 +5,10 @@
 //! declares an archive, a list of mirrors and an in-tree patch, and the headers
 //! that `libraries/acpica.h` pulls in come from the unpacked result.
 //!
-//! Only the declaration is transpiled. Downloading is left to the tree's own
-//! `aros-fetch`, which handles the closed origin flavours the tree uses
-//! (plain mirrors, GNU, SourceForge, GitHub, and a local `cache://`). Rebuilding
-//! that in CMake would be a lot of surface for no gain; a Rust replacement can
-//! come later without changing the declarations.
+//! Only the declaration is transpiled. The workspace's standalone Rust
+//! `aros-fetch` owns transport, verification, extraction and patching. CMake
+//! forwards explicit checksum and archive-representation declarations without
+//! calculating pins or selecting a policy from a source URL.
 //!
 //! The generated CMake target is never part of `all`. Fetching reaches out to
 //! the network, so it stays an explicit step (`ninja fetch-ports`).
@@ -33,6 +32,12 @@ pub struct FetchDecl {
     /// `checksums=`: exact `filename=sha256:<digest>` archive contracts.
     #[serde(default)]
     pub checksums: String,
+    /// `normalization=`: explicit archive representation, never inferred from its URL.
+    #[serde(default)]
+    pub normalization: String,
+    /// `normalized_size=`: byte size of the declared canonical archive.
+    #[serde(default)]
+    pub normalized_size: String,
     /// `location=`: where the downloaded archive is kept.
     pub location: String,
     /// `destination=`: where it is unpacked.
@@ -329,6 +334,8 @@ fn collect_fetches_with_lookup(
             suffixes: get("suffixes").unwrap_or_else(|| "tar.bz2 tar.gz".to_owned()),
             origins: get("archive_origins").unwrap_or_else(|| ".".to_owned()),
             checksums: get("checksums").unwrap_or_default(),
+            normalization: get("normalization").unwrap_or_default(),
+            normalized_size: get("normalized_size").unwrap_or_default(),
             location: get("location").unwrap_or_default(),
             destination: get("destination").unwrap_or_else(|| ".".to_owned()),
             base: get("base").unwrap_or_default(),
@@ -361,6 +368,8 @@ fn collect_fetches_with_lookup(
             &decl.suffixes,
             &decl.origins,
             &decl.checksums,
+            &decl.normalization,
+            &decl.normalized_size,
             &decl.location,
             &decl.destination,
             &decl.base,
@@ -656,6 +665,31 @@ endif
         let src = "%fetch mmake=z archive=pkg-1 destination=$(PORTSDIR)/z suffixes=\"tar.gz\"\n";
         let (decls, _) = collect_fetches(src, &PathBuf::from("d"));
         assert_eq!(decls[0].suffixes, "tar.gz", "no stray quotes");
+    }
+
+    #[test]
+    fn archive_representation_is_source_declared_not_url_inferred() {
+        let src = "SIZE := 2337668\n%fetch mmake=tree archive=tree suffixes=tar.gz destination=$(PORTSDIR)/tree normalization=canonical-tar-gzip-v1 normalized_size=$(SIZE)\n";
+        let (decls, skipped) = collect_fetches(src, Path::new("external/tree"));
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].normalization, "canonical-tar-gzip-v1");
+        assert_eq!(decls[0].normalized_size, "2337668");
+
+        let plain = "%fetch mmake=tree archive=tree suffixes=tar.gz destination=$(PORTSDIR)/tree archive_origins=https://chromium.googlesource.com/example\n";
+        let (decls, skipped) = collect_fetches(plain, Path::new("external/tree"));
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert!(decls[0].normalization.is_empty());
+        assert!(decls[0].normalized_size.is_empty());
+
+        for field in ["normalization", "normalized_size"] {
+            let src = format!(
+                "%fetch mmake=tree archive=tree destination=$(PORTSDIR)/tree {field}=$(UNKNOWN)\n"
+            );
+            let (decls, skipped) = collect_fetches(&src, Path::new("external/tree"));
+            assert!(decls.is_empty());
+            assert_eq!(skipped, ["external/tree: tree"]);
+        }
     }
 
     #[test]

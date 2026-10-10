@@ -752,6 +752,8 @@ impl DependencyGraph {
         }
         self.copy_directories
             .retain(|declaration| is_selected(&declaration.name));
+        self.lifted_copy_aliases
+            .retain(|owner, action| is_selected(owner) && is_selected(action));
         self.icon_targets.retain(|name, _| is_selected(name));
         self.icons
             .retain(|declaration| is_selected(&declaration.mmake));

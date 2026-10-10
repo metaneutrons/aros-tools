@@ -155,6 +155,14 @@ pub struct NativeInvocationSelection<'a> {
     pub parser_origins: &'a BTreeMap<String, BTreeSet<String>>,
 }
 
+/// Shared sealed source invocation facts, independent of boot/media contracts.
+#[derive(Clone, Copy)]
+pub struct NativeInvocationPolicy<'a> {
+    pub profile: &'a str,
+    pub projection: Option<&'a str>,
+    pub inputs: &'a [aros_common::native_build_contract::NativeBuildInput],
+}
+
 impl NativeOwnerProjection {
     /// Exact text-expansion evidence for a declaration in this captured
     /// corpus. This is provenance only, never permission to omit an edge or
@@ -187,13 +195,44 @@ impl NativeOwnerProjection {
         context: &TargetContext,
         excluded_paths: &BTreeSet<String>,
     ) -> Result<Option<Self>, String> {
-        let Some(path) = &native.contract.metamake_projection else {
+        Self::load_invocation(
+            root,
+            NativeInvocationPolicy {
+                profile: &native.contract.profile,
+                projection: native.contract.metamake_projection.as_deref(),
+                inputs: &native.contract.inputs,
+            },
+            files,
+            host,
+            context,
+            excluded_paths,
+        )
+    }
+
+    /// Validate the same closed source-owner proof for a build or consumer.
+    ///
+    /// # Errors
+    /// Rejects incomplete discovery, unsealed policy, selector/configuration
+    /// ambiguity, changed inputs or resource excess. Does not prove a build.
+    pub fn load_invocation(
+        root: &Path,
+        invocation: NativeInvocationPolicy<'_>,
+        files: &[PathBuf],
+        host: &str,
+        context: &TargetContext,
+        excluded_paths: &BTreeSet<String>,
+    ) -> Result<Option<Self>, String> {
+        let Some(path) = invocation.projection else {
             return Ok(None);
         };
-        let sealed = sealed_inputs(native);
+        let sealed = invocation
+            .inputs
+            .iter()
+            .map(|input| (input.path.clone(), input.sha256.to_string()))
+            .collect();
         let mut snapshots = BTreeMap::new();
-        let (bytes, policy) = load_policy(root, path, native, &sealed, &mut snapshots)?;
-        validate_policy_identity(&policy, &native.contract.profile, files.len())?;
+        let (bytes, policy) = load_policy(root, path, invocation.profile, &sealed, &mut snapshots)?;
+        validate_policy_identity(&policy, invocation.profile, files.len())?;
         load_evidence_sources(root, &policy, &sealed, &mut snapshots)?;
         let project = load_project(root, &policy, &sealed, &mut snapshots)?;
         let (globals, absent) = load_globals(&policy, &project, host, context)?;
@@ -410,26 +449,17 @@ fn partition_uninvoked_failures(
     excluded
 }
 
-fn sealed_inputs(native: &LoadedNativeBuildContract) -> BTreeMap<String, String> {
-    native
-        .contract
-        .inputs
-        .iter()
-        .map(|input| (input.path.clone(), input.sha256.to_string()))
-        .collect()
-}
-
 fn load_policy(
     root: &Path,
     path: &str,
-    native: &LoadedNativeBuildContract,
+    profile: &str,
     sealed: &BTreeMap<String, String>,
     snapshots: &mut BTreeMap<String, String>,
 ) -> Result<(Vec<u8>, Policy), String> {
     let bytes = read_snapshot(root, path, 64 * 1024, snapshots)?;
     require_seal(path, &bytes, sealed)?;
     let policy: Policy = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    if policy.profile != native.contract.profile {
+    if policy.profile != profile {
         return Err("native MetaMake policy profile differs from native build contract".into());
     }
     Ok((bytes, policy))

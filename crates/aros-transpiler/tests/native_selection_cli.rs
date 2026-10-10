@@ -10,6 +10,9 @@ use std::{
     process::{Command, Output},
 };
 
+#[path = "native_selection/consumer.rs"]
+mod native_consumer;
+
 fn bind_optional_meta_edge(fixture: &mut Fixture, recipe: &str) {
     bind_optional_meta_contract_edge(
         fixture,
@@ -340,6 +343,105 @@ fn native_metamake_projection_prefers_src_and_keeps_direct_fragment_at_process_b
         .output()
         .with_extension("source-inventory.cmake")
         .exists());
+}
+
+#[test]
+fn native_recursive_copy_cycle_keeps_private_body_source_bound_and_revalidated() {
+    let mut fixture = Fixture::new();
+    let copy_source = fixture.root.path().join("copy-source");
+    fs::create_dir_all(&copy_source).unwrap();
+    fs::write(copy_source.join("fixture.h"), "#define FIXTURE_COPY 1\n").unwrap();
+    fixture.append(
+        "#MM fixture-kernel : fixture-copy\n\
+         #MM fixture-copy : fixture-kernel\n\
+         %copy_dir_recursive mmake=fixture-copy src=$(SRCDIR)/copy-source dst=$(GENDIR)/fixture-copy\n",
+    );
+    add_unowned_literal_object_failure(&fixture, None);
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src", "extra/mmakefile.src"]);
+
+    let preparation = fixture.invoke(true, &["--source-inventory-only"]);
+    assert!(
+        preparation.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preparation.stderr)
+    );
+    assert!(!fixture.output().exists());
+    assert!(fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .is_file());
+
+    let result = fixture.invoke(true, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let generated = fs::read_to_string(fixture.output()).unwrap();
+    assert_eq!(
+        generated.matches("aros_copy_dir_recursive(").count(),
+        1,
+        "{generated}"
+    );
+    let copy_body = generated
+        .split("aros_copy_dir_recursive(")
+        .nth(1)
+        .expect("the selected copy keeps its CMake producer body")
+        .split(')')
+        .next()
+        .unwrap();
+    assert!(
+        copy_body.contains("NAME \"aros-meta-copy-action-"),
+        "{copy_body}"
+    );
+    assert!(
+        copy_body.contains("SOURCE \"${AROS_SOURCE_DIR}/copy-source\""),
+        "{copy_body}"
+    );
+    assert!(
+        copy_body.contains("DESTINATION \"${AROS_BUILD_DIR}/gen/fixture-copy\""),
+        "{copy_body}"
+    );
+
+    let invocation_path = fixture.output().with_extension("native-invocation.json");
+    let invocation: Value = serde_json::from_slice(&fs::read(&invocation_path).unwrap()).unwrap();
+    let evidence = &invocation["native_owner_projection"];
+    assert!(
+        evidence["capability_scope_proven"].as_bool().unwrap(),
+        "{invocation}"
+    );
+    assert_eq!(
+        evidence["unbound_native_endpoints"],
+        json!([]),
+        "{invocation}"
+    );
+    let excluded = invocation["source_uninvoked_capability_failures"]
+        .as_array()
+        .unwrap();
+    assert_eq!(excluded.len(), 1, "{invocation}");
+    assert!(excluded[0]["diagnostic"]
+        .to_string()
+        .contains("exactly one source prerequisite"));
+    assert!(excluded[0]["invoking_recipes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("extra/mmakefile.src")));
+
+    fs::remove_file(fixture.output()).unwrap();
+    fs::remove_file(&invocation_path).unwrap();
+    let recipe = fixture.root.path().join("mmakefile.src");
+    let original = fs::read_to_string(&recipe).unwrap();
+    let tampered = original.replace("copy-source", "changed-copy-source");
+    assert_ne!(tampered, original, "copy declaration was not changed");
+    fs::write(recipe, tampered).unwrap();
+    assert_failure_at_stage(
+        &fixture.invoke(true, &[]),
+        &fixture.output(),
+        "mmakefile.src",
+        "graph_validation",
+    );
+    assert!(!invocation_path.exists());
 }
 
 #[test]
@@ -3033,7 +3135,10 @@ $(GENCTBL) : genctbl.c $(GENMODULE_DEPS)
     .unwrap();
     fs::write(
         fixture.root.path().join("Makefile.in"),
-        r"$(GENCTBL): $(SRCDIR)/tools/genctbl/genctbl.c
+        r"TOP := @AROS_BUILDDIR@
+SRCDIR := @SRCDIR@
+
+$(GENCTBL): $(SRCDIR)/tools/genctbl/genctbl.c
 	@$(ECHO) Building $(notdir $@)...
 	@$(CALL) $(MAKE) $(MKARGS) -C $(SRCDIR)/tools/genctbl SRCDIR=$(SRCDIR) TOP=$(TOP)
 ",

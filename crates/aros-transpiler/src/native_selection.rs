@@ -10,6 +10,107 @@ use aros_transpiler::{DependencyGraph, TargetContext};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+#[cfg(test)]
+#[path = "native_consumer_selection_tests.rs"]
+mod native_consumer_selection_tests;
+
+pub enum LoadedNativeSelection {
+    Build(Box<aros_common::native_build_contract::LoadedNativeBuildContract>),
+    Consumer(Box<aros_common::native_consumer_contract::LoadedNativeConsumerContract>),
+}
+
+/// Borrow shared invocation facts without manufacturing boot/package fields.
+pub struct NativeInvocationRef<'a> {
+    pub profile: &'a str,
+    pub source_baseline: &'a str,
+    pub inputs: &'a [aros_common::native_build_contract::NativeBuildInput],
+    pub host_file_generators: &'a Vec<aros_common::native_host_generator::NativeHostFileGenerator>,
+    pub make_include_bindings: &'a std::collections::BTreeMap<String, String>,
+    pub generated_make_templates: &'a std::collections::BTreeMap<
+        String,
+        aros_common::native_make_template::GeneratedMakeTemplateBinding,
+    >,
+    pub kernel_compiler_role: Option<&'a str>,
+    pub metamake_projection: Option<&'a str>,
+    pub optional_meta_dependencies:
+        &'a [aros_common::native_build_contract::NativeOptionalMetaDependency],
+    pub abi: &'a aros_common::native_build_contract::NativeBuildAbi,
+}
+
+impl LoadedNativeSelection {
+    pub fn invocation(&self) -> NativeInvocationRef<'_> {
+        macro_rules! view {
+            ($contract:expr, $projection:expr) => {{
+                let contract = $contract;
+                NativeInvocationRef {
+                    profile: &contract.profile,
+                    source_baseline: &contract.source_baseline,
+                    inputs: &contract.inputs,
+                    host_file_generators: &contract.host_file_generators,
+                    make_include_bindings: &contract.make_include_bindings,
+                    generated_make_templates: &contract.generated_make_templates,
+                    kernel_compiler_role: contract.kernel_compiler_role.as_deref(),
+                    metamake_projection: $projection,
+                    optional_meta_dependencies: &contract.optional_meta_dependencies,
+                    abi: &contract.abi,
+                }
+            }};
+        }
+        match self {
+            Self::Build(loaded) => view!(
+                &loaded.contract,
+                loaded.contract.metamake_projection.as_deref()
+            ),
+            Self::Consumer(loaded) => view!(
+                &loaded.contract,
+                Some(loaded.contract.metamake_projection.as_str())
+            ),
+        }
+    }
+
+    pub const fn sha256(&self) -> &aros_common::Sha256Digest {
+        match self {
+            Self::Build(loaded) => &loaded.sha256,
+            Self::Consumer(loaded) => &loaded.sha256,
+        }
+    }
+
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Build(_) => "build",
+            Self::Consumer(_) => "consumer",
+        }
+    }
+
+    pub fn make_variables_for_host(
+        &self,
+        host: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        match self {
+            Self::Build(loaded) => loaded.contract.make_variables_for_host(host),
+            Self::Consumer(loaded) => loaded.contract.make_variables_for_host(host),
+        }
+    }
+
+    pub const fn build_contract(
+        &self,
+    ) -> Option<&aros_common::native_build_contract::NativeBuildContract> {
+        match self {
+            Self::Build(loaded) => Some(&loaded.contract),
+            Self::Consumer(_) => None,
+        }
+    }
+
+    pub fn roots(&self, graph: &DependencyGraph, context: &TargetContext) -> Result<Vec<String>> {
+        match self {
+            Self::Build(loaded) => graph.native_contract_roots(&loaded.contract, context),
+            // The ordinary strict closure and source-owner proof below verify
+            // these literal roots. No guessed substitute endpoint is allowed.
+            Self::Consumer(loaded) => Ok(loaded.contract.roots.clone()),
+        }
+    }
+}
+
 pub fn bind_architecture_effects(
     projection: &aros_transpiler::native_owner_projection::NativeOwnerProjection,
     root: &Path,
@@ -32,21 +133,44 @@ pub fn bind_architecture_effects(
                     } if owner == mainmmake && candidate_tag == tag)
             }).cloned());
         }
-        let verified = projection.verify_arch_endpoint_effects(root, &proof).and_then(|()| {
-            if let ArchEndpointEffectData::ArchModuleObjects { mainmmake, tag, directory, module_sources } = &effect.data {
-                let base = graph.targets.contains_key(mainmmake)
-                    || graph.inventory_targets.iter().any(|target| &target.mmake_name == mainmmake);
-                let expected: std::collections::BTreeSet<_> = module_sources.iter().collect();
-                let paired = graph.arch_sources.get(mainmmake).is_some_and(|sources| sources.iter().any(|source| {
-                    &source.tag == tag && &source.dir == directory
-                        && source.files.iter().collect::<std::collections::BTreeSet<_>>() == expected
-                }));
-                if !base || !paired {
-                    return Err("architecture objects lack their exact module/source compilation binding".into());
+        let verified = projection
+            .verify_arch_endpoint_effects(root, &proof)
+            .and_then(|()| {
+                if let ArchEndpointEffectData::ArchModuleObjects {
+                    mainmmake,
+                    tag,
+                    directory,
+                    module_sources,
+                } = &effect.data
+                {
+                    let base = graph.targets.contains_key(mainmmake)
+                        || graph
+                            .inventory_targets
+                            .iter()
+                            .any(|target| &target.mmake_name == mainmmake);
+                    let expected: std::collections::BTreeSet<_> = module_sources.iter().collect();
+                    let paired = graph.arch_sources.get(mainmmake).is_some_and(|sources| {
+                        sources.iter().any(|source| {
+                            &source.tag == tag
+                                && &source.dir == directory
+                                && source
+                                    .files
+                                    .iter()
+                                    .collect::<std::collections::BTreeSet<_>>()
+                                    == expected
+                        })
+                    });
+                    if !base || !paired {
+                        return Err(format!(
+                        "architecture objects lack their exact module/source compilation binding \
+                         (module={mainmmake}, module_exists={base}, source_group_matches={paired}, \
+                         arch={tag}, directory={directory}, source_count={})",
+                        module_sources.len()
+                    ));
+                    }
                 }
-            }
-            Ok(())
-        });
+                Ok(())
+            });
         match verified {
             Ok(()) => graph.arch_endpoint_effects.push(effect.clone()),
             Err(message) => diagnostics.push(
@@ -120,36 +244,69 @@ pub fn append_unscoped_diagnostics(
 pub fn load_native_selection(
     args: &Args,
     context: Option<&TargetContext>,
-) -> Result<Option<aros_common::native_build_contract::LoadedNativeBuildContract>> {
-    let Some(name) = &args.native_profile else {
+) -> Result<Option<LoadedNativeSelection>> {
+    let Some(name) = args
+        .native_profile
+        .as_ref()
+        .or(args.native_consumer_profile.as_ref())
+    else {
         return Ok(None);
     };
     let invalid = |message: &str| ArosError::Configuration {
         file: "native profile selection".into(),
         message: message.into(),
     };
-    let profiles =
-        aros_common::TargetProfile::load_from_file(&args.source_dir.join("aros-targets.toml"))?;
+    let root = args
+        .source_dir
+        .canonicalize()
+        .map_err(|_| invalid("cannot resolve the selected source root"))?;
+    let (_, bytes) =
+        aros_common::measure_regular_file_bounded(&root.join("aros-targets.toml"), 1024 * 1024)?
+            .ok_or_else(|| invalid("source target declarations are absent"))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| invalid("source target declarations are not UTF-8"))?;
+    let profiles = aros_common::TargetProfile::parse_config(text, "aros-targets.toml")?.targets;
     let profile = profiles
         .iter()
         .find(|profile| &profile.name == name)
         .ok_or_else(|| invalid("native profile is not declared by the selected source"))?;
-    let relative = profile
-        .native_build_contract
+    let (loaded, expected) = if args.native_consumer_profile.is_some() {
+        let relative = profile
+            .native_consumer_contract
+            .as_ref()
+            .ok_or_else(|| invalid("selected source profile has no native consumer contract"))?;
+        (
+            LoadedNativeSelection::Consumer(Box::new(
+                aros_common::native_consumer_contract::load_bound_native_consumer_contract(
+                    &args.source_dir,
+                    Path::new(relative),
+                    profile,
+                )?,
+            )),
+            &args.native_consumer_contract_sha256,
+        )
+    } else {
+        let relative = profile
+            .native_build_contract
+            .as_ref()
+            .ok_or_else(|| invalid("selected source profile has no native build contract"))?;
+        (
+            LoadedNativeSelection::Build(Box::new(
+                aros_common::native_build_contract::load_bound_native_build_contract(
+                    &args.source_dir,
+                    Path::new(relative),
+                    profile,
+                )?,
+            )),
+            &args.native_contract_sha256,
+        )
+    };
+    if expected
         .as_ref()
-        .ok_or_else(|| invalid("selected source profile has no native build contract"))?;
-    let loaded = aros_common::native_build_contract::load_bound_native_build_contract(
-        &args.source_dir,
-        Path::new(relative),
-        profile,
-    )?;
-    if args
-        .native_contract_sha256
-        .as_ref()
-        .is_some_and(|digest| digest != loaded.sha256.as_str())
+        .is_some_and(|digest| digest != loaded.sha256().as_str())
     {
         return Err(invalid(
-            "native build contract digest differs from the caller binding",
+            "native contract digest differs from the caller binding",
         ));
     }
     let context = context.ok_or_else(|| invalid("native selection requires explicit selectors"))?;
@@ -157,7 +314,7 @@ pub fn load_native_selection(
         .transpiler
         .as_ref()
         .ok_or_else(|| invalid("native source profile requires explicit transpiler selectors"))?;
-    if context.cpu.as_deref() != Some(loaded.contract.abi.source_cpu.as_str())
+    if context.cpu.as_deref() != Some(loaded.invocation().abi.source_cpu.as_str())
         || context.platform.as_deref() != Some(profile.platform.as_str())
         || context.family.as_deref() != Some(selectors.family.as_str())
         || context.variant.as_deref() != Some(selectors.variant.as_str())

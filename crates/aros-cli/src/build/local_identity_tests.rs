@@ -1,6 +1,24 @@
 use super::*;
 use std::fs;
 
+#[test]
+fn native_executable_identity_streams_large_debug_binaries_under_a_work_ceiling() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("debug-tool");
+    let file = fs::File::create(&path).unwrap();
+    // Sparse fixture crosses the exact ceiling that rejected the CI binary.
+    file.set_len(256 * 1024 * 1024 + 1).unwrap();
+    drop(file);
+    let expected = aros_common::sha256_reader(&mut fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(executable_digest(&path).unwrap(), expected.digest);
+    let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_len(MAX_EXECUTABLE_BYTES + 1).unwrap();
+    assert!(executable_digest(&path)
+        .unwrap_err()
+        .to_string()
+        .contains("hash limit"));
+}
+
 fn write_configuration_fixture(build: &Path, cache: &str) {
     fs::create_dir_all(build.join("CMakeFiles")).unwrap();
     fs::write(build.join("CMakeCache.txt"), cache).unwrap();
@@ -82,6 +100,102 @@ fn local_native_stamp_refuses_symlink_without_mutating_target() {
     std::os::unix::fs::symlink(&sentinel, temp.path().join(STAMP_NAME)).unwrap();
     assert!(identity().bind_build_tree(temp.path()).is_err());
     assert_eq!(fs::read(sentinel).unwrap(), b"must remain unchanged");
+}
+
+#[cfg(unix)]
+#[test]
+fn local_native_consumer_stamp_binds_reloaded_contract_and_inputs() {
+    use std::process::Command;
+
+    let (toolchain_root, _, _) = crate::build::tests::local_compiler_variables_fixture();
+    let (source_root, profile, _) = crate::build::tests::native_consumer_source_fixture();
+    let selected = NativeContractSelection::load(source_root.path(), &profile)
+        .unwrap()
+        .unwrap();
+
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(source_root.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.invalid"]);
+    git(&[
+        "add",
+        "--",
+        "aros-targets.toml",
+        "consumer.json",
+        "policy.json",
+    ]);
+    git(&["commit", "-m", "fixture source"]);
+
+    let engine = tempfile::tempdir().unwrap();
+    fs::write(engine.path().join("AROS.cmake"), b"fixture engine").unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    for name in TOOL_NAMES {
+        fs::write(tools.path().join(name), format!("fixture {name}")).unwrap();
+    }
+    let executable = std::env::current_exe().unwrap();
+    let mut configure = Command::new(&executable);
+    configure
+        .arg("-S")
+        .arg(engine.path())
+        .arg("-B")
+        .arg(source_root.path().join("build/fixture"))
+        .arg(format!("-DCMAKE_MAKE_PROGRAM={}", executable.display()))
+        .arg(format!(
+            "-DAROS_COMPILER_CACHE_EXECUTABLE={}",
+            executable.display()
+        ));
+    for (key, value) in selected.cmake_variables().unwrap() {
+        configure.arg(format!("-D{key}={value}"));
+    }
+
+    let build_tree = source_root.path().join("build/fixture");
+    fs::create_dir_all(&build_tree).unwrap();
+    let identity = LocalNativeInputs::capture(&LocalNativeCapture {
+        root: source_root.path(),
+        preset: "fixture",
+        profile: &profile,
+        toolchain_root: toolchain_root.path(),
+        engine: engine.path(),
+        tools: tools.path(),
+        configure: &configure,
+        selected_contract: &selected,
+    })
+    .unwrap();
+    assert_eq!(identity.native_contract_sha256, *selected.sha256());
+    assert!(identity
+        .configure_arguments
+        .iter()
+        .any(|argument| { argument.starts_with("-DAROS_NATIVE_CONSUMER_CONTRACT_SHA256=") }));
+    identity.bind_build_tree(&build_tree).unwrap();
+    let stamp_path = build_tree.join(STAMP_NAME);
+    let stamp_before = fs::read(&stamp_path).unwrap();
+
+    fs::write(source_root.path().join("policy.json"), b"changed policy").unwrap();
+    assert!(LocalNativeInputs::capture(&LocalNativeCapture {
+        root: source_root.path(),
+        preset: "fixture",
+        profile: &profile,
+        toolchain_root: toolchain_root.path(),
+        engine: engine.path(),
+        tools: tools.path(),
+        configure: &configure,
+        selected_contract: &selected,
+    })
+    .is_err());
+    assert_eq!(fs::read(stamp_path).unwrap(), stamp_before);
 }
 
 #[test]
