@@ -38,6 +38,9 @@ pub(super) struct Fixture {
     recipe: Recipe,
     source_lock: SourceLock,
     profile: Profile,
+    compiler_checkpoint: PathBuf,
+    compiler_checkpoint_receipt_path: String,
+    compiler_checkpoint_bytes: &'static [u8],
     pub(super) identity: Identity,
     phase_receipt_digests: [Sha256Digest; 6],
     candidate_receipt_digest: Option<Sha256Digest>,
@@ -49,6 +52,14 @@ impl Fixture {
     }
 
     pub(super) fn new_for_host(host: &'static str) -> Self {
+        Self::new_for_compiler_family(host, false)
+    }
+
+    pub(super) fn new_gnu_for_host(host: &'static str) -> Self {
+        Self::new_for_compiler_family(host, true)
+    }
+
+    fn new_for_compiler_family(host: &'static str, gnu: bool) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let work = create_canonical_dir(&temporary.path().join("work"));
         let output = create_canonical_dir(&temporary.path().join("output"));
@@ -59,20 +70,44 @@ impl Fixture {
         fs::create_dir(&lifecycle).unwrap();
         fs::create_dir(&receipts).unwrap();
         fs::create_dir(&stage).unwrap();
-        let old_llvm_config = stage.join("toolchain/bin/llvm-config");
-        fs::create_dir_all(old_llvm_config.parent().unwrap()).unwrap();
-        fs::write(&old_llvm_config, b"synthetic pre-cleanup llvm-config\n").unwrap();
-        write_candidate(&candidate);
 
-        let source_lock_bytes = fixture_source_lock();
-        let profiles_bytes = fixture_profiles();
+        let source_lock_bytes = if gnu {
+            fixture_gnu_source_lock()
+        } else {
+            fixture_source_lock()
+        };
+        let profiles_bytes = if gnu {
+            fixture_gnu_profiles()
+        } else {
+            fixture_profiles()
+        };
         let recipe = Recipe::parse(&fixture_recipe(&source_lock_bytes, &profiles_bytes)).unwrap();
         let source_lock = SourceLock::parse(&source_lock_bytes).unwrap();
         let profile = Profiles::parse(&profiles_bytes)
             .unwrap()
-            .select("pc-x86_64")
+            .select(if gnu { "rv32-aros" } else { "pc-x86_64" })
             .unwrap()
             .clone();
+        let (compiler_checkpoint_receipt_path, compiler_checkpoint_bytes) = if gnu {
+            (
+                "toolchain/bin/fixture-gcc-checkpoint",
+                b"synthetic pre-cleanup GNU compiler checkpoint\n" as &'static [u8],
+            )
+        } else {
+            (
+                "toolchain/bin/llvm-config",
+                b"synthetic pre-cleanup llvm-config\n" as &'static [u8],
+            )
+        };
+        let compiler_checkpoint_receipt_path = compiler_checkpoint_receipt_path.to_owned();
+        let compiler_checkpoint = stage.join(&compiler_checkpoint_receipt_path);
+        fs::create_dir_all(compiler_checkpoint.parent().unwrap()).unwrap();
+        fs::write(&compiler_checkpoint, compiler_checkpoint_bytes).unwrap();
+        if gnu {
+            write_gnu_candidate(&candidate, &source_lock, &profile);
+        } else {
+            write_candidate(&candidate);
+        }
         let tools_commit = git_id(TOOLS_COMMIT);
         let identity = Identity {
             recipe_sha256: recipe.sha256().clone(),
@@ -96,6 +131,9 @@ impl Fixture {
             recipe,
             source_lock,
             profile,
+            compiler_checkpoint,
+            compiler_checkpoint_receipt_path,
+            compiler_checkpoint_bytes,
             identity,
             phase_receipt_digests: std::array::from_fn(|_| sha256_bytes(b"unset phase")),
             candidate_receipt_digest: None,
@@ -155,19 +193,13 @@ impl Fixture {
     }
 
     pub(super) fn remove_old_compiler_checkpoint(&self) {
-        fs::remove_file(
-            self.output
-                .join(".aros-native-toolchain-stage/toolchain/bin/llvm-config"),
-        )
-        .unwrap();
+        fs::remove_file(&self.compiler_checkpoint).unwrap();
     }
 
     pub(super) fn write_phase_chain(&mut self) {
         let directory = self.receipts_dir();
         let identity =
             serde_json::to_value(super::owned_identity(&self.identity).unwrap()).unwrap();
-        let collector_path = self.candidate().join("bin/aros-collect");
-        let collector_bytes = fs::read(&collector_path).unwrap();
         for (index, phase) in PHASES.iter().enumerate() {
             let output_root = if index < 3 {
                 self.work.join("native-lifecycle")
@@ -177,22 +209,27 @@ impl Fixture {
                 self.output.join(".aros-native-toolchain-stage")
             };
             let outputs = if index == 3 {
-                let bytes = b"synthetic pre-cleanup llvm-config\n";
                 vec![serde_json::to_value(PhaseOutput {
-                    path: "toolchain/bin/llvm-config".into(),
+                    path: self.compiler_checkpoint_receipt_path.clone(),
                     kind: "file".into(),
-                    sha256: sha256_bytes(bytes),
-                    size: u64::try_from(bytes.len()).unwrap(),
+                    sha256: sha256_bytes(self.compiler_checkpoint_bytes),
+                    size: u64::try_from(self.compiler_checkpoint_bytes.len()).unwrap(),
                 })
                 .unwrap()]
             } else if index == 5 {
-                vec![serde_json::to_value(PhaseOutput {
-                    path: "toolchain/bin/aros-collect".into(),
-                    kind: "file".into(),
-                    sha256: sha256_bytes(&collector_bytes),
-                    size: u64::try_from(collector_bytes.len()).unwrap(),
-                })
-                .unwrap()]
+                crate::native_family::collector_outputs(&self.profile)
+                    .into_iter()
+                    .map(|relative| {
+                        let bytes = fs::read(self.candidate().join(&relative)).unwrap();
+                        serde_json::to_value(PhaseOutput {
+                            path: format!("toolchain/{relative}"),
+                            kind: "file".into(),
+                            sha256: sha256_bytes(&bytes),
+                            size: u64::try_from(bytes.len()).unwrap(),
+                        })
+                        .unwrap()
+                    })
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -583,6 +620,70 @@ fn write_candidate(candidate: &Path) {
     symlink("aros-collect", candidate.join("bin/collect-aros32")).unwrap();
 }
 
+fn write_gnu_candidate(candidate: &Path, source_lock: &SourceLock, profile: &Profile) {
+    // These inert files satisfy the same GNU layout contract as package tests;
+    // no fixture executable is invoked by candidate or package read-back.
+    fs::create_dir_all(candidate.join("bin")).unwrap();
+    fs::create_dir_all(candidate.join("libexec")).unwrap();
+    fs::write(
+        candidate.join("fixture-input"),
+        b"synthetic GNU candidate payload\n",
+    )
+    .unwrap();
+
+    let roles = json!({
+        "c": "bin/fixture-c",
+        "cxx": "bin/fixture-cxx",
+        "assembler": "bin/fixture-as",
+        "linker": "bin/fixture-ld",
+        "archive": "bin/fixture-ar",
+        "ranlib": "bin/fixture-ranlib",
+        "strip": "bin/fixture-strip",
+        "collector": "libexec/fixture-collect"
+    });
+    for relative in [
+        "bin/fixture-c",
+        "bin/fixture-cxx",
+        "bin/fixture-ld",
+        "bin/fixture-ar",
+        "bin/fixture-ranlib",
+        "bin/fixture-strip",
+        "libexec/fixture-collect",
+    ] {
+        write_file(
+            candidate,
+            relative,
+            b"synthetic GNU tool fixture; never execute\n",
+            0o755,
+        );
+    }
+    symlink("fixture-c", candidate.join("bin/fixture-as")).unwrap();
+
+    let compiler = crate::package_identity::compiler_identity_for_format(
+        source_lock,
+        profile,
+        crate::package::PackageFormat::CompilerFamilyV2,
+    )
+    .unwrap();
+    let tool_layout = serde_json::to_vec_pretty(&json!({
+        "schema": "aros-toolchain-tools-v1",
+        "compiler": compiler,
+        "target_triple": profile.target_triple(),
+        "tools": roles
+    }))
+    .unwrap();
+    fs::write(candidate.join("toolchain-tools.json"), tool_layout).unwrap();
+
+    for relative in crate::native_family::collector_outputs(profile) {
+        if relative == "toolchain-tools.json" {
+            continue;
+        }
+        let path = candidate.join(&relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"synthetic GNU collector output; never execute\n").unwrap();
+    }
+}
+
 fn write_file(root: &Path, relative: &str, bytes: &[u8], mode: u32) {
     let path = root.join(relative);
     fs::write(&path, bytes).unwrap();
@@ -635,6 +736,39 @@ pub(super) fn fixture_profiles() -> Vec<u8> {
             "platform": "pc",
             "float_abi": "",
             "capabilities": ["c", "cxx", "standalone-collector"]
+        }]
+    }))
+    .unwrap()
+}
+
+pub(super) fn fixture_gnu_source_lock() -> Vec<u8> {
+    include_bytes!("../../tests/fixtures/gnu-source-lock-v3.json").to_vec()
+}
+
+pub(super) fn fixture_gnu_profiles() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "schema": "aros-toolchain-profiles-v2",
+        "family": "gnu",
+        "upstream_commit": SOURCE_COMMIT,
+        "profiles": [{
+            "name": "rv32-aros",
+            "configure_target": "fixture-rv32",
+            "upstream_output_target": "fixture-rv32",
+            "target_triple": "riscv-aros",
+            "cpu": "riscv",
+            "platform": "fixture",
+            "float_abi": "ilp32f",
+            "capabilities": ["c", "libgcc", "standalone-collector"],
+            "target": {
+                "schema": "aros-riscv-target-v1",
+                "isa": "rv32imafc",
+                "abi": "ilp32f",
+                "code_model": "medany",
+                "architecture": "rv32i2p1_m2p0_a2p1_f2p2_c2p0",
+                "unaligned_access": false,
+                "atomic_abi": 0,
+                "x3_reg_usage": 0
+            }
         }]
     }))
     .unwrap()

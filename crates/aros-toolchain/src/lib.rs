@@ -73,6 +73,8 @@ pub mod release_index_v2_readback;
 pub mod release_index_v2_writer;
 pub mod release_inputs;
 pub mod repackage;
+#[cfg(unix)]
+pub mod repackage_v2;
 pub mod snapshot;
 #[cfg(unix)]
 mod source_audit;

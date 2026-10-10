@@ -41,6 +41,8 @@ pub use environment_plan::{
     derive_native_compatibility_environment_identity, NativeCompatibilityEnvironmentIdentity,
 };
 #[cfg(test)]
+pub(crate) use execution::fixture_riscv_elf;
+#[cfg(test)]
 pub(crate) use execution::receipt_readback_tests;
 pub use execution::{
     execute_native_compatibility, execute_native_compatibility_with_export,

@@ -1563,7 +1563,7 @@ fn amend_configure_to_log_arguments(request: &mut NativeCompatibilityRequest) {
     request.upstream_source_commit = GitObjectId::try_from(commit).unwrap();
 }
 
-fn riscv_elf(
+pub fn riscv_elf(
     class: elf::Class,
     symbol: &str,
     target: &TargetContract,

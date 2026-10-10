@@ -43,7 +43,14 @@ fn guarded_package() -> GuardedPackage {
 }
 
 pub(super) fn guarded_package_for_host(host: &'static str) -> GuardedPackage {
-    let mut fixture = Fixture::new_for_host(host);
+    guarded_package_from_fixture(Fixture::new_for_host(host))
+}
+
+pub(super) fn guarded_gnu_package_for_host(host: &'static str) -> GuardedPackage {
+    guarded_package_from_fixture(Fixture::new_gnu_for_host(host))
+}
+
+fn guarded_package_from_fixture(mut fixture: Fixture) -> GuardedPackage {
     fixture.remove_old_compiler_checkpoint();
     fixture.persist();
 

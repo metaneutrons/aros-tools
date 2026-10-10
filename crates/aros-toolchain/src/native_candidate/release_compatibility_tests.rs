@@ -99,7 +99,13 @@ fn prepare_compatibility(
         let directory = root.path().join(artifact.asset());
         fs::create_dir(&directory).unwrap();
 
-        let mut fixture = ReceiptFixture::with_cmake_build_required(false, false);
+        let mut fixture = ReceiptFixture::with_cmake_build_required(
+            matches!(
+                package.manifest.compiler_identity().unwrap(),
+                ArosCompilerIdentity::Gnu { .. }
+            ),
+            false,
+        );
         bind_fixture_to_indexed_package(
             &mut fixture,
             package,
@@ -149,7 +155,11 @@ fn bind_fixture_to_indexed_package(
     fixture.host = artifact.host().to_owned();
     fixture.profiles = profiles.clone();
     fixture.profile = profile;
-    fixture.source_preset = None;
+    fixture.source_preset = if matches!(fixture.compiler, ArosCompilerIdentity::Gnu { .. }) {
+        Some("source-rv32-preset".into())
+    } else {
+        None
+    };
     fixture.cmake_build_required = false;
     fixture.upstream_commit = profiles.upstream_commit().clone();
     fixture.upstream_tree = upstream_tree.clone();
@@ -159,22 +169,42 @@ fn write_and_verify_standalone(
     directory: &Path,
     compiler: &ArosCompilerIdentity,
 ) -> crate::compatibility::StandaloneOutputReport {
-    let objects = [
-        (
-            "x86_64-unknown-aros",
-            "c-x86_64.o",
-            "cxx-x86_64.o",
-            fixture_elf64("__TOOLCHAIN_LIST__", 62),
-            fixture_elf64("__INIT_ARRAY_LIST__", 62),
-        ),
-        (
-            "i386-unknown-aros",
-            "c-i386.o",
-            "cxx-i386.o",
-            fixture_elf32("__TOOLCHAIN_LIST__", 3),
-            fixture_elf32("__INIT_ARRAY_LIST__", 3),
-        ),
-    ];
+    let objects = if let ArosCompilerIdentity::Gnu { target, .. } = compiler {
+        vec![(
+            "riscv-aros",
+            "c-riscv.o",
+            "cxx-riscv.o",
+            crate::compatibility::fixture_riscv_elf(
+                aros_common::elf::Class::Elf32,
+                "__TOOLCHAIN_LIST__",
+                target,
+                false,
+            ),
+            crate::compatibility::fixture_riscv_elf(
+                aros_common::elf::Class::Elf32,
+                "__INIT_ARRAY_LIST__",
+                target,
+                false,
+            ),
+        )]
+    } else {
+        vec![
+            (
+                "x86_64-unknown-aros",
+                "c-x86_64.o",
+                "cxx-x86_64.o",
+                fixture_elf64("__TOOLCHAIN_LIST__", 62),
+                fixture_elf64("__INIT_ARRAY_LIST__", 62),
+            ),
+            (
+                "i386-unknown-aros",
+                "c-i386.o",
+                "cxx-i386.o",
+                fixture_elf32("__TOOLCHAIN_LIST__", 3),
+                fixture_elf32("__INIT_ARRAY_LIST__", 3),
+            ),
+        ]
+    };
     let mut targets = BTreeMap::new();
     let mut compilers = BTreeMap::new();
     for (triple, c_name, cxx_name, c_bytes, cxx_bytes) in objects {
@@ -228,7 +258,12 @@ fn update_reports_for_selected_host(fixture: &mut ReceiptFixture) {
 fn fixture_files(fixture: &ReceiptFixture, directory: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut files = BTreeMap::new();
     files.insert(COMPATIBILITY_RECEIPT.into(), fixture.receipt.clone());
-    for name in ["c-x86_64.o", "cxx-x86_64.o", "c-i386.o", "cxx-i386.o"] {
+    let objects: &[&str] = if matches!(fixture.compiler, ArosCompilerIdentity::Gnu { .. }) {
+        &["c-riscv.o", "cxx-riscv.o"]
+    } else {
+        &["c-x86_64.o", "cxx-x86_64.o", "c-i386.o", "cxx-i386.o"]
+    };
+    for &name in objects {
         files.insert(name.to_owned(), fs::read(directory.join(name)).unwrap());
     }
     for phase in REQUIRED_PHASES {
@@ -1428,6 +1463,10 @@ impl RecoveryFixtureV2 {
 
 fn prepare_recovery_fixture_v2() -> RecoveryFixtureV2 {
     let prepared = prepare_release();
+    prepare_recovery_fixture_from_release_v2(prepared)
+}
+
+fn prepare_recovery_fixture_from_release_v2(prepared: PreparedRelease) -> RecoveryFixtureV2 {
     let builds = prepared.request();
     let build_proof = readback_release_builds_v2(&builds).unwrap();
     let compatibility = prepare_compatibility(&prepared, &build_proof);
@@ -1540,6 +1579,229 @@ fn assert_recovery_rejected_without_mutation(
 
 // These records are synthetic local observations. A passing test does not
 // authenticate the provider run, Git tag, signer, or attestation origin.
+#[test]
+fn recovery_v2_repackages_selected_compiler_family_lanes_without_changing_original_evidence() {
+    use crate::repackage_v2::{repackage_verified_package_v2, VerifiedPackageRepackageRequestV2};
+
+    for prepared in [
+        prepare_release(),
+        super::release_readback_tests::prepare_gnu_release(),
+    ] {
+        let fixture = prepare_recovery_fixture_from_release_v2(prepared);
+        let complete = fixture.complete_request();
+        let qualification = recovery_qualification_request(
+            &fixture,
+            &complete,
+            &fixture.evidence_bytes,
+            &fixture.policy,
+        );
+        let evidence = QualificationEvidenceV2::parse(&fixture.evidence_bytes).unwrap();
+        let handoff = fresh_recovery_handoff(&evidence.source_run, ReleaseHandoffState::Absent);
+        let recovery = recovery_request_v2(
+            &fixture.evidence_bytes,
+            RecoveryOperation::PackagingRecovery,
+            FailedStage::Packaging,
+            Some(handoff.clone()),
+        );
+        let recovery = RecoveryByteReadbackRequestV2 {
+            recovery: &recovery,
+            qualification: &qualification,
+        };
+        let before = snapshot_request(&complete);
+        for artifact in complete.builds.packages.index.artifacts() {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().canonicalize().unwrap();
+            let output = repackage_verified_package_v2(&VerifiedPackageRepackageRequestV2 {
+                recovery: &recovery,
+                asset: artifact.asset(),
+                extraction_roots: [root.join("extract-a"), root.join("extract-b")],
+                output_dirs: [root.join("package-a"), root.join("package-b")],
+            })
+            .unwrap();
+            let repackaged = &output.packages.repackaged;
+            assert_eq!(
+                output.packages.source.manifest.tree_sha256,
+                artifact.tree_sha256().as_str()
+            );
+            assert_eq!(
+                repackaged.first_verified.manifest.release_id,
+                handoff.release_id
+            );
+            assert_eq!(repackaged.first_verified, repackaged.second_verified);
+            let mut original_manifest = output.packages.source.manifest.clone();
+            original_manifest.release_id.clone_from(&handoff.release_id);
+            assert_eq!(repackaged.first_verified.manifest, original_manifest);
+            assert_eq!(repackaged.first_verified.manifest.schema, 2);
+            assert_eq!(output.comparison.members.len(), 4);
+            assert_ne!(
+                repackaged.first.archive_sha256,
+                output.packages.source.archive_sha256
+            );
+            assert_eq!(snapshot_request(&complete), before);
+        }
+    }
+}
+
+#[test]
+fn recovery_v2_repackage_rejects_bad_selections_and_destinations_before_writes() {
+    use crate::repackage_v2::{repackage_verified_package_v2, VerifiedPackageRepackageRequestV2};
+    use std::os::unix::fs::symlink;
+
+    let fixture = prepare_recovery_fixture_v2();
+    let complete = fixture.complete_request();
+    let qualification = recovery_qualification_request(
+        &fixture,
+        &complete,
+        &fixture.evidence_bytes,
+        &fixture.policy,
+    );
+    let evidence = QualificationEvidenceV2::parse(&fixture.evidence_bytes).unwrap();
+    let handoff = fresh_recovery_handoff(&evidence.source_run, ReleaseHandoffState::Absent);
+    let packaging = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        Some(handoff),
+    );
+    let replay = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::CompatibilityReplay,
+        FailedStage::CompatibilityHarness,
+        None,
+    );
+    let before = snapshot_request(&complete);
+    let asset = complete.builds.packages.index.artifacts()[0].asset();
+    for mutation in [
+        "unknown-lane",
+        "replay",
+        "shared-root",
+        "release-root",
+        "existing",
+        "symlink-parent",
+        "non-normalized",
+        "measurement-root",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let mut extracts = [root.join("extract-a"), root.join("extract-b")];
+        let mut outputs = [root.join("package-a"), root.join("package-b")];
+        let mut selected_asset = asset;
+        let mut selected_recovery = &packaging;
+        match mutation {
+            "unknown-lane" => selected_asset = "not-selected.tar.xz",
+            "replay" => selected_recovery = &replay,
+            "shared-root" => outputs[1] = extracts[0].clone(),
+            "release-root" => outputs[0] = complete.builds.packages.directory.join("new-output"),
+            "existing" => {
+                fs::create_dir(&outputs[0]).unwrap();
+            }
+            "symlink-parent" => {
+                symlink(&root, root.join("alias")).unwrap();
+                outputs[0] = root.join("alias/package-a");
+            }
+            "non-normalized" => outputs[0] = root.join("../outside"),
+            "measurement-root" => {
+                extracts[0] = complete.builds.lanes[asset].builds[0]
+                    .measurement
+                    .join("new");
+            }
+            _ => unreachable!(),
+        }
+        let recovery = RecoveryByteReadbackRequestV2 {
+            recovery: selected_recovery,
+            qualification: &qualification,
+        };
+        let error = repackage_verified_package_v2(&VerifiedPackageRepackageRequestV2 {
+            recovery: &recovery,
+            asset: selected_asset,
+            extraction_roots: extracts,
+            output_dirs: outputs,
+        })
+        .unwrap_err();
+        let expected = match mutation {
+            "unknown-lane" => "recovery asset is not a selected indexed lane",
+            "replay" => "compatibility replay cannot execute packaging recovery",
+            "shared-root" | "release-root" => {
+                "recovery destinations overlap each other or original evidence"
+            }
+            "existing" => "package extraction root already exists and cannot be adopted",
+            "symlink-parent" | "measurement-root" => {
+                "recovery destination parent has a symlink component"
+            }
+            "non-normalized" => "recovery destinations must have normalized absolute paths",
+            _ => unreachable!(),
+        };
+        let diagnostics = error.diagnostics();
+        assert_eq!(diagnostics.diagnostics.len(), 1, "{mutation}: {error}");
+        assert_eq!(diagnostics.diagnostics[0].message, expected, "{mutation}");
+        assert_eq!(
+            diagnostics.diagnostics[0].code.to_string(),
+            if mutation == "existing" {
+                "AX0602"
+            } else {
+                "AX0901"
+            },
+            "{mutation}"
+        );
+        assert!(!root.join("extract-a").exists(), "{mutation}");
+        assert!(!root.join("extract-b").exists(), "{mutation}");
+        assert!(!root.join("package-b").exists(), "{mutation}");
+        assert_eq!(snapshot_request(&complete), before, "{mutation}");
+    }
+}
+
+#[test]
+fn recovery_v2_repackage_reacquires_original_measurements_before_writes() {
+    use crate::repackage_v2::{repackage_verified_package_v2, VerifiedPackageRepackageRequestV2};
+
+    let fixture = prepare_recovery_fixture_v2();
+    let complete = fixture.complete_request();
+    let qualification = recovery_qualification_request(
+        &fixture,
+        &complete,
+        &fixture.evidence_bytes,
+        &fixture.policy,
+    );
+    let evidence = QualificationEvidenceV2::parse(&fixture.evidence_bytes).unwrap();
+    let recovery = recovery_request_v2(
+        &fixture.evidence_bytes,
+        RecoveryOperation::PackagingRecovery,
+        FailedStage::Packaging,
+        Some(fresh_recovery_handoff(
+            &evidence.source_run,
+            ReleaseHandoffState::Absent,
+        )),
+    );
+    let recovery = RecoveryByteReadbackRequestV2 {
+        recovery: &recovery,
+        qualification: &qualification,
+    };
+    let selected = complete.builds.packages.index.artifacts()[0].asset();
+    let measurement = &complete.builds.lanes[selected].builds[1].measurement;
+    let mut modified = fs::read(measurement).unwrap();
+    modified.push(b'\n');
+    fs::write(measurement, modified).unwrap();
+    let before = snapshot_request(&complete);
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let error = repackage_verified_package_v2(&VerifiedPackageRepackageRequestV2 {
+        recovery: &recovery,
+        asset: selected,
+        extraction_roots: [root.join("extract-a"), root.join("extract-b")],
+        output_dirs: [root.join("package-a"), root.join("package-b")],
+    })
+    .unwrap_err();
+    let diagnostics = error.diagnostics();
+    assert_eq!(diagnostics.diagnostics.len(), 1, "{error}");
+    assert_eq!(
+        diagnostics.diagnostics[0].message,
+        "portable package measurement differs from selected raw bytes"
+    );
+    assert_eq!(diagnostics.diagnostics[0].code.to_string(), "AX0801");
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    assert_eq!(snapshot_request(&complete), before);
+}
+
 #[test]
 fn recovery_v2_accepts_packaging_handoff_and_harness_replay_as_opaque_byte_readbacks() {
     let fixture = prepare_recovery_fixture_v2();
