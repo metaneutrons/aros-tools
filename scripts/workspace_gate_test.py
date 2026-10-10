@@ -57,6 +57,7 @@ class WorkspaceGateTests(unittest.TestCase):
         # inert commands prove mode routing without invoking compilers/network.
         for name in ("check-development-runtimes.py", "check-environment-contract.py"):
             self.write("scripts/" + name, "pass\n")
+        self.write("scripts/hooks/test-check-staged.py", "pass\n")
         self.write("scripts/inert_test.py", "import unittest\nclass Fixture(unittest.TestCase):\n    def test_inert(self):\n        self.assertTrue(True)\n")
         for name in ("check-architecture.sh", "release/check-actions-policy.sh",
                      "release/verify-apt-workflow-contract.sh", "release/test-governance-policy.sh",
