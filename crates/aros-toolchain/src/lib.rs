@@ -47,11 +47,23 @@ pub mod producer_environment;
 pub mod profiles;
 pub mod python_environment;
 pub mod qualification_evidence;
+pub mod qualification_evidence_v2;
 pub mod recipe;
 #[cfg(unix)]
 pub mod recipe_builder;
 pub mod recovery;
+#[cfg(unix)]
+pub mod release_attestation_manifest_v2;
+pub mod release_checksums_v2;
+#[cfg(unix)]
+pub mod release_checksums_v2_writer;
 pub mod release_index;
+pub mod release_index_v2;
+pub mod release_index_v2_builder;
+pub mod release_index_v2_readback;
+#[cfg(unix)]
+pub mod release_index_v2_writer;
+pub mod release_inputs;
 pub mod repackage;
 pub mod snapshot;
 #[cfg(unix)]

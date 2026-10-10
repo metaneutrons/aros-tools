@@ -332,7 +332,7 @@ impl QualificationEvidence {
     }
 }
 
-fn validate_policy(policy: &EvidencePolicy) -> Result<(), ContractError> {
+pub(crate) fn validate_policy(policy: &EvidencePolicy) -> Result<(), ContractError> {
     let source_repository = canonical_repository(&policy.source_repository)?;
     let signer_repository = canonical_repository(&policy.signer_repository)?;
     if source_repository != policy.source_repository
@@ -348,7 +348,7 @@ fn validate_policy(policy: &EvidencePolicy) -> Result<(), ContractError> {
     Ok(())
 }
 
-fn canonical_repository(value: &str) -> Result<String, ContractError> {
+pub(crate) fn canonical_repository(value: &str) -> Result<String, ContractError> {
     let url = parse_credential_free_https_url(value).map_err(|_| {
         ContractError::recovery("qualification evidence repository is not credential-free HTTPS")
     })?;
@@ -360,7 +360,7 @@ fn canonical_repository(value: &str) -> Result<String, ContractError> {
     Ok(url.to_string())
 }
 
-fn canonical_https_url(value: &str) -> Result<String, ContractError> {
+pub(crate) fn canonical_https_url(value: &str) -> Result<String, ContractError> {
     let trimmed = value.trim_end_matches('/');
     let url = parse_credential_free_https_url(trimmed).map_err(|_| {
         ContractError::recovery("qualification evidence base URL is not credential-free HTTPS")
@@ -373,7 +373,7 @@ fn canonical_https_url(value: &str) -> Result<String, ContractError> {
     Ok(url.to_string().trim_end_matches('/').to_owned())
 }
 
-fn safe_workflow_path(value: &str) -> bool {
+pub(crate) fn safe_workflow_path(value: &str) -> bool {
     value.starts_with(".github/workflows/")
         && value
             .rsplit_once('.')
@@ -390,7 +390,7 @@ fn safe_workflow_path(value: &str) -> bool {
         })
 }
 
-fn safe_segment(value: &str) -> bool {
+pub(crate) fn safe_segment(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value != "."
@@ -400,7 +400,7 @@ fn safe_segment(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn safe_signer(value: &str) -> bool {
+pub(crate) fn safe_signer(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value

@@ -1,0 +1,129 @@
+{
+  "notice": "Synthetic contract examples only. They provide no compiler-build, SDK, provenance, or runtime proof.",
+  "examples": [
+    {
+      "name": "llvm-x86_64",
+      "evidence": "synthetic; no build or SDK proof",
+      "manifest": {
+        "schema": 2,
+        "release_id": "synthetic-v2-llvm",
+        "host": "linux-x86_64",
+        "target_profile": "pc-x86_64",
+        "target_triple": "x86_64-unknown-aros",
+        "tree_sha256": "11cbd45962f89c54c02fc9c1ae55eb283774b76425c08564da060bd5ca9c840b",
+        "compiler": {
+          "family": "llvm",
+          "version": "18.1.8"
+        },
+        "recipe_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "source_lock_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "profiles_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "source_commit": "4444444444444444444444444444444444444444",
+        "producer_commit": "5555555555555555555555555555555555555555",
+        "tools_commit": "6666666666666666666666666666666666666666",
+        "source_date_epoch": 1720000000,
+        "capabilities": ["assembler", "linker", "llvm"],
+        "build_environment": {
+          "fixture": "synthetic",
+          "sdk_built": false
+        },
+        "files": [
+          {"mode": "0755", "path": "share", "type": "directory"},
+          {"mode": "0755", "path": "share/Größe", "type": "directory"},
+          {"mode": "0644", "path": "share/Größe/marker-ä.txt", "sha256": "4ccf1e6a82136c5751f427f09855c182be7173dfe5c68b1c197901b587544287", "size": 18, "type": "file"},
+          {"mode": "0777", "path": "share/vector-link", "target": "Größe/marker-ä.txt", "type": "symlink"}
+        ]
+      }
+    },
+    {
+      "name": "gnu-rv32-p4-ilp32f",
+      "evidence": "synthetic; no build or SDK proof",
+      "manifest": {
+        "schema": 2,
+        "release_id": "synthetic-v2-gnu-rv32-p4",
+        "host": "linux-x86_64",
+        "target_profile": "p4-rv32",
+        "target_triple": "riscv-p4-aros",
+        "tree_sha256": "11cbd45962f89c54c02fc9c1ae55eb283774b76425c08564da060bd5ca9c840b",
+        "compiler": {
+          "family": "gnu",
+          "gcc_version": "14.2.0",
+          "binutils_version": "2.43.1",
+          "target": {
+            "schema": "aros-riscv-target-v1",
+            "isa": "rv32imafc",
+            "abi": "ilp32f",
+            "code_model": "medany",
+            "architecture": "rv32i2p1_m2p0_a2p1_f2p2_c2p0",
+            "unaligned_access": false,
+            "atomic_abi": 0,
+            "x3_reg_usage": 0
+          }
+        },
+        "recipe_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "source_lock_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "profiles_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "producer_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "tools_commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "source_date_epoch": 1720000001,
+        "capabilities": ["assembler", "linker", "p4"],
+        "build_environment": {
+          "fixture": "synthetic",
+          "sdk_built": false
+        },
+        "files": [
+          {"mode": "0755", "path": "share", "type": "directory"},
+          {"mode": "0755", "path": "share/Größe", "type": "directory"},
+          {"mode": "0644", "path": "share/Größe/marker-ä.txt", "sha256": "4ccf1e6a82136c5751f427f09855c182be7173dfe5c68b1c197901b587544287", "size": 18, "type": "file"},
+          {"mode": "0777", "path": "share/vector-link", "target": "Größe/marker-ä.txt", "type": "symlink"}
+        ]
+      }
+    },
+    {
+      "name": "gnu-rv64-rva22u64-lp64d",
+      "evidence": "synthetic; no build or SDK proof",
+      "manifest": {
+        "schema": 2,
+        "release_id": "synthetic-v2-gnu-rv64-rva22u64",
+        "host": "linux-x86_64",
+        "target_profile": "rv64-generic",
+        "target_triple": "riscv64-unknown-aros",
+        "tree_sha256": "11cbd45962f89c54c02fc9c1ae55eb283774b76425c08564da060bd5ca9c840b",
+        "compiler": {
+          "family": "gnu",
+          "gcc_version": "14.2.0",
+          "binutils_version": "2.43.1",
+          "target": {
+            "schema": "aros-riscv-target-v1",
+            "isa": "rva22u64",
+            "abi": "lp64d",
+            "code_model": "medany",
+            "architecture": "rv64i2p1_m2p0_a2p1_f2p2_d2p2_c2p0",
+            "unaligned_access": false,
+            "atomic_abi": 0,
+            "x3_reg_usage": 0
+          }
+        },
+        "recipe_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "source_lock_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "profiles_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "source_commit": "0123456789abcdef0123456789abcdef01234567",
+        "producer_commit": "89abcdef0123456789abcdef0123456789abcdef",
+        "tools_commit": "fedcba9876543210fedcba9876543210fedcba98",
+        "source_date_epoch": 1720000002,
+        "capabilities": ["assembler", "linker", "rv64"],
+        "build_environment": {
+          "fixture": "synthetic",
+          "sdk_built": false
+        },
+        "files": [
+          {"mode": "0755", "path": "share", "type": "directory"},
+          {"mode": "0755", "path": "share/Größe", "type": "directory"},
+          {"mode": "0644", "path": "share/Größe/marker-ä.txt", "sha256": "4ccf1e6a82136c5751f427f09855c182be7173dfe5c68b1c197901b587544287", "size": 18, "type": "file"},
+          {"mode": "0777", "path": "share/vector-link", "target": "Größe/marker-ä.txt", "type": "symlink"}
+        ]
+      }
+    }
+  ]
+}

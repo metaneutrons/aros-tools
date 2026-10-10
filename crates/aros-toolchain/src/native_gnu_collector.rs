@@ -50,7 +50,9 @@ pub fn install(
     }
 
     let (emulation, driver_emulation) = match profile.cpu() {
-        "riscv" => ("riscv32elf_aros", "elf32lriscv"),
+        // AROS binutils names its ELF32 emulation without a width suffix.
+        // Keep the GCC driver emulation separate from the AROS linker one.
+        "riscv" => ("riscvelf_aros", "elf32lriscv"),
         "riscv64" => ("riscv64elf_aros", "elf64lriscv"),
         _ => {
             return Err(ContractError::collector(
@@ -558,7 +560,7 @@ mod tests {
             );
             let root_manifest = manifest(&fixture.prefix.join(COLLECTOR_MANIFEST));
             let (emulation, driver_emulation) = if width == 32 {
-                ("riscv32elf_aros", "elf32lriscv")
+                ("riscvelf_aros", "elf32lriscv")
             } else {
                 ("riscv64elf_aros", "elf64lriscv")
             };
