@@ -348,6 +348,30 @@ pub fn measure_regular_file_bounded(
     }
 }
 
+/// Hash a regular file through no-follow descriptors without retaining its bytes.
+///
+/// The byte ceiling bounds work, not memory: the digest uses a fixed-size buffer.
+/// Descriptor metadata and the final directory entry must remain unchanged.
+///
+/// # Errors
+///
+/// Rejects unsafe paths, nonregular files, oversized or concurrently changed
+/// inputs, I/O failures, and hosts without Unix descriptor traversal.
+pub fn measure_regular_file_digest_bounded(
+    path: &Path,
+    max_bytes: u64,
+) -> std::io::Result<(FileIdentity, crate::digest::Sha256Result)> {
+    #[cfg(unix)]
+    {
+        unix::digest_regular_bounded(&absolute_path(path)?, max_bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, max_bytes);
+        Err(unsupported_durability())
+    }
+}
+
 /// Open one existing regular file through a descriptor-relative no-follow
 /// path walk.
 ///

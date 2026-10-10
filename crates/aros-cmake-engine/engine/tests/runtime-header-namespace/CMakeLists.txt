@@ -42,7 +42,21 @@ file(WRITE "${CMAKE_BINARY_DIR}/GENINCDIR/generated_order.h"
 file(WRITE "${CMAKE_BINARY_DIR}/gen/module/private_order.h"
     "#define AROS_PRIVATE_ID 5\n")
 
+# The namespace fixture builds only object files. Give the engine an owned
+# sentinel so configure never resolves a host aros-collect from PATH; invoking
+# this collector is a fixture failure.
+set(_fixture_collector "${CMAKE_BINARY_DIR}/inert-aros-collect")
+file(WRITE "${_fixture_collector}" "#!/bin/sh\nexit 97\n")
+file(CHMOD "${_fixture_collector}"
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+set(AROS_COLLECT_BIN "${_fixture_collector}")
+
 include("${TEST_ENGINE_DIR}/AROS.cmake")
+if(NOT AROS_COLLECT_BIN STREQUAL _fixture_collector)
+    message(FATAL_ERROR
+        "namespace fixture did not retain its explicitly owned collector sentinel")
+endif()
 
 set(_probe_source "${CMAKE_CURRENT_LIST_DIR}/probe.c")
 set(_probe_cpp_source "${CMAKE_CURRENT_LIST_DIR}/probe.cpp")

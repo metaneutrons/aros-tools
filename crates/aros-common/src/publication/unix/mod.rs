@@ -1175,7 +1175,8 @@ pub(in crate::publication) use locks::{
 mod regular;
 use regular::same_regular_snapshot;
 pub(in crate::publication) use regular::{
-    open_regular_file_nofollow, read_regular, read_regular_bounded, read_regular_with_mode,
+    digest_regular_bounded, open_regular_file_nofollow, read_regular, read_regular_bounded,
+    read_regular_with_mode,
 };
 mod journal;
 use journal::{cleanup_journal_stage, parse_journal, validate_journal, write_journal};

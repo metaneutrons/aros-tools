@@ -178,6 +178,7 @@ LLVM retains its legacy adapter and rejects this option. GNU's v3 compatibility
 receipt is local evidence, not release admission: V2 release-evidence and
 recovery integration remain unavailable.
 
+
 ### Physical-board workflow
 
 | Command | Effect and boundary |
