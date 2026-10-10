@@ -5,9 +5,11 @@
 //! the admitted fresh identity. These are two packaging operations, not two new
 //! compiler executions. External authentication remains a protected-caller duty.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, PathBuf};
 
-use aros_common::publication::validate_existing_directory_prefix_nofollow;
+use aros_common::publication::{
+    filesystem_paths_overlap, validate_existing_directory_prefix_nofollow,
+};
 
 use crate::package::{package_with_format, PackageFormat, PackageRequest};
 use crate::package_extract::{
@@ -227,21 +229,26 @@ fn validate_destinations(
         })
         .collect::<Result<Vec<_>, _>>()?;
     for (position, destination) in destinations.iter().enumerate() {
-        if destinations[..position]
-            .iter()
-            .chain(&protected)
-            .any(|path| overlap(destination, path))
-        {
-            return Err(error(
-                "recovery destinations overlap each other or original evidence",
-            ));
+        for path in destinations[..position].iter().chain(&protected) {
+            if filesystem_paths_overlap(destination, path)
+                .map_err(|_| error("cannot establish original recovery evidence ancestry"))?
+            {
+                return Err(error(
+                    "recovery destinations overlap each other or original evidence",
+                ));
+            }
+        }
+        for prefix in &complete.builds.packages.forbidden_prefixes {
+            if filesystem_paths_overlap(destination, prefix)
+                .map_err(|_| error("cannot establish forbidden build-root ancestry"))?
+            {
+                return Err(error(
+                    "recovery destinations overlap a forbidden build root",
+                ));
+            }
         }
     }
     Ok(())
-}
-
-fn overlap(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
 }
 
 fn error(message: &str) -> ContractError {

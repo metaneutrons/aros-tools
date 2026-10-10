@@ -1587,7 +1587,10 @@ fn recovery_v2_repackages_selected_compiler_family_lanes_without_changing_origin
         prepare_release(),
         super::release_readback_tests::prepare_gnu_release(),
     ] {
-        let fixture = prepare_recovery_fixture_from_release_v2(prepared);
+        let mut fixture = prepare_recovery_fixture_from_release_v2(prepared);
+        let missing_build_root = fixture.builds.packages.directory.join("missing-build-root");
+        assert!(!missing_build_root.exists());
+        fixture.builds.packages.forbidden_prefixes = vec![missing_build_root.clone()];
         let complete = fixture.complete_request();
         let qualification = recovery_qualification_request(
             &fixture,
@@ -1637,6 +1640,84 @@ fn recovery_v2_repackages_selected_compiler_family_lanes_without_changing_origin
                 repackaged.first.archive_sha256,
                 output.packages.source.archive_sha256
             );
+            assert_eq!(snapshot_request(&complete), before);
+            assert!(!missing_build_root.exists());
+        }
+    }
+}
+
+#[test]
+fn recovery_v2_repackage_preserves_forbidden_build_roots_and_their_aliases() {
+    use crate::repackage_v2::{repackage_verified_package_v2, VerifiedPackageRepackageRequestV2};
+    use std::os::unix::fs::symlink;
+
+    let mut fixture = prepare_recovery_fixture_v2();
+    for selected_destination in 0..4 {
+        for alias in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().canonicalize().unwrap();
+            let build_root = root.join("original-build");
+            fs::create_dir(&build_root).unwrap();
+            let sentinel = build_root.join("retained.log");
+            fs::write(&sentinel, b"original build evidence").unwrap();
+            let prefix = if alias {
+                let path = root.join("original-build-alias");
+                symlink(&build_root, &path).unwrap();
+                path
+            } else {
+                build_root.clone()
+            };
+            fixture.builds.packages.forbidden_prefixes = vec![prefix];
+            let complete = fixture.complete_request();
+            let qualification = recovery_qualification_request(
+                &fixture,
+                &complete,
+                &fixture.evidence_bytes,
+                &fixture.policy,
+            );
+            let evidence = QualificationEvidenceV2::parse(&fixture.evidence_bytes).unwrap();
+            let request = recovery_request_v2(
+                &fixture.evidence_bytes,
+                RecoveryOperation::PackagingRecovery,
+                FailedStage::Packaging,
+                Some(fresh_recovery_handoff(
+                    &evidence.source_run,
+                    ReleaseHandoffState::Absent,
+                )),
+            );
+            let recovery = RecoveryByteReadbackRequestV2 {
+                recovery: &request,
+                qualification: &qualification,
+            };
+            let before = snapshot_request(&complete);
+            let mut destinations = [
+                root.join("extract-a"),
+                root.join("extract-b"),
+                root.join("package-a"),
+                root.join("package-b"),
+            ];
+            destinations[selected_destination] = build_root.join("new-output");
+            let [first_extraction, second_extraction, first_package, second_package] =
+                destinations.clone();
+            let failure = repackage_verified_package_v2(&VerifiedPackageRepackageRequestV2 {
+                recovery: &recovery,
+                asset: complete.builds.packages.index.artifacts()[0].asset(),
+                extraction_roots: [first_extraction, second_extraction],
+                output_dirs: [first_package, second_package],
+            })
+            .unwrap_err();
+            let diagnostics = failure.diagnostics();
+            assert_eq!(diagnostics.diagnostics.len(), 1);
+            assert_eq!(diagnostics.diagnostics[0].code.to_string(), "AX0901");
+            assert_eq!(
+                diagnostics.diagnostics[0].message,
+                "recovery destinations overlap a forbidden build root"
+            );
+            for destination in destinations {
+                assert!(!destination.exists());
+            }
+            assert_eq!(fs::read(&sentinel).unwrap(), b"original build evidence");
+            assert_eq!(fs::read_dir(&build_root).unwrap().count(), 1);
             assert_eq!(snapshot_request(&complete), before);
         }
     }
@@ -1747,6 +1828,77 @@ fn recovery_v2_repackage_rejects_bad_selections_and_destinations_before_writes()
         assert!(!root.join("extract-b").exists(), "{mutation}");
         assert!(!root.join("package-b").exists(), "{mutation}");
         assert_eq!(snapshot_request(&complete), before, "{mutation}");
+    }
+}
+
+#[test]
+fn recovery_v2_repackage_preserves_original_evidence_through_filesystem_aliases() {
+    use crate::repackage_v2::{repackage_verified_package_v2, VerifiedPackageRepackageRequestV2};
+
+    for (original, alternate) in [
+        ("SelectedRoot", "selectedroot"),
+        ("Caf\u{e9}Root", "Cafe\u{301}Root"),
+    ] {
+        let relocated = tempfile::tempdir().unwrap();
+        let parent = relocated.path().canonicalize().unwrap();
+        let original = parent.join(original);
+        fs::create_dir(&original).unwrap();
+        let alternate = parent.join(alternate);
+        if !alternate.is_dir() {
+            // These aliases do not exist on case/normalization-sensitive hosts.
+            continue;
+        }
+        let mut prepared = prepare_release();
+        for entry in fs::read_dir(&prepared.packages.directory).unwrap() {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_file());
+            fs::copy(entry.path(), original.join(entry.file_name())).unwrap();
+        }
+        prepared.packages.directory = original;
+        let fixture = prepare_recovery_fixture_from_release_v2(prepared);
+        let complete = fixture.complete_request();
+        let qualification = recovery_qualification_request(
+            &fixture,
+            &complete,
+            &fixture.evidence_bytes,
+            &fixture.policy,
+        );
+        let evidence = QualificationEvidenceV2::parse(&fixture.evidence_bytes).unwrap();
+        let request = recovery_request_v2(
+            &fixture.evidence_bytes,
+            RecoveryOperation::PackagingRecovery,
+            FailedStage::Packaging,
+            Some(fresh_recovery_handoff(
+                &evidence.source_run,
+                ReleaseHandoffState::Absent,
+            )),
+        );
+        let recovery = RecoveryByteReadbackRequestV2 {
+            recovery: &request,
+            qualification: &qualification,
+        };
+        let asset = complete.builds.packages.index.artifacts()[0].asset();
+        let before = snapshot_request(&complete);
+        let output_root = tempfile::tempdir().unwrap();
+        let root = output_root.path().canonicalize().unwrap();
+        let selected_output = alternate.join("new-package");
+        let error = repackage_verified_package_v2(&VerifiedPackageRepackageRequestV2 {
+            recovery: &recovery,
+            asset,
+            extraction_roots: [root.join("extract-a"), root.join("extract-b")],
+            output_dirs: [selected_output.clone(), root.join("package-b")],
+        })
+        .unwrap_err();
+        let diagnostics = error.diagnostics();
+        assert_eq!(diagnostics.diagnostics.len(), 1);
+        assert_eq!(diagnostics.diagnostics[0].code.to_string(), "AX0901");
+        assert_eq!(
+            diagnostics.diagnostics[0].message,
+            "recovery destinations overlap each other or original evidence"
+        );
+        assert!(!selected_output.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(snapshot_request(&complete), before);
     }
 }
 

@@ -72,60 +72,9 @@ pub(super) fn preflight(destination: &Path, protected: &[&Path]) -> miette::Resu
 /// catches APFS case/Unicode aliases when canonicalize preserves a spelling.
 /// Prospective suffixes are compared conservatively without ASCII case, since
 /// an absent output leaf cannot yet supply a filesystem identity.
-#[cfg(unix)]
 pub(super) fn filesystem_overlap(left: &Path, right: &Path) -> miette::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-
-    let ancestors = |path: &Path| -> miette::Result<Vec<(PathBuf, u64, u64)>> {
-        let mut existing = Vec::new();
-        for ancestor in path.ancestors() {
-            match std::fs::metadata(ancestor) {
-                Ok(metadata) if metadata.is_dir() => {
-                    existing.push((ancestor.to_path_buf(), metadata.dev(), metadata.ino()));
-                }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => {
-                    return Err(miette::miette!(
-                        "cannot resolve compatibility path ancestry"
-                    ));
-                }
-            }
-        }
-        Ok(existing)
-    };
-    let left_ancestors = ancestors(left)?;
-    let right_ancestors = ancestors(right)?;
-    for (left_parent, device, inode) in left_ancestors {
-        if let Some((right_parent, _, _)) = right_ancestors
-            .iter()
-            .find(|(_, other_device, other_inode)| *other_device == device && *other_inode == inode)
-        {
-            let left_suffix = left
-                .strip_prefix(left_parent)
-                .map_err(|_| miette::miette!("cannot resolve compatibility output suffix"))?;
-            let right_suffix = right
-                .strip_prefix(right_parent)
-                .map_err(|_| miette::miette!("cannot resolve compatibility input suffix"))?;
-            let left_parts = left_suffix.components().collect::<Vec<_>>();
-            let right_parts = right_suffix.components().collect::<Vec<_>>();
-            return Ok(left_parts.iter().zip(&right_parts).all(|(left, right)| {
-                left.as_os_str()
-                    .as_encoded_bytes()
-                    .eq_ignore_ascii_case(right.as_os_str().as_encoded_bytes())
-            }));
-        }
-    }
-    Err(miette::miette!(
-        "cannot establish compatibility path ancestry"
-    ))
-}
-
-#[cfg(not(unix))]
-pub(super) fn filesystem_overlap(_left: &Path, _right: &Path) -> miette::Result<bool> {
-    Err(miette::miette!(
-        "compatibility evidence export requires Unix path identities"
-    ))
+    aros_common::publication::filesystem_paths_overlap(left, right)
+        .map_err(|_| miette::miette!("cannot establish compatibility path ancestry"))
 }
 
 /// Resolve existing prefixes to catch aliases even when the final leaf is absent.

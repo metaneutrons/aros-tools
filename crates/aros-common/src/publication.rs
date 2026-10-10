@@ -196,6 +196,8 @@ pub use tree_cas::TreeContentCas;
 use tree_cas::{TreeContentEntry, TreeNodeSnapshot};
 mod payload_path;
 pub use payload_path::payload_casefold_path_key;
+mod path_overlap;
+pub use path_overlap::filesystem_paths_overlap;
 mod tree_ops;
 pub use tree_ops::{
     copy_tree_from_snapshot_nofollow, create_unique_directory_nofollow,
