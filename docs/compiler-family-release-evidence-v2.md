@@ -163,6 +163,10 @@ JSON reports the exact request digest, complete measurements and conditional
 decision with `assurance: byte-consistency-only`. The observations must already
 have been authenticated by the protected workflow; matching caller-supplied
 fields is not signature, GitHub job/artifact or Git authentication. This check
-does not grant execution or publication authority. V2 request creation and
-repackage execution remain integration work; historical `prepare-recovery`,
-`validate-recovery` and `repackage` remain V1-only.
+does not grant execution or publication authority. Explicit
+`producer repackage --release-format family-v2` separately executes two local
+packaging operations with the complete selected evidence and fresh protected
+destinations. It neither rebuilds compilers nor authenticates external claims.
+V2 request creation, external authentication and protected recovery-workflow
+integration remain open. `prepare-recovery` and `validate-recovery` remain
+V1-only; omitting the format on `repackage` retains historical V1 execution.
