@@ -25,6 +25,8 @@ pub mod idf_bootloader;
 mod inspection;
 pub mod metamake_fetch;
 #[cfg(unix)]
+pub mod native_candidate;
+#[cfg(unix)]
 mod native_compiler_cache;
 pub mod native_declaration;
 mod native_family;

@@ -15,7 +15,11 @@ use aros_toolchain::canonical;
 use aros_toolchain::cargo_vendor::{
     fetch_vendor_generation, select_vendor_generation, CargoVendorRequest,
 };
-use aros_toolchain::executor::{self, BuildRequest, ResumePhase};
+use aros_toolchain::executor::{self, BuildRequest, BuildResult, ResumePhase};
+use aros_toolchain::native_candidate::{
+    readback_finished_build_result, readback_finished_candidate, FinishedBuildResultRequest,
+    FinishedCandidateRequest,
+};
 use aros_toolchain::profiles::Profiles;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -100,6 +104,57 @@ printf '%s.%s\n' "$archive" "$suffix" >> "$AROS_TOOLCHAIN_FETCH_LEDGER"
 exec /bin/bash "$AROS_TOOLCHAIN_FETCH_UPSTREAM" "${arguments[@]}"
 "#;
 
+struct GroupFixture {
+    source_lock_path: String,
+    profiles_path: String,
+    source_lock: Vec<u8>,
+    profiles: Vec<u8>,
+}
+
+fn v2_llvm_source_lock() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "schema": "aros-toolchain-source-lock-v2", "family": "llvm", "version": "11.0.0",
+        "sources": [{
+            "component": "llvm", "version": "11.0.0", "purpose": "toolchain-component",
+            "patch": "tools/crosstools/llvm/llvm-11.0.0.src-aros.diff",
+            "filename": "llvm-11.0.0.src.tar.xz", "url": "https://example.invalid/llvm.tar.xz",
+            "sha256": "a".repeat(64), "size": 1
+        }],
+        "host_python_packages": [
+            {"name": "mako", "version": "1.3.10", "filename": "mako.tar.gz", "url": "https://example.invalid/mako.tar.gz", "sha256": "b".repeat(64), "size": 1, "source_root": "mako", "python_path": "."},
+            {"name": "markupsafe", "version": "3.0.2", "filename": "markupsafe.tar.gz", "url": "https://example.invalid/markupsafe.tar.gz", "sha256": "c".repeat(64), "size": 1, "source_root": "markupsafe", "python_path": "."}
+        ]
+    }))
+    .unwrap()
+}
+
+fn v2_llvm_profiles() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "schema": "aros-toolchain-profiles-v1", "upstream_commit": "4".repeat(40),
+        "profiles": [{
+            "name": "pc-x86_64", "configure_target": "pc-x86_64", "upstream_output_target": "pc-x86_64",
+            "target_triple": "x86_64-unknown-aros", "cpu": "x86_64", "platform": "pc", "float_abi": "",
+            "capabilities": ["c", "cxx", "standalone-collector"]
+        }]
+    }))
+    .unwrap()
+}
+
+fn v2_gnu_profiles() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "schema": "aros-toolchain-profiles-v2", "family": "gnu", "upstream_commit": "4".repeat(40),
+        "profiles": [{
+            "name": "rv64-reference", "configure_target": "opensbi-riscv64", "upstream_output_target": "opensbi-riscv64",
+            "target_triple": "riscv64-aros", "cpu": "riscv64", "platform": "opensbi", "float_abi": "lp64d",
+            "capabilities": ["c", "libgcc", "standalone-collector"],
+            "target": {"schema": "aros-riscv-target-v1", "isa": "rva22u64", "abi": "lp64d",
+                "code_model": "medany", "architecture": "rv64i2p1_m2p0_a2p1_f2p2_d2p2_c2p0",
+                "unaligned_access": false, "atomic_abi": 0, "x3_reg_usage": 0}
+        }]
+    }))
+    .unwrap()
+}
+
 struct Fixture {
     _temporary: tempfile::TempDir,
     root: PathBuf,
@@ -125,6 +180,12 @@ impl Fixture {
 
     fn new_gnu() -> Self {
         Self::new_inner_for_family(false, true)
+    }
+
+    fn new_v2(gnu: bool) -> (Self, PathBuf) {
+        let fixture = if gnu { Self::new_gnu() } else { Self::new() };
+        let unselected_profiles = fixture.install_v2_groups(gnu);
+        (fixture, unselected_profiles)
     }
 
     fn new_inner_for_family(cold_vendor_generation: bool, gnu: bool) -> Self {
@@ -452,6 +513,135 @@ exec /bin/bash "$AROS_TOOLCHAIN_FETCH_UPSTREAM" "$@"
         }
     }
 
+    fn plan_request(&self) -> aros_toolchain::plan::PlanRequest {
+        aros_toolchain::plan::PlanRequest {
+            preset: self.preset.clone(),
+            recipe: self.recipe.clone(),
+            source_dir: self.root.join("source"),
+            producer_dir: self.root.join("producer"),
+            tools_dir: self.root.join("tools"),
+            work_dir: Some(self.root.join("work")),
+            output_dir: Some(self.root.join("output")),
+            cache_dir: Some(self.root.join("cache")),
+            jobs: Some(1),
+            timeout_seconds: Some(120),
+        }
+    }
+
+    fn install_v2_groups(&self, selected_gnu: bool) -> PathBuf {
+        let producer = self.root.join("producer");
+        let selected = GroupFixture {
+            source_lock_path: self.source_lock_relative.clone(),
+            profiles_path: self.profiles_relative.clone(),
+            source_lock: fs::read(producer.join(&self.source_lock_relative)).unwrap(),
+            profiles: fs::read(producer.join(&self.profiles_relative)).unwrap(),
+        };
+        let (gnu, llvm) = if selected_gnu {
+            (
+                selected,
+                GroupFixture {
+                    source_lock_path: "toolchains/v2-llvm.sources.json".into(),
+                    profiles_path: "toolchains/v2-llvm-profiles.json".into(),
+                    source_lock: v2_llvm_source_lock(),
+                    profiles: v2_llvm_profiles(),
+                },
+            )
+        } else {
+            (
+                GroupFixture {
+                    source_lock_path: "toolchains/v2-gnu.sources.json".into(),
+                    profiles_path: "toolchains/v2-gnu-profiles.json".into(),
+                    source_lock: include_bytes!("fixtures/gnu-source-lock-v3.json").to_vec(),
+                    profiles: v2_gnu_profiles(),
+                },
+                selected,
+            )
+        };
+
+        for group in [&gnu, &llvm] {
+            fs::write(producer.join(&group.source_lock_path), &group.source_lock).unwrap();
+            fs::write(producer.join(&group.profiles_path), &group.profiles).unwrap();
+        }
+
+        let contract =
+            fs::read(self.root.join("tools/contracts/toolchain-producer-v1.toml")).unwrap();
+        let recipe: serde_json::Value =
+            serde_json::from_slice(&fs::read(&self.recipe).unwrap()).unwrap();
+        let declaration = format!(
+            "schema_version = 2\ncontract_id = \"aros-toolchain-producer-v1\"\ncontract_path = \"contracts/toolchain-producer-v1.toml\"\ncontract_sha256 = \"{}\"\ntools_commit = \"{}\"\n\n[[groups]]\nid = \"gnu\"\nsource_lock = \"{}\"\nsource_lock_sha256 = \"{}\"\nprofiles = \"{}\"\nprofiles_sha256 = \"{}\"\n\n[[groups]]\nid = \"llvm\"\nsource_lock = \"{}\"\nsource_lock_sha256 = \"{}\"\nprofiles = \"{}\"\nprofiles_sha256 = \"{}\"\n",
+            sha256_bytes(&contract),
+            recipe["tools_commit"].as_str().unwrap(),
+            gnu.source_lock_path,
+            sha256_bytes(&gnu.source_lock),
+            gnu.profiles_path,
+            sha256_bytes(&gnu.profiles),
+            llvm.source_lock_path,
+            sha256_bytes(&llvm.source_lock),
+            llvm.profiles_path,
+            sha256_bytes(&llvm.profiles),
+        );
+        fs::write(
+            producer.join("toolchains/producer-executor-v1.toml"),
+            declaration,
+        )
+        .unwrap();
+
+        let selected_lock_sha256 = if selected_gnu {
+            sha256_bytes(&gnu.source_lock)
+        } else {
+            sha256_bytes(&llvm.source_lock)
+        };
+        let selected_profiles_sha256 = if selected_gnu {
+            sha256_bytes(&gnu.profiles)
+        } else {
+            sha256_bytes(&llvm.profiles)
+        };
+        let alternate_lock_sha256 = if selected_gnu {
+            sha256_bytes(&llvm.source_lock)
+        } else {
+            sha256_bytes(&gnu.source_lock)
+        };
+        let alternate_profiles_sha256 = if selected_gnu {
+            sha256_bytes(&llvm.profiles)
+        } else {
+            sha256_bytes(&gnu.profiles)
+        };
+        assert_ne!(selected_lock_sha256, alternate_lock_sha256);
+        assert_ne!(selected_profiles_sha256, alternate_profiles_sha256);
+
+        self.commit_producer_update("test: add native executor v2 groups");
+        let mut recipe: serde_json::Value =
+            serde_json::from_slice(&fs::read(&self.recipe).unwrap()).unwrap();
+        assert_eq!(recipe["source_lock_sha256"], selected_lock_sha256.as_str());
+        assert_eq!(recipe["profiles_sha256"], selected_profiles_sha256.as_str());
+        let selected_recipe_sha256 = recipe["recipe_sha256"].as_str().unwrap().to_owned();
+        recipe["source_lock_sha256"] = serde_json::json!(alternate_lock_sha256);
+        recipe["profiles_sha256"] = serde_json::json!(alternate_profiles_sha256);
+        recipe.as_object_mut().unwrap().remove("recipe_sha256");
+        let alternate_recipe_sha256 = sha256_bytes(&canonical::bytes(&recipe).unwrap());
+        assert_ne!(selected_recipe_sha256, alternate_recipe_sha256.as_str());
+
+        if selected_gnu {
+            self.root.join("producer/toolchains/v2-llvm-profiles.json")
+        } else {
+            self.root.join("producer/toolchains/v2-gnu-profiles.json")
+        }
+    }
+
+    fn commit_producer_update(&self, message: &str) {
+        let producer = self.root.join("producer");
+        git(&producer, &["add", "."]);
+        git(&producer, &["commit", "-qm", message]);
+        let mut recipe: serde_json::Value =
+            serde_json::from_slice(&fs::read(&self.recipe).unwrap()).unwrap();
+        recipe["producer_commit"] = serde_json::json!(git(&producer, &["rev-parse", "HEAD"]));
+        recipe["producer_tree"] = serde_json::json!(git(&producer, &["rev-parse", "HEAD^{tree}"]));
+        recipe.as_object_mut().unwrap().remove("recipe_sha256");
+        recipe["recipe_sha256"] =
+            serde_json::json!(sha256_bytes(&canonical::bytes(&recipe).unwrap()));
+        fs::write(&self.recipe, serde_json::to_vec(&recipe).unwrap()).unwrap();
+    }
+
     fn replace_source_configure(&self, contents: &str) {
         let source = self.root.join("source");
         write_executable(&source.join("configure"), contents);
@@ -638,7 +828,7 @@ fn real_native_compiler_cache(backend: aros_cache::CompilerBackend) {
     let lifecycle = fixture.root.join("work/native-lifecycle");
     let staging = fixture.root.join("output/.aros-native-toolchain-stage");
     fs::rename(fixture.root.join("output/toolchain"), &staging).unwrap();
-    for phase in ["collector", "publish"] {
+    for phase in ["collector", "publish", "finished-candidate"] {
         fs::remove_file(lifecycle.join(format!("receipts/{phase}.json"))).unwrap();
     }
     for name in ["aros-collect", "collect-aros", "collect-aros32"] {
@@ -683,6 +873,88 @@ impl Drop for StopTestSccache {
     }
 }
 
+fn assert_finished_payload(fixture: &Fixture, result: &BuildResult) {
+    let request = fixture.request();
+    let recipe = aros_toolchain::Recipe::parse(&fs::read(&request.recipe).unwrap()).unwrap();
+    let lock = aros_toolchain::source_lock::SourceLock::parse(
+        &fs::read(request.producer_dir.join(&fixture.source_lock_relative)).unwrap(),
+    )
+    .unwrap();
+    let profiles =
+        Profiles::parse(&fs::read(request.producer_dir.join(&fixture.profiles_relative)).unwrap())
+            .unwrap();
+    // Select the identity from a fresh read-only inspection, never the new
+    // finished receipt. These fixture drivers prove orchestration only.
+    let plan = aros_toolchain::plan::inspect(&fixture.plan_request()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&plan.identity).unwrap(),
+        serde_json::to_value(&result.identity).unwrap()
+    );
+    let digest = |name: &str| {
+        let entries = result
+            .evidence
+            .iter()
+            .filter(|entry| entry.check == name)
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, "passed");
+        entries[0].report_sha256.as_ref().unwrap().clone()
+    };
+    let phases = [
+        "preflight",
+        "environment",
+        "configure",
+        "compiler",
+        "collector",
+        "publish",
+    ]
+    .map(digest);
+    let finished = digest("finished-candidate");
+    let proof = readback_finished_candidate(&FinishedCandidateRequest {
+        work_dir: &request.work_dir,
+        output_dir: &request.output_dir,
+        recipe: &recipe,
+        source_lock: &lock,
+        profile: profiles.select(&fixture.preset).unwrap(),
+        identity: &plan.identity,
+        phase_receipt_digests: &phases,
+        candidate_receipt_digest: &finished,
+    })
+    .unwrap();
+    assert_eq!(proof.receipt_sha256(), &finished);
+    assert!(proof.entry_count() > result.outputs.len() as u64);
+    assert_eq!(
+        proof.payload_sha256(),
+        &measure_tree_content_cas(&request.output_dir.join("toolchain"))
+            .unwrap()
+            .payload_digest_excluding(None)
+    );
+    // Select the exact serialized CLI result independently of the retained
+    // receipts. This fixture proves the result adapter, not authenticated execution.
+    let selected = tempfile::tempdir().unwrap();
+    let result_path = selected.path().join("build.json");
+    let bytes = serde_json::to_vec_pretty(result).unwrap();
+    fs::write(&result_path, &bytes).unwrap();
+    let result_digest = sha256_bytes(&bytes);
+    let result_request = FinishedBuildResultRequest {
+        work_dir: &request.work_dir,
+        output_dir: &request.output_dir,
+        recipe: &recipe,
+        source_lock: &lock,
+        profile: profiles.select(&fixture.preset).unwrap(),
+        host: result.identity.host,
+        build_result: &result_path,
+        build_result_sha256: &result_digest,
+    };
+    let result_proof = readback_finished_build_result(&result_request).unwrap();
+    assert_eq!(result_proof.receipt_sha256(), proof.receipt_sha256());
+    assert_eq!(result_proof.payload_sha256(), proof.payload_sha256());
+    let mut changed = bytes;
+    changed.push(b'\n');
+    fs::write(&result_path, &changed).unwrap();
+    assert!(readback_finished_build_result(&result_request).is_err());
+}
+
 #[test]
 fn native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain() {
     let fixture = Fixture::new();
@@ -706,6 +978,7 @@ fn native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain() {
         });
     assert_eq!(result.qualification, "local-only");
     assert_eq!(result.commit_state, "committed");
+    assert_finished_payload(&fixture, &result);
     assert_eq!(result.outputs.len(), 1);
     assert_eq!(result.outputs[0].path, "toolchain/bin/aros-collect");
     let public_result = serde_json::to_value(&result).unwrap();
@@ -825,6 +1098,7 @@ fn native_gnu_lifecycle_builds_locked_rv64_tools_and_binds_collector_layout() {
 
     assert_eq!(result.qualification, "local-only");
     assert_eq!(result.commit_state, "committed");
+    assert_finished_payload(&fixture, &result);
     assert_eq!(
         result
             .outputs
@@ -1067,6 +1341,7 @@ fn native_gnu_collector_resume_reinstalls_contract_without_rebuilding_compiler()
     fs::rename(&published, &staging).unwrap();
     fs::remove_file(lifecycle.join("receipts/publish.json")).unwrap();
     fs::remove_file(lifecycle.join("receipts/collector.json")).unwrap();
+    fs::remove_file(lifecycle.join("receipts/finished-candidate.json")).unwrap();
 
     // Reconstruct the exact pre-collector compiler outputs. The two legacy
     // collector paths are compiler-owned destinations which the GNU collector
@@ -1100,6 +1375,144 @@ fn native_gnu_collector_resume_reinstalls_contract_without_rebuilding_compiler()
         .join("logs/collector-resume-1.stdout.log")
         .is_file());
     assert!(lifecycle.join("rust-target-resume-1").is_dir());
+}
+
+fn exercise_native_v2_group_lifecycle(gnu: bool) {
+    // These are synthetic orchestration fixtures. The GNU lane exercises the
+    // selected profile and collector path, not RV64 compiler qualification.
+    let (fixture, _) = Fixture::new_v2(gnu);
+    let recipe: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture.recipe).unwrap()).unwrap();
+    let expected_recipe_sha256 = recipe["recipe_sha256"].as_str().unwrap();
+    let plan = aros_toolchain::plan::inspect(&fixture.plan_request()).unwrap();
+    assert_eq!(plan.identity.recipe_sha256.as_str(), expected_recipe_sha256);
+    assert_eq!(plan.identity.target_profile, fixture.preset);
+    assert_eq!(
+        plan.identity.executor.contract_id,
+        Some("aros-toolchain-producer-v1")
+    );
+
+    let result = executor::run(&fixture.request(), &CancellationToken::default()).unwrap();
+    assert_eq!(result.qualification, "local-only");
+    assert_eq!(result.commit_state, "committed");
+    assert_eq!(
+        result.identity.recipe_sha256.as_str(),
+        expected_recipe_sha256
+    );
+    assert_eq!(result.identity.target_profile, fixture.preset);
+    let configure_args = fs::read_to_string(
+        fixture
+            .root
+            .join("work/native-lifecycle/build/configure.args"),
+    )
+    .unwrap();
+    for expected in if gnu {
+        ["--with-toolchain=gnu", "--target=opensbi-riscv64"]
+    } else {
+        ["--with-toolchain=llvm", "--target=pc-x86_64"]
+    } {
+        assert!(configure_args.contains(expected), "missing {expected}");
+    }
+
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    let published = fixture.root.join("output/toolchain");
+    let staging = fixture.root.join("output/.aros-native-toolchain-stage");
+    let compiler_receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(lifecycle.join("receipts/compiler.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        compiler_receipt["identity"]["recipe_sha256"],
+        expected_recipe_sha256
+    );
+    assert_eq!(
+        compiler_receipt["identity"]["target_profile"],
+        fixture.preset
+    );
+
+    fs::rename(&published, &staging).unwrap();
+    fs::remove_file(lifecycle.join("receipts/publish.json")).unwrap();
+    fs::remove_file(lifecycle.join("receipts/collector.json")).unwrap();
+    fs::remove_file(lifecycle.join("receipts/finished-candidate.json")).unwrap();
+    if gnu {
+        let tuple_directory = staging.join("riscv64-aros/bin");
+        write_executable(&tuple_directory.join("collect-aros"), "legacy-collector");
+        write_executable(
+            &staging.join("riscv64-aros-collect-aros"),
+            "legacy-collector",
+        );
+        for path in [
+            tuple_directory.join("aros-collector-tools.json"),
+            staging.join("aros-collector-tools.json"),
+            staging.join("toolchain-tools.json"),
+        ] {
+            fs::remove_file(path).unwrap();
+        }
+    } else {
+        let prefix = staging.join("bin");
+        for name in ["aros-collect", "collect-aros", "collect-aros32"] {
+            fs::remove_file(prefix.join(name)).unwrap();
+        }
+        fs::write(prefix.join("llvm-config"), b"producer-only").unwrap();
+    }
+
+    let mut request = fixture.request();
+    request.resume_from = Some(ResumePhase::Compiler);
+    let resumed = executor::run(&request, &CancellationToken::default()).unwrap();
+    assert_eq!(resumed.commit_state, "committed");
+    assert_eq!(
+        resumed.identity.recipe_sha256.as_str(),
+        expected_recipe_sha256
+    );
+    assert_eq!(resumed.identity.target_profile, fixture.preset);
+    let collector_receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(lifecycle.join("receipts/collector.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        collector_receipt["identity"]["recipe_sha256"],
+        expected_recipe_sha256
+    );
+    assert_eq!(
+        collector_receipt["identity"]["target_profile"],
+        fixture.preset
+    );
+    assert!(!staging.exists());
+    assert!(lifecycle
+        .join("logs/collector-resume-1.stdout.log")
+        .is_file());
+}
+
+#[test]
+fn native_lifecycle_v2_llvm_group_plans_builds_and_resumes() {
+    exercise_native_v2_group_lifecycle(false);
+}
+
+#[test]
+fn native_lifecycle_v2_gnu_group_plans_builds_and_resumes() {
+    exercise_native_v2_group_lifecycle(true);
+}
+
+#[test]
+fn native_lifecycle_v2_plan_rejects_changed_unselected_group_after_commit() {
+    let (fixture, unselected_profiles) = Fixture::new_v2(false);
+    let mut changed = fs::read(&unselected_profiles).unwrap();
+    changed.push(b'\n');
+    fs::write(&unselected_profiles, changed).unwrap();
+    fixture.commit_producer_update("test: change unselected native input group");
+
+    let request = fixture.plan_request();
+    let error = aros_toolchain::plan::inspect(&request).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("native executor input-group bytes differ from their declared digests"),
+        "{error}"
+    );
+    assert!(!request.work_dir.unwrap().exists());
+    assert!(!request.output_dir.unwrap().exists());
+    assert!(!fixture
+        .root
+        .join("work/native-lifecycle/build/configure.args")
+        .exists());
 }
 
 #[test]
@@ -1280,6 +1693,7 @@ fn explicit_collector_resume_revalidates_predecessors_and_uses_a_fresh_cargo_tar
     let staging = fixture.root.join("output/.aros-native-toolchain-stage");
     fs::rename(&published, &staging).unwrap();
     fs::remove_file(lifecycle.join("receipts/publish.json")).unwrap();
+    fs::remove_file(lifecycle.join("receipts/finished-candidate.json")).unwrap();
     let prefix = staging.join("bin");
 
     // Model an interruption after the compiler receipt but before a collector
@@ -1316,6 +1730,7 @@ fn collector_resume_rejects_a_tampered_retained_snapshot_before_execution() {
     let staging = fixture.root.join("output/.aros-native-toolchain-stage");
     fs::rename(&published, &staging).unwrap();
     fs::remove_file(lifecycle.join("receipts/publish.json")).unwrap();
+    fs::remove_file(lifecycle.join("receipts/finished-candidate.json")).unwrap();
     let prefix = staging.join("bin");
     fs::remove_file(lifecycle.join("receipts/collector.json")).unwrap();
     for name in ["aros-collect", "collect-aros", "collect-aros32"] {
@@ -1346,6 +1761,7 @@ fn collector_resume_rejects_a_tampered_configure_output_before_execution() {
     let staging = fixture.root.join("output/.aros-native-toolchain-stage");
     fs::rename(&published, &staging).unwrap();
     fs::remove_file(lifecycle.join("receipts/publish.json")).unwrap();
+    fs::remove_file(lifecycle.join("receipts/finished-candidate.json")).unwrap();
     fs::remove_file(lifecycle.join("receipts/collector.json")).unwrap();
     for name in ["aros-collect", "collect-aros", "collect-aros32"] {
         fs::remove_file(staging.join("bin").join(name)).unwrap();

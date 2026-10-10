@@ -33,12 +33,16 @@ use crate::{ContractError, Recipe};
 
 const ARCHIVE_ROOT: &str = "toolchain";
 const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: u64 = 500_000;
-const MAX_EXPANDED_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+pub(crate) const MAX_ARCHIVE_ENTRIES: u64 = 500_000;
+pub(crate) const MAX_EXPANDED_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_XZ_DECODER_MEMORY: u64 = 512 * 1024 * 1024;
-const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOOLCHAIN_TOOLS_BYTES: u64 = 16 * 1024;
 const SCAN_BUFFER_BYTES: usize = 128 * 1024;
+
+#[cfg(test)]
+#[path = "package_verify_structure_tests.rs"]
+mod structure_tests;
 
 /// Closed expected identity for one package-set read-back verification.
 #[derive(Debug, Clone)]
@@ -152,6 +156,16 @@ pub(crate) fn verify_members(
     paths: &PackageAssetPaths,
 ) -> Result<VerifiedPackage, ContractError> {
     let format = PackageFormat::default_for(request.source_lock.family());
+    verify_members_with_format(request, paths, format)
+}
+
+/// Verify explicit members with a format after the caller closes the larger
+/// outer inventory.
+pub(crate) fn verify_members_with_format(
+    request: &PackageVerificationRequest,
+    paths: &PackageAssetPaths,
+    format: PackageFormat,
+) -> Result<VerifiedPackage, ContractError> {
     validate_request(request, format)?;
     verify_members_validated(request, paths, format)
 }
@@ -260,9 +274,9 @@ fn validate_request(
     }
     request.source_lock.verify_recipe_patches(&request.recipe)?;
     for prefix in &request.forbidden_prefixes {
-        if !prefix.is_absolute() {
+        if !prefix.is_absolute() || prefix.to_str().is_none() {
             return Err(ContractError::verification(
-                "every forbidden verification prefix must be absolute",
+                "every forbidden verification prefix must be absolute UTF-8",
             ));
         }
     }
@@ -460,6 +474,7 @@ fn scan_archive<C: ArchiveConsumer>(
     let mut archive = tar::Archive::new(decoder);
     let mut entries = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut directories = BTreeSet::from([PathBuf::new()]);
     let mut previous = None;
     let mut embedded_manifest = None;
     let mut toolchain_tools = None;
@@ -519,10 +534,19 @@ fn scan_archive<C: ArchiveConsumer>(
                 "package tar contains a duplicate or case-folding path collision",
             ));
         }
+        let parent = relative.parent().ok_or_else(|| {
+            ContractError::verification("package tar entry has no relative parent")
+        })?;
+        if !directories.contains(parent) {
+            return Err(ContractError::verification(
+                "package tar entry has no previously declared real parent directory",
+            ));
+        }
         match entry_type.as_byte() {
             b'5' => {
                 verify_header(&header, manifest.source_date_epoch, Some(0o755), 0)?;
                 consumer.directory(&relative)?;
+                directories.insert(relative.clone());
                 entries.push(directory_entry(relative_text));
             }
             b'2' => {
@@ -985,7 +1009,13 @@ fn hash_entry_with_output<R: Read + ?Sized>(
 ) -> Result<Sha256Digest, ContractError> {
     let needles = forbidden_prefixes
         .iter()
-        .filter_map(|prefix| prefix.to_str())
+        .map(|prefix| {
+            prefix.to_str().ok_or_else(|| {
+                ContractError::verification("forbidden verification prefix is not UTF-8")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|prefix| !prefix.is_empty())
         .map(str::as_bytes)
         .collect::<Vec<_>>();

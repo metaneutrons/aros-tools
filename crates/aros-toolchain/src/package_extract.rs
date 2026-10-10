@@ -151,7 +151,7 @@ fn create_fresh_root(path: &Path) -> Result<PathBuf, ContractError> {
     Ok(root)
 }
 
-fn verify_extracted_tree(
+pub(crate) fn verify_extracted_tree(
     root: &Path,
     manifest: &ArosToolchainManifest,
 ) -> Result<(), ContractError> {

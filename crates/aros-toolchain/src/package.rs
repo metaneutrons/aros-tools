@@ -77,7 +77,8 @@ pub struct PackageRequest {
     pub source_lock: SourceLock,
     /// Exact profile selected from the validated profiles document.
     pub profile: Profile,
-    /// Build-environment receipt material included in the manifest.
+    /// Caller-selected build-environment metadata included in the manifest.
+    /// Packaging checks consistency, not independent execution authenticity.
     pub build_environment: Map<String, Value>,
     /// Absolute build roots that must not appear in any packaged regular file.
     pub forbidden_prefixes: Vec<PathBuf>,
@@ -133,7 +134,39 @@ pub fn package_with_format(
     request: &PackageRequest,
     format: PackageFormat,
 ) -> Result<PackageOutput, ContractError> {
+    package_internal(request, format, None).map(|(output, _)| output)
+}
+
+#[cfg(unix)]
+pub(crate) fn package_with_candidate_proof(
+    request: &PackageRequest,
+    proof: &crate::native_candidate::FinishedCandidateReadback,
+) -> Result<(PackageOutput, crate::package_verify::VerifiedPackage), ContractError> {
+    let (output, verified) =
+        package_internal(request, PackageFormat::CompilerFamilyV2, Some(proof))?;
+    Ok((
+        output,
+        verified.expect("finished candidate package is verified before commit"),
+    ))
+}
+
+fn package_internal(
+    request: &PackageRequest,
+    format: PackageFormat,
+    #[cfg(unix)] proof: Option<&crate::native_candidate::FinishedCandidateReadback>,
+    #[cfg(not(unix))] _proof: Option<&()>,
+) -> Result<
+    (
+        PackageOutput,
+        Option<crate::package_verify::VerifiedPackage>,
+    ),
+    ContractError,
+> {
     validate_request(request, format)?;
+    #[cfg(unix)]
+    if let Some(proof) = proof {
+        proof.require_package_request(request)?;
+    }
     let parent = request
         .output_dir
         .parent()
@@ -143,7 +176,45 @@ pub fn package_with_format(
     let candidate_stage = temporary(parent, ".aros-toolchain-candidate-")?;
     let package_stage = temporary(parent, ".aros-toolchain-package-")?;
     let staged_root = candidate_stage.path().join(ARCHIVE_ROOT);
-    copy_candidate(&request.candidate_root, &staged_root)?;
+    // V2 acquires every candidate entry through the complete descriptor-bound
+    // snapshot copy before applying the established lossy package transform.
+    // No live source pathname is traversed by the normalization copier.
+    #[cfg(unix)]
+    let raw_stage = if format == PackageFormat::CompilerFamilyV2 {
+        let stage = temporary(parent, ".aros-toolchain-raw-")?;
+        let snapshot = if let Some(proof) = proof {
+            proof.snapshot().clone()
+        } else {
+            aros_common::measure_tree_content_cas_bounded(
+                &request.candidate_root,
+                crate::native_candidate::payload_limits(),
+            )
+            .map_err(|_| {
+                ContractError::package("cannot safely measure bounded candidate before staging")
+            })?
+        };
+        aros_common::copy_tree_from_snapshot_nofollow(
+            &request.candidate_root,
+            stage.path(),
+            &snapshot,
+            crate::native_candidate::payload_limits(),
+        )
+        .map_err(|_| {
+            ContractError::package(
+                "candidate changed or could not be copied from its bounded snapshot",
+            )
+        })?;
+        Some(stage)
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let copy_source = raw_stage
+        .as_ref()
+        .map_or(request.candidate_root.as_path(), |stage| stage.path());
+    #[cfg(not(unix))]
+    let copy_source = request.candidate_root.as_path();
+    copy_candidate(copy_source, &staged_root)?;
     remove_embedded_manifest(&staged_root)?;
     if request.source_lock.family() == CompilerFamily::Gnu {
         let identity =
@@ -190,6 +261,29 @@ pub fn package_with_format(
     write_new(&sbom, &spdx_bytes(&request.source_lock, &manifest)?)?;
     sync_tree(package_stage.path())?;
 
+    #[cfg(unix)]
+    let verified = if let Some(proof) = proof {
+        let verified = crate::package_verify::verify_with_format(
+            &crate::package_verify::PackageVerificationRequest {
+                package_dir: package_stage.path().to_owned(),
+                release_id: request.release_id.clone(),
+                host: request.host.clone(),
+                recipe: request.recipe.clone(),
+                source_lock: request.source_lock.clone(),
+                profile: request.profile.clone(),
+                build_environment: request.build_environment.clone(),
+                forbidden_prefixes: request.forbidden_prefixes.clone(),
+            },
+            format,
+        )?;
+        proof.revalidate()?;
+        Some(verified)
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let verified = None;
+
     publish_prepared_tree_noclobber(package_stage.path(), &request.output_dir).map_err(
         |error| ContractError::package(format!("cannot atomically publish package set: {error}")),
     )?;
@@ -202,7 +296,7 @@ pub fn package_with_format(
         archive_sha256: measured.digest,
         archive_size: measured.size,
     };
-    Ok(output)
+    Ok((output, verified))
 }
 
 /// Derive the v1 asset name from closed version, host and profile selectors.
@@ -289,9 +383,9 @@ fn validate_request(request: &PackageRequest, format: PackageFormat) -> Result<(
     let build_environment = Value::Object(request.build_environment.clone());
     crate::canonical::bytes(&build_environment)?;
     for prefix in &request.forbidden_prefixes {
-        if !prefix.is_absolute() {
+        if !prefix.is_absolute() || prefix.to_str().is_none() {
             return Err(ContractError::package(
-                "every forbidden package prefix must be absolute",
+                "every forbidden package prefix must be absolute UTF-8",
             ));
         }
     }
@@ -462,11 +556,17 @@ fn remove_embedded_manifest(root: &Path) -> Result<(), ContractError> {
 }
 
 fn scan_prefixes(root: &Path, prefixes: &[PathBuf]) -> Result<(), ContractError> {
-    let needles: Vec<_> = prefixes
+    let needles = prefixes
         .iter()
-        .filter_map(|path| path.to_str().map(|value| (path, value.as_bytes())))
+        .map(|path| {
+            path.to_str()
+                .map(|value| (path, value.as_bytes()))
+                .ok_or_else(|| ContractError::package("forbidden package prefix is not UTF-8"))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|(_, bytes)| !bytes.is_empty())
-        .collect();
+        .collect::<Vec<_>>();
     let mut findings = Vec::new();
     scan_directory(root, Path::new(""), &needles, &mut findings)?;
     if findings.is_empty() {
