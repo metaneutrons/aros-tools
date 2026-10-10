@@ -197,7 +197,7 @@ pub struct FinishedCandidatePackage {
 impl FinishedCandidatePackage {
     /// Atomically published package members.
     #[must_use]
-    pub const fn output(&self) -> &PackageOutput {
+    pub const fn package_output(&self) -> &PackageOutput {
         &self.output
     }
     /// Complete bounded package read-back, including its normalized payload inventory.

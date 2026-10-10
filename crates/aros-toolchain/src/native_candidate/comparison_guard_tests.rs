@@ -101,24 +101,25 @@ fn rejects_each_side_changed_after_a_successful_comparison_without_writing() {
             let path = match member {
                 0 => fixture.candidate().join("bin/clang"),
                 1 => fixture.receipts_dir().join("publish.json"),
-                2 => package.output().archive.clone(),
-                3 => package.output().manifest.clone(),
-                4 => package.output().checksum.clone(),
-                5 => package.output().sbom.clone(),
+                2 => package.package_output().archive.clone(),
+                3 => package.package_output().manifest.clone(),
+                4 => package.package_output().checksum.clone(),
+                5 => package.package_output().sbom.clone(),
                 _ => unreachable!(),
             };
             let mut changed = fs::read(&path).unwrap();
             changed.push(b'\n');
             fs::write(&path, changed).unwrap();
             let before = fs::read(&path).unwrap();
-            let package_before = measure_tree_content_cas(&package.output().output_dir).unwrap();
+            let package_before =
+                measure_tree_content_cas(&package.package_output().output_dir).unwrap();
             assert!(
                 comparison.revalidate().is_err(),
                 "side={right_side}, member={member}"
             );
             assert_eq!(fs::read(&path).unwrap(), before);
             assert_eq!(
-                measure_tree_content_cas(&package.output().output_dir).unwrap(),
+                measure_tree_content_cas(&package.package_output().output_dir).unwrap(),
                 package_before
             );
         }

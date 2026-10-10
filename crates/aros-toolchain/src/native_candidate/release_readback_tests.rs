@@ -150,7 +150,7 @@ pub(super) fn prepare_release() -> PreparedRelease {
         let right = guarded_package_for_host(host);
         let asset = left
             .package
-            .output()
+            .package_output()
             .archive
             .file_name()
             .unwrap()
@@ -158,16 +158,16 @@ pub(super) fn prepare_release() -> PreparedRelease {
             .unwrap()
             .to_owned();
         assert_eq!(
-            right.package.output().archive.file_name().unwrap(),
+            right.package.package_output().archive.file_name().unwrap(),
             asset.as_str()
         );
 
         copy_package(
-            left.package.output().output_dir.as_path(),
+            left.package.package_output().output_dir.as_path(),
             &package_downloads.join(format!("{host_index}-left")),
         );
         copy_package(
-            right.package.output().output_dir.as_path(),
+            right.package.package_output().output_dir.as_path(),
             &package_downloads.join(format!("{host_index}-right")),
         );
         let left_package_dir = package_downloads
@@ -178,7 +178,10 @@ pub(super) fn prepare_release() -> PreparedRelease {
             .join(format!("{host_index}-right"))
             .canonicalize()
             .unwrap();
-        copy_package_to_flat_release(left.package.output().output_dir.as_path(), &release_dir);
+        copy_package_to_flat_release(
+            left.package.package_output().output_dir.as_path(),
+            &release_dir,
+        );
 
         let left_measurement = measurements.join(format!("{host_index}-left.json"));
         let right_measurement = measurements.join(format!("{host_index}-right.json"));
@@ -188,8 +191,8 @@ pub(super) fn prepare_release() -> PreparedRelease {
         let right_measurement = right_measurement.canonicalize().unwrap();
 
         let comparison = compare_package_sets(
-            &left.package.output().output_dir,
-            &right.package.output().output_dir,
+            &left.package.package_output().output_dir,
+            &right.package.package_output().output_dir,
         )
         .unwrap();
         let comparison_path = comparisons.join(format!("{asset}.comparison.json"));

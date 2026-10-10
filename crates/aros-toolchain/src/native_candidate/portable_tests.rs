@@ -69,8 +69,10 @@ pub(super) fn guarded_package_for_host(host: &'static str) -> GuardedPackage {
     .unwrap();
     drop(local);
     let package = package_finished_candidate(&selected_package, &candidate).unwrap();
-    let verification =
-        verification_from_package_request(&selected_package, package.output().output_dir.clone());
+    let verification = verification_from_package_request(
+        &selected_package,
+        package.package_output().output_dir.clone(),
+    );
     let measurement = export_finished_package_measurement(&candidate, &package).unwrap();
     let identity = fixture.identity.clone();
     GuardedPackage {
@@ -273,7 +275,7 @@ fn exports_and_reads_back_a_copied_package_without_opening_original_roots() {
     let collector_root = tempfile::tempdir().unwrap();
     let copied_package = collector_root.path().join("downloaded-package");
     copy_package(
-        guarded.package.output().output_dir.as_path(),
+        guarded.package.package_output().output_dir.as_path(),
         &copied_package,
     );
     let copied_measurement = collector_root.path().join("measurement.json");
@@ -294,7 +296,7 @@ fn exports_and_reads_back_a_copied_package_without_opening_original_roots() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let original_package = guarded.package.output().output_dir.clone();
+    let original_package = guarded.package.package_output().output_dir.clone();
     drop(guarded);
 
     assert!(!work_root.exists());
@@ -618,14 +620,14 @@ fn export_requires_the_cli_result_and_rechecks_live_candidate_receipt_and_packag
         let package_root = tempfile::tempdir().unwrap();
         let request = package_request(&fixture, package_root.path().join("package"));
         let package = package_finished_candidate(&request, &candidate).unwrap();
-        let before = snapshot_package(package.output().output_dir.as_path());
+        let before = snapshot_package(package.package_output().output_dir.as_path());
         let error = export_finished_package_measurement(&candidate, &package).unwrap_err();
         assert_message(
             &error,
             "portable package export requires the retained CLI build result",
         );
         assert_eq!(
-            snapshot_package(package.output().output_dir.as_path()),
+            snapshot_package(package.package_output().output_dir.as_path()),
             before
         );
     }
@@ -653,7 +655,7 @@ fn export_requires_the_cli_result_and_rechecks_live_candidate_receipt_and_packag
             }
             "package" => {
                 fs::write(
-                    guarded.package.output().archive.as_path(),
+                    guarded.package.package_output().archive.as_path(),
                     b"changed package archive bytes\n",
                 )
                 .unwrap();

@@ -51,8 +51,8 @@ fn compares_two_distinct_complete_candidates_and_packages() {
         right_candidate.record.candidate_root
     );
     assert_ne!(
-        left_package.output().output_dir,
-        right_package.output().output_dir
+        left_package.package_output().output_dir,
+        right_package.package_output().output_dir
     );
     let before = snapshot(
         &left_candidate,
@@ -331,7 +331,7 @@ fn rejects_a_wrong_measured_package_member_size() {
     );
     let artifact = selected_artifact(&index);
     let wrong_size_name = format!("{}.manifest.json", artifact.asset());
-    let mut wrong_size = fs::read(&left_package.output().manifest).unwrap();
+    let mut wrong_size = fs::read(&left_package.package_output().manifest).unwrap();
     wrong_size.push(b' ');
     let (release_directory, readback) = final_readback(
         &inputs,
@@ -457,7 +457,7 @@ fn release_index(
     package: &FinishedCandidatePackage,
     base_url: &str,
 ) -> NativeReleaseIndexV2 {
-    let selected_archive = fs::read(&package.output().archive).unwrap();
+    let selected_archive = fs::read(&package.package_output().archive).unwrap();
     let unused_archive = b"synthetic non-selected lane archive\n";
     let unused_tree = sha256_bytes(b"synthetic non-selected lane tree");
     let artifacts = expected_artifacts(&inputs.inputs)
@@ -467,7 +467,7 @@ fn release_index(
             let selected = lane.host == "linux-x86_64" && lane.target_profile == "pc-x86_64";
             let (archive_sha256, archive_size, tree_sha256) = if selected {
                 assert_eq!(
-                    package.output().archive.file_name().unwrap(),
+                    package.package_output().archive.file_name().unwrap(),
                     lane.asset.as_str()
                 );
                 (
@@ -535,7 +535,7 @@ fn final_readback(
     const TREE_FIXTURE_NAME: &str = "tree-digest-v1.fixture.json";
 
     let directory = tempfile::tempdir().unwrap();
-    let output = package.output();
+    let output = package.package_output();
     let selected_asset = selected_artifact(index).asset();
     let index_bytes = index.to_json_bytes().unwrap();
     let mut checksum_lines = Vec::new();
@@ -715,9 +715,9 @@ fn rejects_a_changed_package_member_without_mutation() {
     let (right_candidate, right_package) =
         package_side(&mut right_fixture, package_roots.path().join("right"));
 
-    let mut archive = fs::read(&left_package.output().archive).unwrap();
+    let mut archive = fs::read(&left_package.package_output().archive).unwrap();
     archive[0] ^= 1;
-    fs::write(&left_package.output().archive, archive).unwrap();
+    fs::write(&left_package.package_output().archive, archive).unwrap();
     let before = snapshot(
         &left_candidate,
         &left_package,
@@ -804,10 +804,10 @@ fn snapshot(
     let roots = [
         left_candidate.work_dir.as_path(),
         left_output,
-        left_package.output().output_dir.as_path(),
+        left_package.package_output().output_dir.as_path(),
         right_candidate.work_dir.as_path(),
         right_output,
-        right_package.output().output_dir.as_path(),
+        right_package.package_output().output_dir.as_path(),
     ];
     roots
         .iter()

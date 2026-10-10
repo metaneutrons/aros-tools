@@ -54,7 +54,7 @@ pub(super) fn run(
             "portable_measurement": measurement_text,
             "portable_measurement_sha256": measurement.sha256(),
         });
-        Ok((packaged.output().clone(), Some(evidence)))
+        Ok((packaged.package_output().clone(), Some(evidence)))
     }
     #[cfg(not(unix))]
     {

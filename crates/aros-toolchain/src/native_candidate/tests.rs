@@ -251,9 +251,9 @@ fn reads_complete_candidate_after_old_llvm_checkpoint_cleanup_and_packages_v2() 
         .files
         .iter()
         .all(|entry| entry.path != ".installflag-fixture"));
-    assert!(package.output().archive.is_file());
+    assert!(package.package_output().archive.is_file());
     assert_eq!(
-        package.output().archive_sha256,
+        package.package_output().archive_sha256,
         package.verified().archive_sha256
     );
 }
@@ -526,10 +526,10 @@ fn assert_finished_v2_package(package: &FinishedCandidatePackage) {
     assert_eq!(package.verified().manifest.schema, 2);
     assert_eq!(package.verified().manifest.host, "linux-x86_64");
     assert_eq!(package.verified().manifest.target_profile, "pc-x86_64");
-    assert!(package.output().archive.is_file());
-    assert!(package.output().manifest.is_file());
-    assert!(package.output().checksum.is_file());
-    assert!(package.output().sbom.is_file());
+    assert!(package.package_output().archive.is_file());
+    assert!(package.package_output().manifest.is_file());
+    assert!(package.package_output().checksum.is_file());
+    assert!(package.package_output().sbom.is_file());
 }
 
 pub(super) fn package_request(fixture: &Fixture, output_dir: PathBuf) -> PackageRequest {
