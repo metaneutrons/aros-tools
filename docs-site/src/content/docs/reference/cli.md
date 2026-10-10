@@ -108,7 +108,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 
 ### Native producer control plane
 
-These 14 commands are maintainer-only, explicit local stages. They have no
+These commands are maintainer-only, explicit local stages. They have no
 forge authority: none creates a tag, GitHub release, attestation or package
 manager publication. Their exact required options come from the installed
 `aros toolchain producer <command> --help`; the local candidate workflow uses
@@ -119,6 +119,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer recipe` | Construct one non-overwriting recipe from committed source, producer and tools inputs |
 | `aros toolchain producer environment` | Write a deterministic build-environment receipt |
 | `aros toolchain producer profile` | Read one recipe-bound profile without duplicating selectors |
+| `aros toolchain producer release-plan` | Derive every family-v2 group and host/profile lane from the digest-selected input collection; read-only, no build or qualification |
 | `aros toolchain producer materialize-engine-free-source` | Materialize an audited compatibility snapshot without the source-tree engine |
 | `aros toolchain producer package` | Create one deterministic local package set from a completed candidate |
 | `aros toolchain producer verify-package` | Read back and verify one complete local package set |
@@ -153,6 +154,13 @@ The default V1 path requires `--source-lock-filename`. V2 requires independent
 `--lane-inputs` and an external `--subject-manifest`; its final stage also
 requires the original `--subject-manifest-sha256`. Indexing verifies local bytes,
 not signer identity or publication eligibility.
+
+`producer release-plan` reads `toolchain-release-inputs-v2.json` and every
+referenced recipe, source lock and profile document from `--directory`.
+`--inputs-sha256` must match the independently selected collection bytes.
+JSON contains the complete group and host/profile lane set; runner labels and
+A/B scheduling remain workflow policy. No archive, index, compiler execution
+or signature is required or qualified by this input projection.
 
 `producer verify-release-evidence` requires the complete final family-v2
 inventory, an external closed lane selection and independently retained raw

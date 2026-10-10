@@ -170,6 +170,9 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer record-qualification` | expires_at | --expires-at | — | required | 1 |  |  | — |  |
 | `aros toolchain producer record-qualification` | output | --output | — | required | 1 |  |  | — |  |
 | `aros toolchain producer record-qualification` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros toolchain producer release-plan` | directory | --directory | — | required | 1 |  |  | — |  |
+| `aros toolchain producer release-plan` | inputs_sha256 | --inputs-sha256 | — | required | 1 |  |  | — |  |
+| `aros toolchain producer release-plan` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer repackage` | recovery_request | --recovery-request | — | required | 1 |  |  | — |  |
 | `aros toolchain producer repackage` | source_package_dir | --source-package-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer repackage` | source_release_id | --source-release-id | — | required | 1 |  |  | — |  |

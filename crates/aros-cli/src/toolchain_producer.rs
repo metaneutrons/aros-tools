@@ -42,6 +42,7 @@ mod release_evidence_readback;
 mod release_evidence_selection;
 #[cfg(unix)]
 mod release_index_family;
+mod release_plan;
 
 /// Closed native producer stages exposed by `aros toolchain producer`.
 #[derive(Args)]
@@ -79,6 +80,7 @@ impl ProducerArgs {
             ProducerCommand::VerifyReleaseEvidence(_) => {
                 "toolchain.producer.verify-release-evidence"
             }
+            ProducerCommand::ReleasePlan(_) => "toolchain.producer.release-plan",
         }
     }
 }
@@ -119,6 +121,8 @@ enum ProducerCommand {
     Compatibility(Box<native_compatibility::CompatibilityArgs>),
     /// Read back every selected family-v2 build and compatibility lane; no execution authentication
     VerifyReleaseEvidence(Box<release_evidence::EvidenceArgs>),
+    /// Derive every family-v2 release lane from independently selected input bytes; no build or admission
+    ReleasePlan(release_plan::ReleasePlanArgs),
 }
 
 /// Machine- or human-readable local stage result.
@@ -588,6 +592,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::CompatibilityHostTools { host } => compatibility_host_tools(&host),
         ProducerCommand::Compatibility(args) => native_compatibility::compatibility(*args).await,
         ProducerCommand::VerifyReleaseEvidence(args) => release_evidence::run(&args),
+        ProducerCommand::ReleasePlan(args) => release_plan::run(&args),
     }
 }
 

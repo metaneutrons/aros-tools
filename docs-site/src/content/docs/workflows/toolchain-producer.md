@@ -303,6 +303,14 @@ JSON adds the output directory, input-document digest and evidence-manifest
 digest under `local_evidence`; retain those digests outside the uploaded files.
 Keep this evidence private, outside the public release inventory.
 
+`producer release-plan --directory DIR --inputs-sha256 SHA --format json`
+projects the complete selected V2 input collection before any builds. Its
+`groups` retain each source revision and exact document names/digests; `lanes`
+contains every selected group/host/profile combination. Derive scheduling from
+this result rather than copying profile lists into the workflow. Runner labels
+and A/B scheduling are workflow policy. The command is read-only and its
+`assurance: input-binding-only` result does not qualify execution or release.
+
 `producer verify-release-evidence` reads the complete evidence on a collector
 host without reopening original runner roots. Supply `--directory`,
 `--release-id`, `--base-url`, `--inputs-sha256`, `--index-sha256`, `--selection`,

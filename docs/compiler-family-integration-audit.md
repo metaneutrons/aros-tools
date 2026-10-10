@@ -31,7 +31,7 @@ stage rules; they must not become a second hard-coded workflow inventory.
 
 | Boundary | Source evidence | Remaining integration finding |
 | --- | --- | --- |
-| Input selection | `release_inputs.rs`, `native_declaration.rs` | The library binds multiple compiler groups; the producer must supply and consume the same reviewed group set. |
+| Input selection | `release_inputs.rs`, `native_declaration.rs`, `toolchain_producer/release_plan.rs` | The library binds multiple compiler groups; `producer release-plan` projects the complete digest-selected group/host/profile set without building or qualifying it. The producer must supply and consume that same reviewed set. |
 | Local execution | `native_lifecycle.rs`, `executor.rs`, `native_candidate.rs` | `publish`/result outputs remain collector-only; a separate finished record measures the complete tree and ordered chain. Its guarded package join is local library evidence, not authenticated workflow admission. |
 | Packaging and index | `release_index_v2_builder.rs`, `release_index_v2_readback.rs`, `toolchain_producer/release_index_family.rs` | Explicit family-v2 CLI stages measure packages and index/checksum inputs. They do not qualify execution or authenticate provenance. |
 | A/B comparison | `native_candidate/comparison.rs`, `native_candidate/release_readback.rs`, `release_index.rs::PackageComparisonReport` | Local proofs and complete portable byte acquisition join both packages, retained exports/reports, selected groups and final checksum/subject bytes. `verify-release-evidence` exposes the complete byte collector; external execution/artifact authentication remains separate. |
@@ -150,7 +150,7 @@ The concrete producer handoffs are:
 
 | Handoff | Current writer and reader | Coordinated change |
 | --- | --- | --- |
-| Inputs to plan | `toolchain-release.yml` writes one recipe and expands three fixed profiles on three hosts. | Project the reviewed group set into recipes and twelve lanes; preserve exact independent group inputs. |
+| Inputs to plan | `toolchain-release.yml` writes one recipe and expands three fixed profiles on three hosts. | Use `producer release-plan` on the reviewed group collection to derive its complete lanes; preserve exact independent group inputs and keep runner/A/B scheduling in workflow policy. |
 | Build to package | The build step defaults to human stdout; packaging selects `publish.json` and ordinary format defaults. | Retain exact build JSON and its externally selected digest; use explicit guarded family-V2 packaging on the owning host. |
 | Packages to comparison | Candidate and lifecycle artifacts are uploaded separately; the comparison job reads four package files per side. | Bind complete A/B candidate/package measurements to authenticated job/artifact origin. Do not replay original macOS roots on a Linux collector. |
 | Compatibility to collector | One compatibility job per lane uploads retained results. | Validate original-root evidence on its owning host and transport closed, byte-bound records with independent environment expectations. |
