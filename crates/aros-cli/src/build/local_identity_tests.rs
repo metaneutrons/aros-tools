@@ -1,6 +1,24 @@
 use super::*;
 use std::fs;
 
+#[test]
+fn native_executable_identity_streams_large_debug_binaries_under_a_work_ceiling() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("debug-tool");
+    let file = fs::File::create(&path).unwrap();
+    // Sparse fixture crosses the exact ceiling that rejected the CI binary.
+    file.set_len(256 * 1024 * 1024 + 1).unwrap();
+    drop(file);
+    let expected = aros_common::sha256_reader(&mut fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(executable_digest(&path).unwrap(), expected.digest);
+    let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_len(MAX_EXECUTABLE_BYTES + 1).unwrap();
+    assert!(executable_digest(&path)
+        .unwrap_err()
+        .to_string()
+        .contains("hash limit"));
+}
+
 fn write_configuration_fixture(build: &Path, cache: &str) {
     fs::create_dir_all(build.join("CMakeFiles")).unwrap();
     fs::write(build.join("CMakeCache.txt"), cache).unwrap();

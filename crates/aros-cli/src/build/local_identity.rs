@@ -18,7 +18,9 @@ const MAX_CONFIGURATION_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 
 const STAMP_NAME: &str = ".aros-local-native-inputs.json";
 const MAX_STAMP_BYTES: u64 = 64 * 1024;
-const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
+// Unstripped Linux debug binaries exceed 256 MiB. Stream their identity under
+// an explicit work ceiling instead of allocating the entire executable.
+const MAX_EXECUTABLE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_CONFIGURED_BOARD_INPUT_BYTES: u64 = 256 * 1024 * 1024;
 const KOBJ_MEMBERS: &[&str] = &["kernel_resource.o", "exec_library.o", "task_resource.o"];
 const TOOL_NAMES: &[&str] = &[
@@ -744,12 +746,10 @@ pub(super) fn verify_configured_tree(build: &Path, after_configure: bool) -> Res
 }
 
 fn executable_digest(path: &Path) -> Result<Sha256Digest> {
-    let (_, bytes) = aros_common::measure_regular_file_bounded(path, MAX_EXECUTABLE_BYTES)
-        .into_diagnostic()?
-        .ok_or_else(|| {
-            miette::miette!("native producer executable disappeared: {}", path.display())
-        })?;
-    Ok(aros_common::sha256_bytes(&bytes))
+    let (_, measured) =
+        aros_common::measure_regular_file_digest_bounded(path, MAX_EXECUTABLE_BYTES)
+            .into_diagnostic()?;
+    Ok(measured.digest)
 }
 
 #[cfg(test)]
