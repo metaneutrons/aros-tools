@@ -7,14 +7,14 @@ use std::path::{Path, PathBuf};
 
 use aros_common::{
     elf::{self, AROS_ABI_VERSION, OS_ABI_AROS},
-    open_regular_file_nofollow, sha256_bytes, Sha256Digest,
+    open_regular_file_nofollow, sha256_bytes, ArosCompilerIdentity, Sha256Digest,
 };
 
 use super::checked_directory;
 use crate::ContractError;
 
 const MAX_STANDALONE_TARGETS: usize = 2;
-const MAX_STANDALONE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
+pub(super) const MAX_STANDALONE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
 // `collect-aros` defines the list bounds as ordinary ELF symbols. The `$`
 // commonly shown after them is a shell-regex end anchor, not part of either
 // upstream symbol name.
@@ -76,7 +76,8 @@ pub struct StandaloneOutputReport {
 /// Every output is opened through a no-follow descriptor, read once within a
 /// fixed bound, and parsed with the shared ELF reader. The object must carry
 /// AROS' `EI_OSABI`/`EI_ABIVERSION`, have the class required by its target
-/// triple, and contain the language-specific collector symbol. This has no
+/// triple, and define the language-specific collector symbol in an existing
+/// section or as an absolute symbol. This has no
 /// network, source, cache, tag, release or publication authority.
 ///
 /// # Errors
@@ -87,6 +88,54 @@ pub struct StandaloneOutputReport {
 pub fn verify_standalone_outputs(
     request: &StandaloneOutputRequest,
 ) -> Result<StandaloneOutputReport, ContractError> {
+    verify_outputs(request, None)
+}
+
+/// Verify standalone outputs against explicitly supplied compiler identities.
+///
+/// The identity map must cover exactly every requested target. Every explicit
+/// target requires its matching ELF machine and relocatable link type. GNU RISC-V
+/// outputs additionally pass the complete source-bound target contract:
+/// machine, class, relocatable link type, floating-point ABI, ISA attributes,
+/// stack/atomic/register conventions and AROS ABI marking. Compiler versions
+/// and target triples are validated before reading outputs. RISC-V is never
+/// admitted by the legacy verifier without this explicit contract.
+///
+/// Callers must obtain these identities from independently verified package
+/// manifests and bind them to selected recipe/profile inputs. This operation
+/// verifies output bytes only; it does not authenticate those declarations,
+/// execute a compiler, qualify relocation or authorize publication.
+///
+/// # Errors
+///
+/// Returns AX0703 for an incomplete or invalid compiler map, unsafe outputs,
+/// target-contract mismatches or missing language-specific collector symbols.
+pub fn verify_standalone_outputs_with_compilers(
+    request: &StandaloneOutputRequest,
+    compilers: &BTreeMap<String, ArosCompilerIdentity>,
+) -> Result<StandaloneOutputReport, ContractError> {
+    if request.targets.len() > MAX_STANDALONE_TARGETS
+        || compilers.len() != request.targets.len()
+        || !compilers.keys().eq(request.targets.keys())
+    {
+        return Err(ContractError::compatibility(
+            "standalone compiler identities must cover exactly the requested targets",
+        ));
+    }
+    for (triple, compiler) in compilers {
+        compiler.validate_for_target(triple).map_err(|_| {
+            ContractError::compatibility(
+                "standalone compiler identity differs from its target contract",
+            )
+        })?;
+    }
+    verify_outputs(request, Some(compilers))
+}
+
+fn verify_outputs(
+    request: &StandaloneOutputRequest,
+    compilers: Option<&BTreeMap<String, ArosCompilerIdentity>>,
+) -> Result<StandaloneOutputReport, ContractError> {
     let output_root = checked_directory(&request.output_root, "standalone output root")?;
     if request.targets.is_empty() || request.targets.len() > MAX_STANDALONE_TARGETS {
         return Err(ContractError::compatibility(
@@ -96,19 +145,43 @@ pub fn verify_standalone_outputs(
     let mut paths = BTreeSet::new();
     let mut targets = BTreeMap::new();
     for (triple, artifacts) in &request.targets {
-        let class = standalone_target_class(triple)?;
+        let compiler = compilers.and_then(|values| values.get(triple));
+        let riscv = match compiler {
+            Some(ArosCompilerIdentity::Gnu { target, .. }) => Some(target),
+            _ => None,
+        };
+        let class = standalone_target_class(triple, riscv)?;
+        let machine = if compilers.is_some() {
+            Some(
+                match triple
+                    .split_once('-')
+                    .map_or(triple.as_str(), |(cpu, _)| cpu)
+                {
+                    "x86_64" => 62,
+                    "i386" => 3,
+                    "arm" => 40,
+                    "aarch64" => 183,
+                    "riscv" | "riscv64" => elf::riscv::MACHINE,
+                    _ => unreachable!("standalone_target_class rejects unsupported CPUs"),
+                },
+            )
+        } else {
+            None
+        };
         let c = verify_standalone_artifact(
             &output_root,
             &artifacts.c,
-            class,
+            (class, machine),
             C_COLLECTOR_SYMBOL,
+            riscv,
             &mut paths,
         )?;
         let cxx = verify_standalone_artifact(
             &output_root,
             &artifacts.cxx,
-            class,
+            (class, machine),
             CXX_COLLECTOR_SYMBOL,
+            riscv,
             &mut paths,
         )?;
         targets.insert(triple.clone(), StandaloneTargetReport { c, cxx });
@@ -116,7 +189,10 @@ pub fn verify_standalone_outputs(
     Ok(StandaloneOutputReport { targets })
 }
 
-fn standalone_target_class(triple: &str) -> Result<elf::Class, ContractError> {
+fn standalone_target_class(
+    triple: &str,
+    riscv: Option<&elf::riscv::TargetContract>,
+) -> Result<elf::Class, ContractError> {
     if !crate::profiles::identifier(triple) {
         return Err(ContractError::compatibility(
             "standalone output contract contains an unsafe target triple",
@@ -125,6 +201,8 @@ fn standalone_target_class(triple: &str) -> Result<elf::Class, ContractError> {
     match triple.split_once('-').map_or(triple, |(cpu, _)| cpu) {
         "x86_64" | "aarch64" => Ok(elf::Class::Elf64),
         "i386" | "arm" => Ok(elf::Class::Elf32),
+        "riscv" if riscv.is_some() => Ok(elf::Class::Elf32),
+        "riscv64" if riscv.is_some() => Ok(elf::Class::Elf64),
         _ => Err(ContractError::compatibility(
             "standalone output contract contains an unsupported target triple",
         )),
@@ -134,8 +212,9 @@ fn standalone_target_class(triple: &str) -> Result<elf::Class, ContractError> {
 fn verify_standalone_artifact(
     output_root: &Path,
     path: &Path,
-    expected_class: elf::Class,
+    expected_identity: (elf::Class, Option<u16>),
     required_symbol: &str,
+    riscv: Option<&elf::riscv::TargetContract>,
     paths: &mut BTreeSet<PathBuf>,
 ) -> Result<StandaloneArtifactIdentity, ContractError> {
     let path = checked_direct_child(output_root, path, "standalone output")?;
@@ -160,7 +239,9 @@ fn verify_standalone_artifact(
     let mut bytes = Vec::with_capacity(usize::try_from(before.len()).map_err(|_| {
         ContractError::compatibility("standalone output length exceeds addressable memory")
     })?);
-    file.read_to_end(&mut bytes)
+    (&mut file)
+        .take(MAX_STANDALONE_ARTIFACT_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| ContractError::compatibility("cannot read the complete standalone output"))?;
     let after = file.metadata().map_err(|_| {
         ContractError::compatibility("cannot remeasure the opened standalone output")
@@ -175,19 +256,38 @@ fn verify_standalone_artifact(
             "standalone output is not a supported little-endian ELF object",
         )
     })?;
-    if object.class != expected_class
+    if object.class != expected_identity.0
         || object.os_abi != OS_ABI_AROS
         || object.abi_version != AROS_ABI_VERSION
+        || expected_identity
+            .1
+            .is_some_and(|machine| object.machine != machine || object.kind != 1)
     {
         return Err(ContractError::compatibility(
             "standalone output does not carry the selected target's AROS ELF identity",
         ));
     }
-    if !object
-        .symbols
-        .iter()
-        .any(|symbol| symbol.name == required_symbol)
-    {
+    if let Some(target) = riscv {
+        target
+            .verify(&bytes, elf::riscv::ArtifactRole::ArosRelocatable)
+            .map_err(|_| {
+                ContractError::compatibility(
+                    "standalone output differs from its source-bound RISC-V target contract",
+                )
+            })?;
+    }
+    if !object.symbols.iter().any(|symbol| {
+        symbol.name == required_symbol
+            && match symbol.home {
+                elf::Home::Absolute => true,
+                elf::Home::Undefined => false,
+                elf::Home::Section(index) => {
+                    index != 0
+                        && index < 0xff00
+                        && object.sections.iter().any(|section| section.index == index)
+                }
+            }
+    }) {
         return Err(ContractError::compatibility(
             "standalone output lacks its required collector symbol",
         ));

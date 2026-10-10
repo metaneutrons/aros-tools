@@ -12,15 +12,16 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use aros_common::{sha256_bytes, CancellationToken, Sha256Digest};
+use aros_common::toolchain_layout::ToolchainToolLayout;
+use aros_common::{sha256_bytes, ArosCompilerIdentity, CancellationToken, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    checked_executable, native_compatibility_host_tools, run_probe_set, verify_standalone_outputs,
-    CompatibilityCommand, CompatibilityEnvironment, CompatibilityPhase, CompatibilityPreparation,
-    CompatibilityProbeRequest, CompatibilityProbeSet, CompatibilityProbeSetRequest,
-    HostToolClosure, StandaloneOutputReport, StandaloneOutputRequest, StandaloneTargetArtifacts,
-    TwoRootRelocation,
+    checked_executable, run_probe_set, verify_standalone_outputs,
+    verify_standalone_outputs_with_compilers, CompatibilityCommand, CompatibilityPhase,
+    CompatibilityPreparation, CompatibilityProbeRequest, CompatibilityProbeSet,
+    CompatibilityProbeSetRequest, HostToolClosure, StandaloneOutputReport, StandaloneOutputRequest,
+    StandaloneTargetArtifacts, TwoRootRelocation,
 };
 use crate::compatibility_ports::{
     safe_fetch_marker_path, safe_relative_path, CompatibilityPortsPayload,
@@ -32,11 +33,42 @@ use crate::recipe::GitObjectId;
 use crate::source_audit::{self, Budget as SourceAuditBudget};
 use crate::{canonical, inspection, ContractError};
 
-const POISONED_PATH: &str = "/nonexistent";
 const MAX_MAKE_JOBS: usize = 64;
 const UPSTREAM_SOURCE_AUDIT_TIMEOUT: Duration = Duration::from_mins(5);
 const COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v2";
+const GNU_COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v3";
+const LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v4";
 const COMPATIBILITY_RECEIPT_FILE: &str = "native-compatibility.receipt.json";
+
+#[path = "execution_receipt_readback.rs"]
+mod receipt_readback;
+pub use receipt_readback::{
+    readback_native_compatibility_receipt, NativeCompatibilityCommandLogs,
+    NativeCompatibilityExpectedPackage, NativeCompatibilityExpectedPortSource,
+    NativeCompatibilityReceiptReadback, NativeCompatibilityReceiptReadbackRequest,
+};
+
+#[path = "execution_retained.rs"]
+mod retained;
+pub use retained::{
+    execute_native_compatibility_with_readback, readback_retained_native_compatibility,
+};
+
+#[path = "execution_portable.rs"]
+mod portable;
+pub use portable::{
+    export_retained_native_compatibility, readback_portable_native_compatibility,
+    NativeCompatibilityReceiptExpectations, PortableNativeCompatibilityExport,
+    PortableNativeCompatibilityReadback, PortableNativeCompatibilityRequest,
+    PORTABLE_NATIVE_COMPATIBILITY_MANIFEST,
+};
+
+#[path = "execution_observation.rs"]
+mod observation;
+pub use observation::{
+    execute_native_compatibility_with_export, NativeCompatibilityExecutionExport,
+    NativeCompatibilityInputClaims,
+};
 
 /// Explicit C and C++ fixture files compiled through the installed drivers.
 #[derive(Debug, Clone)]
@@ -60,6 +92,18 @@ pub struct NativeCompatibilityRequest {
     pub relocation: TwoRootRelocation,
     /// Producer-selected target profile.
     pub profile: Profile,
+    /// Package-build source commit from the independently verified recipe.
+    /// Required for family-v2 packages. It is separate from the upstream
+    /// consumer commit selected by the profiles document; neither replaces
+    /// the other. This declaration alone is not source authentication.
+    pub package_source_commit: Option<GitObjectId>,
+    /// Explicit source-owned preset for GNU consumers, distinct from the
+    /// compiler profile. LLVM's legacy adapter does not use this selector.
+    pub source_preset: Option<String>,
+    /// Explicit prepared cache for raw source-declared host-generator inputs.
+    /// Required only when the bound native source contract declares them.
+    /// Execution verifies every exact size/hash and never downloads a miss.
+    pub host_generator_cache_root: Option<PathBuf>,
     /// Absolute CMake executable selected by the caller's host preflight.
     pub cmake_program: PathBuf,
     /// Absolute Ninja executable supplied to CMake without ambient PATH lookup.
@@ -126,6 +170,27 @@ struct CompatibilityReceiptDocument {
     ports_sources: Vec<CompatibilityReceiptPortsSource>,
     phase_reports: Vec<CompatibilityReceiptPhase>,
     standalone_targets: BTreeMap<String, CompatibilityReceiptTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package: Option<CompatibilityReceiptPackage>,
+}
+
+/// V3 binds GNU packages and V4 binds LLVM family-v2 packages. Neither is a
+/// signature or publication admission. Legacy LLVM V2 receipts retain their
+/// existing byte shape, as do GNU V3 receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptPackage {
+    compiler: ArosCompilerIdentity,
+    host: String,
+    target_profile: String,
+    target_triple: String,
+    archive_sha256: Sha256Digest,
+    archive_size: u64,
+    manifest_sha256: Sha256Digest,
+    tree_sha256: Sha256Digest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_preset: Option<String>,
+    source_tree_sha256: Sha256Digest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +236,15 @@ struct CompatibilityReceiptArtifact {
 /// `PATH=/nonexistent`; their outputs are parsed for AROS ELF and collector
 /// evidence after the six process reports succeed.
 ///
+/// GNU uses the inventoried executable-role document and the profile-bound
+/// RISC-V contract. Family-v2 packages of either compiler family remeasure both
+/// complete extracted trees before output creation and after the probes. The
+/// caller must exclusively own these
+/// roots while executing; these checks are not a filesystem snapshot or a
+/// lock against concurrent writers. GNU receipts use v3 and LLVM family-v2
+/// receipts use v4 to bind the canonical manifest identity. Neither grants
+/// signature authentication or release admission. Legacy LLVM v1 remains v2.
+///
 /// # Errors
 ///
 /// Returns AX0703 when any input root, phase environment, selected helper,
@@ -191,27 +265,29 @@ pub fn execute_native_compatibility(
     let cmake_source_cache = request
         .ports_sources
         .materialize_cmake_cache(&outputs.cmake_build)?;
-    let mut upstream_environment = request.host_python.compatibility_environment()?;
-    // Autoconf 2.73 can otherwise append a C23 dialect marker before the
-    // pinned upstream snapshot captures its compiler base name. That produces
-    // impossible LLVM helper names. This is an explicit, recorded upstream
-    // compatibility input rather than a runner-specific inherited default.
-    upstream_environment.insert("ac_cv_prog_cc_c23".into(), String::new());
-    let required_host_tools = native_compatibility_host_tools(&request.host)?;
-    validate_host_environment(
-        &upstream_environment,
+    let environments = super::environment_plan::prepare_native_environments(
+        &request.host_python,
         &request.host_tools,
-        &required_host_tools,
+        &request.host,
     )?;
-    let sealed_environment = CompatibilityEnvironment::SealedHostTools {
-        variables: upstream_environment,
-        host_tools: request.host_tools.clone(),
-    };
-    let poisoned_environment = CompatibilityEnvironment::Poisoned {
-        variables: BTreeMap::from([("PATH".into(), POISONED_PATH.into())]),
-    };
+    let sealed_environment = environments.sdk;
+    let poisoned_environment = environments.standalone;
     let helpers_root = helpers_root(&request.preparation)?;
-    let cmake_command = cmake_command(request, &inputs, &outputs, &helpers_root)?;
+    let mut cmake_commands = vec![cmake_command(request, &inputs, &outputs, &helpers_root)?];
+    if let Some(binding) = &inputs.native_consumer_contract {
+        let mut arguments = vec![
+            "--build".into(),
+            utf8_path(&outputs.cmake_build, "native consumer CMake build root")?,
+            "--parallel".into(),
+            request.make_jobs.to_string(),
+            "--target".into(),
+        ];
+        arguments.extend(binding.contract.roots.iter().cloned());
+        cmake_commands.push(CompatibilityCommand {
+            program: inputs.cmake.clone(),
+            arguments,
+        });
+    }
     let upstream_commands = upstream_commands(request, &inputs, &outputs)?;
     let standalone = standalone_commands(request, &inputs, &outputs)?;
 
@@ -219,7 +295,7 @@ pub fn execute_native_compatibility(
         probes: vec![
             CompatibilityProbeRequest {
                 phase: CompatibilityPhase::CmakeConsumer,
-                commands: vec![cmake_command],
+                commands: cmake_commands,
                 // The AROS CMake engine builds host tools. Its selected host
                 // compiler is an explicit measured closure entry, so this
                 // phase must not inherit an ambient runner PATH.
@@ -277,13 +353,31 @@ pub fn execute_native_compatibility(
         ],
     };
     let probes = run_probe_set(&probes, cancellation)?;
+    if let Some(host_inputs) = &inputs.host_generator_cache {
+        host_inputs.revalidate()?;
+    }
     cmake_source_cache.revalidate()?;
     request.ports_sources.clear_upstream_fetch_markers()?;
     request.ports_sources.revalidate()?;
-    let standalone = verify_standalone_outputs(&StandaloneOutputRequest {
+    let standalone_request = StandaloneOutputRequest {
         output_root: outputs.standalone,
         targets: standalone.outputs,
-    })?;
+    };
+    let standalone = if package_binding_required(request) {
+        let compilers = standalone_request
+            .targets
+            .keys()
+            .map(|triple| (triple.clone(), inputs.compiler.clone()))
+            .collect();
+        let verified = verify_standalone_outputs_with_compilers(&standalone_request, &compilers)?;
+        // A probe cannot alter a prefix and then turn its outputs into valid
+        // compatibility evidence. Remeasure both complete inventories.
+        revalidate_bound_roots(request)?;
+        super::validate_preparation(&request.preparation)?;
+        verified
+    } else {
+        verify_standalone_outputs(&standalone_request)?
+    };
     let revalidated_tree =
         verify_pristine_upstream_source(&inputs.upstream_source, &inputs.upstream_source_commit)?;
     if revalidated_tree != inputs.upstream_source_tree {
@@ -298,6 +392,7 @@ pub fn execute_native_compatibility(
         &inputs.upstream_source_commit,
         &inputs.upstream_source_tree,
         &inputs.ports_sources,
+        request,
     )?;
     Ok(NativeCompatibilityReport {
         probes,
@@ -313,6 +408,7 @@ fn write_compatibility_receipt(
     upstream_source_commit: &GitObjectId,
     upstream_source_tree: &GitObjectId,
     ports_sources: &CompatibilityPortsSources,
+    request: &NativeCompatibilityRequest,
 ) -> Result<CompatibilityReceipt, ContractError> {
     let mut persisted_reports = BTreeMap::new();
     let mut phase_reports = Vec::with_capacity(super::REQUIRED_PROBE_PHASES.len());
@@ -351,14 +447,61 @@ fn write_compatibility_receipt(
             )
         })
         .collect();
+    let compiler = request
+        .relocation
+        .second
+        .verified
+        .manifest
+        .compiler_identity()
+        .map_err(|_| {
+            ContractError::compatibility("compatibility package compiler identity is invalid")
+        })?;
+    let is_gnu = matches!(compiler, ArosCompilerIdentity::Gnu { .. });
+    let package = if package_binding_required(request) {
+        let verified = &request.relocation.second.verified;
+        let manifest = &verified.manifest;
+        let bytes = canonical::bytes(&serde_json::to_value(manifest).map_err(|_| {
+            ContractError::compatibility("cannot encode compatibility package identity")
+        })?)?;
+        Some(CompatibilityReceiptPackage {
+            compiler,
+            host: manifest.host.clone(),
+            target_profile: manifest.target_profile.clone(),
+            target_triple: manifest.target_triple.clone(),
+            archive_sha256: verified.archive_sha256.clone(),
+            archive_size: verified.archive_size,
+            manifest_sha256: sha256_bytes(&bytes),
+            tree_sha256: Sha256Digest::parse(&manifest.tree_sha256).map_err(|_| {
+                ContractError::compatibility("compatibility package tree identity is invalid")
+            })?,
+            source_preset: if is_gnu {
+                Some(request.source_preset.clone().ok_or_else(|| {
+                    ContractError::compatibility("GNU compatibility lost its source preset")
+                })?)
+            } else {
+                None
+            },
+            source_tree_sha256: request.preparation.source_tree_sha256.clone(),
+        })
+    } else {
+        None
+    };
     let document = CompatibilityReceiptDocument {
-        schema: COMPATIBILITY_RECEIPT_SCHEMA.into(),
+        schema: if is_gnu {
+            GNU_COMPATIBILITY_RECEIPT_SCHEMA
+        } else if package.is_some() {
+            LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA
+        } else {
+            COMPATIBILITY_RECEIPT_SCHEMA
+        }
+        .into(),
         operation: "native-compatibility".into(),
         upstream_source_commit: upstream_source_commit.as_str().into(),
         upstream_source_tree: upstream_source_tree.as_str().into(),
         ports_sources: receipt_ports_sources(ports_sources)?,
         phase_reports,
         standalone_targets,
+        package,
     };
     document.validate()?;
     let encoded = canonical::bytes(
@@ -407,10 +550,55 @@ fn write_compatibility_receipt(
 
 impl CompatibilityReceiptDocument {
     fn validate(&self) -> Result<(), ContractError> {
-        if self.schema != COMPATIBILITY_RECEIPT_SCHEMA || self.operation != "native-compatibility" {
+        if self.operation != "native-compatibility"
+            || match self.schema.as_str() {
+                COMPATIBILITY_RECEIPT_SCHEMA => self.package.is_some(),
+                GNU_COMPATIBILITY_RECEIPT_SCHEMA | LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA => {
+                    self.package.is_none()
+                }
+                _ => true,
+            }
+        {
             return Err(ContractError::compatibility(
                 "native compatibility receipt has an unsupported schema or operation",
             ));
+        }
+        if let Some(package) = &self.package {
+            let valid_family = match (&package.compiler, self.schema.as_str()) {
+                (ArosCompilerIdentity::Gnu { .. }, GNU_COMPATIBILITY_RECEIPT_SCHEMA) => package
+                    .source_preset
+                    .as_deref()
+                    .is_some_and(crate::profiles::identifier),
+                (ArosCompilerIdentity::Llvm { .. }, LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA) => {
+                    package.source_preset.is_none()
+                }
+                _ => false,
+            };
+            let mut expected_targets = BTreeSet::from([package.target_triple.as_str()]);
+            if self.schema == LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA
+                && package.target_profile == "pc-x86_64"
+            {
+                expected_targets.insert("i386-unknown-aros");
+            }
+            if !valid_family
+                || package
+                    .compiler
+                    .validate_for_target(&package.target_triple)
+                    .is_err()
+                || !crate::profiles::identifier(&package.host)
+                || !crate::profiles::identifier(&package.target_profile)
+                || package.archive_size == 0
+                || self
+                    .standalone_targets
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>()
+                    != expected_targets
+            {
+                return Err(ContractError::compatibility(
+                    "native compatibility receipt has an invalid package binding",
+                ));
+            }
         }
         let ports_ids = self
             .ports_sources
@@ -527,6 +715,13 @@ fn valid_receipt_artifact(artifact: &CompatibilityReceiptArtifact) -> bool {
 
 #[derive(Debug)]
 struct Inputs {
+    compiler: ArosCompilerIdentity,
+    gnu_drivers: BTreeMap<String, PathBuf>,
+    source_profile: Option<aros_common::TargetProfile>,
+    native_contract: Option<aros_common::native_build_contract::LoadedNativeBuildContract>,
+    native_consumer_contract:
+        Option<aros_common::native_consumer_contract::LoadedNativeConsumerContract>,
+    host_generator_cache: Option<super::host_generator_inputs::HostGeneratorInputs>,
     cmake_toolchain_root: PathBuf,
     upstream_toolchain_root: PathBuf,
     upstream_source: PathBuf,
@@ -581,6 +776,153 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
             "native compatibility execution cannot reuse one relocation root",
         ));
     }
+    let manifest = &request.relocation.second.verified.manifest;
+    let compiler = manifest.compiler_identity().map_err(|_| {
+        ContractError::compatibility(
+            "native compatibility package has an invalid compiler identity",
+        )
+    })?;
+    let family = match compiler {
+        ArosCompilerIdentity::Llvm { .. } => crate::source_lock::CompilerFamily::Llvm,
+        ArosCompilerIdentity::Gnu { .. } => crate::source_lock::CompilerFamily::Gnu,
+    };
+    if family != request.profile.family()
+        || manifest.target_profile != request.profile.name()
+        || manifest.target_triple != request.profile.target_triple()
+        || manifest.host != request.host
+    {
+        return Err(ContractError::compatibility(
+            "native compatibility profile/host differs from the package identity",
+        ));
+    }
+    if package_binding_required(request) {
+        let package_source_commit = request.package_source_commit.as_ref().ok_or_else(|| {
+            ContractError::compatibility(
+                "family-v2 compatibility requires the recipe-bound package source commit",
+            )
+        })?;
+        if manifest.profiles_sha256 != request.profile.document_sha256().as_str()
+            || manifest.source_commit != package_source_commit.as_str()
+        {
+            return Err(ContractError::compatibility(
+                "family-v2 compatibility source/profile contract differs from the package identity",
+            ));
+        }
+        revalidate_bound_roots(request)?;
+    }
+    let gnu_drivers = if let ArosCompilerIdentity::Gnu { target, .. } = &compiler {
+        if request.profile.target() != Some(target) {
+            return Err(ContractError::compatibility(
+                "GNU compatibility source/profile contract differs from the package identity",
+            ));
+        }
+        let layout = ToolchainToolLayout::load(&upstream_toolchain_root).map_err(|_| {
+            ContractError::compatibility("GNU compatibility executable layout is invalid")
+        })?;
+        layout
+            .validate_binding(&compiler, request.profile.target_triple())
+            .map_err(|_| {
+                ContractError::compatibility(
+                    "GNU compatibility executable layout is not compiler-bound",
+                )
+            })?;
+        layout
+            .resolve_tools(&upstream_toolchain_root)
+            .map_err(|_| {
+                ContractError::compatibility(
+                    "GNU compatibility executable roles cannot be resolved",
+                )
+            })?
+            .into_iter()
+            .map(|(role, path)| (role.to_owned(), path))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    let source_profile = if matches!(compiler, ArosCompilerIdentity::Gnu { .. }) {
+        Some(validate_gnu_source_profile(request)?)
+    } else {
+        if request.source_preset.is_some() {
+            return Err(ContractError::compatibility(
+                "the legacy LLVM compatibility adapter does not accept a source preset",
+            ));
+        }
+        None
+    };
+    let native_consumer_contract = source_profile
+        .as_ref()
+        .and_then(|profile| {
+            profile
+                .native_consumer_contract
+                .as_ref()
+                .map(|path| (profile, path))
+        })
+        .map(|(profile, path)| {
+            let binding =
+                aros_common::native_consumer_contract::load_bound_native_consumer_contract(
+                    &request.preparation.source_root,
+                    Path::new(path),
+                    profile,
+                )
+                .map_err(|_| {
+                    ContractError::compatibility("GNU source native consumer contract is invalid")
+                })?;
+            aros_common::native_consumer_contract::validate_native_consumer_compiler(
+                &binding.contract,
+                &compiler,
+                request.profile.target_triple(),
+            )
+            .map_err(|_| {
+                ContractError::compatibility(
+                    "GNU source native consumer contract differs from the compiler",
+                )
+            })?;
+            Ok(binding)
+        })
+        .transpose()?;
+    // A source profile may describe both a full boot/media build and a bounded
+    // compiler consumer. Compatibility qualification selects the consumer
+    // contract explicitly when present and never falls back when that binding
+    // fails validation.
+    let native_contract = if native_consumer_contract.is_some() {
+        None
+    } else {
+        source_profile
+            .as_ref()
+            .and_then(|profile| {
+                profile
+                    .native_build_contract
+                    .as_ref()
+                    .map(|path| (profile, path))
+            })
+            .map(|(profile, path)| {
+                let binding = aros_common::native_build_contract::load_bound_native_build_contract(
+                    &request.preparation.source_root,
+                    Path::new(path),
+                    profile,
+                )
+                .map_err(|_| {
+                    ContractError::compatibility("GNU source native build contract is invalid")
+                })?;
+                aros_common::native_build_contract::validate_native_build_compiler(
+                    &binding.contract,
+                    &compiler,
+                    request.profile.target_triple(),
+                )
+                .map_err(|_| {
+                    ContractError::compatibility(
+                        "GNU source native build contract differs from the compiler",
+                    )
+                })?;
+                if !gnu_drivers.contains_key("objdump") {
+                    return Err(ContractError::compatibility(
+                        "GNU native build contracts require an inventoried objdump role",
+                    ));
+                }
+                Ok(binding)
+            })
+            .transpose()?
+    };
     let upstream_source = checked_directory(
         &request.upstream_source_root,
         "pristine upstream compatibility source root",
@@ -625,7 +967,25 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
     }
     let cmake = checked_executable(&request.cmake_program)?;
     let ninja = checked_executable(&request.ninja_program)?;
+    let generators = native_consumer_contract.as_ref().map_or_else(
+        || {
+            native_contract.as_ref().map_or(&[][..], |binding| {
+                binding.contract.host_file_generators.as_slice()
+            })
+        },
+        |binding| binding.contract.host_file_generators.as_slice(),
+    );
+    let host_generator_cache = super::host_generator_inputs::prepare(
+        generators,
+        request.host_generator_cache_root.as_deref(),
+    )?;
     Ok(Inputs {
+        compiler,
+        gnu_drivers,
+        source_profile,
+        native_contract,
+        native_consumer_contract,
+        host_generator_cache,
         cmake_toolchain_root,
         upstream_toolchain_root,
         upstream_source,
@@ -638,6 +998,71 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
         standalone_cxx,
         ports_sources: request.ports_sources.clone(),
     })
+}
+
+fn validate_gnu_source_profile(
+    request: &NativeCompatibilityRequest,
+) -> Result<aros_common::TargetProfile, ContractError> {
+    super::validate_preparation(&request.preparation)?;
+    let name = request.source_preset.as_deref().ok_or_else(|| {
+        ContractError::compatibility(
+            "GNU compatibility requires an explicit source preset from aros-targets.toml",
+        )
+    })?;
+    let path = request.preparation.source_root.join("aros-targets.toml");
+    let bytes = super::read_regular_bounded(
+        &path,
+        "source-owned target configuration",
+        crate::canonical::MAX_DOCUMENT_BYTES,
+    )?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        ContractError::compatibility("source-owned target configuration is not UTF-8")
+    })?;
+    let config =
+        aros_common::TargetProfile::parse_config(text, "aros-targets.toml").map_err(|_| {
+            ContractError::compatibility("source-owned target configuration is invalid")
+        })?;
+    let profile = config
+        .targets
+        .into_iter()
+        .find(|profile| profile.name == name)
+        .ok_or_else(|| {
+            ContractError::compatibility("GNU compatibility source preset is not declared")
+        })?;
+    let cpu = profile.arch.source_cpu();
+    if profile.toolchain_profile() != request.profile.name()
+        || cpu != request.profile.cpu()
+        || profile.platform != request.profile.platform()
+        || profile
+            .float_abi
+            .as_ref()
+            .is_some_and(|abi| abi != request.profile.float_abi())
+        || profile
+            .transpiler
+            .as_ref()
+            .is_none_or(|context| context.toolchain != "gnu")
+    {
+        return Err(ContractError::compatibility(
+            "GNU compatibility source preset differs from the compiler profile",
+        ));
+    }
+    Ok(profile)
+}
+
+const fn package_binding_required(request: &NativeCompatibilityRequest) -> bool {
+    request.relocation.second.verified.manifest.schema == 2
+}
+
+fn revalidate_bound_roots(request: &NativeCompatibilityRequest) -> Result<(), ContractError> {
+    for package in [&request.relocation.first, &request.relocation.second] {
+        crate::package_extract::verify_extracted_tree(&package.root, &package.verified.manifest)
+            .map_err(|_| {
+                ContractError::compatibility(
+                    "family-v2 compatibility extracted package differs from its verified inventory",
+                )
+            })?;
+    }
+    Ok(())
 }
 
 fn verify_pristine_upstream_source(
@@ -684,7 +1109,7 @@ fn create_output_roots(
             "native compatibility execution output roots must be distinct",
         ));
     }
-    let mut protected = vec![
+    let mut protected: Vec<&Path> = vec![
         &request.preparation.source_root,
         &request.preparation.engine_root,
         &inputs.cmake_toolchain_root,
@@ -695,7 +1120,16 @@ fn create_output_roots(
         &request.host_tools.root,
         &inputs.ports_sources.root,
     ];
-    protected.extend(request.host_python.import_roots());
+    protected.extend(
+        request
+            .host_python
+            .import_roots()
+            .iter()
+            .map(PathBuf::as_path),
+    );
+    if let Some(host_inputs) = &inputs.host_generator_cache {
+        protected.extend([host_inputs.cache_root(), host_inputs.root()]);
+    }
     if roots.iter().any(|root| {
         protected
             .iter()
@@ -723,76 +1157,6 @@ fn create_output_roots(
         standalone: roots[2].clone(),
         reports: roots[3].clone(),
     })
-}
-
-fn validate_host_environment(
-    environment: &BTreeMap<String, String>,
-    host_tools: &HostToolClosure,
-    required_host_tools: &[&str],
-) -> Result<(), ContractError> {
-    let expected = BTreeSet::from([
-        "ac_cv_prog_cc_c23",
-        "PATH",
-        "PYTHON",
-        "PYTHONDONTWRITEBYTECODE",
-        "PYTHONHASHSEED",
-        "PYTHONNOUSERSITE",
-        "PYTHONPATH",
-    ]);
-    if environment
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>()
-        != expected
-        || environment.get("PATH").map(String::as_str) != Some(POISONED_PATH)
-        || environment
-            .get("PYTHONDONTWRITEBYTECODE")
-            .map(String::as_str)
-            != Some("1")
-        || environment.get("PYTHONHASHSEED").map(String::as_str) != Some("0")
-        || environment.get("PYTHONNOUSERSITE").map(String::as_str) != Some("1")
-        || environment.get("ac_cv_prog_cc_c23").map(String::as_str) != Some("")
-        || environment.get("PYTHONPATH").is_none_or(String::is_empty)
-    {
-        return Err(ContractError::compatibility(
-            "upstream compatibility phase does not have the exact closed Python environment",
-        ));
-    }
-    host_tools.revalidate()?;
-    let python = PathBuf::from(environment.get("PYTHON").ok_or_else(|| {
-        ContractError::compatibility(
-            "upstream compatibility Python environment lost its interpreter",
-        )
-    })?);
-    let Some(host_python) = host_tools.tools.get("python3") else {
-        return Err(ContractError::compatibility(
-            "upstream compatibility host-tool closure does not expose the checked python3 interpreter",
-        ));
-    };
-    let expected_roles = required_host_tools.iter().copied().collect::<BTreeSet<_>>();
-    let actual_roles = host_tools
-        .tools
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let missing_roles = expected_roles
-        .difference(&actual_roles)
-        .copied()
-        .collect::<Vec<_>>();
-    let unexpected_roles = actual_roles
-        .difference(&expected_roles)
-        .copied()
-        .collect::<Vec<_>>();
-    if python != host_python.program || !missing_roles.is_empty() || !unexpected_roles.is_empty() {
-        return Err(ContractError::compatibility(
-            format!(
-                "native compatibility host-tool closure does not bind the exact measured command set{}{}",
-                if missing_roles.is_empty() { String::new() } else { format!(": missing {}", missing_roles.join(", ")) },
-                if unexpected_roles.is_empty() { String::new() } else { format!("; unexpected {}", unexpected_roles.join(", ")) },
-            ),
-        ));
-    }
-    Ok(())
 }
 
 fn helpers_root(preparation: &CompatibilityPreparation) -> Result<PathBuf, ContractError> {
@@ -848,7 +1212,7 @@ fn cmake_command(
         &request.host_tools.root.join("cc"),
         "measured compatibility host C compiler",
     )?;
-    Ok(CompatibilityCommand {
+    let mut command = CompatibilityCommand {
         program: inputs.cmake.clone(),
         arguments: vec![
             "-S".into(),
@@ -874,10 +1238,80 @@ fn cmake_command(
             // lock-verified cache materialized above. A missing input is a
             // closed qualification failure, never an implicit download.
             "-DAROS_FETCH_OFFLINE=ON".into(),
-            "-DAROS_ENABLE_MMU=ON".into(),
             "-DCMAKE_BUILD_TYPE=Release".into(),
         ],
-    })
+    };
+    if let Some(host_inputs) = &inputs.host_generator_cache {
+        host_inputs.revalidate()?;
+        command.arguments.push(format!(
+            "-DAROS_NATIVE_HOST_INPUT_DIRECTORY={}",
+            utf8_path(host_inputs.root(), "private verified host-generator inputs")?
+        ));
+    }
+    if let Some(profile) = &inputs.source_profile {
+        let context = profile.transpiler.as_ref().ok_or_else(|| {
+            ContractError::compatibility("GNU source preset lost its transpiler context")
+        })?;
+        command.arguments.extend([
+            "-DAROS_TOOLCHAIN=gnu".into(),
+            format!("-DAROS_TARGET_PROFILE={}", profile.name),
+            format!("-DAROS_CROSS_TOOLCHAIN_PROFILE={}", request.profile.name()),
+            format!("-DAROS_TARGET_TRIPLE={}", request.profile.target_triple()),
+            format!("-DAROS_TARGET_FAMILY={}", context.family),
+            format!("-DAROS_TARGET_VARIANT={}", context.variant),
+            format!("-DAROS_TARGET_CPU32={}", context.cpu32),
+            format!(
+                "-DAROS_ENABLE_MMU={}",
+                if context.use_mmu { "ON" } else { "OFF" }
+            ),
+        ]);
+        if let Some(version) = &context.mesa_version {
+            command
+                .arguments
+                .push(format!("-DAROS_MESA_VERSION={version}"));
+        }
+        command
+            .arguments
+            .push(format!("-DAROS_TARGET_BOOTLOADER={}", profile.bootloader()));
+        if let Some(binding) = &inputs.native_consumer_contract {
+            command.arguments.extend([
+                format!(
+                    "-DAROS_NATIVE_CONSUMER_CONTRACT={}",
+                    utf8_path(&binding.path, "native consumer contract")?
+                ),
+                format!("-DAROS_NATIVE_CONSUMER_CONTRACT_SHA256={}", binding.sha256),
+                format!("-DAROS_ABI_FLAVOUR={}", binding.contract.abi.flavour),
+                format!(
+                    "-DAROS_ABI_PLATFORM_SMP={}",
+                    if binding.contract.abi.platform_smp {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
+                ),
+            ]);
+        } else if let Some(abi) = &profile.bootstrap_abi {
+            command.arguments.extend([
+                format!("-DAROS_ABI_FLAVOUR={}", abi.flavour),
+                format!(
+                    "-DAROS_ABI_PLATFORM_SMP={}",
+                    if abi.platform_smp { "ON" } else { "OFF" }
+                ),
+            ]);
+        }
+        if let Some(binding) = &inputs.native_contract {
+            command.arguments.extend([
+                format!(
+                    "-DAROS_NATIVE_BUILD_CONTRACT={}",
+                    utf8_path(&binding.path, "native build contract")?
+                ),
+                format!("-DAROS_NATIVE_BUILD_CONTRACT_SHA256={}", binding.sha256),
+            ]);
+        }
+    } else {
+        command.arguments.push("-DAROS_ENABLE_MMU=ON".into());
+    }
+    Ok(command)
 }
 
 fn upstream_commands(
@@ -894,12 +1328,27 @@ fn upstream_commands(
         &inputs.ports_sources.root,
         "verified compatibility ports source directory",
     )?;
-    let manifest = &request.relocation.second.verified.manifest;
-    let llvm_version = manifest.llvm_version.as_deref().ok_or_else(|| {
-        ContractError::compatibility(
-            "second compatibility package manifest does not declare an LLVM version",
-        )
-    })?;
+    let mut configure_arguments = vec![format!("--target={}", request.profile.configure_target())];
+    match &inputs.compiler {
+        ArosCompilerIdentity::Llvm { version } => configure_arguments.extend([
+            "--with-toolchain=llvm".into(),
+            format!("--with-llvm-version={version}"),
+        ]),
+        ArosCompilerIdentity::Gnu {
+            gcc_version,
+            binutils_version,
+            ..
+        } => configure_arguments.extend([
+            "--with-toolchain=gnu".into(),
+            format!("--with-gcc-version={gcc_version}"),
+            format!("--with-binutils-version={binutils_version}"),
+        ]),
+    }
+    configure_arguments.extend([
+        "--with-aros-toolchain=yes".into(),
+        format!("--with-portssources={ports_sources}"),
+        format!("--with-aros-toolchain-install={toolchain}"),
+    ]);
     let make = request
         .host_tools
         .tools
@@ -922,14 +1371,7 @@ fn upstream_commands(
     Ok(UpstreamCommands {
         configure: CompatibilityCommand {
             program: inputs.configure.clone(),
-            arguments: vec![
-                format!("--target={}", request.profile.configure_target()),
-                "--with-toolchain=llvm".into(),
-                format!("--with-llvm-version={llvm_version}"),
-                "--with-aros-toolchain=yes".into(),
-                format!("--with-portssources={ports_sources}"),
-                format!("--with-aros-toolchain-install={toolchain}"),
-            ],
+            arguments: configure_arguments,
         },
         includes: CompatibilityCommand {
             program: make.clone(),
@@ -948,8 +1390,18 @@ fn standalone_commands(
     outputs: &OutputRoots,
 ) -> Result<StandaloneCommands, ContractError> {
     let bin = inputs.upstream_toolchain_root.join("bin");
-    let clang = bin.join("clang");
-    let clangxx = bin.join("clang++");
+    let (c_driver, cxx_driver) = if matches!(inputs.compiler, ArosCompilerIdentity::Gnu { .. }) {
+        let driver = |role: &str| {
+            inputs.gnu_drivers.get(role).cloned().ok_or_else(|| {
+                ContractError::compatibility(
+                    "GNU compatibility executable layout lacks a required compiler role",
+                )
+            })
+        };
+        (driver("c")?, driver("cxx")?)
+    } else {
+        (bin.join("clang"), bin.join("clang++"))
+    };
     let developer = outputs
         .upstream_build
         .join("bin")
@@ -969,10 +1421,21 @@ fn standalone_commands(
         let cxx_output = outputs.standalone.join(format!("cxx-{cpu}.o"));
         let c_output_arg = utf8_path(&c_output, "standalone C output")?;
         let cxx_output_arg = utf8_path(&cxx_output, "standalone C++ output")?;
-        let mut c_arguments = vec![
-            format!("--target={triple}"),
-            format!("--sysroot={developer}"),
-        ];
+        let mut c_arguments = match &inputs.compiler {
+            ArosCompilerIdentity::Llvm { .. } => vec![format!("--target={triple}")],
+            ArosCompilerIdentity::Gnu { target, .. } => vec![
+                format!("-march={}", target.isa()),
+                format!("-mabi={}", target.abi()),
+                format!("-mcmodel={}", target.code_model()),
+                if target.unaligned_access() {
+                    "-mno-strict-align"
+                } else {
+                    "-mstrict-align"
+                }
+                .into(),
+            ],
+        };
+        c_arguments.push(format!("--sysroot={developer}"));
         let mut cxx_arguments = c_arguments.clone();
         if request.profile.float_abi() == "hard" && triple.starts_with("arm-") {
             c_arguments.push("-mfloat-abi=hard".into());
@@ -1005,11 +1468,11 @@ fn standalone_commands(
             cxx_output_arg,
         ]);
         c_commands.push(CompatibilityCommand {
-            program: clang.clone(),
+            program: c_driver.clone(),
             arguments: c_arguments,
         });
         cxx_commands.push(CompatibilityCommand {
-            program: clangxx.clone(),
+            program: cxx_driver.clone(),
             arguments: cxx_arguments,
         });
         targets.insert(
@@ -1029,7 +1492,8 @@ fn standalone_commands(
 
 fn standalone_triples(profile: &Profile) -> Result<Vec<String>, ContractError> {
     let mut triples = vec![profile.target_triple().to_owned()];
-    if profile.name() == "pc-x86_64" {
+    if profile.family() == crate::source_lock::CompilerFamily::Llvm && profile.name() == "pc-x86_64"
+    {
         triples.push("i386-unknown-aros".into());
     }
     if triples.len() > 2
@@ -1111,644 +1575,31 @@ fn utf8_path(path: &Path, label: &str) -> Result<String, ContractError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt as _;
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
-    use std::time::Duration;
+#[path = "execution_gnu_tests.rs"]
+mod gnu_tests;
 
-    use aros_common::{
-        run_output, run_status, sha256_file, ArosToolchainManifest, CancellationToken, Sha256Digest,
-    };
-    use flate2::{write::GzEncoder, Compression};
-    use serde_json::json;
-    use tar::{Builder, Header};
+#[cfg(test)]
+#[path = "execution_tests.rs"]
+mod tests;
+#[cfg(test)]
+pub use tests::{fixture_elf32, fixture_elf64};
 
-    use super::{
-        execute_native_compatibility, CompatibilityReceiptDocument,
-        CompatibilityReceiptPortsSource, NativeCompatibilityRequest, StandaloneFixtures,
-        COMPATIBILITY_RECEIPT_SCHEMA,
-    };
-    use crate::compatibility::{
-        prepare, prepare_host_tool_closure, CompatibilityHostTool, CompatibilityPreparationRequest,
-        HostToolClosureRequest, TwoRootRelocation, CXX_COLLECTOR_SYMBOL, C_COLLECTOR_SYMBOL,
-        REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
-    };
-    use crate::compatibility_ports::{
-        materialize, CompatibilityPortsLock, CompatibilityPortsSources,
-    };
-    use crate::package_extract::ExtractedPackage;
-    use crate::package_verify::VerifiedPackage;
-    use crate::profiles::Profiles;
-    use crate::python_environment::PythonEnvironment;
-    use crate::source_lock::SourceLock;
+#[cfg(test)]
+#[path = "execution_llvm_v2_tests.rs"]
+mod llvm_v2_tests;
 
-    #[test]
-    fn receipt_accepts_safe_nested_upstream_fetch_markers() {
-        let digest = Sha256Digest::parse(&"a".repeat(64)).unwrap();
-        let document = CompatibilityReceiptDocument {
-            schema: COMPATIBILITY_RECEIPT_SCHEMA.into(),
-            operation: "native-compatibility".into(),
-            upstream_source_commit: "b".repeat(40),
-            upstream_source_tree: "c".repeat(40),
-            ports_sources: vec![CompatibilityReceiptPortsSource {
-                id: "codesets-6-22".into(),
-                cache_filename: "codesets-6.22.tar.gz".into(),
-                relative_path: "codesets/6.22.tar.gz".into(),
-                fetch_marker: "codesets/.6.22-fetched".into(),
-                sha256: digest,
-                size: 1,
-            }],
-            phase_reports: Vec::new(),
-            standalone_targets: BTreeMap::new(),
-        };
+#[cfg(test)]
+#[path = "execution_receipt_readback_tests.rs"]
+pub mod receipt_readback_tests;
 
-        let error = document.validate().unwrap_err();
-        assert!(error.to_string().contains("required ordered phase set"));
-    }
+#[cfg(test)]
+#[path = "execution_retained_tests.rs"]
+mod retained_tests;
 
-    #[test]
-    fn executes_every_phase_with_two_roots_and_closed_environments() {
-        let temporary = tempfile::tempdir().unwrap();
-        let (request, cmake_log, make_log) = request(temporary.path());
-        let report = execute_native_compatibility(&request, &CancellationToken::default()).unwrap();
+#[cfg(test)]
+#[path = "execution_portable_tests.rs"]
+mod portable_tests;
 
-        assert_eq!(report.probes.reports.len(), 6);
-        assert!(report
-            .probes
-            .reports
-            .values()
-            .all(|probe| !probe.commands.is_empty()));
-        assert_eq!(
-            report.probes.reports[&crate::compatibility::CompatibilityPhase::CmakeConsumer]
-                .host_tools
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS
-        );
-        assert_eq!(
-            report.probes.reports[&crate::compatibility::CompatibilityPhase::UpstreamConfigure]
-                .host_tools
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS
-        );
-        assert_eq!(report.standalone.targets.len(), 2);
-        assert!(report
-            .standalone
-            .targets
-            .contains_key("x86_64-unknown-aros"));
-        assert!(report.standalone.targets.contains_key("i386-unknown-aros"));
-        assert!(report.receipt.path.is_file());
-        let receipt: serde_json::Value =
-            serde_json::from_slice(&fs::read(&report.receipt.path).unwrap()).unwrap();
-        assert_eq!(
-            receipt["schema"],
-            "aros-toolchain-native-compatibility-receipt-v2"
-        );
-        assert_eq!(receipt["phase_reports"].as_array().unwrap().len(), 6);
-        assert_eq!(receipt["ports_sources"].as_array().unwrap().len(), 3);
-        assert_eq!(receipt["standalone_targets"].as_object().unwrap().len(), 2);
-        assert_eq!(
-            aros_common::sha256_file(&report.receipt.path)
-                .unwrap()
-                .digest,
-            report.receipt.sha256
-        );
-
-        let cmake_arguments = fs::read_to_string(cmake_log).unwrap();
-        assert!(cmake_arguments.contains("-S"));
-        assert!(cmake_arguments.contains("aros-cmake-engine"));
-        assert!(cmake_arguments.contains("AROS_SOURCE_DIR="));
-        assert!(cmake_arguments.contains(&format!(
-            "-DAROS_HOST_CC={}",
-            request.host_tools.root.join("cc").display()
-        )));
-        assert!(cmake_arguments.contains("-DAROS_COMPILER_CACHE_MODE=off"));
-        assert!(cmake_arguments.contains("-DAROS_FETCH_OFFLINE=ON"));
-        let make_arguments = fs::read_to_string(make_log).unwrap();
-        assert!(make_arguments.contains("includes"));
-        assert!(make_arguments.contains("linklibs"));
-    }
-
-    #[test]
-    fn rejects_a_reused_native_output_root_before_any_child_starts() {
-        let temporary = tempfile::tempdir().unwrap();
-        let (request, _, _) = request(temporary.path());
-        fs::create_dir(&request.reports_root).unwrap();
-        let error =
-            execute_native_compatibility(&request, &CancellationToken::default()).unwrap_err();
-        assert_eq!(
-            error.diagnostics().diagnostics[0].code,
-            aros_common::DiagnosticCode::ProducerCompatibility
-        );
-    }
-
-    #[test]
-    fn rejects_a_missing_measured_host_c_compiler_before_cmake_starts() {
-        let temporary = tempfile::tempdir().unwrap();
-        let (mut request, cmake_log, _) = request(temporary.path());
-        let make = request.host_tools.tools["make"].program.clone();
-        let python3 = request.host_tools.tools["python3"].program.clone();
-        request.host_tools = prepare_host_tool_closure(&HostToolClosureRequest {
-            output_root: temporary.path().join("host-tools-without-cc"),
-            tools: vec![
-                CompatibilityHostTool {
-                    name: "make".into(),
-                    program: make,
-                },
-                CompatibilityHostTool {
-                    name: "python3".into(),
-                    program: python3,
-                },
-            ],
-        })
-        .unwrap();
-
-        let error =
-            execute_native_compatibility(&request, &CancellationToken::default()).unwrap_err();
-        assert_eq!(
-            error.diagnostics().diagnostics[0].code,
-            aros_common::DiagnosticCode::ProducerCompatibility
-        );
-        assert!(!cmake_log.exists());
-    }
-
-    #[test]
-    fn rejects_an_unselected_measured_host_tool_before_cmake_starts() {
-        let temporary = tempfile::tempdir().unwrap();
-        let (mut request, cmake_log, _) = request(temporary.path());
-        let mut tools = request
-            .host_tools
-            .tools
-            .iter()
-            .map(|(name, identity)| CompatibilityHostTool {
-                name: name.clone(),
-                program: identity.program.clone(),
-            })
-            .collect::<Vec<_>>();
-        let extra = temporary.path().join("unexpected-host-tool");
-        script(&extra, "exit 0");
-        tools.push(CompatibilityHostTool {
-            name: "unexpected".into(),
-            program: extra,
-        });
-        request.host_tools = prepare_host_tool_closure(&HostToolClosureRequest {
-            output_root: temporary.path().join("host-tools-with-unexpected-entry"),
-            tools,
-        })
-        .unwrap();
-
-        let error =
-            execute_native_compatibility(&request, &CancellationToken::default()).unwrap_err();
-        assert_eq!(
-            error.diagnostics().diagnostics[0].code,
-            aros_common::DiagnosticCode::ProducerCompatibility
-        );
-        assert!(!cmake_log.exists());
-    }
-
-    #[test]
-    fn rejects_a_dirty_or_mismatched_pristine_upstream_source_before_any_child_starts() {
-        let temporary = tempfile::tempdir().unwrap();
-        let (dirty, _, _) = request(temporary.path());
-        fs::write(dirty.upstream_source_root.join("configure"), "exit 0\n").unwrap();
-        assert!(execute_native_compatibility(&dirty, &CancellationToken::default()).is_err());
-        assert!(!dirty.reports_root.exists());
-
-        let temporary = tempfile::tempdir().unwrap();
-        let (mut mismatched, _, _) = request(temporary.path());
-        mismatched.upstream_source_commit =
-            crate::recipe::GitObjectId::try_from("f".repeat(40)).unwrap();
-        assert!(execute_native_compatibility(&mismatched, &CancellationToken::default()).is_err());
-        assert!(!mismatched.reports_root.exists());
-    }
-
-    fn request(root: &Path) -> (NativeCompatibilityRequest, PathBuf, PathBuf) {
-        let source = root.join("engine-free-source");
-        let engine_work = root.join("engine-work");
-        let helpers = root.join("helpers");
-        for directory in [&source, &engine_work, &helpers] {
-            fs::create_dir(directory).unwrap();
-        }
-        for helper in crate::compatibility::REQUIRED_HELPERS {
-            script(&helpers.join(helper), "exit 0");
-        }
-        let preparation = prepare(&CompatibilityPreparationRequest {
-            source_root: source,
-            work_root: engine_work,
-            helpers_root: helpers,
-        })
-        .unwrap();
-
-        let first = root.join("first-toolchain");
-        let second = root.join("second-toolchain");
-        for toolchain in [&first, &second] {
-            fs::create_dir(toolchain).unwrap();
-            fs::create_dir(toolchain.join("bin")).unwrap();
-        }
-        let c_elf = root.join("c.elf");
-        let cxx_elf = root.join("cxx.elf");
-        let c_elf32 = root.join("c-i386.elf");
-        let cxx_elf32 = root.join("cxx-i386.elf");
-        fs::write(&c_elf, fixture_elf64(C_COLLECTOR_SYMBOL)).unwrap();
-        fs::write(&cxx_elf, fixture_elf64(CXX_COLLECTOR_SYMBOL)).unwrap();
-        fs::write(&c_elf32, fixture_elf32(C_COLLECTOR_SYMBOL)).unwrap();
-        fs::write(&cxx_elf32, fixture_elf32(CXX_COLLECTOR_SYMBOL)).unwrap();
-        for toolchain in [&first, &second] {
-            script(
-                &toolchain.join("bin/clang"),
-                &format!(
-                    "out=\ncase \" $* \" in *' --target=i386-unknown-aros '*) fixture='{}';; *) fixture='{}';; esac\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then shift; out=$1; fi\n  shift\ndone\n/bin/cp \"$fixture\" \"$out\"",
-                    c_elf32.display(),
-                    c_elf.display(),
-                ),
-            );
-            script(
-                &toolchain.join("bin/clang++"),
-                &format!(
-                    "out=\ncase \" $* \" in *' --target=i386-unknown-aros '*) fixture='{}';; *) fixture='{}';; esac\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then shift; out=$1; fi\n  shift\ndone\n/bin/cp \"$fixture\" \"$out\"",
-                    cxx_elf32.display(),
-                    cxx_elf.display(),
-                ),
-            );
-        }
-        let verified = VerifiedPackage {
-            manifest: manifest(),
-            archive_sha256: aros_common::Sha256Digest::parse(&"a".repeat(64)).unwrap(),
-            archive_size: 1,
-        };
-        let relocation = TwoRootRelocation {
-            first: ExtractedPackage {
-                root: first,
-                verified: verified.clone(),
-            },
-            second: ExtractedPackage {
-                root: second,
-                verified,
-            },
-        };
-        let ports_sources = ports_sources(root);
-
-        let upstream = root.join("upstream-source");
-        fs::create_dir(&upstream).unwrap();
-        script(
-            &upstream.join("configure"),
-            &format!(
-                "[ \"$PATH\" != /nonexistent ] || exit 20\n[ \"${{ac_cv_prog_cc_c23+x}}\" = x ] && [ -z \"$ac_cv_prog_cc_c23\" ] || exit 21\ncase \" $* \" in *\" --with-portssources={} \"*) ;; *) exit 22;; esac\npython3 -S -P -c 'import mako, markupsafe'",
-                ports_sources.root.display(),
-            ),
-        );
-        git(&upstream, &["init", "-q"]);
-        git(&upstream, &["config", "user.email", "test@example.invalid"]);
-        git(&upstream, &["config", "user.name", "AROS Tools Test"]);
-        git(&upstream, &["add", "configure"]);
-        git(
-            &upstream,
-            &["commit", "-qm", "test: pristine upstream source"],
-        );
-        let upstream_commit = git_output(&upstream, &["rev-parse", "HEAD"]);
-        let cmake_log = root.join("cmake-arguments.log");
-        let cmake = root.join("cmake");
-        script(
-            &cmake,
-            &format!("printf '%s\\n' \"$@\" > '{}'", cmake_log.display()),
-        );
-        let ninja = root.join("ninja");
-        script(&ninja, "exit 0");
-        let make_log = root.join("make-arguments.log");
-        let make = root.join("make");
-        script(
-            &make,
-            &format!("printf '%s\\n' \"$@\" >> '{}'", make_log.display()),
-        );
-        let cc = root.join("cc");
-        script(&cc, "exit 0");
-        let python = python_environment(root);
-        let mut closure_tools = Vec::new();
-        for role in crate::compatibility::REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS {
-            let program = match *role {
-                "cc" => cc.clone(),
-                "make" => make.clone(),
-                "python3" => python.interpreter().path.clone(),
-                role => {
-                    let program = root.join(format!("host-{role}"));
-                    script(&program, "exit 0");
-                    program
-                }
-            };
-            closure_tools.push(CompatibilityHostTool {
-                name: (*role).into(),
-                program,
-            });
-        }
-        let closure = prepare_host_tool_closure(&HostToolClosureRequest {
-            output_root: root.join("host-tools"),
-            tools: closure_tools,
-        })
-        .unwrap();
-        let c_fixture = root.join("smoke.c");
-        let cxx_fixture = root.join("smoke.cpp");
-        fs::write(&c_fixture, b"int main(void) { return 0; }\n").unwrap();
-        fs::write(&cxx_fixture, b"int main() { return 0; }\n").unwrap();
-        let profiles = Profiles::parse(
-            serde_json::to_vec(&serde_json::json!({
-                "schema": "aros-toolchain-profiles-v1",
-                "upstream_commit": upstream_commit,
-                "profiles": [{
-                    "name": "pc-x86_64", "configure_target": "pc-x86_64",
-                    "upstream_output_target": "pc-x86_64",
-                    "target_triple": "x86_64-unknown-aros", "cpu": "x86_64",
-                    "platform": "pc", "float_abi": "",
-                    "capabilities": ["c", "cxx", "standalone-collector"]
-                }]
-            }))
-            .unwrap()
-            .as_slice(),
-        )
-        .unwrap();
-        (
-            NativeCompatibilityRequest {
-                preparation,
-                relocation,
-                profile: profiles.select("pc-x86_64").unwrap().clone(),
-                cmake_program: cmake,
-                ninja_program: ninja,
-                cmake_build_root: root.join("cmake-build"),
-                upstream_source_root: upstream,
-                upstream_source_commit: profiles.upstream_commit().clone(),
-                upstream_build_root: root.join("upstream-build"),
-                host_python: python,
-                host_tools: closure,
-                ports_sources,
-                host: "linux-x86_64".into(),
-                make_jobs: 2,
-                standalone_fixtures: StandaloneFixtures {
-                    c: c_fixture,
-                    cxx: cxx_fixture,
-                },
-                standalone_output_root: root.join("standalone"),
-                reports_root: root.join("reports"),
-                timeout: Duration::from_secs(5),
-            },
-            cmake_log,
-            make_log,
-        )
-    }
-
-    fn git(root: &Path, arguments: &[&str]) {
-        let mut command = Command::new("git");
-        command.args(arguments).current_dir(root);
-        let status = run_status(&mut command).unwrap();
-        assert!(status.status.success());
-    }
-
-    fn git_output(root: &Path, arguments: &[&str]) -> String {
-        let mut command = Command::new("git");
-        command.args(arguments).current_dir(root);
-        let output = run_output(&mut command).unwrap();
-        assert!(output.status.success());
-        String::from_utf8(output.stdout.exact_bytes().unwrap().to_vec())
-            .unwrap()
-            .trim()
-            .to_owned()
-    }
-
-    fn manifest() -> ArosToolchainManifest {
-        ArosToolchainManifest {
-            schema: 1,
-            release_id: "toolchain-v1-test".into(),
-            host: "linux-x86_64".into(),
-            target_profile: "pc-x86_64".into(),
-            target_triple: "x86_64-unknown-aros".into(),
-            tree_sha256: "b".repeat(64),
-            llvm_version: Some("11.0.0".into()),
-            compiler: None,
-            recipe_sha256: "c".repeat(64),
-            source_lock_sha256: "d".repeat(64),
-            profiles_sha256: "e".repeat(64),
-            source_commit: "1".repeat(40),
-            producer_commit: "2".repeat(40),
-            tools_commit: "3".repeat(40),
-            source_date_epoch: 1,
-            capabilities: vec!["c".into(), "cxx".into()],
-            build_environment: serde_json::Map::default(),
-            files: Vec::new(),
-        }
-    }
-
-    fn python_environment(root: &Path) -> PythonEnvironment {
-        let cache = root.join("python-cache");
-        fs::create_dir(&cache).unwrap();
-        archive(
-            &cache.join("mako-1.3.10.tar.gz"),
-            &[
-                ("mako-1.3.10/mako/__init__.py", b"__version__ = '1.3.10'\n"),
-                (
-                    "mako-1.3.10/mako/template.py",
-                    b"import markupsafe\nclass Template:\n def __init__(self, value): self.value = value\n def render(self): assert markupsafe.__version__ == '3.0.2'; return self.value\n",
-                ),
-            ],
-        );
-        archive(
-            &cache.join("markupsafe-3.0.2.tar.gz"),
-            &[(
-                "markupsafe-3.0.2/src/markupsafe/__init__.py",
-                b"__version__ = '3.0.2'\n",
-            )],
-        );
-        let package =
-            |name: &str, version: &str, filename: &str, source_root: &str, python_path: &str| {
-                let measured = sha256_file(&cache.join(filename)).unwrap();
-                json!({
-                    "name": name, "version": version, "filename": filename,
-                    "url": format!("https://example.invalid/{filename}"),
-                    "sha256": measured.digest, "size": measured.size,
-                    "source_root": source_root, "python_path": python_path
-                })
-            };
-        let lock = SourceLock::parse(&serde_json::to_vec(&json!({
-            "schema": "aros-toolchain-source-lock-v2", "family": "llvm", "version": "11.0.0",
-            "sources": [{
-                "component": "llvm", "version": "11.0.0", "purpose": "toolchain-component",
-                "filename": "llvm.tar.xz", "url": "https://example.invalid/llvm.tar.xz",
-                "sha256": "a".repeat(64), "size": 1
-            }],
-            "host_python_packages": [
-                package("mako", "1.3.10", "mako-1.3.10.tar.gz", "mako-1.3.10", "."),
-                package("markupsafe", "3.0.2", "markupsafe-3.0.2.tar.gz", "markupsafe-3.0.2", "src")
-            ]
-        })).unwrap()).unwrap();
-        PythonEnvironment::prepare(&lock, &cache, &root.join("python-environment")).unwrap()
-    }
-
-    fn ports_sources(root: &Path) -> CompatibilityPortsSources {
-        let cache = root.join("ports-cache");
-        fs::create_dir(&cache).unwrap();
-        let unicode = b"0000;<control>;Cc;0;BN;;;;;N;NULL;;;;\n";
-        let special = b"# SpecialCasing-16.0.0.txt\n";
-        let bzip2 = b"bzip2 source archive";
-        fs::write(cache.join("UnicodeData.txt"), unicode).unwrap();
-        fs::write(cache.join("SpecialCasing.txt"), special).unwrap();
-        fs::write(cache.join("bzip2-1.0.8.tar.gz"), bzip2).unwrap();
-        let measured = |id: &str, filename: &str| {
-            let measured = sha256_file(&cache.join(filename)).unwrap();
-            let url = if filename == "bzip2-1.0.8.tar.gz" {
-                "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz".to_owned()
-            } else {
-                format!("https://www.unicode.org/Public/16.0.0/ucd/{filename}")
-            };
-            json!({
-                "id": id,
-                "cache_filename": filename,
-                "relative_path": filename,
-                "cmake_cache_path": if filename == "bzip2-1.0.8.tar.gz" { Some("portssources/bzip2-1.0.8.tar.gz") } else { None },
-                "fetch_marker": if filename == "bzip2-1.0.8.tar.gz" { ".bzip2-1.0.8-fetched" } else { "" },
-                "url": url,
-                "sha256": measured.digest,
-                "size": measured.size,
-            })
-        };
-        let lock = CompatibilityPortsLock::parse(
-            serde_json::to_vec(&json!({
-                "schema": "aros-toolchain-compatibility-ports-v3",
-                "upstream_commit": "a".repeat(40),
-                "inputs": [
-                    measured("unicode-data", "UnicodeData.txt"),
-                    measured("special-casing", "SpecialCasing.txt"),
-                    measured("bzip2", "bzip2-1.0.8.tar.gz"),
-                ],
-                "profiles": [{
-                    "name": "pc-x86_64",
-                    "inputs": ["unicode-data", "special-casing", "bzip2"],
-                }],
-            }))
-            .unwrap()
-            .as_slice(),
-        )
-        .unwrap();
-        let upstream_commit = lock.upstream_commit().clone();
-        materialize(
-            &cache,
-            &lock,
-            &upstream_commit,
-            "pc-x86_64",
-            &root.join("ports-sources"),
-        )
-        .unwrap()
-    }
-
-    fn archive(path: &Path, entries: &[(&str, &[u8])]) {
-        let file = fs::File::create(path).unwrap();
-        let encoder = GzEncoder::new(file, Compression::default());
-        let mut builder = Builder::new(encoder);
-        for (name, contents) in entries {
-            let mut header = Header::new_gnu();
-            header.set_size(u64::try_from(contents.len()).unwrap());
-            header.set_mode(0o644);
-            header.set_cksum();
-            builder.append_data(&mut header, name, *contents).unwrap();
-        }
-        builder.into_inner().unwrap().finish().unwrap();
-    }
-
-    fn script(path: &Path, body: &str) {
-        fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-    }
-
-    fn fixture_elf64(symbol: &str) -> Vec<u8> {
-        let mut names = Vec::from([0_u8]);
-        names.extend_from_slice(symbol.as_bytes());
-        names.push(0);
-        let section_offset = 64_usize;
-        let section_size = 64_usize;
-        let strtab_offset = section_offset + 3 * section_size;
-        let symtab_offset = strtab_offset + names.len();
-        let mut object = vec![0_u8; symtab_offset + 2 * 24];
-        object[..4].copy_from_slice(b"\x7fELF");
-        object[4] = 2;
-        object[5] = 1;
-        object[6] = 1;
-        object[7] = aros_common::elf::OS_ABI_AROS;
-        object[8] = aros_common::elf::AROS_ABI_VERSION;
-        write_u32(&mut object, 0x14, 1);
-        write_u64(&mut object, 0x28, section_offset as u64);
-        write_u16(&mut object, 0x34, 64);
-        write_u16(&mut object, 0x3a, section_size as u16);
-        write_u16(&mut object, 0x3c, 3);
-        let strtab = section_offset + section_size;
-        write_u32(&mut object, strtab + 4, 3);
-        write_u64(&mut object, strtab + 24, strtab_offset as u64);
-        write_u64(&mut object, strtab + 32, names.len() as u64);
-        write_u64(&mut object, strtab + 48, 1);
-        let symtab = strtab + section_size;
-        write_u32(&mut object, symtab + 4, 2);
-        write_u64(&mut object, symtab + 24, symtab_offset as u64);
-        write_u64(&mut object, symtab + 32, 48);
-        write_u32(&mut object, symtab + 40, 1);
-        write_u64(&mut object, symtab + 48, 8);
-        write_u64(&mut object, symtab + 56, 24);
-        object[strtab_offset..strtab_offset + names.len()].copy_from_slice(&names);
-        let symbol_entry = symtab_offset + 24;
-        write_u32(&mut object, symbol_entry, 1);
-        object[symbol_entry + 4] = 0x10;
-        write_u16(&mut object, symbol_entry + 6, 1);
-        object
-    }
-
-    fn fixture_elf32(symbol: &str) -> Vec<u8> {
-        let mut names = Vec::from([0_u8]);
-        names.extend_from_slice(symbol.as_bytes());
-        names.push(0);
-        let section_offset = 52_usize;
-        let section_size = 40_usize;
-        let strtab_offset = section_offset + 3 * section_size;
-        let symtab_offset = strtab_offset + names.len();
-        let mut object = vec![0_u8; symtab_offset + 2 * 16];
-        object[..4].copy_from_slice(b"\x7fELF");
-        object[4] = 1;
-        object[5] = 1;
-        object[6] = 1;
-        object[7] = aros_common::elf::OS_ABI_AROS;
-        object[8] = aros_common::elf::AROS_ABI_VERSION;
-        write_u32(&mut object, 0x14, 1);
-        write_u32(&mut object, 0x20, section_offset as u32);
-        write_u16(&mut object, 0x28, 52);
-        write_u16(&mut object, 0x2e, section_size as u16);
-        write_u16(&mut object, 0x30, 3);
-        let strtab = section_offset + section_size;
-        write_u32(&mut object, strtab + 4, 3);
-        write_u32(&mut object, strtab + 16, strtab_offset as u32);
-        write_u32(&mut object, strtab + 20, names.len() as u32);
-        write_u32(&mut object, strtab + 32, 1);
-        let symtab = strtab + section_size;
-        write_u32(&mut object, symtab + 4, 2);
-        write_u32(&mut object, symtab + 16, symtab_offset as u32);
-        write_u32(&mut object, symtab + 20, 32);
-        write_u32(&mut object, symtab + 24, 1);
-        write_u32(&mut object, symtab + 36, 16);
-        object[strtab_offset..strtab_offset + names.len()].copy_from_slice(&names);
-        let symbol_entry = symtab_offset + 16;
-        write_u32(&mut object, symbol_entry, 1);
-        object[symbol_entry + 4] = 0x10;
-        write_u16(&mut object, symbol_entry + 14, 1);
-        object
-    }
-
-    fn write_u16(buffer: &mut [u8], offset: usize, value: u16) {
-        buffer[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn write_u32(buffer: &mut [u8], offset: usize, value: u32) {
-        buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn write_u64(buffer: &mut [u8], offset: usize, value: u64) {
-        buffer[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-    }
-}
+#[cfg(test)]
+#[path = "execution_environment_tests.rs"]
+mod environment_tests;
