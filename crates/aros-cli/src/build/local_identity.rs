@@ -1,9 +1,9 @@
 //! Pre-build local-native input stamp, not a successful-build/media receipt.
 
+use super::native_contract::NativeContractSelection;
 use aros_common::{
     local_source::LocalSourceIdentity,
     local_toolchain::{LocalToolchainDescriptor, LOCAL_TOOLCHAIN_DESCRIPTOR_FILE},
-    native_build_contract::load_bound_native_build_contract,
     AtomicFilePolicy, Sha256Digest, TargetProfile, TreeTraversalLimits,
 };
 use miette::{IntoDiagnostic, Result, WrapErr};
@@ -33,15 +33,13 @@ const TOOL_NAMES: &[&str] = &[
 
 pub(super) fn validate_source_namespace(
     profile: &TargetProfile,
-    contract: &aros_common::native_build_contract::LoadedNativeBuildContract,
+    contract: &NativeContractSelection,
 ) -> Result<()> {
-    if profile
-        .native_build_contract
-        .as_ref()
+    if contract
+        .relative_path(profile)
         .is_some_and(|path| path.starts_with("build/"))
         || contract
-            .contract
-            .inputs
+            .inputs()
             .iter()
             .any(|input| input.path.starts_with("build/"))
     {
@@ -65,23 +63,40 @@ pub(super) struct LocalNativeInputs {
     configure_arguments: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct LocalNativeCapture<'a> {
+    pub(super) root: &'a Path,
+    pub(super) preset: &'a str,
+    pub(super) profile: &'a TargetProfile,
+    pub(super) toolchain_root: &'a Path,
+    pub(super) engine: &'a Path,
+    pub(super) tools: &'a Path,
+    pub(super) configure: &'a Command,
+    pub(super) selected_contract: &'a NativeContractSelection,
+}
+
 impl LocalNativeInputs {
-    pub(super) fn capture(
-        root: &Path,
-        preset: &str,
-        profile: &TargetProfile,
-        toolchain_root: &Path,
-        engine: &Path,
-        tools: &Path,
-        configure: &Command,
-    ) -> Result<Self> {
+    pub(super) fn capture(inputs: &LocalNativeCapture<'_>) -> Result<Self> {
+        let LocalNativeCapture {
+            root,
+            preset,
+            profile,
+            toolchain_root,
+            engine,
+            tools,
+            configure,
+            selected_contract,
+        } = *inputs;
         let source =
             LocalSourceIdentity::capture(root, preset).map_err(|error| miette::miette!(error))?;
-        let relative = profile.native_build_contract.as_ref().ok_or_else(|| {
-            miette::miette!("local native binding requires a source build contract")
-        })?;
-        let contract = load_bound_native_build_contract(root, Path::new(relative), profile)
-            .into_diagnostic()?;
+        let contract = NativeContractSelection::load(root, profile)?
+            .ok_or_else(|| miette::miette!("local native binding requires a source contract"))?;
+        if contract.is_build() != selected_contract.is_build()
+            || contract.path() != selected_contract.path()
+            || contract.sha256() != selected_contract.sha256()
+        {
+            miette::bail!("local native contract changed while capturing its input stamp");
+        }
         validate_source_namespace(profile, &contract)?;
         let (_, descriptor_bytes) = aros_common::measure_regular_file_bounded(
             &toolchain_root.join(LOCAL_TOOLCHAIN_DESCRIPTOR_FILE),
@@ -167,7 +182,7 @@ impl LocalNativeInputs {
         Ok(Self {
             schema: "aros-local-native-inputs-v1".into(),
             source,
-            native_contract_sha256: contract.sha256,
+            native_contract_sha256: contract.sha256().clone(),
             toolchain_descriptor_sha256: aros_common::sha256_bytes(&descriptor_bytes),
             toolchain_tree_sha256: Sha256Digest::parse(&descriptor.tree_sha256)
                 .into_diagnostic()?,

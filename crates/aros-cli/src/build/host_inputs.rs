@@ -1,21 +1,20 @@
 //! Exact raw inputs for source-owned host-C generators.
 
-use aros_common::native_build_contract::LoadedNativeBuildContract;
+use super::native_contract::NativeContractSelection;
 use aros_common::native_host_generator::NativeHostFileInput;
 use miette::{IntoDiagnostic, Result};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub(super) async fn prepare(
-    contract: Option<&LoadedNativeBuildContract>,
+    contract: Option<&NativeContractSelection>,
     offline: bool,
 ) -> Result<Option<PathBuf>> {
     let Some(contract) = contract else {
         return Ok(None);
     };
     let inputs: BTreeMap<_, _> = contract
-        .contract
-        .host_file_generators
+        .host_file_generators()
         .iter()
         .flat_map(|generator| &generator.inputs)
         .map(|input| (input.filename.clone(), input.clone()))

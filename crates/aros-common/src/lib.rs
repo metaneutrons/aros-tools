@@ -37,6 +37,7 @@ pub mod media_profile;
 pub mod media_receipt;
 pub mod media_tree;
 pub mod native_build_contract;
+pub mod native_consumer_contract;
 pub mod native_host_generator;
 pub mod native_make_template;
 pub mod native_media;
