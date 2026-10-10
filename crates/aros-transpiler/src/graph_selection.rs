@@ -29,6 +29,21 @@ fn inventory_archive_failure(owner: &str, name: &str, candidates: usize) -> Diag
 }
 
 impl DependencyGraph {
+    /// All native producer/link edges used by selection and CMake publication.
+    /// Resolve parent identities, retaining child selectors until traversal so
+    /// an unrelated unresolved recipe cannot invalidate a selected proof.
+    pub(crate) fn native_selection_dependency_edges(&self, context: &TargetContext) -> Edges {
+        let mut edges = Edges::new();
+        for (raw, children) in self.selection_edges(&[], true, context).edges {
+            add(
+                &mut edges,
+                &endpoint(&raw, context).unwrap_or(raw),
+                children,
+            );
+        }
+        edges
+    }
+
     /// Existing native endpoint identities, not a claim of capability support.
     pub(crate) fn native_metadata_endpoint_names(
         &self,
