@@ -35,7 +35,7 @@ stage rules; they must not become a second hard-coded workflow inventory.
 | Local execution | `native_lifecycle.rs`, `executor.rs`, `native_candidate.rs` | `publish`/result outputs remain collector-only; a separate finished record measures the complete tree and ordered chain. Its guarded package join is local library evidence, not authenticated workflow admission. |
 | Packaging and index | `release_index_v2_builder.rs`, `release_index_v2_readback.rs`, `toolchain_producer/release_index_family.rs` | Explicit family-v2 CLI stages measure packages and index/checksum inputs. They do not qualify execution or authenticate provenance. |
 | A/B comparison | `native_candidate/comparison.rs`, `native_candidate/release_readback.rs`, `release_index.rs::PackageComparisonReport` | Local proofs and complete portable byte acquisition join both packages, retained exports/reports, selected groups and final checksum/subject bytes. The CLI still needs integration; external execution/artifact authentication remains separate. |
-| Compatibility | `compatibility/execution_retained.rs`, `compatibility/execution_portable.rs`, `native_candidate/release_compatibility.rs` | Owning-host export and rootless read-back validate the exact report/log/ELF closure against independent expectations. Complete indexed acquisition joins actual packages, A/B and compatibility bytes. CLI and authenticated recovery admission still need integration; byte consistency is not proof of execution. |
+| Compatibility | `compatibility/execution_retained.rs`, `compatibility/execution_portable.rs`, `native_candidate/release_compatibility.rs` | Owning-host export and rootless read-back validate the exact report/log/ELF closure against independent expectations. The CLI exposes complete local exports through explicit `--evidence-dir`. Complete indexed acquisition joins actual packages, A/B and compatibility bytes. Aggregate collector CLI and authenticated recovery admission still need integration; byte consistency is not proof of execution. |
 | Qualification | `qualification_evidence_v2.rs` | The V2 record validates claims and their index/policy joins, not actual report acquisition. `record-qualification` still uses V1. |
 | Recovery | `recovery.rs`, `toolchain_producer.rs` | Admission, inventory measurement and CLI still select the V1 index/evidence and active/historical V1 inventory shapes. |
 
@@ -118,14 +118,17 @@ without reopening original roots. The complete compatibility collector joins
 every independent package expectation to actual verified A/B and final indexed
 package bytes and rebinds all lane selectors to the selected input groups.
 It admits no diagnostic subset and does not authenticate execution.
-External origin, collector CLI integration and V2
+The owning-host CLI can now atomically publish the separate input observation
+and exact portable file set after complete execution. It does not admit the
+aggregate report set or authenticate the owning job. External origin,
+aggregate collector CLI integration and V2
 qualification/recovery admission remain implementation requirements, not
 authenticated evidence from this audit.
 
 ### Producer audit boundary
 
 The inspected `aros-toolchains` tree at
-`e2335de6be9bb9d9f58163490ac1aa782a37ac7c` still selects a single LLVM lock,
+`f35ecea2918c8c8314bf6878b4401af6ae45132d` still selects a single LLVM lock,
 recipe and profile document. `toolchain-release.yml` expands three fixed
 profiles, uploads lifecycle receipts, defaults to legacy package/index formats,
 records V1 qualification and enforces forty-four final files.

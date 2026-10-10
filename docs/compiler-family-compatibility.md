@@ -136,7 +136,7 @@ command plan or prove that commands executed; those require separate trusted
 execution evidence. Package signatures, runtime bytes, A/B independence and
 release admission remain separate gates.
 
-The CLI's existing `producer compatibility` command uses
+Without `--evidence-dir`, the CLI's `producer compatibility` command uses
 `execute_native_compatibility_with_readback` for family-v2 packages. Before any
 phase starts it derives the source-owned CMake command count and independently
 measures the upstream tree and host environments. After execution it reads the
@@ -169,9 +169,30 @@ Each fixture must be a stable, no-follow regular file of at most 1 MiB; its
 contents are rechecked before execution, after execution and after export.
 Changed fixtures prevent a successful export.
 
-This additive library API is not yet the CLI's compatibility collector. Its
-input-document parser returns unauthenticated claims; protected job/artifact
-origin and selected runtime/input bytes still need independent verification.
+The CLI exposes this owning-host operation through optional
+`producer compatibility --package-format family-v2 --evidence-dir ABSENT_DIR`.
+The directory must be absolute, have an existing non-symlink parent, and remain
+separate from every input and execution root. Legacy-v1 export is rejected
+before extraction. Without this option, execution and stdout keep their prior
+shape.
+
+Overlap checks compare existing directory identities, including filesystem
+aliases. Missing path suffixes are compared conservatively without ASCII case;
+choose distinct component names even on a case-sensitive filesystem.
+
+Only a complete successful execution/export creates the final output: one
+no-clobber directory rename exposes exact `inputs.json` and the closed flat
+`evidence/` inventory together. Publisher-owned empty advisory lock files may
+also remain in the outer directory; they are not evidence members. An error
+may retain an owned sibling stage for diagnosis. A post-rename durability error
+may leave the complete destination; inspect it rather than retrying over it.
+The JSON result adds `local_evidence.directory`, `inputs_sha256` and
+`manifest_sha256`. Retain these exact digests independently of uploaded bytes;
+do not select them from a downloaded report's own claims.
+
+This is not the aggregate compatibility collector. The input-document parser
+returns unauthenticated claims; protected job/artifact origin and selected
+runtime/input bytes still need independent verification.
 The caller must exclusively own quiescent roots. Remeasurement is not a defense
 against deliberate mutate-and-restore races and does not authenticate command
 execution or admit a release.

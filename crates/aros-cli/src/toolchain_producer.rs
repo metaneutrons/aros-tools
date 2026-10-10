@@ -33,6 +33,7 @@ use std::path::PathBuf;
 
 use crate::observability;
 
+mod compatibility_export;
 mod finished_package;
 mod native_compatibility;
 #[cfg(unix)]

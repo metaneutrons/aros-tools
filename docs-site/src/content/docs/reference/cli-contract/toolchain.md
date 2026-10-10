@@ -86,6 +86,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer compatibility` | cxx_fixture | --cxx-fixture | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | standalone_output_dir | --standalone-output-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | reports_dir | --reports-dir | — | required | 1 |  |  | — |  |
+| `aros toolchain producer compatibility` | evidence_dir | --evidence-dir | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | jobs | --jobs | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | timeout_seconds | --timeout-seconds | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | format | --format | — | optional | 1 | human | human, json | — |  |

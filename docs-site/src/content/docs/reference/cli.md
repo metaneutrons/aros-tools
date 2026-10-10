@@ -129,7 +129,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer prepare-recovery` | Create a closed recovery request from externally verified qualification facts |
 | `aros toolchain producer index` | Advance a complete local release inventory through an explicit index stage |
 | `aros toolchain producer compatibility-host-tools` | Print the measured command roles required for native compatibility |
-| `aros toolchain producer compatibility` | Execute all six local package-compatibility phases |
+| `aros toolchain producer compatibility` | Execute all six local package-compatibility phases; optional `--evidence-dir` publishes complete family-v2 input/report/ELF evidence locally, never authenticated origin |
 
 The local `package`, `verify-package` and `compatibility` commands accept the optional
 `--package-format legacy-v1|family-v2`. When omitted, LLVM keeps its historical

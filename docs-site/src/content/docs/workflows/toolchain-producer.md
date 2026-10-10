@@ -291,11 +291,22 @@ against pre-execution source and environment expectations, then reparses the
 standalone outputs. This local read-back is not signature verification or
 recovery admission.
 
-The library can also export and read back the exact reports, logs and standalone
-ELFs on a different host. It requires independently selected package, source,
-runtime and environment identities; the CLI does not yet expose this portable
-collector. Keep exported evidence private. Valid bytes do not authenticate the
-owning job or qualify a release.
+For a complete local export, add `--package-format family-v2 --evidence-dir
+/absolute/path/to/absent-export` to `producer compatibility`. The export parent
+must exist and have no symlink components. Inputs and execution roots must be
+separate. After all six phases and read-back pass, one no-clobber directory
+publication exposes the exact pre-execution `inputs.json` and closed
+`evidence/` reports, logs and ELF files. Existing output is never replaced.
+Overlap checks recognize filesystem aliases and conservatively reject missing
+path suffixes that differ only by ASCII case.
+JSON adds the output directory, input-document digest and evidence-manifest
+digest under `local_evidence`; retain those digests outside the uploaded files.
+Keep this evidence private, outside the public release inventory.
+
+The library can read back this evidence on another host using independently
+selected package, source, runtime and environment identities. The aggregate
+collector is not yet a CLI command. Valid bytes do not authenticate the owning
+job or qualify a release.
 
 The complete library collector also binds every compatibility lane to the
 actual indexed package and its A/B byte evidence. Its lane set comes from the
