@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use aros_common::{sha256_bytes, ArosCompilerIdentity, CancellationToken, Sha256Digest};
+use aros_common::{
+    measure_regular_file_bounded, sha256_bytes, ArosCompilerIdentity, CancellationToken,
+    Sha256Digest,
+};
 use serde::{Deserialize, Serialize};
 
 use super::portable::export_with_expectations;
@@ -19,6 +22,22 @@ use crate::recipe::GitObjectId;
 use crate::ContractError;
 
 const SCHEMA: &str = "aros-toolchain-compatibility-inputs-v1";
+const MAX_STANDALONE_FIXTURE_BYTES: u64 = 1024 * 1024;
+
+/// Bounded content identity only; this makes no claim about a fixture path or
+/// filesystem identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StandaloneFixtureIdentity {
+    sha256: Sha256Digest,
+    size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StandaloneFixtureIdentities {
+    c: StandaloneFixtureIdentity,
+    cxx: StandaloneFixtureIdentity,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +59,8 @@ struct InputDocument {
     engine_sha256: Sha256Digest,
     helpers: BTreeMap<String, CompatibilityHelperReport>,
     host_tools: BTreeMap<String, CompatibilityHostToolReport>,
+    standalone_c_fixture: StandaloneFixtureIdentity,
+    standalone_cxx_fixture: StandaloneFixtureIdentity,
     sdk_environment_sha256: Sha256Digest,
     standalone_environment_sha256: Sha256Digest,
     upstream_source_commit: GitObjectId,
@@ -83,6 +104,17 @@ impl NativeCompatibilityInputClaims {
         if document.schema != SCHEMA {
             return Err(error(
                 "compatibility input observation has an unsupported schema",
+            ));
+        }
+        if [
+            document.standalone_c_fixture.size,
+            document.standalone_cxx_fixture.size,
+        ]
+        .iter()
+        .any(|size| !(1..=MAX_STANDALONE_FIXTURE_BYTES).contains(size))
+        {
+            return Err(error(
+                "compatibility input observation has an invalid standalone fixture size",
             ));
         }
         if encode(&document)? != bytes {
@@ -140,7 +172,9 @@ impl NativeCompatibilityInputClaims {
             || doc.target_triple != profile.target_triple()
             || &doc.upstream_source_commit != profiles.upstream_commit()
         {
-            return Err(error("compatibility input observation differs from independently selected package or profiles"));
+            return Err(error(
+                "compatibility input observation differs from independently selected package or profiles",
+            ));
         }
         Ok(NativeCompatibilityReceiptExpectations {
             package,
@@ -163,6 +197,7 @@ impl NativeCompatibilityInputClaims {
 
     fn from_expected(
         expected: &NativeCompatibilityReceiptExpectations<'_>,
+        standalone_fixtures: StandaloneFixtureIdentities,
     ) -> Result<Self, ContractError> {
         let manifest = crate::canonical::bytes(
             &serde_json::to_value(expected.package.manifest)
@@ -186,6 +221,8 @@ impl NativeCompatibilityInputClaims {
             engine_sha256: expected.engine_sha256.clone(),
             helpers: expected.helpers.clone(),
             host_tools: expected.host_tools.clone(),
+            standalone_c_fixture: standalone_fixtures.c,
+            standalone_cxx_fixture: standalone_fixtures.cxx,
             sdk_environment_sha256: expected.sdk_environment_sha256.clone(),
             standalone_environment_sha256: expected.standalone_environment_sha256.clone(),
             upstream_source_commit: expected.upstream_source_commit.clone(),
@@ -230,11 +267,15 @@ impl NativeCompatibilityExecutionExport {
 ///
 /// Captures independently prepared inputs before any of the six phases starts.
 /// After execution, retained read-back and portable export reuse those exact
-/// pre-execution expectations rather than copying fields out of a report.
-/// Original roots must remain exclusively owned and quiescent. It writes only
-/// the normal execution outputs; the caller publishes the returned protected
-/// export separately with no-clobber semantics. No signing, external origin
-/// authentication, qualification, recovery or release admission occurs here.
+/// pre-execution expectations rather than copying fields out of a report. C
+/// and C++ fixture contents are measured as bounded no-follow regular-file
+/// snapshots and checked before execution, after execution, and after export.
+/// Their claims bind raw content size and SHA-256 only, not paths or filesystem
+/// identities. Original roots must remain exclusively owned and quiescent;
+/// these checks do not defeat a deliberate mutate-and-restore race. It writes
+/// only the normal execution outputs; the caller publishes the returned
+/// protected export separately with no-clobber semantics. No signing, external
+/// origin authentication, qualification, recovery or release admission occurs.
 ///
 /// # Errors
 /// Returns AX0703 for legacy packages, input drift or inconsistent retained
@@ -249,12 +290,17 @@ pub fn execute_native_compatibility_with_export(
             "compatibility execution export requires a compiler-family-v2 package",
         ));
     }
+    let standalone_fixtures = measure_standalone_fixtures(request)?;
     let expected = ExpectedRetainedEvidence::prepare(request, profiles)?;
     let inputs = NativeCompatibilityInputClaims::from_expected(
         &expected.portable_expectations(request, profiles)?,
+        standalone_fixtures.clone(),
     )?;
+    revalidate_standalone_fixtures(request, &standalone_fixtures)?;
     let report = execute_native_compatibility(request, cancellation)?;
+    revalidate_standalone_fixtures(request, &standalone_fixtures)?;
     let evidence = export_with_expectations(request, profiles, &expected)?;
+    revalidate_standalone_fixtures(request, &standalone_fixtures)?;
     if evidence.receipt_sha256() != &report.receipt.sha256 {
         return Err(error(
             "exported compatibility receipt differs from its execution digest",
@@ -265,6 +311,57 @@ pub fn execute_native_compatibility_with_export(
         inputs,
         evidence,
     })
+}
+
+fn measure_standalone_fixtures(
+    request: &NativeCompatibilityRequest,
+) -> Result<StandaloneFixtureIdentities, ContractError> {
+    Ok(StandaloneFixtureIdentities {
+        c: measure_standalone_fixture(&request.standalone_fixtures.c, "C")?,
+        cxx: measure_standalone_fixture(&request.standalone_fixtures.cxx, "C++")?,
+    })
+}
+
+fn measure_standalone_fixture(
+    path: &std::path::Path,
+    language: &str,
+) -> Result<StandaloneFixtureIdentity, ContractError> {
+    let (_, bytes) = measure_regular_file_bounded(path, MAX_STANDALONE_FIXTURE_BYTES)
+        .map_err(|_| {
+            error(&format!(
+                "standalone {language} compatibility fixture cannot be safely measured"
+            ))
+        })?
+        .ok_or_else(|| {
+            error(&format!(
+                "standalone {language} compatibility fixture cannot be safely measured"
+            ))
+        })?;
+    if bytes.is_empty() {
+        return Err(error(&format!(
+            "standalone {language} compatibility fixture must not be empty"
+        )));
+    }
+    let size = u64::try_from(bytes.len())
+        .map_err(|_| error("standalone compatibility fixture size is not representable"))?;
+    Ok(StandaloneFixtureIdentity {
+        sha256: sha256_bytes(&bytes),
+        size,
+    })
+}
+
+fn revalidate_standalone_fixtures(
+    request: &NativeCompatibilityRequest,
+    expected: &StandaloneFixtureIdentities,
+) -> Result<(), ContractError> {
+    let observed = measure_standalone_fixtures(request)
+        .map_err(|_| error("standalone compatibility fixture changed after input observation"))?;
+    if &observed != expected {
+        return Err(error(
+            "standalone compatibility fixture changed after input observation",
+        ));
+    }
+    Ok(())
 }
 
 fn encode(document: &InputDocument) -> Result<Vec<u8>, ContractError> {

@@ -157,3 +157,21 @@ This is a read-back of exclusively owned local execution roots, not an atomic
 snapshot or authenticated recovery into a new workspace. Family-v2 release
 recording, recovery and protected workflow admission remain separate
 integration requirements.
+
+## Separate local input observation
+
+The library's `execute_native_compatibility_with_export` captures a canonical
+`aros-toolchain-compatibility-inputs-v1` document before executing a family-v2
+lane and exports the retained reports, logs and ELF outputs separately. It
+records package/profile, source, engine, helper and environment identities,
+including the raw SHA-256 and size of each standalone C/C++ source fixture.
+Each fixture must be a stable, no-follow regular file of at most 1 MiB; its
+contents are rechecked before execution, after execution and after export.
+Changed fixtures prevent a successful export.
+
+This additive library API is not yet the CLI's compatibility collector. Its
+input-document parser returns unauthenticated claims; protected job/artifact
+origin and selected runtime/input bytes still need independent verification.
+The caller must exclusively own quiescent roots. Remeasurement is not a defense
+against deliberate mutate-and-restore races and does not authenticate command
+execution or admit a release.

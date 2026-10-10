@@ -27,6 +27,21 @@ use crate::recipe::GitObjectId;
 use crate::ContractError;
 
 #[derive(Debug, Clone)]
+struct FixtureBytesIdentity {
+    sha256: Sha256Digest,
+    size: u64,
+}
+
+impl FixtureBytesIdentity {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            sha256: sha256_bytes(bytes),
+            size: u64::try_from(bytes.len()).unwrap(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct IndependentSelection {
     manifest: ArosToolchainManifest,
     archive_sha256: Sha256Digest,
@@ -84,6 +99,8 @@ struct DetachedExecution {
     input_sha256: Sha256Digest,
     measurement_sha256: Sha256Digest,
     receipt_sha256: Sha256Digest,
+    c_fixture: FixtureBytesIdentity,
+    cxx_fixture: FixtureBytesIdentity,
     selected: IndependentSelection,
 }
 
@@ -95,6 +112,12 @@ fn detached_gnu_rv32_execution() -> &'static DetachedExecution {
         let original_root = original.path().to_path_buf();
         let fixture = super::super::gnu_tests::gnu_fixture(original.path(), 32, false);
         let selected = IndependentSelection::from_fixture(&fixture);
+        let c_fixture = FixtureBytesIdentity::from_bytes(
+            &fs::read(&fixture.request.standalone_fixtures.c).unwrap(),
+        );
+        let cxx_fixture = FixtureBytesIdentity::from_bytes(
+            &fs::read(&fixture.request.standalone_fixtures.cxx).unwrap(),
+        );
         let exported = execute_native_compatibility_with_export(
             &fixture.request,
             &fixture.profiles,
@@ -132,6 +155,8 @@ fn detached_gnu_rv32_execution() -> &'static DetachedExecution {
             input_sha256,
             measurement_sha256,
             receipt_sha256,
+            c_fixture,
+            cxx_fixture,
             selected,
         }
     })
@@ -149,6 +174,18 @@ fn measured_inputs_and_export_rebind_rootlessly_to_independent_selection() {
         NativeCompatibilityInputClaims::parse(&fixture.input_bytes, &fixture.input_sha256).unwrap();
     assert_eq!(claims.bytes(), fixture.input_bytes);
     assert_eq!(claims.sha256(), &fixture.input_sha256);
+    let serialized: Value = serde_json::from_slice(claims.bytes()).unwrap();
+    for (field, identity) in [
+        ("standalone_c_fixture", &fixture.c_fixture),
+        ("standalone_cxx_fixture", &fixture.cxx_fixture),
+    ] {
+        assert_eq!(
+            serialized[field]["sha256"],
+            serde_json::to_value(&identity.sha256).unwrap()
+        );
+        assert_eq!(serialized[field]["size"], json!(identity.size));
+        assert_eq!(serialized[field].as_object().unwrap().len(), 2);
+    }
     let expected = claims
         .expectations(
             fixture.selected.package(),
@@ -175,6 +212,19 @@ fn measured_inputs_and_export_rebind_rootlessly_to_independent_selection() {
 fn input_claim_parser_rejects_unselected_or_noncanonical_documents() {
     let fixture = detached_gnu_rv32_execution();
     let bytes = &fixture.input_bytes;
+
+    for member in ["standalone_c_fixture", "standalone_cxx_fixture"] {
+        for size in [0, super::MAX_STANDALONE_FIXTURE_BYTES + 1] {
+            let mut invalid: Value = serde_json::from_slice(bytes).unwrap();
+            invalid[member]["size"] = json!(size);
+            let invalid = crate::canonical::bytes(&invalid).unwrap();
+            assert_parse_rejected(
+                &invalid,
+                &sha256_bytes(&invalid),
+                "invalid standalone fixture size",
+            );
+        }
+    }
 
     let wrong_digest = Sha256Digest::parse(&"0".repeat(64)).unwrap();
     assert_parse_rejected(bytes, &wrong_digest, "differs from its selected raw digest");
@@ -275,12 +325,52 @@ fn legacy_package_export_is_rejected_before_any_compatibility_phase() {
     assert!(!cmake_log.exists(), "the CMake child must not have started");
 }
 
+#[test]
+fn fixture_changed_by_an_earlier_phase_prevents_export() {
+    let temporary = tempfile::tempdir().unwrap();
+    let fixture = super::super::gnu_tests::gnu_fixture(temporary.path(), 32, false);
+    let c_fixture = fixture.request.standalone_fixtures.c.clone();
+    let original_c_fixture = fs::read(&c_fixture).unwrap();
+    let cmake = fixture.request.cmake_program.clone();
+    let cmake_script = fs::read_to_string(&cmake).unwrap();
+    let mutation = format!(
+        "\nprintf '%s\\n' '/* changed after input measurement */' >> {}\n",
+        shell_quote(&c_fixture.to_string_lossy())
+    );
+    fs::write(&cmake, format!("{cmake_script}{mutation}")).unwrap();
+
+    let error = execute_native_compatibility_with_export(
+        &fixture.request,
+        &fixture.profiles,
+        &CancellationToken::default(),
+    )
+    .unwrap_err();
+    assert_ax0703(
+        &error,
+        "standalone compatibility fixture changed after input observation",
+    );
+    assert!(fixture.request.reports_root.exists());
+    assert!(
+        cmake
+            .parent()
+            .unwrap()
+            .join("cmake-arguments.log")
+            .is_file(),
+        "the mutation must occur in an earlier synthetic phase"
+    );
+    assert_ne!(fs::read(&c_fixture).unwrap(), original_c_fixture);
+}
+
 fn write_export(directory: &Path, files: &BTreeMap<String, Vec<u8>>) {
     fs::create_dir(directory).unwrap();
     for (name, bytes) in files {
         assert_eq!(Path::new(name).file_name().unwrap(), name.as_str());
         fs::write(directory.join(name), bytes).unwrap();
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn snapshot_files(directory: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
