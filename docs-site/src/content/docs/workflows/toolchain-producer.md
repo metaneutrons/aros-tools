@@ -284,9 +284,9 @@ PATH or board-name inference. GNU receipts use schema v3, LLVM family-v2 uses
 package-bound schema v4, and legacy LLVM v1 retains schema v2. Family-v2
 execution checks the source/profile binding, both complete inventories and
 compiler-bound standalone ELF outputs. Complete V2 release-evidence and read-only
-recovery checks admit GNU v3 and LLVM v4 receipts; historical recovery execution
-remains V1-only. Successful packaging or synthetic adapter tests are not a real
-consumer qualification.
+recovery checks admit GNU v3 and LLVM v4 receipts. Explicit family-v2 `repackage`
+also supports both families. Successful packaging or synthetic adapter tests
+are not a real consumer qualification.
 Family-v2 compatibility also checks the exact retained report/log inventory
 against pre-execution source and environment expectations, then reparses the
 standalone outputs. This local read-back is not signature verification or
@@ -338,7 +338,34 @@ absent packaging handoff. It reacquires all original bytes and writes nothing.
 Replay allows a compatibility-harness failure, not an actual compatibility
 failure; compilation and comparison failures are also ineligible. Observations
 still require external authentication; this check executes no recovery. The
-historical request-creation and repackage commands remain V1-only.
+historical `prepare-recovery` and `validate-recovery` commands remain V1-only.
+
+For packaging-only execution, use `producer repackage --release-format family-v2`
+with the same complete selection and independent digests. Rename `--directory`
+to `--release-dir` and `--release-id` to `--source-release-id`; select one exact
+archive basename with `--asset`. Add `--first-extraction-dir`,
+`--second-extraction-dir`, `--first-output-dir`, `--second-output-dir` and
+`--comparison-output`. Every destination must be absent, absolute and normalized,
+with an existing nonsymlink parent, outside all selected evidence and the other
+destinations. Declared forbidden build roots are also protected, including
+existing aliases and prospective suffixes. The caller must exclusively own
+quiescent inputs and outputs.
+
+The command revalidates the complete original qualification, extracts the
+selected package twice and packages both copies under the fresh recovery
+identity. Only release identity changes; qualified payload and other manifest
+fields remain unchanged. It compares all four package members, checks the
+original closure again and writes a no-clobber comparison receipt. JSON includes
+the fresh and original release IDs, original archive hash/size, output paths,
+comparison digest and package-set digest. `build_count` and `lanes` describe
+the original evidence, not new compiler executions.
+
+This operation neither signs nor publishes, and it does not authenticate
+GitHub observations. Replay requests are ineligible for packaging. A failure
+after output creation preserves the selected new directories for diagnosis;
+never treat them as a completed recovery or adopt them on a retry. Use fresh
+paths. Without explicit format, `repackage` keeps the V1 contract; V1 context
+flags and V2 complete-selection flags cannot be mixed.
 
 `producer record-qualification --release-format family-v2` acquires that same
 complete closure before deriving the claim file. Supply `--release-dir`, the
@@ -365,8 +392,9 @@ After external attestation supplies provenance, `final` requires the original
 `--subject-manifest-sha256`, verifies unchanged subjects and writes final checksums.
 These local byte checks do not authenticate signatures. The default `legacy-v1`
 index path remains available. Qualification recording and read-only recovery
-verification explicitly support V2. Recovery execution remains V1-only;
-the V2 byte checker does not make the historical execution path V2-capable.
+verification and explicit `repackage --release-format family-v2` support V2.
+Historical request creation and default V1 execution keep their original
+contracts; no format is inferred from filenames or failed verification.
 
 The producer preserves owned work/output roots on failure, cancellation, and
 deadline expiry. Inspect their lifecycle receipts and logs, correct the exact

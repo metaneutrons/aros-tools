@@ -185,7 +185,21 @@ and non-absent packaging handoff observations. Replay permits only a
 compatibility-harness failure, not an actual compatibility failure; compiler
 and comparison failures are ineligible. The protected workflow must authenticate
 these observations. The command executes no recovery; historical
-`prepare-recovery`, `validate-recovery` and `repackage` remain V1-only.
+`prepare-recovery` and `validate-recovery` remain V1-only.
+
+`producer repackage --release-format family-v2` executes local packaging-only
+recovery for one exact indexed `--asset`. It uses the complete `verify-recovery`
+selection, with `--release-dir` instead of `--directory` and
+`--source-release-id` instead of `--release-id`. Add two absent extraction
+directories, two absent package directories and an absent `--comparison-output`.
+All five destinations must have existing nonsymlink parents and remain outside
+each other, every selected input/evidence path and every declared forbidden
+build root, including existing aliases. The original complete
+qualification is checked before and after packaging; the two new package sets
+must be byte-identical. These are not new compiler A/B builds. No signing,
+network or publication occurs; externally authenticated observations are still
+required. Omitted format and explicit `legacy-v1` retain the V1 contract;
+V1 package/context flags cannot be mixed with the V2 selection.
 
 `producer record-qualification --release-format family-v2` derives claims from
 that complete byte selection. Use `--release-dir` instead of `--directory`,
