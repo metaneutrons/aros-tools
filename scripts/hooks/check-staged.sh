@@ -39,8 +39,13 @@ git -c core.quotePath=false diff --cached --name-only --diff-filter=AM | while I
     fi
 done || status=1
 
+# Rust's source modules can legitimately be named `build`; that is not a
+# compiler output directory. Permit only immediate snake-case Rust files in
+# a crate's src/build namespace. Nested directories and non-source files stay
+# subject to the artifact guard below.
 # --- Verzeichnisse, die nie eingecheckt gehören ---------------------------
 if git -c core.quotePath=false diff --cached --name-only |
+    grep -Ev '^crates/[^/]+/src/build/[a-z][a-z0-9_]*\.rs$' |
     grep -Eq '(^|/)(node_modules|target|dist|build|\.next|coverage)/'; then
     fail "Ein Build- oder Abhängigkeitsverzeichnis ist gestaged. .gitignore prüfen."
 fi
