@@ -11,7 +11,9 @@ use aros_common::{sha256_bytes, Sha256Digest};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use super::portable_tests::{copy_package, guarded_package_for_host, GuardedPackage};
+use super::portable_tests::{
+    copy_package, guarded_gnu_package_for_host, guarded_package_for_host, GuardedPackage,
+};
 use super::{
     readback_release_builds_v2, ReleaseBuildLaneRequestV2, ReleaseBuildReadbackRequestV2,
     ReleaseBuildSideRequestV2,
@@ -74,8 +76,22 @@ impl PreparedRelease {
 }
 
 fn input_fixture() -> InputFixture {
-    let source_lock = super::tests::fixture_source_lock();
-    let profiles = super::tests::fixture_profiles();
+    input_fixture_for(
+        "llvm-pc",
+        super::tests::fixture_source_lock(),
+        super::tests::fixture_profiles(),
+    )
+}
+
+fn gnu_input_fixture() -> InputFixture {
+    input_fixture_for(
+        "gnu-rv32",
+        super::tests::fixture_gnu_source_lock(),
+        super::tests::fixture_gnu_profiles(),
+    )
+}
+
+fn input_fixture_for(group_id: &str, source_lock: Vec<u8>, profiles: Vec<u8>) -> InputFixture {
     let recipe = super::tests::fixture_recipe(&source_lock, &profiles);
     let mut documents = BTreeMap::new();
     documents.insert("recipe.json".to_owned(), recipe);
@@ -87,7 +103,7 @@ fn input_fixture() -> InputFixture {
         "tools_commit": "5555555555555555555555555555555555555555",
         "hosts": ACTIVE_HOSTS,
         "groups": [{
-            "id": "llvm-pc",
+            "id": group_id,
             "recipe": {
                 "file": "recipe.json",
                 "sha256": sha256_bytes(documents.get("recipe.json").unwrap()).as_str(),
@@ -112,7 +128,19 @@ fn input_fixture() -> InputFixture {
 }
 
 pub(super) fn prepare_release() -> PreparedRelease {
-    let input = input_fixture();
+    prepare_release_for_family(false)
+}
+
+pub(super) fn prepare_gnu_release() -> PreparedRelease {
+    prepare_release_for_family(true)
+}
+
+fn prepare_release_for_family(gnu: bool) -> PreparedRelease {
+    let input = if gnu {
+        gnu_input_fixture()
+    } else {
+        input_fixture()
+    };
     let release_root = tempfile::tempdir().unwrap();
     let release_dir = release_root.path().canonicalize().unwrap();
     for (name, bytes) in &input.documents {
@@ -146,8 +174,16 @@ pub(super) fn prepare_release() -> PreparedRelease {
     let mut required_paths = BTreeMap::new();
 
     for (host_index, host) in ACTIVE_HOSTS.iter().copied().enumerate() {
-        let left = guarded_package_for_host(host);
-        let right = guarded_package_for_host(host);
+        let left = if gnu {
+            guarded_gnu_package_for_host(host)
+        } else {
+            guarded_package_for_host(host)
+        };
+        let right = if gnu {
+            guarded_gnu_package_for_host(host)
+        } else {
+            guarded_package_for_host(host)
+        };
         let asset = left
             .package
             .package_output()
@@ -243,7 +279,14 @@ pub(super) fn prepare_release() -> PreparedRelease {
 
         let environment = left.package_request.build_environment.clone();
         build_environments.insert(asset.clone(), environment);
-        required_paths.insert(asset, vec!["bin/clang".to_owned()]);
+        required_paths.insert(
+            asset,
+            vec![if gnu {
+                "bin/fixture-c".to_owned()
+            } else {
+                "bin/clang".to_owned()
+            }],
+        );
         owners.push(left);
         owners.push(right);
     }

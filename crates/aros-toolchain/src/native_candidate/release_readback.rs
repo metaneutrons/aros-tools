@@ -17,7 +17,7 @@ use crate::release_attestation_manifest_v2::{
 };
 use crate::release_checksums_v2::{verify_final_checksums_v2, FinalChecksumsReadbackV2};
 use crate::release_index::{compare_package_sets, PackageComparisonReport};
-use crate::release_index_v2::NativeReleaseArtifactV2;
+use crate::release_index_v2::{NativeReleaseArtifactV2, PROVENANCE_NAME};
 use crate::release_index_v2_readback::{
     validate_directory_path, IndexedPackageReadbackRequestV2, MAX_METADATA_BYTES,
 };
@@ -74,6 +74,7 @@ pub struct ReleaseBuildReadbackV2 {
     lanes: Vec<ReleaseBuildLaneReadbackV2>,
     checksums: FinalChecksumsReadbackV2,
     subject_manifest_sha256: Sha256Digest,
+    provenance_sha256: Sha256Digest,
 }
 
 impl ReleaseBuildReadbackV2 {
@@ -93,6 +94,13 @@ impl ReleaseBuildReadbackV2 {
     #[must_use]
     pub const fn subject_manifest_sha256(&self) -> &Sha256Digest {
         &self.subject_manifest_sha256
+    }
+
+    /// Raw bundle digest measured with the exact final inventory. This does
+    /// not establish that its signatures or attested subjects are authentic.
+    #[must_use]
+    pub const fn provenance_sha256(&self) -> &Sha256Digest {
+        &self.provenance_sha256
     }
 }
 
@@ -218,10 +226,18 @@ pub fn readback_release_builds_v2(
         }
     }
     require_distinct_paths(request)?;
+    let provenance_sha256 = checksums
+        .members()
+        .iter()
+        .find(|member| member.name() == PROVENANCE_NAME)
+        .ok_or_else(|| error("release build final inventory lacks provenance bytes"))?
+        .sha256()
+        .clone();
     Ok(ReleaseBuildReadbackV2 {
         lanes,
         checksums,
         subject_manifest_sha256: final_subjects.sha256().clone(),
+        provenance_sha256,
     })
 }
 

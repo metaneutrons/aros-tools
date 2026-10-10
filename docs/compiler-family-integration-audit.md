@@ -31,13 +31,13 @@ stage rules; they must not become a second hard-coded workflow inventory.
 
 | Boundary | Source evidence | Remaining integration finding |
 | --- | --- | --- |
-| Input selection | `release_inputs.rs`, `native_declaration.rs` | The library binds multiple compiler groups; the producer must supply and consume the same reviewed group set. |
+| Input selection | `release_inputs.rs`, `native_declaration.rs`, `toolchain_producer/release_plan.rs` | The library binds multiple compiler groups; `producer release-plan` projects the complete digest-selected group/host/profile set without building or qualifying it. The producer must supply and consume that same reviewed set. |
 | Local execution | `native_lifecycle.rs`, `executor.rs`, `native_candidate.rs` | `publish`/result outputs remain collector-only; a separate finished record measures the complete tree and ordered chain. Its guarded package join is local library evidence, not authenticated workflow admission. |
 | Packaging and index | `release_index_v2_builder.rs`, `release_index_v2_readback.rs`, `toolchain_producer/release_index_family.rs` | Explicit family-v2 CLI stages measure packages and index/checksum inputs. They do not qualify execution or authenticate provenance. |
-| A/B comparison | `native_candidate/comparison.rs`, `native_candidate/release_readback.rs`, `release_index.rs::PackageComparisonReport` | Local proofs and complete portable byte acquisition join both packages, retained exports/reports, selected groups and final checksum/subject bytes. The CLI still needs integration; external execution/artifact authentication remains separate. |
-| Compatibility | `compatibility/execution_retained.rs`, `compatibility/execution_portable.rs`, `native_candidate/release_compatibility.rs` | Owning-host export and rootless read-back validate the exact report/log/ELF closure against independent expectations. Complete indexed acquisition joins actual packages, A/B and compatibility bytes. CLI and authenticated recovery admission still need integration; byte consistency is not proof of execution. |
-| Qualification | `qualification_evidence_v2.rs` | The V2 record validates claims and their index/policy joins, not actual report acquisition. `record-qualification` still uses V1. |
-| Recovery | `recovery.rs`, `toolchain_producer.rs` | Admission, inventory measurement and CLI still select the V1 index/evidence and active/historical V1 inventory shapes. |
+| A/B comparison | `native_candidate/comparison.rs`, `native_candidate/release_readback.rs`, `release_index.rs::PackageComparisonReport` | Local proofs and complete portable byte acquisition join both packages, retained exports/reports, selected groups and final checksum/subject bytes. `verify-release-evidence` exposes the complete byte collector; external execution/artifact authentication remains separate. |
+| Compatibility | `compatibility/execution_retained.rs`, `compatibility/execution_portable.rs`, `native_candidate/release_compatibility.rs` | Owning-host export and rootless read-back validate the exact report/log/ELF closure against independent expectations. The CLI exposes owning-host exports through `--evidence-dir` and complete indexed acquisition through `verify-release-evidence`. Authenticated recovery admission remains incomplete; byte consistency is not proof of execution. |
+| Qualification | `qualification_evidence_v2.rs`, `qualification_readback_v2.rs`, `qualification_recording_v2.rs` | Explicit family-V2 recording and verification acquire the complete selected release and bind claims to raw exports, comparison/compatibility closure, checksums, subjects and provenance. Execution/signature/job authentication and protected producer wiring remain separate. |
+| Recovery | `recovery_v2.rs`, `repackage_v2.rs`, `toolchain_producer/recovery_family.rs`, `toolchain_producer/repackage_family.rs` | `verify-recovery` reacquires complete V2 qualification bytes and checks exact run-attempt/tag/attestation/fresh-handoff observations. Explicit `repackage --release-format family-v2` executes two local packaging operations into fresh protected destinations, not compiler A/B builds. External authentication, V2 request creation and protected workflow wiring remain open; historical V1 stays separate. |
 
 Paths in the table are relative to `crates/aros-toolchain/src/` except
 `toolchain_producer*`, which belong to `crates/aros-cli/src/`.
@@ -66,9 +66,9 @@ The [finished-candidate boundary](compiler-family-finished-candidate-v2.md)
 provides the local full-tree/chain reader and guarded V2 package operation.
 The producer CLI can explicitly select the guarded operation through a complete
 build-result file, external file digest and original work root. Ordinary
-packaging remains separate. The aggregate release collector still needs to
-consume that proof explicitly; local read-back does not close
-the external provenance or independent A/B requirements.
+packaging remains separate. The complete byte collector consumes these
+portable measurements explicitly; local read-back does not close the external
+provenance or independent A/B requirements.
 
 ### Local consistency and portable admission are different
 
@@ -118,14 +118,21 @@ without reopening original roots. The complete compatibility collector joins
 every independent package expectation to actual verified A/B and final indexed
 package bytes and rebinds all lane selectors to the selected input groups.
 It admits no diagnostic subset and does not authenticate execution.
-External origin, collector CLI integration and V2
-qualification/recovery admission remain implementation requirements, not
-authenticated evidence from this audit.
+The owning-host CLI can now atomically publish the separate input observation
+and exact portable file set after complete execution. It does not admit the
+aggregate report set or authenticate the owning job. The separate
+[`verify-release-evidence` CLI](compiler-family-release-evidence-v2.md) acquires
+the complete indexed build and compatibility bytes without authenticating
+execution. `verify-qualification` also joins a complete V2 claim document to
+those bytes, including its exact run attempt, raw export/manifest digests and
+measured provenance bundle digest. It authenticates neither that attempt nor
+its owning jobs. External origin and V2 qualification/recovery admission remain
+implementation requirements, not authenticated evidence from this audit.
 
 ### Producer audit boundary
 
 The inspected `aros-toolchains` tree at
-`e2335de6be9bb9d9f58163490ac1aa782a37ac7c` still selects a single LLVM lock,
+`f35ecea2918c8c8314bf6878b4401af6ae45132d` still selects a single LLVM lock,
 recipe and profile document. `toolchain-release.yml` expands three fixed
 profiles, uploads lifecycle receipts, defaults to legacy package/index formats,
 records V1 qualification and enforces forty-four final files.
@@ -146,7 +153,7 @@ The concrete producer handoffs are:
 
 | Handoff | Current writer and reader | Coordinated change |
 | --- | --- | --- |
-| Inputs to plan | `toolchain-release.yml` writes one recipe and expands three fixed profiles on three hosts. | Project the reviewed group set into recipes and twelve lanes; preserve exact independent group inputs. |
+| Inputs to plan | `toolchain-release.yml` writes one recipe and expands three fixed profiles on three hosts. | Use `producer release-plan` on the reviewed group collection to derive its complete lanes; preserve exact independent group inputs and keep runner/A/B scheduling in workflow policy. |
 | Build to package | The build step defaults to human stdout; packaging selects `publish.json` and ordinary format defaults. | Retain exact build JSON and its externally selected digest; use explicit guarded family-V2 packaging on the owning host. |
 | Packages to comparison | Candidate and lifecycle artifacts are uploaded separately; the comparison job reads four package files per side. | Bind complete A/B candidate/package measurements to authenticated job/artifact origin. Do not replay original macOS roots on a Linux collector. |
 | Compatibility to collector | One compatibility job per lane uploads retained results. | Validate original-root evidence on its owning host and transport closed, byte-bound records with independent environment expectations. |
@@ -193,6 +200,15 @@ The reviewed input groups supply the lane set and explicit family-v2 stages.
 Before compiler builds, exercise the complete synthetic handoff below with
 positive cases and expected-diagnostic, no-mutation counterprobes. Documentation
 must distinguish implemented commands from release-qualified behavior.
+
+Local V2 qualification recording is implemented as a complete byte-derivation
+operation: `producer record-qualification --release-format family-v2` acquires
+every selected package, A/B export, comparison and compatibility closure, then
+atomically writes one absent claim file outside all selected roots. Its paired
+`verify-qualification` operation rejoins those claims to actual bytes. Both
+remain byte-consistency-only. Owning-job/artifact authentication, protected V2
+recovery integration and cohesive protected-producer wiring are still required
+before Block 2 can close; these local commands do not supply that authority.
 
 ### Block 3: Real qualification and public cutover
 

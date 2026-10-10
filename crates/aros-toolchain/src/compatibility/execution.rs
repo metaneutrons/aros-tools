@@ -1577,6 +1577,8 @@ fn utf8_path(path: &Path, label: &str) -> Result<String, ContractError> {
 #[cfg(test)]
 #[path = "execution_gnu_tests.rs"]
 mod gnu_tests;
+#[cfg(test)]
+pub use gnu_tests::riscv_elf as fixture_riscv_elf;
 
 #[cfg(test)]
 #[path = "execution_tests.rs"]

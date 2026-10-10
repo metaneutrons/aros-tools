@@ -33,10 +33,19 @@ use std::path::PathBuf;
 
 use crate::observability;
 
+mod compatibility_export;
 mod finished_package;
 mod native_compatibility;
+mod qualification_bytes;
+mod recovery_family;
+mod release_evidence;
+#[cfg(unix)]
+mod release_evidence_readback;
+mod release_evidence_selection;
 #[cfg(unix)]
 mod release_index_family;
+mod release_plan;
+mod repackage_family;
 
 /// Closed native producer stages exposed by `aros toolchain producer`.
 #[derive(Args)]
@@ -71,6 +80,12 @@ impl ProducerArgs {
                 "toolchain.producer.compatibility-host-tools"
             }
             ProducerCommand::Compatibility(_) => "toolchain.producer.compatibility",
+            ProducerCommand::VerifyReleaseEvidence(_) => {
+                "toolchain.producer.verify-release-evidence"
+            }
+            ProducerCommand::ReleasePlan(_) => "toolchain.producer.release-plan",
+            ProducerCommand::VerifyQualification(_) => "toolchain.producer.verify-qualification",
+            ProducerCommand::VerifyRecovery(_) => "toolchain.producer.verify-recovery",
         }
     }
 }
@@ -93,11 +108,11 @@ enum ProducerCommand {
     /// Compare two complete local package sets byte-for-byte
     Compare(CompareArgs),
     /// Repackage one evidence-bound retained package into two fresh package sets
-    Repackage(RepackageArgs),
+    Repackage(Box<RepackageArgs>),
     /// Re-evaluate recovery eligibility against one isolated complete release inventory
     ValidateRecovery(ValidateRecoveryArgs),
     /// Record complete native qualification evidence from an isolated final release
-    RecordQualification(RecordQualificationArgs),
+    RecordQualification(Box<RecordQualificationArgs>),
     /// Create one closed recovery request after external attestation verification
     PrepareRecovery(PrepareRecoveryArgs),
     /// Advance a complete local release inventory through one index stage
@@ -109,6 +124,14 @@ enum ProducerCommand {
     },
     /// Execute all six native package-compatibility phases locally
     Compatibility(Box<native_compatibility::CompatibilityArgs>),
+    /// Read back every selected family-v2 build and compatibility lane; no execution authentication
+    VerifyReleaseEvidence(Box<release_evidence::EvidenceArgs>),
+    /// Derive every family-v2 release lane from independently selected input bytes; no build or admission
+    ReleasePlan(release_plan::ReleasePlanArgs),
+    /// Bind family-v2 qualification claims to all measured release evidence; no execution authentication
+    VerifyQualification(Box<qualification_bytes::QualificationArgs>),
+    /// Reacquire complete family-v2 recovery bytes and check external observations; no authentication or mutation
+    VerifyRecovery(Box<recovery_family::RecoveryArgs>),
 }
 
 /// Machine- or human-readable local stage result.
@@ -315,34 +338,78 @@ struct CompareArgs {
 
 /// Inputs for one evidence-bound, two-output local packaging recovery.
 #[derive(Args)]
+#[command(
+    group(ArgGroup::new("legacy_repackage").multiple(true).conflicts_with("family_repackage")),
+    after_help = "Format selection: omitted or --release-format legacy-v1 requires --source-package-dir, --recipe, --source-lock, --profiles, --preset, --host and --build-environment. Explicit family-v2 requires the complete release/evidence selection and all independently retained digests, plus one exact --asset; it derives package context from that selected input group. Do not mix V1 and V2 selectors. All five output/extraction/comparison destinations must be absent, nonoverlapping and outside selected evidence, with existing nonsymlink parents. This command executes two local packaging operations, not compiler A/B builds, signing or publication."
+)]
 struct RepackageArgs {
-    /// Closed recovery-request-v1 document with isolated inventory and policy claims
+    /// Explicit recovery format; omitted retains historical legacy-v1 execution
+    #[arg(long, value_enum)]
+    release_format: Option<ReleaseFormatArg>,
+    /// Closed recovery request in the explicitly selected format
     #[arg(long)]
     recovery_request: PathBuf,
-    /// Complete four-member retained source package set
-    #[arg(long)]
-    source_package_dir: PathBuf,
+    /// V1 only: complete four-member retained source package set
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    source_package_dir: Option<PathBuf>,
     /// Immutable release identity embedded in the retained source package
     #[arg(long)]
     source_release_id: String,
-    /// Self-digesting recipe-v2 JSON document
-    #[arg(long)]
-    recipe: PathBuf,
-    /// Source-lock-v2 document bound by the selected recipe
-    #[arg(long)]
-    source_lock: PathBuf,
-    /// Profiles-v1 document bound by the selected recipe
-    #[arg(long)]
-    profiles: PathBuf,
-    /// Exact profile from the recipe-bound profiles matrix
-    #[arg(long)]
-    preset: String,
-    /// Closed v1 host selector for the retained source package
-    #[arg(long)]
-    host: String,
-    /// JSON object recording the retained package's measured build environment
-    #[arg(long)]
-    build_environment: PathBuf,
+    /// V1 only: self-digesting recipe-v2 JSON document
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    recipe: Option<PathBuf>,
+    /// V1 only: source-lock-v2 document bound by the selected recipe
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    source_lock: Option<PathBuf>,
+    /// V1 only: profiles-v1 document bound by the selected recipe
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    profiles: Option<PathBuf>,
+    /// V1 only: exact profile from the recipe-bound profiles matrix
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    preset: Option<String>,
+    /// V1 only: closed host selector for the retained source package
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    host: Option<String>,
+    /// V1 only: JSON object recording the retained package's measured build environment
+    #[arg(
+        long,
+        required_unless_present = "release_format",
+        required_if_eq("release_format", "legacy-v1"),
+        group = "legacy_repackage"
+    )]
+    build_environment: Option<PathBuf>,
+    #[command(flatten)]
+    family: repackage_family::FamilyRepackageArgs,
     /// Absolute build root forbidden from package regular-file contents; repeatable
     #[arg(long = "forbidden-prefix")]
     forbidden_prefixes: Vec<PathBuf>,
@@ -385,27 +452,74 @@ struct ValidateRecoveryArgs {
 
 /// Inputs for recording a complete final native qualification candidate.
 ///
-/// The three report roots use the default names produced by the pinned GitHub
-/// artifact action.  Keeping this layout explicit means the native command,
-/// rather than workflow string processing, owns the release index's active or
-/// historical host/profile evidence closure.
+/// Historical V1 recording uses three explicit report roots with the names
+/// produced by the pinned artifact action. Explicit V2 recording instead uses
+/// independently selected complete portable bytes and input-derived lanes.
 #[derive(Args)]
 struct RecordQualificationArgs {
     /// Complete isolated final release inventory
     #[arg(long)]
     release_dir: PathBuf,
-    /// Basename of the source-lock document in the final release inventory
-    #[arg(long)]
-    source_lock_filename: String,
-    /// Download root containing `native-lifecycle-<host>-<profile>-{a,b}` artifacts
-    #[arg(long)]
-    lifecycle_reports_dir: PathBuf,
-    /// Download root containing `comparison-<host>-<profile>` artifacts
-    #[arg(long)]
-    comparison_reports_dir: PathBuf,
-    /// Download root containing `compatibility-<host>-<profile>` artifacts
-    #[arg(long)]
-    compatibility_reports_dir: PathBuf,
+    /// Explicit format; omitted means historical legacy-v1 recording
+    #[arg(long, value_enum)]
+    release_format: Option<ReleaseFormatArg>,
+    /// V1 only: basename of the source-lock document in the final inventory
+    #[arg(long, required_unless_present = "release_format", required_if_eq("release_format", "legacy-v1"), conflicts_with_all = ["inputs_sha256", "index_sha256", "selection", "selection_sha256", "subject_manifest", "subject_manifest_sha256", "source_run_attempt", "forbidden_prefixes"])]
+    source_lock_filename: Option<String>,
+    /// V1 only: root containing `native-lifecycle-<host>-<profile>-{a,b}` artifacts
+    #[arg(long, required_unless_present = "release_format", required_if_eq("release_format", "legacy-v1"), conflicts_with_all = ["selection", "inputs_sha256", "source_run_attempt"])]
+    lifecycle_reports_dir: Option<PathBuf>,
+    /// V1 only: root containing `comparison-<host>-<profile>` artifacts
+    #[arg(long, required_unless_present = "release_format", required_if_eq("release_format", "legacy-v1"), conflicts_with_all = ["selection", "inputs_sha256", "source_run_attempt"])]
+    comparison_reports_dir: Option<PathBuf>,
+    /// V1 only: root containing `compatibility-<host>-<profile>` artifacts
+    #[arg(long, required_unless_present = "release_format", required_if_eq("release_format", "legacy-v1"), conflicts_with_all = ["selection", "inputs_sha256", "source_run_attempt"])]
+    compatibility_reports_dir: Option<PathBuf>,
+    /// V2 only: independently retained release-input collection digest
+    #[arg(
+        long,
+        requires = "release_format",
+        required_if_eq("release_format", "family-v2")
+    )]
+    inputs_sha256: Option<Sha256Digest>,
+    /// V2 only: independently retained exact index digest
+    #[arg(
+        long,
+        requires = "release_format",
+        required_if_eq("release_format", "family-v2")
+    )]
+    index_sha256: Option<Sha256Digest>,
+    /// V2 only: absolute closed selection of complete A/B and compatibility bytes
+    #[arg(
+        long,
+        requires = "release_format",
+        required_if_eq("release_format", "family-v2")
+    )]
+    selection: Option<PathBuf>,
+    /// V2 only: independently retained raw selection digest
+    #[arg(
+        long,
+        requires = "release_format",
+        required_if_eq("release_format", "family-v2")
+    )]
+    selection_sha256: Option<Sha256Digest>,
+    /// V2 only: retained pre-attestation subject list outside the release inventory
+    #[arg(
+        long,
+        requires = "release_format",
+        required_if_eq("release_format", "family-v2")
+    )]
+    subject_manifest: Option<PathBuf>,
+    /// V2 only: independently retained raw subject-list digest
+    #[arg(
+        long,
+        requires = "release_format",
+        required_if_eq("release_format", "family-v2")
+    )]
+    subject_manifest_sha256: Option<Sha256Digest>,
+    /// V2 only: absolute build root forbidden in archive payloads (repeatable)
+    #[arg(long = "forbidden-prefix", requires = "release_format")]
+    forbidden_prefixes: Vec<PathBuf>,
     /// Credential-free HTTPS repository that ran the producer workflow
     #[arg(long)]
     source_repository: String,
@@ -415,6 +529,9 @@ struct RecordQualificationArgs {
     /// Immutable GitHub Actions producer run identifier
     #[arg(long)]
     source_run_id: u64,
+    /// V2 only: exact positive provider attempt; a run ID alone is insufficient
+    #[arg(long, requires = "release_format", required_if_eq("release_format", "family-v2"), value_parser = clap::value_parser!(u64).range(1..))]
+    source_run_attempt: Option<u64>,
     /// Immutable source tag used by the producer run
     #[arg(long)]
     source_tag: String,
@@ -439,7 +556,7 @@ struct RecordQualificationArgs {
     /// Strict expiration time for later replay or packaging recovery
     #[arg(long)]
     expires_at: u64,
-    /// Absent durable qualification-evidence-v1 output
+    /// Absent durable qualification output outside all selected evidence roots
     #[arg(long)]
     output: PathBuf,
     /// Result representation on stdout
@@ -570,13 +687,17 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::Package(args) => package(&args),
         ProducerCommand::VerifyPackage(args) => verify_package(args),
         ProducerCommand::Compare(args) => compare(&args),
-        ProducerCommand::Repackage(args) => repackage(args),
+        ProducerCommand::Repackage(args) => repackage(*args),
         ProducerCommand::ValidateRecovery(args) => validate_recovery(&args),
         ProducerCommand::RecordQualification(args) => record_qualification(&args),
         ProducerCommand::PrepareRecovery(args) => prepare_recovery(&args),
         ProducerCommand::Index(args) => index(args),
         ProducerCommand::CompatibilityHostTools { host } => compatibility_host_tools(&host),
         ProducerCommand::Compatibility(args) => native_compatibility::compatibility(*args).await,
+        ProducerCommand::VerifyReleaseEvidence(args) => release_evidence::run(&args),
+        ProducerCommand::ReleasePlan(args) => release_plan::run(&args),
+        ProducerCommand::VerifyQualification(args) => qualification_bytes::run(&args),
+        ProducerCommand::VerifyRecovery(args) => recovery_family::run(&args),
     }
 }
 
@@ -852,25 +973,34 @@ fn compare(args: &CompareArgs) -> miette::Result<()> {
 }
 
 fn repackage(args: RepackageArgs) -> miette::Result<()> {
+    if matches!(args.release_format, Some(ReleaseFormatArg::FamilyV2)) {
+        return repackage_family::run(&args);
+    }
     let recovery = RecoveryRequest::parse(&read_regular_input(
         &args.recovery_request,
         "recovery request",
     )?)
     .map_err(|error| native_error(&error))?;
     let context = package_context(PackageContextArgs {
-        recipe: args.recipe,
-        source_lock: args.source_lock,
-        profiles: args.profiles,
-        preset: args.preset,
+        recipe: legacy_repackage_required(args.recipe, "--recipe")?,
+        source_lock: legacy_repackage_required(args.source_lock, "--source-lock")?,
+        profiles: legacy_repackage_required(args.profiles, "--profiles")?,
+        preset: legacy_repackage_required(args.preset, "--preset")?,
         release_id: args.source_release_id,
-        host: args.host,
-        build_environment: args.build_environment,
+        host: legacy_repackage_required(args.host, "--host")?,
+        build_environment: legacy_repackage_required(
+            args.build_environment,
+            "--build-environment",
+        )?,
         forbidden_prefixes: args.forbidden_prefixes,
     })?;
     let output = repackage::repackage_verified_package(&VerifiedPackageRepackageRequest {
         recovery,
         source: package_verify::PackageVerificationRequest {
-            package_dir: args.source_package_dir,
+            package_dir: legacy_repackage_required(
+                args.source_package_dir,
+                "--source-package-dir",
+            )?,
             release_id: context.release_id,
             host: context.host,
             recipe: context.recipe,
@@ -926,6 +1056,10 @@ fn repackage(args: RepackageArgs) -> miette::Result<()> {
     Ok(())
 }
 
+fn legacy_repackage_required<T>(value: Option<T>, name: &str) -> miette::Result<T> {
+    value.ok_or_else(|| miette::miette!("legacy-v1 repackage requires {name}"))
+}
+
 fn validate_recovery(args: &ValidateRecoveryArgs) -> miette::Result<()> {
     let request_bytes = read_regular_input(&args.recovery_request, "recovery request")?;
     let request = RecoveryRequest::parse(&request_bytes).map_err(|error| native_error(&error))?;
@@ -958,6 +1092,14 @@ fn validate_recovery(args: &ValidateRecoveryArgs) -> miette::Result<()> {
 }
 
 fn record_qualification(args: &RecordQualificationArgs) -> miette::Result<()> {
+    if matches!(args.release_format, Some(ReleaseFormatArg::FamilyV2)) {
+        #[cfg(unix)]
+        return release_evidence_readback::run_record(args);
+        #[cfg(not(unix))]
+        return Err(miette::miette!(
+            "family-v2 qualification recording requires a supported Unix host"
+        ));
+    }
     let inventory = recovery::measure_complete_release_inventory(&args.release_dir)
         .map_err(|error| native_error(&error))?;
     let index = NativeReleaseIndex::parse(&inventory.release_index_bytes)
@@ -972,7 +1114,9 @@ fn record_qualification(args: &RecordQualificationArgs) -> miette::Result<()> {
     let source_lock_bytes = inventory_document(
         &args.release_dir,
         &inventory,
-        &args.source_lock_filename,
+        args.source_lock_filename.as_deref().ok_or_else(|| {
+            miette::miette!("legacy qualification recording requires its source lock")
+        })?,
         "source lock",
     )?;
     let _source_lock =
@@ -1202,6 +1346,15 @@ fn qualification_lanes(
     args: &RecordQualificationArgs,
     index: &NativeReleaseIndex,
 ) -> miette::Result<Vec<QualificationLane>> {
+    let lifecycle_root = args.lifecycle_reports_dir.as_deref().ok_or_else(|| {
+        miette::miette!("legacy qualification recording requires lifecycle report roots")
+    })?;
+    let comparison_root = args.comparison_reports_dir.as_deref().ok_or_else(|| {
+        miette::miette!("legacy qualification recording requires comparison report roots")
+    })?;
+    let compatibility_root = args.compatibility_reports_dir.as_deref().ok_or_else(|| {
+        miette::miette!("legacy qualification recording requires compatibility report roots")
+    })?;
     // `NativeReleaseIndex::parse` already accepts only the complete active or
     // historical v1 matrix.  The evidence must follow that selected immutable
     // inventory, rather than re-expanding it to every host the parser can read.
@@ -1209,20 +1362,16 @@ fn qualification_lanes(
     for artifact in &index.artifacts {
         let host = &artifact.host;
         let profile = &artifact.target_profile;
-        let lifecycle_a = args
-            .lifecycle_reports_dir
+        let lifecycle_a = lifecycle_root
             .join(format!("native-lifecycle-{host}-{profile}-a"))
             .join("publish.json");
-        let lifecycle_b = args
-            .lifecycle_reports_dir
+        let lifecycle_b = lifecycle_root
             .join(format!("native-lifecycle-{host}-{profile}-b"))
             .join("publish.json");
-        let comparison = args
-            .comparison_reports_dir
+        let comparison = comparison_root
             .join(format!("comparison-{host}-{profile}"))
             .join(format!("comparison-{host}-{profile}.json"));
-        let compatibility = args
-            .compatibility_reports_dir
+        let compatibility = compatibility_root
             .join(format!("compatibility-{host}-{profile}"))
             .join("native-compatibility.receipt.json");
         lanes.push(QualificationLane {
@@ -1648,3 +1797,7 @@ mod toolchain_producer_active_matrix_tests;
 #[cfg(test)]
 #[path = "toolchain_producer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "toolchain_producer/repackage_parser_tests.rs"]
+mod repackage_parser_tests;

@@ -205,10 +205,10 @@ six phase receipts, finished record and four package measurements. Preserve its
 bytes unchanged; these receipts belong in protected evidence artifacts, not
 public package metadata. This transport does not authenticate execution.
 
-The library can join the complete indexed A/B export set to measured packages,
-comparison reports, final checksums and unchanged pre-attestation subjects.
-This is not a release-qualification CLI: authenticated job/artifact origin,
-compatibility and recovery integration remain separate gates.
+`producer verify-release-evidence` joins the complete indexed A/B export set to
+measured packages, comparisons, compatibility reports/logs/ELFs, final checksums
+and unchanged pre-attestation subjects. It requires external lane selections
+and retained raw digests; it does not qualify a release or authenticate jobs.
 
 A local file hash is not authenticated execution provenance. Hashing an
 untrusted result does not make it trusted; a release workflow must separately
@@ -283,24 +283,101 @@ Driver roles and RISC-V flags come from the verified package and profile, not
 PATH or board-name inference. GNU receipts use schema v3, LLVM family-v2 uses
 package-bound schema v4, and legacy LLVM v1 retains schema v2. Family-v2
 execution checks the source/profile binding, both complete inventories and
-compiler-bound standalone ELF outputs. The release-evidence
-and recovery paths do not yet admit v3/v4 receipts. Successful packaging or synthetic
-adapter tests are not a real consumer qualification.
+compiler-bound standalone ELF outputs. Complete V2 release-evidence and read-only
+recovery checks admit GNU v3 and LLVM v4 receipts. Explicit family-v2 `repackage`
+also supports both families. Successful packaging or synthetic adapter tests
+are not a real consumer qualification.
 Family-v2 compatibility also checks the exact retained report/log inventory
 against pre-execution source and environment expectations, then reparses the
 standalone outputs. This local read-back is not signature verification or
 recovery admission.
 
-The library can also export and read back the exact reports, logs and standalone
-ELFs on a different host. It requires independently selected package, source,
-runtime and environment identities; the CLI does not yet expose this portable
-collector. Keep exported evidence private. Valid bytes do not authenticate the
-owning job or qualify a release.
+For a complete local export, add `--package-format family-v2 --evidence-dir
+/absolute/path/to/absent-export` to `producer compatibility`. The export parent
+must exist and have no symlink components. Inputs and execution roots must be
+separate. After all six phases and read-back pass, one no-clobber directory
+publication exposes the exact pre-execution `inputs.json` and closed
+`evidence/` reports, logs and ELF files. Existing output is never replaced.
+Overlap checks recognize filesystem aliases and conservatively reject missing
+path suffixes that differ only by ASCII case.
+JSON adds the output directory, input-document digest and evidence-manifest
+digest under `local_evidence`; retain those digests outside the uploaded files.
+Keep this evidence private, outside the public release inventory.
 
-The complete library collector also binds every compatibility lane to the
-actual indexed package and its A/B byte evidence. Its lane set comes from the
-release inputs, not downloaded reports. Qualification and recovery still
-require separately authenticated evidence; this collector is not a CLI command.
+`producer release-plan --directory DIR --inputs-sha256 SHA --format json`
+projects the complete selected V2 input collection before any builds. Its
+`groups` retain each source revision and exact document names/digests; `lanes`
+contains every selected group/host/profile combination. Derive scheduling from
+this result rather than copying profile lists into the workflow. Runner labels
+and A/B scheduling are workflow policy. The command is read-only and its
+`assurance: input-binding-only` result does not qualify execution or release.
+
+`producer verify-release-evidence` reads the complete evidence on a collector
+host without reopening original runner roots. Supply `--directory`,
+`--release-id`, `--base-url`, `--inputs-sha256`, `--index-sha256`, `--selection`,
+`--selection-sha256`, `--subject-manifest` and `--subject-manifest-sha256`.
+The selection schema is `aros-toolchain-release-evidence-selection-v2`; it
+contains every indexed archive's independent environment/required-path map,
+two build exports and executor digests, comparison and compatibility inputs.
+The lane set comes from release inputs, not discovered reports. JSON reports
+`assurance: byte-consistency-only`; authentication, qualification and recovery
+remain separate gates.
+
+`producer verify-qualification` additionally requires `--qualification-evidence`,
+`--qualification-sha256`, `--policy` and `--policy-sha256`. It joins complete V2
+claims to that same actual evidence: raw A/B exports, comparison, compatibility
+manifest, final checksums, subject list and provenance bytes. Diagnostic coverage
+and self-hashes substituted for raw exports/manifests are rejected. It writes
+nothing and remains `assurance: byte-consistency-only`; the run attempt,
+signatures and producing jobs still need independent authentication.
+
+`producer verify-recovery` uses those same complete selections and adds
+`--recovery-request` and `--recovery-request-sha256`. It checks the exact V2
+qualification digest, external run-attempt/tag/signer observations and a fresh
+absent packaging handoff. It reacquires all original bytes and writes nothing.
+Replay allows a compatibility-harness failure, not an actual compatibility
+failure; compilation and comparison failures are also ineligible. Observations
+still require external authentication; this check executes no recovery. The
+historical `prepare-recovery` and `validate-recovery` commands remain V1-only.
+
+For packaging-only execution, use `producer repackage --release-format family-v2`
+with the same complete selection and independent digests. Rename `--directory`
+to `--release-dir` and `--release-id` to `--source-release-id`; select one exact
+archive basename with `--asset`. Add `--first-extraction-dir`,
+`--second-extraction-dir`, `--first-output-dir`, `--second-output-dir` and
+`--comparison-output`. Every destination must be absent, absolute and normalized,
+with an existing nonsymlink parent, outside all selected evidence and the other
+destinations. Declared forbidden build roots are also protected, including
+existing aliases and prospective suffixes. The caller must exclusively own
+quiescent inputs and outputs.
+
+The command revalidates the complete original qualification, extracts the
+selected package twice and packages both copies under the fresh recovery
+identity. Only release identity changes; qualified payload and other manifest
+fields remain unchanged. It compares all four package members, checks the
+original closure again and writes a no-clobber comparison receipt. JSON includes
+the fresh and original release IDs, original archive hash/size, output paths,
+comparison digest and package-set digest. `build_count` and `lanes` describe
+the original evidence, not new compiler executions.
+
+This operation neither signs nor publishes, and it does not authenticate
+GitHub observations. Replay requests are ineligible for packaging. A failure
+after output creation preserves the selected new directories for diagnosis;
+never treat them as a completed recovery or adopt them on a retry. Use fresh
+paths. Without explicit format, `repackage` keeps the V1 contract; V1 context
+flags and V2 complete-selection flags cannot be mixed.
+
+`producer record-qualification --release-format family-v2` acquires that same
+complete closure before deriving the claim file. Supply `--release-dir`, the
+independent input/index/selection/subject digests and paths, and source
+repository/workflow/run ID/positive attempt/tag object/peeled producer commit.
+The index digest binds release ID and download URL. Add the selected signer
+claims, creation/expiry times and an absent absolute `--output` outside every
+input and evidence root, with an existing nonsymlink parent. The complete file
+is written atomically without replacement; JSON includes its raw digest and
+`assurance: byte-consistency-only`. External authentication remains mandatory.
+Default recording and explicit `legacy-v1` keep the historical layout; legacy
+report-root arguments cannot be combined with the V2 selection.
 
 The v2 library also binds comparison-report claims for all four package members
 to measured final checksum entries. This check does not authenticate independent
@@ -314,7 +391,10 @@ The `pre-attestation` stage writes the index and subject list, not final checksu
 After external attestation supplies provenance, `final` requires the original
 `--subject-manifest-sha256`, verifies unchanged subjects and writes final checksums.
 These local byte checks do not authenticate signatures. The default `legacy-v1`
-index path remains available; qualification and recovery still use V1.
+index path remains available. Qualification recording and read-only recovery
+verification and explicit `repackage --release-format family-v2` support V2.
+Historical request creation and default V1 execution keep their original
+contracts; no format is inferred from filenames or failed verification.
 
 The producer preserves owned work/output roots on failure, cancellation, and
 deadline expiry. Inspect their lifecycle receipts and logs, correct the exact

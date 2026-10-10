@@ -848,7 +848,10 @@ fn drain_bounded(
                 continue;
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                check_pipe_deadline(finished, &mut finished_at)?;
+                // EAGAIN can precede the final writer close while this
+                // worker is descheduled. Recheck HUP before treating that
+                // stale observation as a pipe still open past cleanup.
+                check_capture_deadline(&stream, finished, &mut finished_at)?;
                 stream.wait_for_io(false)?;
                 continue;
             }
@@ -1164,6 +1167,65 @@ mod tests {
             buffered: &[],
         };
         let error = drain_bounded(reader, 1024, &finished).expect_err("live pipe stays bounded");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[cfg(unix)]
+    struct StaleWouldBlockReader {
+        reads: usize,
+        closed: bool,
+    }
+
+    #[cfg(unix)]
+    impl Read for StaleWouldBlockReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            if self.closed && self.reads >= 3 {
+                Ok(0)
+            } else {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl PipeReadiness for StaleWouldBlockReader {
+        fn wait_for_io(&self, _writing: bool) -> io::Result<()> {
+            if self.reads == 1 {
+                // The worker resumes beyond the cleanup bound. Its second
+                // EAGAIN observation precedes a final writer close, so HUP
+                // must be checked before declaring that writer still alive.
+                thread::sleep(Duration::from_millis(1100));
+            }
+            Ok(())
+        }
+
+        fn writers_closed(&self) -> io::Result<bool> {
+            Ok(self.closed && self.reads >= 2)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_would_block_rechecks_writer_hangup_before_cleanup_timeout() {
+        let reader = StaleWouldBlockReader {
+            reads: 0,
+            closed: true,
+        };
+        let captured = drain_bounded(reader, 1024, &AtomicBool::new(true))
+            .expect("a stale EAGAIN must not turn a closed writer set into a timeout");
+        assert_eq!(captured.total_bytes(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_would_block_keeps_live_writer_cleanup_bounded() {
+        let reader = StaleWouldBlockReader {
+            reads: 0,
+            closed: false,
+        };
+        let error = drain_bounded(reader, 1024, &AtomicBool::new(true))
+            .expect_err("a live writer must still time out");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 

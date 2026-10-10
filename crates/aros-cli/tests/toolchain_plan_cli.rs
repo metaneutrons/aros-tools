@@ -278,8 +278,9 @@ impl Fixture {
     }
 }
 
-fn git(root: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
+fn fixture_git_command(root: &Path, arguments: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
         .current_dir(root)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -292,16 +293,87 @@ fn git(root: &Path, arguments: &[&str]) -> String {
             "commit.gpgsign=false",
             "-c",
             "core.hooksPath=/dev/null",
+            // Fixture writes must finish before a byte-for-byte snapshot.
+            // Otherwise commit's detached maintenance can repack .git while
+            // the read-only CLI is being measured.
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
         ])
-        .args(arguments)
-        .output()
-        .unwrap();
+        .args(arguments);
+    command
+}
+
+fn git(root: &Path, arguments: &[&str]) -> String {
+    let output = fixture_git_command(root, arguments).output().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn fixture_git_writes_do_not_start_background_maintenance() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("repository");
+    fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-q"]);
+    // Ambient repository preferences must not re-enable fixture maintenance.
+    git(&root, &["config", "maintenance.auto", "true"]);
+    let trace = temporary.path().join("hardened-trace.jsonl");
+    let output = fixture_git_command(
+        &root,
+        &["commit", "--allow-empty", "-qm", "test: fixture write"],
+    )
+    .env("GIT_TRACE2_EVENT", &trace)
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let starts_auto_maintenance = |path: &Path| {
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .any(|event| {
+                event["event"] == "child_start"
+                    && event["argv"].as_array().is_some_and(|arguments| {
+                        arguments.iter().any(|value| value == "maintenance")
+                            && arguments.iter().any(|value| value == "--auto")
+                    })
+            })
+    };
+    assert!(!starts_auto_maintenance(&trace));
+
+    // Counterprobe proves the trace actually detects the automatic writer,
+    // rather than passing because the observer cannot see child processes.
+    let counter_trace = temporary.path().join("counter-trace.jsonl");
+    let output = fixture_git_command(
+        &root,
+        &[
+            "-c",
+            "maintenance.auto=true",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "test: maintenance counterprobe",
+        ],
+    )
+    .env("GIT_TRACE2_EVENT", &counter_trace)
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(starts_auto_maintenance(&counter_trace));
 }
 
 fn sign(recipe: &mut Value) {
@@ -570,7 +642,12 @@ fn v2_native_plan_rejects_changed_unselected_committed_group() {
         .as_str()
         .unwrap()
         .contains("declared digests"));
-    assert_eq!(inventory(&fixture.root), before);
+    let after = inventory(&fixture.root);
+    assert!(
+        after == before,
+        "{}",
+        first_inventory_difference(&fixture.root, &before, &after),
+    );
 }
 
 #[test]

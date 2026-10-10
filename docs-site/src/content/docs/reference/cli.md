@@ -108,7 +108,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 
 ### Native producer control plane
 
-These 14 commands are maintainer-only, explicit local stages. They have no
+These commands are maintainer-only, explicit local stages. They have no
 forge authority: none creates a tag, GitHub release, attestation or package
 manager publication. Their exact required options come from the installed
 `aros toolchain producer <command> --help`; the local candidate workflow uses
@@ -119,17 +119,21 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer recipe` | Construct one non-overwriting recipe from committed source, producer and tools inputs |
 | `aros toolchain producer environment` | Write a deterministic build-environment receipt |
 | `aros toolchain producer profile` | Read one recipe-bound profile without duplicating selectors |
+| `aros toolchain producer release-plan` | Derive every family-v2 group and host/profile lane from the digest-selected input collection; read-only, no build or qualification |
 | `aros toolchain producer materialize-engine-free-source` | Materialize an audited compatibility snapshot without the source-tree engine |
 | `aros toolchain producer package` | Create one deterministic local package set from a completed candidate |
 | `aros toolchain producer verify-package` | Read back and verify one complete local package set |
 | `aros toolchain producer compare` | Compare two complete package sets byte-for-byte and write a receipt |
 | `aros toolchain producer repackage` | Repackage a retained, evidence-bound package twice under a closed recovery request |
 | `aros toolchain producer validate-recovery` | Re-evaluate recovery eligibility against one isolated release inventory |
-| `aros toolchain producer record-qualification` | Record complete measured native qualification evidence from an isolated inventory |
+| `aros toolchain producer record-qualification` | Record complete qualification claims; explicit `--release-format family-v2` derives every lane from selected bytes and writes one absent output |
 | `aros toolchain producer prepare-recovery` | Create a closed recovery request from externally verified qualification facts |
 | `aros toolchain producer index` | Advance a complete local release inventory through an explicit index stage |
 | `aros toolchain producer compatibility-host-tools` | Print the measured command roles required for native compatibility |
-| `aros toolchain producer compatibility` | Execute all six local package-compatibility phases |
+| `aros toolchain producer compatibility` | Execute all six local package-compatibility phases; optional `--evidence-dir` publishes complete family-v2 input/report/ELF evidence locally, never authenticated origin |
+| `aros toolchain producer verify-release-evidence` | Read back every family-v2 A/B package and compatibility lane against independent selections; byte consistency only, not authenticated execution |
+| `aros toolchain producer verify-qualification` | Bind complete family-v2 qualification claims to all measured release evidence; byte consistency only, not signature or execution authentication |
+| `aros toolchain producer verify-recovery` | Reacquire complete family-v2 qualification and check recovery observations; read-only, no authentication or recovery execution |
 
 The local `package`, `verify-package` and `compatibility` commands accept the optional
 `--package-format legacy-v1|family-v2`. When omitted, LLVM keeps its historical
@@ -153,6 +157,59 @@ The default V1 path requires `--source-lock-filename`. V2 requires independent
 requires the original `--subject-manifest-sha256`. Indexing verifies local bytes,
 not signer identity or publication eligibility.
 
+`producer release-plan` reads `toolchain-release-inputs-v2.json` and every
+referenced recipe, source lock and profile document from `--directory`.
+`--inputs-sha256` must match the independently selected collection bytes.
+JSON contains the complete group and host/profile lane set; runner labels and
+A/B scheduling remain workflow policy. No archive, index, compiler execution
+or signature is required or qualified by this input projection.
+
+`producer verify-release-evidence` requires the complete final family-v2
+inventory, an external closed lane selection and independently retained raw
+digests for the selection, input collection, index and subject manifest. It
+checks every selected A/B package and compatibility report/log/ELF closure,
+without executing builds or modifying files. Its result is not release admission.
+
+`producer verify-qualification` adds `--qualification-evidence`,
+`--qualification-sha256`, `--policy` and `--policy-sha256` to those arguments.
+It requires complete V2 coverage and joins report claims to raw measured files,
+including the final checksum, subject-list and provenance bytes. A positive
+run attempt is required but not authenticated here. The command is read-only;
+signatures, job/artifact origin and publication authorization remain separate.
+
+`producer verify-recovery` additionally requires `--recovery-request` and
+`--recovery-request-sha256`. The closed V2 request binds the qualification
+digest and exact external run-attempt, tag, signer and fresh-handoff
+observations. It checks all original bytes again and rejects expired evidence
+and non-absent packaging handoff observations. Replay permits only a
+compatibility-harness failure, not an actual compatibility failure; compiler
+and comparison failures are ineligible. The protected workflow must authenticate
+these observations. The command executes no recovery; historical
+`prepare-recovery` and `validate-recovery` remain V1-only.
+
+`producer repackage --release-format family-v2` executes local packaging-only
+recovery for one exact indexed `--asset`. It uses the complete `verify-recovery`
+selection, with `--release-dir` instead of `--directory` and
+`--source-release-id` instead of `--release-id`. Add two absent extraction
+directories, two absent package directories and an absent `--comparison-output`.
+All five destinations must have existing nonsymlink parents and remain outside
+each other, every selected input/evidence path and every declared forbidden
+build root, including existing aliases. The original complete
+qualification is checked before and after packaging; the two new package sets
+must be byte-identical. These are not new compiler A/B builds. No signing,
+network or publication occurs; externally authenticated observations are still
+required. Omitted format and explicit `legacy-v1` retain the V1 contract;
+V1 package/context flags cannot be mixed with the V2 selection.
+
+`producer record-qualification --release-format family-v2` derives claims from
+that complete byte selection. Use `--release-dir` instead of `--directory`,
+add the explicit source-run/tag/signer/time fields and a positive
+`--source-run-attempt`. The absent absolute `--output` must be outside every
+selected root and input path; its parent must already exist without symlinks.
+One atomic no-clobber write follows complete validation. The result is byte
+consistency, not authentication. Omitting the format retains V1 recording;
+V1 report-root flags and V2 selection flags cannot be mixed.
+
 Compatibility verifies the complete package set independently into both fresh
 relocation roots using the selected format. It never detects a different format
 from a filename or retries a rejected package under another format. LLVM
@@ -168,8 +225,10 @@ The six-phase `compatibility` adapter accepts LLVM and GNU packages. GNU require
 `aros-targets.toml`; its `toolchain_profile`, CPU, platform and compiler family
 must match the package. Source selectors remain separate from compiler profiles.
 LLVM retains its legacy adapter and rejects this option. GNU's v3 compatibility
-receipt is local evidence, not release admission: V2 release-evidence and
-recovery integration remain unavailable.
+receipt is local evidence, not release admission. Complete V2 byte read-back
+is available; authenticated producer and recovery execution integration remain
+unqualified.
+
 
 ### Physical-board workflow
 

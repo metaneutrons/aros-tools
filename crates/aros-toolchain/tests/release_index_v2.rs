@@ -1006,6 +1006,7 @@ fn qualification_evidence_value(
             "repository": "https://github.com/example/aros-toolchains",
             "workflow": ".github/workflows/qualification.yml",
             "run_id": 42,
+            "run_attempt": 1,
             "producer_commit": PRODUCER_COMMIT,
             "source_tag": "release-2026.10",
             "tag_object": "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a"
@@ -1362,6 +1363,33 @@ fn qualification_v2_binds_attestation_manifest_separately_from_final_checksums()
     let mut mismatched_manifest_claim = valid;
     mismatched_manifest_claim["attestation"]["subject_manifest_sha256"] = json!("e".repeat(64));
     assert_qualification_invalid(&mismatched_manifest_claim, &index_bytes, &inputs, &policy);
+}
+
+#[test]
+fn qualification_v2_requires_a_positive_source_run_attempt() {
+    let (_fixture, _inputs, _index_bytes, valid, _policy) =
+        qualification_setup("release-candidate");
+
+    let mut missing = valid.clone();
+    missing["source_run"]
+        .as_object_mut()
+        .unwrap()
+        .remove("run_attempt");
+    assert!(
+        aros_toolchain::qualification_evidence_v2::QualificationEvidenceV2::parse(
+            &serde_json::to_vec(&missing).unwrap()
+        )
+        .is_err()
+    );
+
+    let mut zero = valid;
+    zero["source_run"]["run_attempt"] = json!(0);
+    assert!(
+        aros_toolchain::qualification_evidence_v2::QualificationEvidenceV2::parse(
+            &serde_json::to_vec(&zero).unwrap()
+        )
+        .is_err()
+    );
 }
 
 #[test]

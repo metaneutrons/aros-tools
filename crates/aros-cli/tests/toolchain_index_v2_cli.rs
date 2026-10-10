@@ -837,6 +837,333 @@ fn inventory_count(directory: &Path) -> usize {
     fs::read_dir(directory).unwrap().count()
 }
 
+const RELEASE_INPUTS_FILENAME: &str = "toolchain-release-inputs-v2.json";
+
+struct ReleasePlanFixture {
+    _temporary: TempDir,
+    root: PathBuf,
+    collection: Value,
+    collection_bytes: Vec<u8>,
+    documents: BTreeMap<String, Vec<u8>>,
+}
+
+impl ReleasePlanFixture {
+    fn new() -> Self {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let (collection, documents) = target_scope_input_documents();
+        let collection_bytes = serde_json::to_vec(&collection).unwrap();
+        fs::write(root.join(RELEASE_INPUTS_FILENAME), &collection_bytes).unwrap();
+        for (name, bytes) in &documents {
+            fs::write(root.join(name), bytes).unwrap();
+        }
+        Self {
+            _temporary: temporary,
+            root,
+            collection,
+            collection_bytes,
+            documents,
+        }
+    }
+
+    fn inputs_sha256(&self) -> String {
+        sha256_bytes(&self.collection_bytes).as_str().to_owned()
+    }
+
+    fn write_collection(&self, bytes: &[u8]) {
+        fs::write(self.root.join(RELEASE_INPUTS_FILENAME), bytes).unwrap();
+    }
+
+    fn command(&self, inputs_sha256: &str) -> Command {
+        let mut command = Command::new(aros());
+        command
+            .current_dir(&self.root)
+            .env_remove("AROS_LOG_FILE")
+            .env_remove("AROS_LOG_LEVEL")
+            .env_remove("AROS_LOG_FORMAT")
+            .env_remove("AROS_OFFLINE")
+            .env_remove("AROS_DIAGNOSTIC_FORMAT")
+            .args([
+                "--diagnostic-format=json",
+                "toolchain",
+                "producer",
+                "release-plan",
+                "--directory",
+            ])
+            .arg(&self.root)
+            .args(["--inputs-sha256", inputs_sha256, "--format", "json"]);
+        command
+    }
+
+    fn invoke(&self, inputs_sha256: &str) -> Output {
+        // The fixture is deliberately flat: this snapshot covers the entire
+        // temporary root, including every selected document and symlink.
+        let before = snapshot(&self.root);
+        let output = invoke_with_timeout(self.command(inputs_sha256), Duration::from_secs(5));
+        assert_eq!(
+            snapshot(&self.root),
+            before,
+            "release-plan changed its input directory"
+        );
+        output
+    }
+}
+
+fn assert_release_plan_failure(
+    output: &Output,
+    root: &Path,
+    expected_reason: &str,
+    expected_code: Option<&str>,
+) {
+    assert_failure_is_sanitized(output, root, expected_reason, None);
+    if let Some(expected_code) = expected_code {
+        let diagnostic: Value = serde_json::from_slice(&output.stderr)
+            .expect("failure emits the requested JSON diagnostic format");
+        assert_eq!(
+            diagnostic["diagnostics"][0]["code"], expected_code,
+            "release-plan failed with an unexpected diagnostic code"
+        );
+    }
+}
+
+fn release_plan_group_records(fixture: &ReleasePlanFixture) -> Vec<Value> {
+    fixture.collection["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|group| {
+            let recipe_reference = group["recipe"].clone();
+            let source_lock_reference = group["source_lock"].clone();
+            let profiles_reference = group["profiles"].clone();
+            let recipe: Value = serde_json::from_slice(
+                &fixture.documents[recipe_reference["file"].as_str().unwrap()],
+            )
+            .unwrap();
+            let profiles: Value = serde_json::from_slice(
+                &fixture.documents[profiles_reference["file"].as_str().unwrap()],
+            )
+            .unwrap();
+            json!({
+                "group_id": group["id"],
+                "source_commit": recipe["source_commit"],
+                "source_tree": recipe["source_tree"],
+                "upstream_commit": profiles["upstream_commit"],
+                "recipe": recipe_reference,
+                "source_lock": source_lock_reference,
+                "profiles": profiles_reference,
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn release_plan_cli_projects_the_exact_mixed_matrix_deterministically() {
+    let fixture = ReleasePlanFixture::new();
+    let inputs_sha256 = fixture.inputs_sha256();
+    let first_output = fixture.invoke(&inputs_sha256);
+    let first = successful_json(&first_output, "family-v2 release plan");
+    let second_output = fixture.invoke(&inputs_sha256);
+    let second = successful_json(&second_output, "repeated family-v2 release plan");
+
+    assert_eq!(first_output.stdout, second_output.stdout);
+    assert_eq!(first, second);
+    assert_eq!(first["schema"], "aros-toolchain-producer-stage-v2");
+    assert_eq!(first["operation"], "release-plan");
+    assert_eq!(first["release_format"], "family-v2");
+    assert_eq!(first["assurance"], "input-binding-only");
+    assert_eq!(first["inputs_sha256"], inputs_sha256);
+    assert_eq!(
+        first["producer_commit"],
+        fixture.collection["producer_commit"]
+    );
+    assert_eq!(first["tools_commit"], fixture.collection["tools_commit"]);
+    assert_eq!(first["hosts"], fixture.collection["hosts"]);
+    assert_eq!(first["groups"], json!(release_plan_group_records(&fixture)));
+
+    let fields = first
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let expected_fields = [
+        "schema",
+        "operation",
+        "release_format",
+        "assurance",
+        "inputs_sha256",
+        "producer_commit",
+        "tools_commit",
+        "hosts",
+        "groups",
+        "lane_count",
+        "lanes",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(fields, expected_fields);
+
+    let lanes = first["lanes"].as_array().unwrap();
+    assert_eq!(first["lane_count"], 12);
+    assert_eq!(lanes.len(), 12);
+    let lane_fields = ["group_id", "host", "target_profile"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut actual_lanes = BTreeSet::new();
+    for lane in lanes {
+        let fields = lane
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(fields, lane_fields, "lane includes workflow-only fields");
+        assert!(actual_lanes.insert((
+            lane["group_id"].as_str().unwrap().to_owned(),
+            lane["host"].as_str().unwrap().to_owned(),
+            lane["target_profile"].as_str().unwrap().to_owned(),
+        )));
+    }
+    let mut expected_lanes = BTreeSet::new();
+    for host in ACTIVE_HOSTS {
+        for (group, profile) in [
+            ("gnu-riscv", "rv32-esp32p4"),
+            ("llvm-pc", "pc-x86_64"),
+            ("llvm-pc", "arm-raspi"),
+            ("llvm-pc", "rpi-aarch64"),
+        ] {
+            expected_lanes.insert((group.to_owned(), (*host).to_owned(), profile.to_owned()));
+        }
+    }
+    assert_eq!(actual_lanes, expected_lanes);
+}
+
+#[test]
+fn release_plan_cli_rejects_a_wrong_external_collection_digest() {
+    let fixture = ReleasePlanFixture::new();
+    let wrong_digest = "0".repeat(64);
+    assert_ne!(wrong_digest, fixture.inputs_sha256());
+    let output = fixture.invoke(&wrong_digest);
+    assert_release_plan_failure(
+        &output,
+        &fixture.root,
+        "release inputs differ from the independently selected digest",
+        None,
+    );
+}
+
+#[test]
+fn release_plan_cli_rejects_changed_referenced_bytes_without_resealing() {
+    let fixture = ReleasePlanFixture::new();
+    let filename = fixture.collection["groups"][0]["recipe"]["file"]
+        .as_str()
+        .unwrap();
+    let path = fixture.root.join(filename);
+    let mut changed = fs::read(&path).unwrap();
+    changed.extend_from_slice(b" changed");
+    fs::write(path, changed).unwrap();
+
+    let output = fixture.invoke(&fixture.inputs_sha256());
+    assert_release_plan_failure(
+        &output,
+        &fixture.root,
+        "referenced document bytes do not match their declared SHA-256",
+        Some("AX0102"),
+    );
+}
+
+#[test]
+fn release_plan_cli_rejects_unknown_collection_fields() {
+    let fixture = ReleasePlanFixture::new();
+    let mut collection = fixture.collection.clone();
+    collection["unreviewed"] = json!(PRIVATE_MARKER);
+    let bytes = serde_json::to_vec(&collection).unwrap();
+    fixture.write_collection(&bytes);
+
+    let output = fixture.invoke(sha256_bytes(&bytes).as_str());
+    assert_release_plan_failure(
+        &output,
+        &fixture.root,
+        "invalid closed release-inputs-v2 collection",
+        Some("AX0101"),
+    );
+}
+
+#[test]
+fn release_plan_cli_rejects_duplicate_collection_keys() {
+    let fixture = ReleasePlanFixture::new();
+    let collection = String::from_utf8(fixture.collection_bytes.clone()).unwrap();
+    let duplicated = collection.replacen(
+        "\"schema\":\"aros-toolchain-release-inputs-v2\"",
+        "\"schema\":\"aros-toolchain-release-inputs-v2\",\"schema\":\"aros-toolchain-release-inputs-v2\"",
+        1,
+    );
+    assert_ne!(duplicated, collection);
+    let bytes = duplicated.into_bytes();
+    fixture.write_collection(&bytes);
+
+    let output = fixture.invoke(sha256_bytes(&bytes).as_str());
+    assert_release_plan_failure(
+        &output,
+        &fixture.root,
+        "invalid closed release-inputs-v2 collection",
+        Some("AX0101"),
+    );
+}
+
+#[test]
+fn release_plan_cli_rejects_the_legacy_collection_schema() {
+    let fixture = ReleasePlanFixture::new();
+    let mut collection = fixture.collection.clone();
+    collection["schema"] = json!("aros-toolchain-release-inputs-v1");
+    let bytes = serde_json::to_vec(&collection).unwrap();
+    fixture.write_collection(&bytes);
+
+    let output = fixture.invoke(sha256_bytes(&bytes).as_str());
+    assert_release_plan_failure(
+        &output,
+        &fixture.root,
+        "invalid closed release-inputs-v2 collection",
+        Some("AX0101"),
+    );
+}
+
+#[test]
+fn release_plan_cli_rejects_a_missing_selected_group_document() {
+    let fixture = ReleasePlanFixture::new();
+    let filename = fixture.collection["groups"][0]["profiles"]["file"]
+        .as_str()
+        .unwrap();
+    fs::remove_file(fixture.root.join(filename)).unwrap();
+
+    let output = fixture.invoke(&fixture.inputs_sha256());
+    assert_release_plan_failure(
+        &output,
+        &fixture.root,
+        "required referenced release-input document is missing",
+        Some("AX0101"),
+    );
+}
+
+#[test]
+fn release_plan_cli_rejects_a_symlinked_selected_group_document() {
+    let fixture = ReleasePlanFixture::new();
+    let names = fixture.documents.keys().cloned().collect::<Vec<_>>();
+    let linked = fixture.root.join(&names[0]);
+    fs::remove_file(&linked).unwrap();
+    symlink(&names[1], &linked).unwrap();
+
+    let output = fixture.invoke(&fixture.inputs_sha256());
+    assert_release_plan_failure(
+        &output,
+        &fixture.root,
+        "cannot safely read referenced release-input document",
+        Some("AX0101"),
+    );
+}
+
 #[test]
 fn family_v2_index_cli_binds_staged_outputs_and_rejects_invalid_process_inputs() {
     let fixture = Fixture::new();
