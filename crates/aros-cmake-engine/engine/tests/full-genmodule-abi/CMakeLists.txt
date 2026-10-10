@@ -106,6 +106,38 @@ if(AROS_ARCHIVE_PROBE)
         message(FATAL_ERROR "archive probe requires the source-owned TIFF module")
     endif()
 
+    if(AROS_ARCHIVE_PROBE MATCHES "^explicit-name-(distinct|case-only)$")
+        set(_name_kind "${CMAKE_MATCH_1}")
+        aros_test_bind_native_build_validation("${AROS_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/native-build-contract-test.json")
+        if(_name_kind STREQUAL "distinct")
+            set(_explicit_name archive-probe-explicit)
+        else()
+            set(_explicit_name TIFF)
+        endif()
+        aros_add_library(
+            TARGET tiff
+            MMAKE_ID archive-explicit
+            DIRECTORY "${_tiff_dir}"
+            GENMODULE_LINKLIBS
+            LINKLIB_NAME "${_explicit_name}"
+            SOURCES "${_tiff_source}")
+        foreach(_suffix "" "-rel")
+            if(_suffix STREQUAL "-rel")
+                set(_archive_suffix _rel)
+            else()
+                set(_archive_suffix "")
+            endif()
+            get_target_property(_primary_name "archive-explicit-linklib${_suffix}"
+                OUTPUT_NAME)
+            if(NOT _primary_name STREQUAL "${_explicit_name}${_archive_suffix}")
+                message(FATAL_ERROR
+                    "explicit LINKLIB_NAME is not the primary output: ${_primary_name}")
+            endif()
+        endforeach()
+        return()
+    endif()
+
     if(AROS_ARCHIVE_PROBE MATCHES
        "^reject-(no-contract|genmodule-only)-(all|normal|relative)$")
         set(_rejection_kind "${CMAKE_MATCH_1}")
