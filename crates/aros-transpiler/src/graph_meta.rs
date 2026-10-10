@@ -150,8 +150,21 @@ impl DependencyGraph {
     /// dependencies and all internal edges are removed. The result is
     /// deterministic and preserves what building either entry point prepares.
     ///
-    /// Returns one report line per flattened component.
-    pub fn flatten_meta_cycles(&mut self) -> Vec<String> {
+    /// A recursive copy is an action, not a phony alias. Lift its body into a
+    /// private endpoint before collapsing the aliases, and include that body
+    /// in every member's shared closure. This preserves both aggregate and
+    /// direct source-owner invocations without introducing utility cycles.
+    /// Other producer families retain their existing normalization semantics.
+    ///
+    /// Reports each flattened component and each preserved copy. Rejects private-name
+    /// collisions and copy prerequisites inside the component: lifting such
+    /// a prerequisite would reintroduce a cycle or silently drop ordering.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when a private execution endpoint collides
+    /// with a declared name or a copy prerequisite would re-enter its component.
+    pub fn flatten_meta_cycles(&mut self) -> Result<Vec<String>> {
         fn visit(
             node: &str,
             graph: &HashMap<String, HashSet<String>>,
@@ -233,9 +246,60 @@ impl DependencyGraph {
         }
 
         components.sort();
+        let mut occupied = crate::generator::concrete_endpoint_names(self);
+        occupied.extend(self.meta_targets.keys().cloned());
+        // Missing source prerequisites also reserve their spelling. Creating
+        // a private action must not turn such a reference into a valid edge.
+        occupied.extend(self.meta_targets.values().flatten().cloned());
+        occupied.extend(
+            self.explicit_meta_edges
+                .iter()
+                .flat_map(|(owner, dependency)| [owner.clone(), dependency.clone()]),
+        );
+        occupied.extend(self.make_meta_providers.iter().cloned());
+        occupied.extend(
+            self.targets
+                .values()
+                .flat_map(|target| target.dependencies.iter().cloned()),
+        );
+        occupied.extend(
+            self.copy_directories
+                .iter()
+                .flat_map(|copy| copy.dependencies.iter().cloned()),
+        );
         let mut reports = Vec::new();
         for component in components {
             let members: HashSet<&str> = component.iter().map(String::as_str).collect();
+            let mut lifted = Vec::new();
+            for (index, declaration) in self.copy_directories.iter().enumerate() {
+                if !members.contains(declaration.name.as_str()) {
+                    continue;
+                }
+                if let Some(dependency) = declaration
+                    .dependencies
+                    .iter()
+                    .find(|dependency| members.contains(dependency.as_str()))
+                {
+                    return Err(ArosError::Configuration {
+                        file: declaration.file.clone(),
+                        message: format!(
+                            "{}:{}: recursive copy {} has an action prerequisite {dependency} inside its MetaMake cycle; cannot preserve ordering by alias normalization",
+                            declaration.file, declaration.line, declaration.name
+                        ),
+                    });
+                }
+                let action = super::private_meta_copy_action(&declaration.name);
+                if !occupied.insert(action.clone()) {
+                    return Err(ArosError::Configuration {
+                        file: declaration.file.clone(),
+                        message: format!(
+                            "{}:{}: recursive copy {} cannot use occupied internal endpoint {action}",
+                            declaration.file, declaration.line, declaration.name
+                        ),
+                    });
+                }
+                lifted.push((index, declaration.name.clone(), action));
+            }
             let mut external = BTreeSet::new();
             for name in &component {
                 if let Some(deps) = self.meta_targets.get(name) {
@@ -246,28 +310,42 @@ impl DependencyGraph {
                     );
                 }
             }
+            // Keep the declaration's source, destination and independently
+            // resolved fetch prerequisites unchanged. Only its execution
+            // identity is private; all original names remain public aliases.
+            for (index, owner, action) in &lifted {
+                self.copy_directories[*index].name.clone_from(action);
+                self.lifted_copy_aliases
+                    .insert(owner.clone(), action.clone());
+                // Unlike siblings on a phony alias, these edges order the
+                // action itself after the shared external prerequisites.
+                self.meta_targets
+                    .insert(action.clone(), external.iter().cloned().collect());
+            }
+            external.extend(lifted.iter().map(|(_, _, action)| action.clone()));
             for name in &component {
                 if let Some(deps) = self.meta_targets.get_mut(name) {
                     deps.retain(|dep| !members.contains(dep.as_str()));
                     deps.extend(external.iter().cloned());
                 }
             }
-            let kind = if component.iter().any(|name| {
-                self.targets.contains_key(name)
-                    || self.icon_targets.contains_key(name)
-                    || self
-                        .external_cmake
-                        .iter()
-                        .any(|declaration| declaration.mmake_name == *name)
-                    || self
-                        .configure_builds
-                        .iter()
-                        .any(|declaration| declaration.mmake_name == *name)
-                    || self
-                        .grub_builds
-                        .iter()
-                        .any(|declaration| declaration.mmake_name == *name)
-            }) {
+            let kind = if !lifted.is_empty()
+                || component.iter().any(|name| {
+                    self.targets.contains_key(name)
+                        || self.icon_targets.contains_key(name)
+                        || self
+                            .external_cmake
+                            .iter()
+                            .any(|declaration| declaration.mmake_name == *name)
+                        || self
+                            .configure_builds
+                            .iter()
+                            .any(|declaration| declaration.mmake_name == *name)
+                        || self
+                            .grub_builds
+                            .iter()
+                            .any(|declaration| declaration.mmake_name == *name)
+                }) {
                 "build/meta"
             } else {
                 "meta"
@@ -277,8 +355,31 @@ impl DependencyGraph {
                 component.join(" -> "),
                 external.into_iter().collect::<Vec<_>>().join(", ")
             ));
+            for (_, owner, action) in lifted {
+                reports.push(format!(
+                    "preserved recursive copy action {owner} as {action}; public cycle aliases retain its prerequisites"
+                ));
+            }
         }
-        reports
+        Ok(reports)
+    }
+
+    /// Return only a normalization-created binding with its exact copy body
+    /// and still-connected public alias. The private-name pattern is not proof.
+    pub(super) fn lifted_copy_action(&self, owner: &str) -> Option<&str> {
+        let action = self.lifted_copy_aliases.get(owner)?;
+        (action == &super::private_meta_copy_action(owner)
+            && self
+                .copy_directories
+                .iter()
+                .filter(|declaration| declaration.name == *action)
+                .count()
+                == 1
+            && self
+                .meta_targets
+                .get(owner)
+                .is_some_and(|dependencies| dependencies.contains(action)))
+        .then_some(action.as_str())
     }
 
     /// Verifies that no cyclic dependencies exist in the graph.

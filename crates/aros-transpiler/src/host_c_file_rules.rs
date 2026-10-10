@@ -87,15 +87,41 @@ pub(crate) fn validate_source_rule(
     // Validate the supplied coordinate system first. This detects conditions
     // that the Make parser resolved as false/unknown and duplicate rules added
     // by a joined local fragment.
-    validate_make_chain(content, line_states, &rel_dir_text, declaration)
-        .map_err(|reason| format!("{owner}: {reason}"))?;
+    let content_form = if crate::parser::join_continuations(content) == content {
+        MakeTextForm::ParserJoined
+    } else {
+        // Unit callers may supply the source text directly. The actual parser
+        // pipeline supplies join_continuations() output, and that form has its
+        // own exact recipe spelling below.
+        MakeTextForm::Raw
+    };
+    let joined_route = validate_make_chain(
+        content,
+        line_states,
+        &rel_dir_text,
+        declaration,
+        content_form,
+    )
+    .map_err(|reason| format!("{owner}: {reason}"))?;
     // Then independently require the same literal rules in the source-owned
     // file. Source conditionals around these rules are intentionally rejected:
     // this module has no variable environment with which to evaluate them.
-    validate_make_chain(&recipe_text, None, &rel_dir_text, declaration)
-        .map_err(|reason| format!("{owner}: source mmakefile: {reason}"))?;
+    let source_route = validate_make_chain(
+        &recipe_text,
+        None,
+        &rel_dir_text,
+        declaration,
+        MakeTextForm::Raw,
+    )
+    .map_err(|reason| format!("{owner}: source mmakefile: {reason}"))?;
+    if joined_route != source_route {
+        return Err(format!(
+            "{owner}: joined Make input and source mmakefile select different input routes"
+        ));
+    }
 
-    validate_tool_chain(&root, declaration).map_err(|reason| format!("{owner}: {reason}"))
+    validate_tool_chain(&root, declaration, source_route)
+        .map_err(|reason| format!("{owner}: {reason}"))
 }
 
 fn validate_declaration_paths(
@@ -121,10 +147,17 @@ fn validate_declaration_paths(
     {
         return Err("arguments must start with the input and output directory placeholders".into());
     }
+    let mut input_names = std::collections::BTreeSet::new();
     for input in &declaration.inputs {
         if !safe_token(&input.filename) {
             return Err(format!(
                 "declared input {:?} is not one safe basename",
+                input.filename
+            ));
+        }
+        if !input_names.insert(input.filename.to_ascii_lowercase()) {
+            return Err(format!(
+                "declared input {:?} is duplicated case-insensitively",
                 input.filename
             ));
         }
@@ -163,7 +196,8 @@ fn validate_make_chain(
     line_states: Option<&[ConditionalTruth]>,
     rel_dir: &str,
     declaration: &NativeHostFileGenerator,
-) -> Result<(), String> {
+    text_form: MakeTextForm,
+) -> Result<InputRoute, String> {
     let normalized = normalize_mmake_recipe_indentation(content);
     let rules = parse_rules(logical_lines(&normalized, line_states));
     let paths = derive_paths(rel_dir, declaration)?;
@@ -205,18 +239,7 @@ fn validate_make_chain(
     }
     require_recipe_lines(input_dir_rule, &["%mkdirs_q $@"])?;
 
-    let input_rule = unique_rule(&rules, &paths.input_pattern)?;
-    check_rule_state(input_rule)?;
-    if input_rule.target.trim() != paths.input_pattern.as_str() || input_rule.continued {
-        return Err("input copy rule must match the declared directory and suffix".into());
-    }
-    let (normal, order_only) = prerequisites(&input_rule.prerequisites)?;
-    if normal != [paths.input_source_pattern.as_str()]
-        || order_only != [paths.input_directory_expr.as_str()]
-    {
-        return Err("input copy rule has changed source or directory prerequisites".into());
-    }
-    require_recipe_lines(input_rule, &["@$(CP) $< $@"])?;
+    let route = validate_input_route(&rules, declaration, &paths, &tool_variable, text_form)?;
 
     let generated = unique_rule(&rules, &paths.output_pattern)?;
     check_rule_state(generated)?;
@@ -277,8 +300,8 @@ fn validate_make_chain(
     // Reject source-local overrides of names that determine the modeled paths
     // and executable. The Makefile may use these variables, but this owner may
     // not silently redefine their meaning around the recipe.
-    reject_local_variable_overrides(content, &declaration.tool_variable)?;
-    Ok(())
+    reject_local_variable_overrides(content, &declaration.tool_variable, route)?;
+    Ok(route)
 }
 
 fn normalize_mmake_recipe_indentation(content: &str) -> String {
@@ -295,11 +318,160 @@ fn normalize_mmake_recipe_indentation(content: &str) -> String {
         .join("\n")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputRoute {
+    CopyPattern,
+    DelegatedToolMake,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MakeTextForm {
+    Raw,
+    ParserJoined,
+}
+
+fn validate_input_route(
+    rules: &[Rule],
+    declaration: &NativeHostFileGenerator,
+    paths: &DerivedPaths,
+    tool_variable: &str,
+    text_form: MakeTextForm,
+) -> Result<InputRoute, String> {
+    let copy_rule_present = paths.input_copy_pattern.as_ref().is_some_and(|target| {
+        rules.iter().any(|rule| {
+            rule.state != ConditionalTruth::False
+                && rule
+                    .target
+                    .split_whitespace()
+                    .any(|candidate| candidate == target)
+        })
+    });
+    let input_targets: Vec<_> = declaration
+        .inputs
+        .iter()
+        .map(|input| format!("{}/{}", paths.input_directory_expr, input.filename))
+        .collect();
+    let delegated_rule_present = input_targets.iter().any(|target| {
+        rules.iter().any(|rule| {
+            rule.state != ConditionalTruth::False
+                && rule
+                    .target
+                    .split_whitespace()
+                    .any(|candidate| candidate == target)
+        })
+    });
+
+    match (copy_rule_present, delegated_rule_present) {
+        (true, true) => Err("declared inputs have both copy-pattern and delegated Make producers".into()),
+        (true, false) => {
+            let target = paths
+                .input_copy_pattern
+                .as_deref()
+                .expect("copy pattern presence was established");
+            let input_rule = unique_rule(rules, target)?;
+            check_rule_state(input_rule)?;
+            if input_rule.target.trim() != target || input_rule.continued {
+                return Err("input copy rule must match the declared directory and suffix".into());
+            }
+            let (normal, order_only) = prerequisites(&input_rule.prerequisites)?;
+            if normal != [paths.input_source_pattern.as_deref().unwrap_or_default()]
+                || order_only != [paths.input_directory_expr.as_str()]
+            {
+                return Err("input copy rule has changed source or directory prerequisites".into());
+            }
+            require_recipe_lines(input_rule, &["@$(CP) $< $@"])?;
+            Ok(InputRoute::CopyPattern)
+        }
+        (false, true) => {
+            validate_delegated_source_input_chain(
+                rules,
+                declaration,
+                paths,
+                tool_variable,
+                &input_targets,
+                text_form,
+            )?;
+            Ok(InputRoute::DelegatedToolMake)
+        }
+        (false, false) => Err(
+            "declared inputs have neither the bounded copy-pattern nor delegated Make producer chain"
+                .into(),
+        ),
+    }
+}
+
+fn validate_delegated_source_input_chain(
+    rules: &[Rule],
+    declaration: &NativeHostFileGenerator,
+    paths: &DerivedPaths,
+    tool_variable: &str,
+    input_targets: &[String],
+    text_form: MakeTextForm,
+) -> Result<(), String> {
+    if input_targets.len() < 2 {
+        return Err("delegated input chain requires at least two declared inputs".into());
+    }
+    let tool_directory = Path::new(&declaration.tool_recipe)
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or("tool recipe has no source directory")?;
+    let submake =
+        format!("$(MAKE) $(MKARGS) -C $(SRCDIR)/{tool_directory} SRCDIR=$(SRCDIR) TOP=$(TOP) all");
+    let first = unique_rule(rules, &input_targets[0])?;
+    check_rule_state(first)?;
+    if first.target.trim() != input_targets[0] || first.continued {
+        return Err("first delegated input rule must be one uncontinued literal target".into());
+    }
+    let (normal, order_only) = prerequisites(&first.prerequisites)?;
+    if normal != [tool_variable] || order_only != [paths.input_directory_expr.as_str()] {
+        return Err(
+            "first delegated input must depend on the host tool and input directory".into(),
+        );
+    }
+    require_recipe_lines(first, &[&format!("@{submake}"), "@test -s \"$@\""])?;
+
+    for index in 1..input_targets.len() {
+        let rule = unique_rule(rules, &input_targets[index])?;
+        check_rule_state(rule)?;
+        if rule.target.trim() != input_targets[index] || rule.continued {
+            return Err(format!(
+                "delegated input {} must be one uncontinued literal target",
+                declaration.inputs[index].filename
+            ));
+        }
+        let (normal, order_only) = prerequisites(&rule.prerequisites)?;
+        if normal != [input_targets[index - 1].as_str()] || !order_only.is_empty() {
+            return Err(format!(
+                "delegated input {} must depend only on its preceding declared input",
+                declaration.inputs[index].filename
+            ));
+        }
+        let guard_recipe = match text_form {
+            MakeTextForm::Raw => (
+                format!("@if ! test -s \"$@\"; then \t    {submake}; fi"),
+                true,
+            ),
+            MakeTextForm::ParserJoined => {
+                let raw = format!("\t@if ! test -s \"$@\"; then \\\n\t    {submake}; \\\n\tfi");
+                (
+                    crate::parser::join_continuations(&raw).trim().to_owned(),
+                    false,
+                )
+            }
+        };
+        require_recipe_lines_with_continuations(
+            rule,
+            &[guard_recipe, ("@test -s \"$@\"".to_owned(), false)],
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct DerivedPaths {
     input_directory_expr: String,
-    input_pattern: String,
-    input_source_pattern: String,
+    input_copy_pattern: Option<String>,
+    input_source_pattern: Option<String>,
     output_directory_expr: String,
     output_pattern: String,
     output_suffix: String,
@@ -317,9 +489,13 @@ fn derive_paths(
         .ok_or("input directory must be below the generated build root")?;
     validate_relative_suffix(input_suffix, "input directory")?;
     let input_directory_expr = format!("$(GENDIR)/{input_suffix}");
-    let input_extension = uniform_extension(&declaration.inputs)?;
-    let input_pattern = format!("{input_directory_expr}/%{input_extension}");
-    let input_source_pattern = format!("$(PORTSSOURCEDIR)/%{input_extension}");
+    let (input_copy_pattern, input_source_pattern) =
+        uniform_extension(&declaration.inputs).map_or((None, None), |extension| {
+            (
+                Some(format!("{input_directory_expr}/%{extension}")),
+                Some(format!("$(PORTSSOURCEDIR)/%{extension}")),
+            )
+        });
 
     let local_output_prefix = if rel_dir.is_empty() {
         "gen/".to_owned()
@@ -367,7 +543,7 @@ fn derive_paths(
 
     Ok(DerivedPaths {
         input_directory_expr,
-        input_pattern,
+        input_copy_pattern,
         input_source_pattern,
         output_directory_expr,
         output_pattern,
@@ -379,18 +555,16 @@ fn derive_paths(
 
 fn uniform_extension(
     inputs: &[aros_common::native_host_generator::NativeHostFileInput],
-) -> Result<String, String> {
-    let Some(first) = inputs.first() else {
-        return Err("generator has no declared source inputs".into());
-    };
+) -> Option<String> {
+    let first = inputs.first()?;
     let suffix = file_suffix(&first.filename);
     if inputs
         .iter()
         .any(|input| file_suffix(&input.filename) != suffix)
     {
-        return Err("declared inputs do not share one suffix for the copy pattern".into());
+        return None;
     }
-    Ok(suffix)
+    Some(suffix)
 }
 
 fn file_suffix(filename: &str) -> String {
@@ -492,6 +666,32 @@ fn require_recipe_lines(rule: &Rule, expected: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+fn require_recipe_lines_with_continuations(
+    rule: &Rule,
+    expected: &[(String, bool)],
+) -> Result<(), String> {
+    if rule.recipes.len() != expected.len()
+        || rule
+            .recipes
+            .iter()
+            .zip(expected)
+            .any(|(actual, (text, continued))| {
+                actual.text.trim() != text || actual.continued != *continued
+            })
+    {
+        return Err(format!(
+            "rule for {:?} has commands outside the exact continued recipe: actual {:?}, expected {:?}",
+            rule.target.trim(),
+            rule.recipes
+                .iter()
+                .map(|recipe| (&recipe.text, recipe.continued))
+                .collect::<Vec<_>>(),
+            expected
+        ));
+    }
+    Ok(())
+}
+
 fn normalized_recipe_lines(
     recipes: &[crate::genmodule_header_rules::RecipeLine],
 ) -> Result<Vec<String>, String> {
@@ -504,8 +704,12 @@ fn normalized_recipe_lines(
         .collect())
 }
 
-fn reject_local_variable_overrides(content: &str, tool_variable: &str) -> Result<(), String> {
-    let names = [
+fn reject_local_variable_overrides(
+    content: &str,
+    tool_variable: &str,
+    input_route: InputRoute,
+) -> Result<(), String> {
+    let mut names = vec![
         "GENDIR",
         "CURDIR",
         "PORTSSOURCEDIR",
@@ -513,19 +717,19 @@ fn reject_local_variable_overrides(content: &str, tool_variable: &str) -> Result
         "ECHO",
         tool_variable,
     ];
-    reject_dynamic_make_rebindings(content, &names, "source mmakefile")?;
-    for (line_number, line) in content.lines().enumerate() {
-        let Some(assignment) = parse_make_assignment(line) else {
-            continue;
-        };
-        if names.contains(&assignment.name) {
-            return Err(format!(
-                "source line {} locally assigns modeled Make variable {}",
-                line_number + 1,
-                assignment.name
-            ));
-        }
+    if input_route == InputRoute::DelegatedToolMake {
+        names.extend([
+            "MAKE",
+            "MKARGS",
+            "SRCDIR",
+            "TOP",
+            "GENCTBL_UCD_VERSION",
+            "GENCTBL_UCD_SHA256",
+            "GENCTBL_UCD_READY",
+            "FETCH",
+        ]);
     }
+    reject_dynamic_make_rebindings(content, &names, &[], "source mmakefile")?;
     Ok(())
 }
 
@@ -545,10 +749,7 @@ fn parse_make_assignment(line: &str) -> Option<MakeAssignment<'_>> {
     if line.starts_with('#') || line.starts_with('\t') {
         return None;
     }
-    let (at, operator) = MAKE_ASSIGNMENT_OPERATORS
-        .iter()
-        .filter_map(|operator| line.find(operator).map(|at| (at, *operator)))
-        .min_by_key(|(at, operator)| (*at, std::cmp::Reverse(operator.len())))?;
+    let (at, operator) = make_assignment_operator(line)?;
     let left = line[..at].trim();
     let (left, target_specific) = left
         .rsplit_once(':')
@@ -575,13 +776,16 @@ fn parse_make_assignment(line: &str) -> Option<MakeAssignment<'_>> {
 fn reject_dynamic_make_rebindings(
     content: &str,
     protected: &[&str],
+    canonical_assignments: &[&str],
     recipe_label: &str,
 ) -> Result<(), String> {
-    for (line_number, physical_line) in content.lines().enumerate() {
-        if physical_line.starts_with('\t') {
-            continue;
-        }
-        let line = make_text_before_comment(physical_line).trim();
+    reject_computed_make_assignment_names(content, recipe_label)?;
+    // The closed rule parser recognizes only GNU make's ordinary tab recipe
+    // prefix. A source-selected prefix would turn skipped recipe text into
+    // Make syntax and invalidate every assignment/directive check below.
+    let is_protected = |name: &str| name == ".RECIPEPREFIX" || protected.contains(&name);
+    for (line_number, logical_line) in make_logical_nonrecipe_lines(content) {
+        let line = make_text_before_comment(&logical_line).trim();
         if line.is_empty() {
             continue;
         }
@@ -594,8 +798,38 @@ fn reject_dynamic_make_rebindings(
                 line_number + 1
             ));
         }
+        if parse_make_assignment(line).is_some_and(|assignment| assignment.name.contains('$')) {
+            return Err(format!(
+                "{recipe_label} line {} uses a computed Make assignment name",
+                line_number + 1
+            ));
+        }
+        if let Some(assignment) = parse_make_assignment(line) {
+            if is_protected(assignment.name) {
+                if assignment.modified || assignment.target_specific {
+                    return Err(format!(
+                        "{recipe_label} line {} uses Make modifiers or target scope for protected variable {}",
+                        line_number + 1,
+                        assignment.name
+                    ));
+                }
+                if !canonical_assignments.contains(&assignment.name) {
+                    return Err(format!(
+                        "{recipe_label} line {} locally assigns protected Make variable {}",
+                        line_number + 1,
+                        assignment.name
+                    ));
+                }
+            }
+        }
         if let Some((kind, name, dynamic)) = make_variable_directive(line) {
-            if dynamic || protected.contains(&name) {
+            if kind == "define" {
+                return Err(format!(
+                    "{recipe_label} line {} uses a define block outside the closed Make capability",
+                    line_number + 1
+                ));
+            }
+            if dynamic || is_protected(name) {
                 return Err(format!(
                     "{recipe_label} line {} uses {kind} for a protected or dynamic Make variable",
                     line_number + 1
@@ -603,7 +837,7 @@ fn reject_dynamic_make_rebindings(
             }
         }
         if let Some((kind, names, dynamic)) = make_export_directive(line) {
-            if dynamic || names.iter().any(|name| protected.contains(name)) {
+            if dynamic || names.iter().any(|name| is_protected(name)) {
                 return Err(format!(
                     "{recipe_label} line {} uses {kind} for a protected or dynamic Make variable",
                     line_number + 1
@@ -612,6 +846,151 @@ fn reject_dynamic_make_rebindings(
         }
     }
     Ok(())
+}
+
+fn reject_computed_make_assignment_names(content: &str, recipe_label: &str) -> Result<(), String> {
+    for (line_number, line) in make_logical_nonrecipe_lines(content) {
+        let line = make_text_before_comment(&line).trim();
+        let Some((operator_at, _)) = make_assignment_operator(line) else {
+            continue;
+        };
+        let left = &line[..operator_at];
+        let variable_part = last_top_level_colon(left).map_or(left, |colon| &left[colon + 1..]);
+        let variable_part = strip_make_assignment_modifiers(variable_part);
+        if variable_part.contains('$') {
+            return Err(format!(
+                "{recipe_label} line {} uses a computed Make assignment name",
+                line_number + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn make_logical_nonrecipe_lines(content: &str) -> Vec<(usize, String)> {
+    let physical: Vec<_> = content.lines().collect();
+    let mut output = Vec::new();
+    let mut index = 0usize;
+    while index < physical.len() {
+        let first_line = index;
+        let is_recipe = physical[index].starts_with('\t');
+        let mut logical = String::new();
+        let mut continued = false;
+        loop {
+            let line = physical[index].trim_end_matches('\r');
+            let trimmed = line.trim_end();
+            let trailing_backslashes = trimmed
+                .as_bytes()
+                .iter()
+                .rev()
+                .take_while(|byte| **byte == b'\\')
+                .count();
+            if trailing_backslashes % 2 == 1 {
+                let prefix = &trimmed[..trimmed.len() - 1];
+                if continued {
+                    logical.push_str(prefix.trim_start().trim_end());
+                } else {
+                    logical.push_str(prefix.trim_end());
+                }
+                logical.push(' ');
+                continued = true;
+                index += 1;
+                if index == physical.len() {
+                    break;
+                }
+                continue;
+            }
+            if continued {
+                logical.push_str(line.trim());
+            } else {
+                logical.push_str(line);
+            }
+            index += 1;
+            break;
+        }
+        if !is_recipe {
+            output.push((first_line, logical));
+        }
+    }
+    output
+}
+
+fn strip_make_assignment_modifiers(value: &str) -> &str {
+    let mut remaining = value.trim_start();
+    loop {
+        let Some((first, rest)) = remaining.split_once(char::is_whitespace) else {
+            return remaining;
+        };
+        if !MAKE_ASSIGNMENT_MODIFIERS.contains(&first) {
+            return remaining;
+        }
+        remaining = rest.trim_start();
+    }
+}
+
+fn make_assignment_operator(line: &str) -> Option<(usize, &'static str)> {
+    let bytes = line.as_bytes();
+    let mut nesting = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'$'
+            && index + 1 < bytes.len()
+            && matches!(bytes[index + 1], b'(' | b'{')
+        {
+            nesting.push(if bytes[index + 1] == b'(' { b')' } else { b'}' });
+            index += 2;
+            continue;
+        }
+        if let Some(close) = nesting.last().copied() {
+            if bytes[index] == b'(' {
+                nesting.push(b')');
+            } else if bytes[index] == b'{' {
+                nesting.push(b'}');
+            } else if bytes[index] == close {
+                nesting.pop();
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(operator) = MAKE_ASSIGNMENT_OPERATORS
+            .iter()
+            .find(|operator| line[index..].starts_with(**operator))
+        {
+            return Some((index, operator));
+        }
+        index += 1;
+    }
+    None
+}
+
+fn last_top_level_colon(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut nesting = Vec::new();
+    let mut last = None;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'$'
+            && index + 1 < bytes.len()
+            && matches!(bytes[index + 1], b'(' | b'{')
+        {
+            nesting.push(if bytes[index + 1] == b'(' { b')' } else { b'}' });
+            index += 2;
+            continue;
+        }
+        if let Some(close) = nesting.last().copied() {
+            if bytes[index] == b'(' {
+                nesting.push(b')');
+            } else if bytes[index] == b'{' {
+                nesting.push(b'}');
+            } else if bytes[index] == close {
+                nesting.pop();
+            }
+        } else if bytes[index] == b':' {
+            last = Some(index);
+        }
+        index += 1;
+    }
+    last
 }
 
 fn make_text_before_comment(line: &str) -> &str {
@@ -705,14 +1084,44 @@ fn contains_eval_function(line: &str) -> bool {
 fn validate_tool_chain(
     source_root: &Path,
     declaration: &NativeHostFileGenerator,
+    input_route: InputRoute,
 ) -> Result<(), String> {
     let tool_makefile = read_source_file(source_root, &declaration.tool_recipe)?;
     let protected = [
         declaration.tool_variable.as_str(),
         "USER_CFLAGS",
         "HOST_CFLAGS",
+        "GENCTBL_UCD_VERSION",
+        "GENCTBL_UCD_SHA256",
+        "GENCTBL_UCD_READY",
+        "FETCH",
+        "MAKE",
+        "MKARGS",
+        "SRCDIR",
+        "TOP",
+        "PORTSSOURCEDIR",
+        "GENINCDIR",
+        "ECHO",
     ];
-    reject_dynamic_make_rebindings(&tool_makefile, &protected, "host tool Makefile")?;
+    let mut canonical_assignments = vec![
+        declaration.tool_variable.as_str(),
+        "USER_CFLAGS",
+        "HOST_CFLAGS",
+    ];
+    if input_route == InputRoute::DelegatedToolMake {
+        canonical_assignments.extend([
+            "GENCTBL_UCD_VERSION",
+            "GENCTBL_UCD_SHA256",
+            "GENCTBL_UCD_READY",
+            "FETCH",
+        ]);
+    }
+    reject_dynamic_make_rebindings(
+        &tool_makefile,
+        &protected,
+        &canonical_assignments,
+        "host tool Makefile",
+    )?;
     let tool_source = read_source_file(source_root, &declaration.tool_source)?;
     let standard_headers = standard_headers_in_c_source(&tool_source)?;
     reject_source_local_header_shadows(source_root, &declaration.tool_source, &standard_headers)?;
@@ -726,6 +1135,12 @@ fn validate_tool_chain(
         .and_then(|value| value.to_str())
         .ok_or("tool source stem is not UTF-8")?;
     let tool_default = unique_make_assignment(&tool_makefile, &declaration.tool_variable, "?=")?;
+    require_unconditional_assignment(
+        &tool_makefile,
+        &declaration.tool_variable,
+        "?=",
+        &tool_default,
+    )?;
     if tool_default != source_stem {
         return Err("host tool variable default must be its declared C-source basename".into());
     }
@@ -737,9 +1152,22 @@ fn validate_tool_chain(
         return Err("host tool target must be one uncontinued tool-variable target".into());
     }
     let (normal, order_only) = prerequisites(&compile_rule.prerequisites)?;
-    if normal != [source_leaf, "$(GENMODULE_DEPS)"] || !order_only.is_empty() {
+    let tool_makefile_dependency = format!("$(SRCDIR)/{}", declaration.tool_recipe);
+    let expected_compile_prerequisites = [
+        source_leaf,
+        tool_makefile_dependency.as_str(),
+        "$(GENMODULE_DEPS)",
+    ];
+    let legacy_compile_prerequisites = [source_leaf, "$(GENMODULE_DEPS)"];
+    let compile_prerequisites_match = match input_route {
+        InputRoute::CopyPattern => {
+            normal == expected_compile_prerequisites || normal == legacy_compile_prerequisites
+        }
+        InputRoute::DelegatedToolMake => normal == expected_compile_prerequisites,
+    };
+    if !compile_prerequisites_match || !order_only.is_empty() {
         return Err(
-            "host tool prerequisites differ from its C source and declared Make dependencies"
+            "host tool prerequisites differ from its C source, declared Makefile, and Make dependencies"
                 .into(),
         );
     }
@@ -751,6 +1179,8 @@ fn validate_tool_chain(
 
     let user_flags = unique_make_assignment(&tool_makefile, "USER_CFLAGS", ":=")?;
     let host_flags = unique_make_assignment(&tool_makefile, "HOST_CFLAGS", "?=")?;
+    require_unconditional_assignment(&tool_makefile, "USER_CFLAGS", ":=", &user_flags)?;
+    require_unconditional_assignment(&tool_makefile, "HOST_CFLAGS", "?=", &host_flags)?;
     if host_flags != "$(USER_CFLAGS)" {
         return Err("HOST_CFLAGS must default to USER_CFLAGS".into());
     }
@@ -763,48 +1193,307 @@ fn validate_tool_chain(
         ));
     }
 
-    validate_top_level_tool_rule(source_root, declaration)?;
+    if input_route == InputRoute::DelegatedToolMake {
+        validate_delegated_tool_data_chain(&tool_makefile, declaration)?;
+    }
+    validate_top_level_tool_rule(source_root, declaration, input_route)?;
     validate_configure_tool_variable(source_root, declaration, source_stem)?;
     Ok(())
 }
 
-fn unique_make_assignment<'a>(
-    content: &'a str,
+fn unique_make_assignment(
+    content: &str,
     name: &str,
     expected_operator: &str,
-) -> Result<&'a str, String> {
-    let assignments: Vec<_> = content
-        .lines()
-        .filter_map(parse_make_assignment)
-        .filter(|assignment| assignment.name == name)
+) -> Result<String, String> {
+    let assignments: Vec<_> = make_logical_nonrecipe_lines(content)
+        .into_iter()
+        .filter_map(|(_, logical_line)| {
+            let line = make_text_before_comment(&logical_line).trim().to_owned();
+            let assignment = parse_make_assignment(&line)?;
+            (assignment.name == name).then(|| {
+                (
+                    assignment.operator.to_owned(),
+                    assignment.value.to_owned(),
+                    assignment.modified,
+                    assignment.target_specific,
+                )
+            })
+        })
         .collect();
     match assignments.as_slice() {
         [assignment]
-            if !assignment.modified
-                && !assignment.target_specific
-                && assignment.operator == expected_operator =>
+            if !assignment.2 && !assignment.3 && assignment.0 == expected_operator =>
         {
-            Ok(assignment.value)
+            Ok(assignment.1.clone())
         }
-        [assignment] if assignment.modified || assignment.target_specific => Err(format!(
+        [assignment] if assignment.2 || assignment.3 => Err(format!(
             "{name} assignment uses Make modifiers or target scope that are outside the closed recipe"
         )),
         [assignment] => Err(format!(
             "{name} assignment uses {}, expected {expected_operator}",
-            assignment.operator
+            assignment.0
         )),
         [] => Err(format!("tool Makefile has no {name} assignment")),
         _ => Err(format!("tool Makefile has duplicate {name} assignments")),
     }
 }
 
+fn validate_delegated_tool_data_chain(
+    tool_makefile: &str,
+    declaration: &NativeHostFileGenerator,
+) -> Result<(), String> {
+    let (data_directory, version, archive) = archive_input_identity(declaration)?;
+    let version_value = unique_make_assignment(tool_makefile, "GENCTBL_UCD_VERSION", ":=")?;
+    if version_value != version {
+        return Err(format!(
+            "GENCTBL_UCD_VERSION {version_value:?} differs from the sealed input URL version {version:?}"
+        ));
+    }
+    require_unconditional_assignment(tool_makefile, "GENCTBL_UCD_VERSION", ":=", &version)?;
+
+    let archive_hash = unique_make_assignment(tool_makefile, "GENCTBL_UCD_SHA256", ":=")?;
+    if !valid_sha256(&archive_hash) {
+        return Err("GENCTBL_UCD_SHA256 is not one 64-character hexadecimal digest".into());
+    }
+    require_unconditional_assignment(tool_makefile, "GENCTBL_UCD_SHA256", ":=", &archive_hash)?;
+
+    let ready_value = format!("$(GENDIR)/{data_directory}/.ucd-$(GENCTBL_UCD_VERSION)-ready");
+    if unique_make_assignment(tool_makefile, "GENCTBL_UCD_READY", ":=")? != ready_value {
+        return Err(
+            "GENCTBL_UCD_READY differs from the declared input directory and version".into(),
+        );
+    }
+    require_unconditional_assignment(tool_makefile, "GENCTBL_UCD_READY", ":=", &ready_value)?;
+    if unique_make_assignment(tool_makefile, "FETCH", "?=")? != "$(SRCDIR)/scripts/fetch.sh" {
+        return Err("FETCH must use the source tree's canonical fetch script".into());
+    }
+    require_unconditional_assignment(tool_makefile, "FETCH", "?=", "$(SRCDIR)/scripts/fetch.sh")?;
+
+    let input_directory = format!("$(GENDIR)/{data_directory}");
+    let ports_source_directory = "$(PORTSSOURCEDIR)";
+    let tool_makefile_dependency = format!("$(SRCDIR)/{}", declaration.tool_recipe);
+    let tool_rules = parse_rules(logical_lines(tool_makefile, None));
+    let ready_target = "$(GENCTBL_UCD_READY)";
+    let ready_rule = unique_rule(&tool_rules, ready_target)?;
+
+    let all_rule = unique_rule(&tool_rules, "all")?;
+    check_rule_state(all_rule)?;
+    if all_rule.target.trim() != "all" || all_rule.continued || !all_rule.recipes.is_empty() {
+        return Err("host tool all target must be one ordinary dependency-only rule".into());
+    }
+    let input_targets: Vec<String> = declaration
+        .inputs
+        .iter()
+        .map(|input| format!("{input_directory}/{}", input.filename))
+        .collect();
+    let mut expected_all = vec![format!("$({})", declaration.tool_variable)];
+    expected_all.extend(input_targets.iter().cloned());
+    let (normal, order_only) = prerequisites(&all_rule.prerequisites)?;
+    if normal != expected_all.iter().map(String::as_str).collect::<Vec<_>>()
+        || !order_only.is_empty()
+    {
+        return Err(
+            "host tool all target must depend on its executable and every declared input".into(),
+        );
+    }
+
+    validate_tool_mkdir_rule(&tool_rules, &input_directory)?;
+    validate_tool_mkdir_rule(&tool_rules, ports_source_directory)?;
+
+    check_rule_state(ready_rule)?;
+    if ready_rule.target.trim() != ready_target || ready_rule.continued {
+        return Err("UCD archive ready target must be one literal tool variable".into());
+    }
+    let (normal, order_only) = prerequisites(&ready_rule.prerequisites)?;
+    if normal != [tool_makefile_dependency.as_str()]
+        || order_only != [input_directory.as_str(), ports_source_directory]
+    {
+        return Err("UCD archive ready rule has changed source or directory dependencies".into());
+    }
+    let archive_base =
+        format!("https://www.unicode.org/Public/$(GENCTBL_UCD_VERSION)/{data_directory}");
+    let archive_name = format!("{archive}.zip");
+    let fetch_command = format!(
+        "@$(FETCH) -ao \"{archive_base}\" \t    -a {archive} -s zip -l \"$(PORTSSOURCEDIR)\" -d \"{input_directory}\" -b \"{input_directory}\" -cs \"{archive_name}=sha256:$(GENCTBL_UCD_SHA256)\" -f"
+    );
+    let verify_command = format!(
+        "@test -s \"{input_directory}/{}\" -a -s \"{input_directory}/{}\"",
+        declaration.inputs[0].filename, declaration.inputs[1].filename
+    );
+    require_recipe_lines_with_continuations(
+        ready_rule,
+        &[
+            (
+                "@$(ECHO) \"Preparing verified Unicode $(GENCTBL_UCD_VERSION) data...\"".to_owned(),
+                false,
+            ),
+            (fetch_command, true),
+            (verify_command, false),
+            ("@touch \"$@\"".to_owned(), false),
+        ],
+    )?;
+
+    let output_target = input_targets.join(" ");
+    let outputs_rule = unique_rule(&tool_rules, &input_targets[0])?;
+    check_rule_state(outputs_rule)?;
+    if outputs_rule.target.trim() != output_target || outputs_rule.continued {
+        return Err("host tool must declare every sealed input as a ready-stamp output".into());
+    }
+    let (normal, order_only) = prerequisites(&outputs_rule.prerequisites)?;
+    if normal != [ready_target] || !order_only.is_empty() {
+        return Err(
+            "host tool input outputs must depend only on the verified archive stamp".into(),
+        );
+    }
+    require_recipe_lines(outputs_rule, &["@test -s \"$@\""])?;
+    for target in input_targets.iter().skip(1) {
+        if !std::ptr::eq(unique_rule(&tool_rules, target)?, outputs_rule) {
+            return Err("host tool input outputs are not one shared ready-stamp rule".into());
+        }
+    }
+    Ok(())
+}
+
+fn archive_input_identity(
+    declaration: &NativeHostFileGenerator,
+) -> Result<(String, String, String), String> {
+    if declaration.inputs.len() != 2 {
+        return Err("delegated archive route requires the two sealed raw inputs".into());
+    }
+    let input_directory = declaration
+        .input_directory
+        .strip_prefix("gen/")
+        .ok_or("delegated input directory must be below gen/")?;
+    validate_relative_suffix(input_directory, "delegated input directory")?;
+    let mut expected_version: Option<&str> = None;
+    let mut expected_data_directory: Option<&str> = None;
+    for input in &declaration.inputs {
+        let prefix = "https://www.unicode.org/Public/";
+        let tail = input
+            .url
+            .strip_prefix(prefix)
+            .ok_or("delegated raw inputs must use the canonical Unicode HTTPS URL")?;
+        let parts: Vec<_> = tail.split('/').collect();
+        if parts.len() != 3
+            || parts[0].is_empty()
+            || parts[0].eq_ignore_ascii_case("latest")
+            || parts[1].is_empty()
+            || parts[2] != input.filename
+            || !safe_token(parts[0])
+            || !safe_token(parts[1])
+        {
+            return Err(format!(
+                "sealed input URL {:?} is not /Public/<version>/<data-dir>/<filename>",
+                input.url
+            ));
+        }
+        if expected_version.is_some_and(|version| version != parts[0])
+            || expected_data_directory.is_some_and(|directory| directory != parts[1])
+        {
+            return Err(
+                "sealed raw input URLs disagree on Unicode version or data directory".into(),
+            );
+        }
+        expected_version = Some(parts[0]);
+        expected_data_directory = Some(parts[1]);
+    }
+    let version = expected_version.ok_or("delegated route has no sealed inputs")?;
+    let data_directory = expected_data_directory.ok_or("delegated route has no data directory")?;
+    if input_directory != data_directory {
+        return Err(
+            "declared input directory differs from the sealed input URL data directory".into(),
+        );
+    }
+    let archive = data_directory.to_ascii_uppercase();
+    if !safe_token(&archive) {
+        return Err("derived Unicode archive name is not one safe token".into());
+    }
+    Ok((data_directory.to_owned(), version.to_owned(), archive))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn require_unconditional_assignment(
+    content: &str,
+    name: &str,
+    operator: &str,
+    value: &str,
+) -> Result<(), String> {
+    let mut conditional_depth = 0usize;
+    for (_, logical_line) in make_logical_nonrecipe_lines(content) {
+        let text = make_text_before_comment(&logical_line).trim();
+        let directive = text.split_whitespace().next().unwrap_or_default();
+        if matches!(directive, "ifeq" | "ifneq" | "ifdef" | "ifndef") {
+            conditional_depth += 1;
+        }
+        if let Some(assignment) = parse_make_assignment(text) {
+            if assignment.name == name
+                && (conditional_depth != 0
+                    || assignment.modified
+                    || assignment.target_specific
+                    || assignment.operator != operator
+                    || assignment.value != value)
+            {
+                return Err(format!("{name} assignment is conditional or changed"));
+            }
+        }
+        if directive == "endif" {
+            conditional_depth = conditional_depth.saturating_sub(1);
+        }
+    }
+    Ok(())
+}
+
+fn validate_tool_mkdir_rule(rules: &[Rule], target: &str) -> Result<(), String> {
+    let rule = unique_rule(rules, target)?;
+    check_rule_state(rule)?;
+    if rule.target.trim() != target
+        || rule.continued
+        || !prerequisites(&rule.prerequisites)?.0.is_empty()
+        || !prerequisites(&rule.prerequisites)?.1.is_empty()
+    {
+        return Err(format!("host tool directory rule for {target:?} changed"));
+    }
+    require_recipe_lines(rule, &["@$(MKDIR) -p $@"])
+}
+
 fn validate_top_level_tool_rule(
     source_root: &Path,
     declaration: &NativeHostFileGenerator,
+    input_route: InputRoute,
 ) -> Result<(), String> {
     let makefile = read_source_file(source_root, "Makefile.in")?;
+    let protected = [
+        declaration.tool_variable.as_str(),
+        "MAKE",
+        "MKARGS",
+        "SRCDIR",
+        "TOP",
+        "CALL",
+        "ECHO",
+        "FETCH",
+    ];
+    reject_dynamic_make_rebindings(
+        &makefile,
+        &protected,
+        &["TOP", "SRCDIR"],
+        "top-level Makefile.in",
+    )?;
+    for (name, expected_value) in [("TOP", "@AROS_BUILDDIR@"), ("SRCDIR", "@SRCDIR@")] {
+        let value = unique_make_assignment(&makefile, name, ":=")?;
+        if value != expected_value {
+            return Err(format!(
+                "top-level {name} assignment must preserve its canonical configure placeholder"
+            ));
+        }
+        require_unconditional_assignment(&makefile, name, ":=", expected_value)?;
+    }
     let expected_target = format!("$({})", declaration.tool_variable);
     let expected_prerequisite = format!("$(SRCDIR)/{}", declaration.tool_source);
+    let tool_makefile_prerequisite = format!("$(SRCDIR)/{}", declaration.tool_recipe);
     let source_directory = Path::new(&declaration.tool_source)
         .parent()
         .ok_or("tool source has no parent directory")?
@@ -817,8 +1506,19 @@ fn validate_top_level_tool_rule(
         return Err("top-level host tool target must be one literal variable".into());
     }
     let (normal, order_only) = prerequisites(&rule.prerequisites)?;
-    if normal != [expected_prerequisite.as_str()] || !order_only.is_empty() {
-        return Err("top-level host tool target must depend on its declared source C file".into());
+    let legacy_prerequisites = [expected_prerequisite.as_str()];
+    let sealed_prerequisites = [
+        expected_prerequisite.as_str(),
+        tool_makefile_prerequisite.as_str(),
+    ];
+    let prerequisite_match = match input_route {
+        InputRoute::CopyPattern => normal == legacy_prerequisites || normal == sealed_prerequisites,
+        InputRoute::DelegatedToolMake => normal == sealed_prerequisites,
+    };
+    if !prerequisite_match || !order_only.is_empty() {
+        return Err(
+            "top-level host tool target must depend on its declared source C file and, for delegated inputs, its declared Makefile".into(),
+        );
     }
     let expected_recipes = [
         "@$(ECHO) Building $(notdir $@)...".to_owned(),
@@ -1108,362 +1808,5 @@ fn safe_token(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use aros_common::native_host_generator::NativeHostFileInput;
-    use aros_common::Sha256Digest;
-    use std::fs;
-    use std::path::PathBuf;
-
-    const REL_DIR: &str = "compiler/crt/stdc";
-
-    fn declaration() -> NativeHostFileGenerator {
-        NativeHostFileGenerator {
-            owner: "compiler-stdc-genwcharsupport".into(),
-            recipe: format!("{REL_DIR}/mmakefile.src"),
-            tool_recipe: "tools/genctbl/Makefile".into(),
-            tool_source: "tools/genctbl/genctbl.c".into(),
-            tool_variable: "GENCTBL".into(),
-            output: format!("gen/{REL_DIR}/defaults/en_GB_ISO8859-1.c"),
-            input_directory: "gen/ucd".into(),
-            compile_flags: ["-g", "-Wall", "-Werror", "-Wunused", "-O2"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            arguments: vec![
-                "@INPUT_DIRECTORY@".into(),
-                "@OUTPUT_DIRECTORY@".into(),
-                "en_GB_ISO8859-1".into(),
-                "--emit-c".into(),
-            ],
-            inputs: ["UnicodeData.txt", "SpecialCasing.txt"]
-                .into_iter()
-                .map(|filename| NativeHostFileInput {
-                    filename: filename.into(),
-                    url: format!("https://www.unicode.org/Public/17.0.0/ucd/{filename}"),
-                    sha256: Sha256Digest::parse(
-                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    )
-                    .unwrap(),
-                    size: 1,
-                })
-                .collect(),
-        }
-    }
-
-    const MAKEFILE: &str = r#"compiler-stdc-genwcharsupport : $(GENDIR)/$(CURDIR)/defaults/en_GB_ISO8859-1.c
-
-$(GENDIR)/$(CURDIR)/defaults:
-	%mkdirs_q $@
-
-$(GENDIR)/ucd:
-	%mkdirs_q $@
-
-$(GENDIR)/ucd/%.txt: $(PORTSSOURCEDIR)/%.txt | $(GENDIR)/ucd
-	@$(CP) $< $@
-
-$(GENDIR)/$(CURDIR)/defaults/%.c: $(GENCTBL) $(GENDIR)/ucd/UnicodeData.txt $(GENDIR)/ucd/SpecialCasing.txt | $(GENDIR)/$(CURDIR)/defaults
-	@$(ECHO) "Generating $*.c";
-	@$(GENCTBL) $(GENDIR)/ucd $(GENDIR)/$(CURDIR)/defaults $* --emit-c;
-"#;
-
-    fn source_root() -> (tempfile::TempDir, PathBuf) {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().to_path_buf();
-        let declaration = declaration();
-        write(&root, &declaration.recipe, MAKEFILE);
-        write(
-            &root,
-            &declaration.tool_recipe,
-            r#"USER_CFLAGS := -Wall -Werror -Wunused -O2
-
--include $(TOP)/config/make.cfg
--include Makefile.deps
-
-HOST_CC ?= gcc
-HOST_CFLAGS ?= $(USER_CFLAGS)
-GENCTBL ?= genctbl
-
-$(GENCTBL) : genctbl.c $(GENMODULE_DEPS)
-	@$(ECHO) "Compiling $(notdir $@)..."
-	@$(HOST_CC) -g $(HOST_CFLAGS) -I$(GENINCDIR) -I$(TOP)/$(CURDIR) genctbl.c -o $@
-"#,
-        );
-        write(
-            &root,
-            &declaration.tool_source,
-            "#include <stdio.h>\nint main(void) { return 0; }\n",
-        );
-        write(
-            &root,
-            "Makefile.in",
-            r"$(GENCTBL): $(SRCDIR)/tools/genctbl/genctbl.c
-	@$(ECHO) Building $(notdir $@)...
-	@$(CALL) $(MAKE) $(MKARGS) -C $(SRCDIR)/tools/genctbl SRCDIR=$(SRCDIR) TOP=$(TOP)
-",
-        );
-        write(
-            &root,
-            "configure.in",
-            "make_extra_commands=\"$make_extra_commands$export_newline\"\"GENCTBL\t:= $\"\"(TOOLDIR)/genctbl$\"\"(HOST_EXE_SUFFIX)$export_newline\"\n",
-        );
-        (temp, root)
-    }
-
-    fn write(root: &Path, relative: &str, contents: &str) {
-        let path = root.join(relative);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, contents).unwrap();
-    }
-
-    fn validate_fixture(
-        content: &str,
-        root: &Path,
-        declaration: &NativeHostFileGenerator,
-        states: Option<&[ConditionalTruth]>,
-    ) -> Result<(), String> {
-        validate_source_rule(content, root, Path::new(REL_DIR), declaration, states)
-    }
-
-    #[test]
-    fn accepts_the_bounded_owner_generator_and_source_tool_chain() {
-        let (_temp, root) = source_root();
-        validate_fixture(MAKEFILE, &root, &declaration(), None).unwrap();
-    }
-
-    #[test]
-    fn derives_non_ucd_directories_and_input_output_suffixes() {
-        let (_temp, root) = source_root();
-        let mut declaration = declaration();
-        declaration.input_directory = "gen/reference/unicode".into();
-        declaration.inputs = ["Primary.csv", "Secondary.csv"]
-            .into_iter()
-            .map(|filename| NativeHostFileInput {
-                filename: filename.into(),
-                url: format!("https://example.invalid/reference/{filename}"),
-                sha256: Sha256Digest::parse(
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                )
-                .unwrap(),
-                size: 1,
-            })
-            .collect();
-        declaration.output = format!("gen/{REL_DIR}/generated/locale_variant.h");
-        declaration.arguments[2] = "locale_variant".into();
-
-        let custom = MAKEFILE
-            .replace(
-                "$(GENDIR)/$(CURDIR)/defaults/en_GB_ISO8859-1.c",
-                "$(GENDIR)/$(CURDIR)/generated/locale_variant.h",
-            )
-            .replace(
-                "$(GENDIR)/$(CURDIR)/defaults/%.c",
-                "$(GENDIR)/$(CURDIR)/generated/%.h",
-            )
-            .replace(
-                "$(GENDIR)/$(CURDIR)/defaults",
-                "$(GENDIR)/$(CURDIR)/generated",
-            )
-            .replace(
-                "$(GENDIR)/ucd/UnicodeData.txt",
-                "$(GENDIR)/reference/unicode/Primary.csv",
-            )
-            .replace(
-                "$(GENDIR)/ucd/SpecialCasing.txt",
-                "$(GENDIR)/reference/unicode/Secondary.csv",
-            )
-            .replace("$(GENDIR)/ucd/%.txt", "$(GENDIR)/reference/unicode/%.csv")
-            .replace("$(PORTSSOURCEDIR)/%.txt", "$(PORTSSOURCEDIR)/%.csv")
-            .replace("$(GENDIR)/ucd", "$(GENDIR)/reference/unicode")
-            .replace("$*.c", "$*.h");
-        write(&root, &declaration.recipe, &custom);
-        validate_fixture(&custom, &root, &declaration, None).unwrap();
-    }
-
-    #[test]
-    fn keeps_every_declared_input_as_a_normal_prerequisite() {
-        let (_temp, root) = source_root();
-        let altered = MAKEFILE.replace(" $(GENDIR)/ucd/SpecialCasing.txt |", " |");
-        write(&root, &declaration().recipe, &altered);
-        let error = validate_fixture(&altered, &root, &declaration(), None).unwrap_err();
-        assert!(error.contains("every sealed input"), "{error}");
-    }
-
-    #[test]
-    fn rejects_extra_shell_and_changed_generator_mode() {
-        let (_temp, root) = source_root();
-        let altered = MAKEFILE.replace(
-            "\t@$(GENCTBL) $(GENDIR)/ucd $(GENDIR)/$(CURDIR)/defaults $* --emit-c;",
-            "\t@$(GENCTBL) $(GENDIR)/ucd $(GENDIR)/$(CURDIR)/defaults $* --emit-c; touch bad",
-        );
-        write(&root, &declaration().recipe, &altered);
-        assert!(validate_fixture(&altered, &root, &declaration(), None).is_err());
-
-        let altered = MAKEFILE.replace("$* --emit-c;", "$* --emit-binary;");
-        write(&root, &declaration().recipe, &altered);
-        assert!(validate_fixture(&altered, &root, &declaration(), None).is_err());
-    }
-
-    #[test]
-    fn rejects_unresolved_conditions_and_owner_additions() {
-        let (_temp, root) = source_root();
-        let mut states = vec![ConditionalTruth::True; MAKEFILE.lines().count()];
-        let owner_line = MAKEFILE
-            .lines()
-            .position(|line| line.starts_with("compiler-stdc-genwcharsupport"))
-            .unwrap();
-        states[owner_line] = ConditionalTruth::Unknown;
-        assert!(validate_fixture(MAKEFILE, &root, &declaration(), Some(&states)).is_err());
-
-        let altered = MAKEFILE.replace(
-            "compiler-stdc-genwcharsupport : $(GENDIR)/$(CURDIR)/defaults/en_GB_ISO8859-1.c",
-            "compiler-stdc-genwcharsupport : $(GENDIR)/$(CURDIR)/defaults/en_GB_ISO8859-1.c extra",
-        );
-        write(&root, &declaration().recipe, &altered);
-        assert!(validate_fixture(&altered, &root, &declaration(), None).is_err());
-    }
-
-    #[test]
-    fn rejects_source_make_variable_rebinding_forms() {
-        let (_temp, root) = source_root();
-        let declarations = [
-            "override GENCTBL := /tmp/evil",
-            "export GENCTBL := /tmp/evil",
-            "other-owner: private GENCTBL := /tmp/evil",
-            "other-owner: override export private GENCTBL := /tmp/evil",
-            "define GENCTBL =\n/tmp/evil\nendef",
-            "undefine GENCTBL",
-            "OTHER := $(eval GENCTBL := /tmp/evil)",
-        ];
-        for rebinding in declarations {
-            let altered = format!("{rebinding}\n\n{MAKEFILE}");
-            write(&root, &declaration().recipe, &altered);
-            let error = validate_fixture(&altered, &root, &declaration(), None).unwrap_err();
-            let expected = if rebinding.starts_with("define ") {
-                "define"
-            } else if rebinding.starts_with("undefine ") {
-                "undefine"
-            } else if rebinding.contains("$(eval") {
-                "eval"
-            } else {
-                "GENCTBL"
-            };
-            assert!(error.contains(expected), "{rebinding:?}: {error}");
-        }
-    }
-
-    #[test]
-    fn rejects_tool_flag_assignments_with_make_modifiers() {
-        let (_temp, root) = source_root();
-        let tool_makefile_path = root.join(declaration().tool_recipe);
-        let original = fs::read_to_string(&tool_makefile_path).unwrap();
-        for assignment in [
-            "HOST_CFLAGS ?= $(USER_CFLAGS)",
-            "USER_CFLAGS := -Wall -Werror -Wunused -O2",
-        ] {
-            let changed = original.replace(assignment, &format!("override {assignment}"));
-            assert_ne!(changed, original);
-            write(&root, &declaration().tool_recipe, &changed);
-            let error = validate_fixture(MAKEFILE, &root, &declaration(), None).unwrap_err();
-            assert!(error.contains("Make modifiers"), "{error}");
-        }
-    }
-
-    #[test]
-    fn binds_host_flags_and_rejects_quoted_project_includes() {
-        let (_temp, root) = source_root();
-        let mut changed = declaration();
-        changed.compile_flags.pop();
-        assert!(validate_fixture(MAKEFILE, &root, &changed, None).is_err());
-
-        write(
-            &root,
-            &changed.tool_source,
-            "#include \"local.h\"\nint main(void) { return 0; }\n",
-        );
-        assert!(validate_fixture(MAKEFILE, &root, &declaration(), None).is_err());
-
-        write(
-            &root,
-            &changed.tool_source,
-            "#include <private_project_header.h>\nint main(void) { return 0; }\n",
-        );
-        assert!(validate_fixture(MAKEFILE, &root, &declaration(), None).is_err());
-    }
-
-    #[test]
-    fn rejects_alternate_and_spliced_preprocessor_include_syntax() {
-        let (_temp, root) = source_root();
-        for source in [
-            "%:include <private_project_header.h>\n",
-            "#inc\\\nlude <private_project_header.h>\n",
-            "#??=include <private_project_header.h>\n",
-        ] {
-            write(&root, &declaration().tool_source, source);
-            let error = validate_fixture(MAKEFILE, &root, &declaration(), None).unwrap_err();
-            assert!(
-                error.contains("include") || error.contains("trigraph"),
-                "{error}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_source_local_shadows_of_standard_headers() {
-        let (_temp, root) = source_root();
-        write(
-            &root,
-            &declaration().tool_source,
-            "#include <stdio.h>\nint main(void) { return 0; }\n",
-        );
-        write(&root, "tools/genctbl/stdio.h", "/* local shadow */\n");
-        let error = validate_fixture(MAKEFILE, &root, &declaration(), None).unwrap_err();
-        assert!(
-            error.contains("shadow for standard header <stdio.h>"),
-            "{error}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_symlinked_tool_sources() {
-        use std::os::unix::fs::symlink;
-
-        let (_temp, root) = source_root();
-        let real = root.join("tools/genctbl/real.c");
-        fs::write(&real, "#include <stdio.h>\n").unwrap();
-        let target = root.join("tools/genctbl/genctbl.c");
-        fs::remove_file(&target).unwrap();
-        symlink(real, target).unwrap();
-        assert!(validate_fixture(MAKEFILE, &root, &declaration(), None).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_symlinked_source_local_header_shadows() {
-        use std::os::unix::fs::symlink;
-
-        let (_temp, root) = source_root();
-        let real = root.join("tools/genctbl/real.h");
-        fs::write(&real, "/* shadow */\n").unwrap();
-        symlink(real, root.join("tools/genctbl/stdio.h")).unwrap();
-        let error = validate_fixture(MAKEFILE, &root, &declaration(), None).unwrap_err();
-        assert!(
-            error.contains("shadow for standard header <stdio.h>"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    #[ignore = "requires AROS_TEST_P4_SOURCE"]
-    fn actual_source_genctbl_recipe_is_admitted() {
-        let root = PathBuf::from(
-            std::env::var_os("AROS_TEST_P4_SOURCE")
-                .expect("set AROS_TEST_P4_SOURCE to the selected AROS source tree"),
-        );
-        let root = root.canonicalize().expect("source tree must exist");
-        let declaration = declaration();
-        let content = fs::read_to_string(root.join(&declaration.recipe)).unwrap();
-        validate_source_rule(&content, &root, Path::new(REL_DIR), &declaration, None).unwrap();
-    }
-}
+#[path = "host_c_file_rules_tests.rs"]
+mod tests;

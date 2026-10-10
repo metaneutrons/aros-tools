@@ -20,6 +20,7 @@ use std::process::ExitCode;
 use walkdir::WalkDir;
 
 mod cli_args;
+mod consumer_validation;
 mod error_mapping;
 mod native_selection;
 mod observability;
@@ -173,6 +174,9 @@ fn main() -> ExitCode {
     reason = "the transpiler command coordinates one diagnostic transaction; parsing and generation remain isolated library stages"
 )]
 fn run(args: &Args, logger: &Logger) -> Result<()> {
+    if args.validate_native_consumer_only {
+        return consumer_validation::execute(args);
+    }
     if resolved_publication_path(&args.output)?
         == resolved_publication_path(&args.output.with_extension("native-invocation.json"))?
     {
@@ -251,22 +255,21 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         dirs.bind_native_target_tool_roles();
         target
             .host_file_generators
-            .clone_from(&contract.contract.host_file_generators);
+            .clone_from(contract.invocation().host_file_generators);
         target.make_variables = contract
-            .contract
             .make_variables_for_host(aros_common::target::native_host_key().unwrap_or(""))
             .map_err(native_selection_input_error)?;
         target
             .make_include_bindings
-            .clone_from(&contract.contract.make_include_bindings);
+            .clone_from(contract.invocation().make_include_bindings);
         target.native_kernel_sources_in_target_role =
-            contract.contract.kernel_compiler_role.as_deref() == Some("target");
+            contract.invocation().kernel_compiler_role == Some("target");
         target.generated_make_templates =
             aros_common::native_make_template::resolve_generated_make_templates(
                 &args.source_dir,
-                &contract.contract.generated_make_templates,
+                contract.invocation().generated_make_templates,
                 &contract
-                    .contract
+                    .invocation()
                     .inputs
                     .iter()
                     .map(|input| (input.path.clone(), input.sha256.clone()))
@@ -281,7 +284,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         source_discovery::ignored_directories(&args.source_dir, native_contract.as_ref())?;
     let skip_dirs: &[&str] = if native_contract
         .as_ref()
-        .is_some_and(|native| native.contract.metamake_projection.is_some())
+        .is_some_and(|native| native.invocation().metamake_projection.is_some())
     {
         &[".git"]
     } else {
@@ -291,7 +294,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // basename) from a native walk when it lies inside the source tree.
     let excluded_build_paths = if native_contract
         .as_ref()
-        .is_some_and(|native| native.contract.metamake_projection.is_some())
+        .is_some_and(|native| native.invocation().metamake_projection.is_some())
     {
         native_build_exclusion(args)?
     } else {
@@ -335,9 +338,13 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     let native_owner_projection = native_contract
         .as_ref()
         .map(|contract| {
-            aros_transpiler::native_owner_projection::NativeOwnerProjection::load(
+            aros_transpiler::native_owner_projection::NativeOwnerProjection::load_invocation(
                 &args.source_dir,
-                contract,
+                aros_transpiler::native_owner_projection::NativeInvocationPolicy {
+                    profile: contract.invocation().profile,
+                    projection: contract.invocation().metamake_projection,
+                    inputs: contract.invocation().inputs,
+                },
                 &files,
                 aros_common::target::native_host_key().unwrap_or(""),
                 target
@@ -521,12 +528,12 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                                 .insert(relative.to_string());
                         }
                     }
-                    for declaration in &contract.contract.optional_meta_dependencies {
+                    for declaration in contract.invocation().optional_meta_dependencies {
                         if declaration.recipe != relative {
                             continue;
                         }
                         let expected = contract
-                            .contract
+                            .invocation()
                             .inputs
                             .iter()
                             .find(|input| input.path == declaration.recipe)
@@ -610,7 +617,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         return Err(diagnostics_error(parse_errors));
     }
     if let Some(contract) = &native_contract {
-        if optional_meta_proofs.len() != contract.contract.optional_meta_dependencies.len() {
+        if optional_meta_proofs.len() != contract.invocation().optional_meta_dependencies.len() {
             return Err(native_selection_input_error(ArosError::Configuration {
                 file: "native build contract".into(),
                 message:
@@ -618,7 +625,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                         .into(),
             }));
         }
-        for declaration in &contract.contract.optional_meta_dependencies {
+        for declaration in contract.invocation().optional_meta_dependencies {
             let sources =
                 &meta_edge_sources[&(declaration.target.clone(), declaration.dependency.clone())];
             if sources.iter().any(|recipe| {
@@ -638,7 +645,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
 
     let mut graph = DependencyGraph::new();
     if let Some(contract) = &native_contract {
-        for input in &contract.contract.inputs {
+        for input in contract.invocation().inputs {
             graph
                 .host_file_generator_source_digests
                 .insert(input.path.clone(), input.sha256.to_string());
@@ -1030,7 +1037,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // not dependencies rewritten by SCC flattening. Flatten native routes
     // together after source aliases and explicit hooks have been verified.
     let mut flattened_meta_cycles = if native_contract.is_none() {
-        graph.flatten_meta_cycles()
+        graph.flatten_meta_cycles()?
     } else {
         Vec::new()
     };
@@ -1041,19 +1048,19 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 message: "native selection requires explicit target context".into(),
             })
         })?;
-        let selected_package_errors: Vec<_> = skipped_packages
-            .iter()
-            .filter(|message| {
-                message.split_whitespace().any(|word| word == contract.contract.package.target)
+        let selected_package_errors: Vec<_> = contract.build_contract().into_iter()
+            .flat_map(|build| skipped_packages.iter().map(move |message| (build, message)))
+            .filter(|(build, message)| {
+                message.split_whitespace().any(|word| word == build.package.target)
             })
-            .map(|message| {
+            .map(|(build, message)| {
                 Diagnostic::error(
                     DiagnosticCode::CapabilityDrift,
                     DiagnosticStage::CapabilityValidation,
                     format!("selected native package declaration is unresolved: {message}"),
                 )
                 .with_location(SourceLocation {
-                    path: contract.contract.package.recipe.clone(),
+                    path: build.package.recipe.clone(),
                     line: None,
                     column: None,
                 })
@@ -1107,14 +1114,13 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 "Typed plain archive has no generated ABI-header interface: {omission}"
             );
         }
-        let (roots, root_resolution_error) =
-            match graph.native_contract_roots(&contract.contract, context) {
-                Ok(roots) => (roots, None),
-                Err(error) if args.native_graph_audit.is_some() => {
-                    (Vec::new(), Some(error.to_string()))
-                }
-                Err(error) => return Err(error),
-            };
+        let (roots, root_resolution_error) = match contract.roots(&graph, context) {
+            Ok(roots) => (roots, None),
+            Err(error) if args.native_graph_audit.is_some() => {
+                (Vec::new(), Some(error.to_string()))
+            }
+            Err(error) => return Err(error),
+        };
         let source_meta_semantics = native_owner_projection
             .as_ref()
             .filter(|_| root_resolution_error.is_none() && !roots.is_empty())
@@ -1125,7 +1131,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                     aros_transpiler::native_owner_projection::NativeMetaSemanticsSelection {
                         context,
                         roots: &roots,
-                        declarations: &contract.contract.optional_meta_dependencies,
+                        declarations: contract.invocation().optional_meta_dependencies,
                         diagnostics: &capability_errors,
                         meta_edge_origins: &native_meta_edge_origins,
                     },
@@ -1141,7 +1147,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             })?;
         // Imported source aliases can add metadata-only cycles. Flatten only
         // after exact optional hook edges have been independently evidenced.
-        let imported_meta_cycles = graph.flatten_meta_cycles();
+        let imported_meta_cycles = graph.flatten_meta_cycles()?;
         flattened_meta_cycles.extend(imported_meta_cycles.iter().cloned());
         // Keep full parsing, provider resolution and global failure checks.
         // Only a reverified source invocation can establish that an unowned
@@ -1190,8 +1196,9 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "schema_version": 1,
                     "qualification": "source-invocation-scope-not-build-proof",
-                    "native_profile": args.native_profile,
-                    "native_contract_sha256": contract.sha256,
+                    "native_profile": contract.invocation().profile,
+                    "native_contract_kind": contract.kind(),
+                    "native_contract_sha256": contract.sha256(),
                     "native_owner_projection": evidence,
                     "source_uninvoked_capability_failures": source_uninvoked_capability_failures,
                     "source_meta_semantics": source_meta_semantics,
@@ -1206,7 +1213,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         // graph failure. It cannot publish a build graph or grant admission.
         // Malformed/unbound declarations remain fatal even in audit mode.
         let remaining_meta_declarations: Vec<_> = contract
-            .contract
+            .invocation()
             .optional_meta_dependencies
             .iter()
             .filter(|edge| {
@@ -1269,11 +1276,12 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 );
             }
             let report_json = serde_json::to_string_pretty(&serde_json::json!({
-                "native_profile": args.native_profile,
-                "native_contract_sha256": contract.sha256,
+                "native_profile": contract.invocation().profile,
+                "native_contract_kind": contract.kind(),
+                "native_contract_sha256": contract.sha256(),
                 "source_root": args.source_dir,
-                "source_baseline": contract.contract.source_baseline,
-                "bound_source_inputs": contract.contract.inputs,
+                "source_baseline": contract.invocation().source_baseline,
+                "bound_source_inputs": contract.invocation().inputs,
                 "source_literal_ignoredirs": source_ignoredirs,
                 "typed_plain_archive_header_omissions": plain_archive_header_omissions,
                 "source_declared_optional_omissions": native_optional_omissions,
@@ -1384,7 +1392,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         });
         aros_common::outputln!(
             "Native source contract {} selects {} dependency endpoints",
-            contract.sha256,
+            contract.sha256(),
             selected.len()
         );
     }

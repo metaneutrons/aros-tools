@@ -8,6 +8,7 @@ endif()
 # Modern Multi-Platform Build System for AROS
 
 include(CMakeParseArguments)
+include("${CMAKE_CURRENT_LIST_DIR}/NativeConsumerContract.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ArchitectureMetadata.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ArchitectureEndpoints.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ModuleMacroContract.cmake")
@@ -131,6 +132,8 @@ set(AROS_DEVELOPER_FD_DIR "${AROS_DEVELOPER_SDK_DIR}/fd")
 # an output-root contract for later generated-file rules as well, so establish
 # it in directory scope rather than only inside the bootstrap helper.
 set(AROS_GEN_DIR "${CMAKE_BINARY_DIR}/gen")
+aros_resolve_sdk_include_root(AROS_SDK_INCLUDE_DIR)
+set(AROS_GENINC_DIR "${CMAKE_BINARY_DIR}/GENINCDIR")
 
 # Release compilers intentionally have no producer build directory embedded as
 # DEFAULT_SYSROOT.  Match config/features.in's external-toolchain contract:
@@ -168,7 +171,11 @@ aros_bootstrap_sdk_includes()
 set(_aros_c_startup_output "${AROS_DEVELOPER_LIB_DIR}/startup.o")
 set(_aros_c_detach_output "${AROS_DEVELOPER_LIB_DIR}/detach.o")
 set(_aros_cxx_startup_output "${AROS_DEVELOPER_LIB_DIR}/cxx-startup.o")
-if(NOT AROS_NATIVE_BUILD_CONTRACT_VALIDATED)
+set(_aros_source_sdk_consumer FALSE)
+if(AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)
+    _aros_native_source_selection_validated(_aros_source_sdk_consumer)
+endif()
+if(NOT AROS_NATIVE_BUILD_CONTRACT_VALIDATED AND NOT _aros_source_sdk_consumer)
 set(_aros_c_startup_source "${AROS_SOURCE_DIR}/compiler/startup/startup.c")
 if(NOT EXISTS "${_aros_c_startup_source}")
     message(FATAL_ERROR "AROS program startup source is missing: ${_aros_c_startup_source}")
@@ -541,14 +548,14 @@ add_compile_options(
     -Wno-unused-parameter
 )
 
-# The generated trees come first. The target compiler's legacy specs search
-# the POSIX and standard-C namespaces before the shared SDK root. LLVM is a
-# bare driver here and has no installed AROS specs, so repeat that order for
-# every target unless its compile declaration disables POSIX headers. Otherwise
-# <errno.h> and <stdlib.h> resolve to the smaller
-# C99 namespace and POSIX declarations such as ESRCH, EMFILE and random() are
-# silently lost. Keep these as ordinary includes: a later -isystem path would
-# still lose to the shared SDK's -I path in the compiler's search order.
+# The generated trees come first. Search the POSIX and standard-C namespaces
+# before the shared SDK root unless the compile declaration disables POSIX.
+# GNU AROS specs inject these namespaces as -idirafter paths, while the common
+# SDK root is a built-in system directory. GCC discards -I entries duplicating
+# system directories: ordinary includes therefore cannot express this order.
+# Explicit -isystem namespaces precede the built-in SDK root. Bare LLVM has no
+# such specs; retain ordinary includes there so the namespaces precede its
+# ordinary SDK -I root. Do not change private/generated directory precedence.
 #
 # The historic build has no -I into the source tree at all: compiler/include
 # is staged into the SDK by %copy_includes, and genmodule then writes over what
@@ -557,12 +564,21 @@ add_compile_options(
 # clib/input_protos.h -- which predates genmodule and still declares
 # PeekQualifier through AROS_LP0 -- shadowed the generated one.
 set(AROS_DEFAULT_POSIXC_INCLUDE
-    "$<$<NOT:$<BOOL:$<TARGET_PROPERTY:AROS_NO_POSIXC_HEADERS>>>:${CMAKE_BINARY_DIR}/SDK/include/aros/posixc>")
+    "$<$<NOT:$<BOOL:$<TARGET_PROPERTY:AROS_NO_POSIXC_HEADERS>>>:${AROS_SDK_INCLUDE_DIR}/aros/posixc>")
+if(AROS_TOOLCHAIN STREQUAL "gnu")
+    include_directories(SYSTEM
+        "${AROS_DEFAULT_POSIXC_INCLUDE}"
+        "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
+    set(_aros_default_namespace_includes "")
+else()
+    set(_aros_default_namespace_includes
+        "${AROS_DEFAULT_POSIXC_INCLUDE}"
+        "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
+endif()
 include_directories(
-    "${CMAKE_BINARY_DIR}/GENINCDIR"
-    "${AROS_DEFAULT_POSIXC_INCLUDE}"
-    "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc"
-    "${CMAKE_BINARY_DIR}/SDK/include"
+    "${AROS_GENINC_DIR}"
+    ${_aros_default_namespace_includes}
+    "${AROS_SDK_INCLUDE_DIR}"
     "${AROS_SOURCE_DIR}/compiler/include"
     "${AROS_SOURCE_DIR}/arch/all-native/include"
 )
@@ -590,9 +606,6 @@ include("${CMAKE_CURRENT_LIST_DIR}/GrubBuild.cmake")
 # The transpiler turns each declaration into an aros_copy_includes() call; the
 # glob is resolved here rather than in the transpiler, so adding a header needs
 # no regeneration by hand.
-
-set(AROS_SDK_INCLUDE_DIR "${CMAKE_BINARY_DIR}/SDK/include")
-set(AROS_GENINC_DIR "${CMAKE_BINARY_DIR}/GENINCDIR")
 
 # Counters so the configure output states what was staged.
 set_property(GLOBAL PROPERTY AROS_STAGED_HEADERS 0)
@@ -1067,6 +1080,8 @@ function(aros_copy_dir_recursive)
         add_custom_target("${_copy_target}" DEPENDS "${_stamp}")
     endif()
     add_dependencies("${CDR_NAME}" "${_copy_target}")
+    set_property(TARGET "${CDR_NAME}" PROPERTY
+        AROS_RECURSIVE_COPY_TARGET "${_copy_target}")
 endfunction()
 
 # A wildcard header list from a fetched port cannot name its outputs while
@@ -1667,9 +1682,9 @@ function(aros_apply_includes target_name)
         list(APPEND FALLBACK_DIRS "${INC_MODULE_DIR}")
     endif()
 
-    # The target compiler's specs search these two libc namespaces before the
-    # common SDK include root. Bare-metal Clang has no installed AROS specs, so
-    # an exact declaration-local request recreates that lane explicitly. The
+    # Reproduce these libc namespaces in their semantic order before the
+    # common SDK root. GNU marks the default namespace paths SYSTEM above;
+    # declaration-local requests retain that classification. The
     # fixed order is semantic; do not inherit a reversed order from an
     # assignment assembled through several Make variables.
     foreach(_namespace IN ITEMS
@@ -1716,8 +1731,13 @@ function(aros_apply_includes target_name)
 
     if(NAMESPACE_DIRS)
         list(REMOVE_DUPLICATES NAMESPACE_DIRS)
-        target_include_directories(${target_name} BEFORE PRIVATE
-            ${NAMESPACE_DIRS})
+        if(AROS_TOOLCHAIN STREQUAL "gnu")
+            target_include_directories(${target_name} SYSTEM BEFORE PRIVATE
+                ${NAMESPACE_DIRS})
+        else()
+            target_include_directories(${target_name} BEFORE PRIVATE
+                ${NAMESPACE_DIRS})
+        endif()
     endif()
 
     foreach(pair IN LISTS INC_ARCH_INCLUDES)
@@ -1831,6 +1851,12 @@ function(aros_apply_flags target_name)
     foreach(_option IN LISTS _arch_opts FL_COMPILE_OPTIONS)
         if(_option STREQUAL "-noposixc")
             set_property(TARGET "${target_name}" PROPERTY AROS_NO_POSIXC_HEADERS TRUE)
+            if(AROS_TOOLCHAIN STREQUAL "gnu")
+                # Removing the engine's implicit directory alone does not
+                # disable the installed GNU driver's -idirafter namespace.
+                # The source compile contract must also reach its specs.
+                list(APPEND _compiler_opts "${_option}")
+            endif()
         else()
             list(APPEND _compiler_opts "${_option}")
         endif()
@@ -2025,6 +2051,20 @@ function(aros_add_target_dependency target_name dependency)
     endif()
     add_dependencies("${target_name}" "${dependency}")
 
+    # A recursive-copy owner wraps a stamp-producing custom target. An edge
+    # on the wrapper alone makes the copy and its prerequisite siblings.
+    # Mirror it to the command target so #MM prerequisites complete before
+    # staging bytes, including dependencies declared after the copy helper.
+    get_property(_copy_target TARGET "${target_name}"
+        PROPERTY AROS_RECURSIVE_COPY_TARGET)
+    if(_copy_target)
+        if(NOT TARGET "${_copy_target}")
+            message(FATAL_ERROR
+                "${target_name}: recursive copy command target is missing: ${_copy_target}")
+        endif()
+        add_dependencies("${_copy_target}" "${dependency}")
+    endif()
+
     # Output-producing #MM prerequisites may publish a private generated
     # include directory. Apply it only to compilable consumers, preserving
     # quoted-include semantics and avoiding directory-wide global includes.
@@ -2074,6 +2114,10 @@ endfunction()
 # module is loaded. Bind its aggregate edge at that point, while preserving a
 # fail-closed error if a locked consumer ever loses the linker-visible object.
 function(aros_bind_cxx_startup_target target_name)
+    if(AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)
+        _aros_native_source_selection_validated(_source_selected)
+        return()
+    endif()
     if(AROS_NATIVE_BUILD_CONTRACT_VALIDATED)
         # Source-derived owners carry their own prerequisite edges. Actual
         # C++ consumers validate their required role when they are created.
@@ -2095,6 +2139,10 @@ function(aros_bind_cxx_startup_target target_name)
 endfunction()
 
 function(aros_bind_c_startup_target target_name)
+    if(AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)
+        _aros_native_source_selection_validated(_source_selected)
+        return()
+    endif()
     if(AROS_NATIVE_BUILD_CONTRACT_VALIDATED)
         # No legacy guessed objects or header edges in a source-native graph.
         # The program consumer checks the source-owned startup role itself.
@@ -2599,6 +2647,7 @@ set_property(GLOBAL PROPERTY AROS_FETCH_TARGETS "")
 
 # aros_fetch_archive(NAME <t> ARCHIVE <a> SUFFIXES <s> ORIGINS <o>
 #                    [CHECKSUMS <filename=sha256:digest...>]
+#                    [NORMALIZATION <explicit-representation> NORMALIZED_SIZE <bytes>]
 #                    LOCATION <l> DESTINATION <d> [BASE <b>]
 #                    PATCH_ORIGINS <po> PATCHES <p>
 #                    [SOURCE_DIR <audited-source>
@@ -2610,7 +2659,7 @@ set_property(GLOBAL PROPERTY AROS_FETCH_TARGETS "")
 # receipt-protected source tree. An archive may be shared by several profiles,
 # but each profile still has to unpack and patch its own Ports tree.
 function(aros_fetch_archive)
-    set(oneValueArgs NAME ARCHIVE SUFFIXES ORIGINS CHECKSUMS LOCATION DESTINATION BASE
+    set(oneValueArgs NAME ARCHIVE SUFFIXES ORIGINS CHECKSUMS NORMALIZATION NORMALIZED_SIZE LOCATION DESTINATION BASE
         PATCH_ORIGINS PATCHES SOURCE_DIR)
     set(multiValueArgs LOCAL_PATCH_FILES)
     cmake_parse_arguments(FA "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
@@ -2650,11 +2699,9 @@ function(aros_fetch_archive)
     set(_legacy_stamp "${FA_DESTINATION}/.${FA_ARCHIVE}-fetched")
 
     # Strict external-CMake profiles track their in-tree patches directly.
-    # aros-fetch deliberately caches both the copied patch and an `.applied` marker, so a
-    # plain file dependency would rerun the recipe but still use the old
-    # patch.  When one of these audited inputs changes, discard only the
-    # declared archive source directory and its own cache markers before
-    # letting aros-fetch unpack and patch it again.
+    # Refresh their copied patch inputs and request a validated staged source
+    # replacement. Never delete the live source before aros-fetch verifies its
+    # archive/patch contract: a failed fetch must preserve the previous tree.
     set(_patch_refresh_commands "")
     set(_patch_dependency_args "")
     if(FA_SOURCE_DIR OR FA_LOCAL_PATCH_FILES)
@@ -2687,8 +2734,6 @@ function(aros_fetch_archive)
 
         separate_arguments(_patch_specs UNIX_COMMAND "${FA_PATCHES}")
         set(_local_patch_inputs "")
-        set(_cached_patch_paths "")
-        set(_applied_patch_markers "")
         math(EXPR _last_local_patch "${_local_patch_count} - 1")
         foreach(_index RANGE 0 ${_last_local_patch})
             list(GET FA_LOCAL_PATCH_FILES ${_index} _raw_patch)
@@ -2738,23 +2783,8 @@ function(aros_fetch_archive)
             endif()
 
             list(APPEND _local_patch_inputs "${_patch}")
-            list(APPEND _cached_patch_paths "${_patch_base}/${_patch_name}")
-            list(APPEND _applied_patch_markers
-                "${_patch_base}/.${_patch_name}.applied")
         endforeach()
 
-        separate_arguments(_archive_suffixes UNIX_COMMAND "${FA_SUFFIXES}")
-        set(_archive_unpack_markers "")
-        foreach(_suffix IN LISTS _archive_suffixes)
-            list(APPEND _archive_unpack_markers
-                "${_patch_base}/.${FA_ARCHIVE}.${_suffix}.unpacked")
-        endforeach()
-        list(APPEND _patch_refresh_commands
-            COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_source}"
-            COMMAND "${CMAKE_COMMAND}" -E rm -f
-                ${_archive_unpack_markers}
-                ${_cached_patch_paths}
-                ${_applied_patch_markers})
         foreach(_index RANGE 0 ${_last_local_patch})
             list(GET _local_patch_inputs ${_index} _patch)
             cmake_path(GET _patch FILENAME _patch_name)
@@ -2767,12 +2797,17 @@ function(aros_fetch_archive)
     endif()
 
     set(_fetch_policy_args "")
+    if(FA_SOURCE_DIR AND FA_LOCAL_PATCH_FILES)
+        list(APPEND _fetch_policy_args --force)
+    endif()
     if(AROS_FETCH_OFFLINE)
         list(APPEND _fetch_policy_args --offline)
     endif()
     if(AROS_FETCH_REQUIRE_CHECKSUMS)
         list(APPEND _fetch_policy_args --require-checksums)
     endif()
+    aros_fetch_representation_arguments(_representation_args
+        "${FA_NORMALIZATION}" "${FA_NORMALIZED_SIZE}")
 
     add_custom_command(
         OUTPUT "${_stamp}"
@@ -2790,6 +2825,7 @@ function(aros_fetch_archive)
                 --archive "${FA_ARCHIVE}"
                 --suffixes "${FA_SUFFIXES}"
                 --checksums "${FA_CHECKSUMS}"
+                ${_representation_args}
                 --location "${_loc}"
                 --destination "${FA_DESTINATION}"
                 --base "${_base}"
@@ -3116,7 +3152,13 @@ function(aros_build_external_cmake)
         # CMAKE_<LANG>_FLAGS is a command-line string rather than a CMake
         # argument list. Preserve an include root containing whitespace when
         # the nested generator parses that string into compiler arguments.
-        list(APPEND _target_flags "-I\"${_include}\"")
+        if(AROS_TOOLCHAIN STREQUAL "gnu" AND
+           (_include STREQUAL "${AROS_SDK_INCLUDE_DIR}/aros/posixc" OR
+            _include STREQUAL "${AROS_SDK_INCLUDE_DIR}/aros/stdc"))
+            list(APPEND _target_flags "-isystem \"${_include}\"")
+        else()
+            list(APPEND _target_flags "-I\"${_include}\"")
+        endif()
     endforeach()
     string(JOIN " " _target_flags_string ${_target_flags})
     foreach(_language IN ITEMS C CXX ASM)
@@ -4290,20 +4332,34 @@ function(_aros_generate_module_support out_prefix)
         "${_include_dir}/clib" "${_include_dir}/inline"
         "${_include_dir}/defines" "${_include_dir}/proto"
         "${_include_dir}/interface")
-    set(_publish_dirs
-        "${AROS_SDK_INCLUDE_DIR}/clib" "${AROS_SDK_INCLUDE_DIR}/inline"
-        "${AROS_SDK_INCLUDE_DIR}/defines" "${AROS_SDK_INCLUDE_DIR}/proto"
-        "${AROS_GENINC_DIR}/clib" "${AROS_GENINC_DIR}/inline"
-        "${AROS_GENINC_DIR}/defines" "${AROS_GENINC_DIR}/proto"
-        "${AROS_DEVELOPER_INCLUDE_DIR}/clib" "${AROS_DEVELOPER_INCLUDE_DIR}/inline"
-        "${AROS_DEVELOPER_INCLUDE_DIR}/defines" "${AROS_DEVELOPER_INCLUDE_DIR}/proto")
+    # The SDK include root and Developer include root normally coincide. In
+    # configurations which spell the same root differently, constructing the
+    # custom-command outputs from the raw values declares duplicate Ninja
+    # outputs. Normalize and deduplicate only this producer's publication
+    # roots; each distinct root still receives the generated headers.
+    set(_public_roots "")
+    foreach(_public_root
+            "${AROS_SDK_INCLUDE_DIR}"
+            "${AROS_GENINC_DIR}"
+            "${AROS_DEVELOPER_INCLUDE_DIR}")
+        cmake_path(ABSOLUTE_PATH _public_root
+            BASE_DIRECTORY "${CMAKE_BINARY_DIR}" NORMALIZE
+            OUTPUT_VARIABLE _normalized_public_root)
+        list(FIND _public_roots "${_normalized_public_root}" _root_index)
+        if(_root_index EQUAL -1)
+            list(APPEND _public_roots "${_normalized_public_root}")
+        endif()
+    endforeach()
+    set(_publish_dirs "")
+    foreach(_public_root IN LISTS _public_roots)
+        list(APPEND _publish_dirs
+            "${_public_root}/clib" "${_public_root}/inline"
+            "${_public_root}/defines" "${_public_root}/proto")
+    endforeach()
     foreach(_rel IN LISTS _include_rel)
         set(_private "${_include_dir}/${_rel}")
         list(APPEND _private_headers "${_private}")
-        foreach(_public_root
-                "${AROS_SDK_INCLUDE_DIR}"
-                "${AROS_GENINC_DIR}"
-                "${AROS_DEVELOPER_INCLUDE_DIR}")
+        foreach(_public_root IN LISTS _public_roots)
             set(_public "${_public_root}/${_rel}")
             list(APPEND _published_headers "${_public}")
             list(APPEND _publish_commands
@@ -4967,9 +5023,11 @@ function(aros_add_library)
             _client_archive_dir "${ARG_MMAKE_ID}" "${ARG_OUTPUT_DIR}")
     endif()
 
-    if((ARG_NO_CLIENT_ARCHIVES OR ARG_NO_NORMAL_CLIENT_ARCHIVE OR ARG_NO_RELATIVE_CLIENT_ARCHIVE) AND
-       (NOT AROS_NATIVE_BUILD_CONTRACT_VALIDATED OR ARG_GENMODULE_ONLY))
-        message(FATAL_ERROR "${ARG_MMAKE_ID}: NO_CLIENT_ARCHIVES requires a selected native runtime declaration")
+    if(ARG_NO_CLIENT_ARCHIVES OR ARG_NO_NORMAL_CLIENT_ARCHIVE OR ARG_NO_RELATIVE_CLIENT_ARCHIVE)
+        _aros_native_source_selection_validated(_source_selected)
+        if(NOT _source_selected OR ARG_GENMODULE_ONLY)
+            message(FATAL_ERROR "${ARG_MMAKE_ID}: NO_CLIENT_ARCHIVES requires a selected native runtime declaration")
+        endif()
     endif()
     if(ARG_NO_CLIENT_ARCHIVES)
         set(ARG_NO_NORMAL_CLIENT_ARCHIVE TRUE)

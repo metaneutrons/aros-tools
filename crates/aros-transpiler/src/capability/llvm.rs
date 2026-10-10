@@ -74,6 +74,7 @@ pub(crate) fn admit(
         archive: "llvm-11.0.0.src".to_owned(), suffixes: "tar.xz".to_owned(),
         origins: "https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.0".to_owned(),
         checksums: "llvm-11.0.0.src.tar.xz=sha256:913f68c898dfb4a03b397c5e11c6a2f39d0f22ed7665c9cefa87a34423a72469".to_owned(),
+        normalization: String::new(), normalized_size: String::new(),
         location: "${AROS_PORTS_SOURCE_DIR}".to_owned(), destination: "${AROS_PORTS_DIR}/llvm".to_owned(),
         base: String::new(), patch_origins: "${AROS_SOURCE_DIR}/tools/crosstools/llvm".to_owned(),
         patches: "llvm-11.0.0.src-aros.diff:llvm-11.0.0.src:-p1".to_owned(), dir: DIRECTORY.to_owned(),

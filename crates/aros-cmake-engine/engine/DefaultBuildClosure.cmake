@@ -61,3 +61,23 @@ function(aros_limit_all_to_metamake_root root_target)
     list(SORT _excluded)
     set_property(GLOBAL PROPERTY AROS_OUTSIDE_DEFAULT_ROOT_TARGETS "${_excluded}")
 endfunction()
+
+# Native source selections may intentionally export only SDK producer targets,
+# without MetaMake's classic AROS root. Apply the strict classic closure when
+# no validated native selection exists, or when the selected graph contains
+# the classic root; otherwise leave the selected graph's implicit targets as-is.
+function(aros_limit_all_for_selected_source_graph root_target)
+    set(_native_source_selected FALSE)
+    if(COMMAND _aros_native_source_selection_validated)
+        _aros_native_source_selection_validated(_native_source_selected)
+    elseif(AROS_NATIVE_BUILD_CONTRACT OR AROS_NATIVE_BUILD_CONTRACT_VALIDATED OR
+           AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)
+        message(FATAL_ERROR
+            "MetaMake default closure: native source selection validator is required")
+    endif()
+
+    if(_native_source_selected AND NOT TARGET "${root_target}")
+        return()
+    endif()
+    aros_limit_all_to_metamake_root("${root_target}")
+endfunction()

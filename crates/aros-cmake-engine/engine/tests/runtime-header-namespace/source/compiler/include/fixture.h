@@ -1,0 +1,1 @@
+/* Minimal source include root for the namespace fixture. */

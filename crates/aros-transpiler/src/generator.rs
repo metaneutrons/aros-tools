@@ -12,6 +12,11 @@ mod rules;
 mod targets;
 pub use header::generated_header;
 
+/// Names reserved by typed CMake producers, also used before normalization.
+pub(crate) fn concrete_endpoint_names(graph: &DependencyGraph) -> HashSet<String> {
+    endpoints::collect_endpoint_names(graph)
+}
+
 /// Renders one value as a quoted CMake argument.
 ///
 /// A string-literal define such as `AROS_ARCHITECTURE="pc"` carries quotes of

@@ -11,6 +11,7 @@ use std::path::PathBuf;
     about = "Fail-closed AROS MetaMake-to-CMake transpiler",
     after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_TRANSPILER_DIAGNOSTIC_FORMAT,\nAROS_TRANSPILER_LOG_LEVEL, AROS_TRANSPILER_LOG_FORMAT, and\nAROS_TRANSPILER_LOG_FILE. Logging is off by default. A selected file without a\nselected level uses info; explicit off creates no sink, and a non-off level\nrequires a local file."
 )]
+#[command(group(clap::ArgGroup::new("native_selection").args(["native_profile", "native_consumer_profile"]).multiple(false)))]
 pub struct Args {
     /// Root directory of AROS source tree
     #[arg(short, long, default_value = ".")]
@@ -25,7 +26,7 @@ pub struct Args {
     pub ports_dir: Option<PathBuf>,
 
     /// Prepare only the source-inventory sidecar; do not publish a build graph
-    #[arg(long, requires = "native_profile")]
+    #[arg(long, requires = "native_selection")]
     pub source_inventory_only: bool,
 
     /// Write a diagnostic-only selected graph audit; publish no graph or inventory
@@ -37,8 +38,32 @@ pub struct Args {
     pub native_profile: Option<String>,
 
     /// Expected digest of that profile's validated native build contract
-    #[arg(long, requires = "native_profile")]
+    #[arg(
+        long,
+        requires = "native_profile",
+        conflicts_with = "native_consumer_profile"
+    )]
     pub native_contract_sha256: Option<String>,
+
+    /// Source-owned SDK/consumer graph, without core, package or media policy
+    #[arg(long)]
+    pub native_consumer_profile: Option<String>,
+
+    /// Expected digest of the selected source-owned consumer contract
+    #[arg(
+        long,
+        requires = "native_consumer_profile",
+        conflicts_with = "native_profile"
+    )]
+    pub native_consumer_contract_sha256: Option<String>,
+
+    /// Validate only the consumer binding and emit JSON; no graph or build proof
+    #[arg(
+        long,
+        requires = "native_consumer_profile",
+        conflicts_with_all = ["native_profile", "source_inventory_only", "native_graph_audit"]
+    )]
+    pub validate_native_consumer_only: bool,
 
     /// Target instruction set (for example x86_64, arm, or aarch64)
     #[arg(long)]

@@ -27,6 +27,18 @@ endif()
 set(_build_real "${CMAKE_BINARY_DIR}/declared-build")
 file(MAKE_DIRECTORY "${_build_real}")
 set(AROS_BUILD_DIR "${_build_real}")
+set(AROS_GENINC_DIR "${AROS_BUILD_DIR}/GENINCDIR")
+set(AROS_SDK_INCLUDE_DIR "${AROS_BUILD_DIR}/SDK/include")
+if(LITERAL_CASE STREQUAL "native-consumer-includes")
+    set(AROS_SDK_INCLUDE_DIR "${AROS_BUILD_DIR}/SYS/Developer/include")
+    # A reused build can retain the former root. Poison it so a successful
+    # compile proves that neither C nor C++ selected that stale header tree.
+    file(MAKE_DIRECTORY "${AROS_BUILD_DIR}/SDK/include/aros/stdc")
+    file(WRITE "${AROS_BUILD_DIR}/SDK/include/literal-sdk-only.h"
+        "#error stale legacy SDK root\n")
+    file(WRITE "${AROS_BUILD_DIR}/SDK/include/aros/stdc/literal-aros-stdc-only.h"
+        "#error stale legacy stdc root\n")
+endif()
 if(LITERAL_CASE STREQUAL "build-root-symlink")
     set(_build_alias "${CMAKE_BINARY_DIR}/build-alias")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/build-real-target")
@@ -38,12 +50,66 @@ if(LITERAL_CASE STREQUAL "output-parent-symlink")
     file(CREATE_LINK "${_build_real}/gen-target" "${_build_real}/gen" SYMBOLIC)
 endif()
 
-if(LITERAL_CASE STREQUAL "native-includes")
+if(LITERAL_CASE STREQUAL "native-build-includes")
     set(AROS_NATIVE_BUILD_CONTRACT ON)
+elseif(LITERAL_CASE STREQUAL "native-consumer-includes" OR
+       LITERAL_CASE STREQUAL "native-helper-false" OR
+       LITERAL_CASE STREQUAL "native-missing-helper")
+    set(AROS_NATIVE_CONSUMER_CONTRACT ON)
+endif()
+
+# This test double exercises only LiteralObjects' include-root admission
+# boundary. It does not validate or attest a native source contract.
+if(NOT LITERAL_CASE STREQUAL "native-missing-helper")
+    function(_aros_native_source_selection_validated out_validated)
+        if(LITERAL_CASE STREQUAL "native-build-includes" OR
+           LITERAL_CASE STREQUAL "native-consumer-includes")
+            set(${out_validated} TRUE PARENT_SCOPE)
+        else()
+            set(${out_validated} FALSE PARENT_SCOPE)
+        endif()
+    endfunction()
 endif()
 
 set(_source "${AROS_SOURCE_DIR}/src/main.c")
 set(_cpp_source "${AROS_SOURCE_DIR}/src/helper.cpp")
+if(LITERAL_CASE STREQUAL "native-build-includes" OR
+   LITERAL_CASE STREQUAL "native-consumer-includes")
+    file(MAKE_DIRECTORY
+        "${AROS_GENINC_DIR}"
+        "${AROS_SDK_INCLUDE_DIR}/aros/stdc"
+        "${AROS_SDK_INCLUDE_DIR}")
+    file(WRITE "${AROS_GENINC_DIR}/literal-generated-only.h"
+        "#define LITERAL_GEN_VALUE 17\n")
+    file(WRITE "${AROS_SDK_INCLUDE_DIR}/aros/stdc/literal-aros-stdc-only.h"
+        "#define LITERAL_STDC_VALUE 23\n")
+    file(WRITE "${AROS_SDK_INCLUDE_DIR}/literal-sdk-only.h"
+        "#define LITERAL_SDK_VALUE 31\n")
+    file(WRITE "${_source}" [=[
+#include <literal-generated-only.h>
+#include <literal-aros-stdc-only.h>
+#include <literal-sdk-only.h>
+#if LITERAL_GEN_VALUE != 17 || LITERAL_STDC_VALUE != 23 || LITERAL_SDK_VALUE != 31
+#error "native generated SDK include roots are required"
+#endif
+int literal_c_value(void)
+{
+    return LITERAL_GEN_VALUE + LITERAL_STDC_VALUE + LITERAL_SDK_VALUE;
+}
+]=])
+    file(WRITE "${_cpp_source}" [=[
+#include <literal-generated-only.h>
+#include <literal-aros-stdc-only.h>
+#include <literal-sdk-only.h>
+#if LITERAL_GEN_VALUE != 17 || LITERAL_STDC_VALUE != 23 || LITERAL_SDK_VALUE != 31
+#error "native generated SDK include roots are required"
+#endif
+extern "C" int literal_cpp_value()
+{
+    return LITERAL_GEN_VALUE + LITERAL_STDC_VALUE + LITERAL_SDK_VALUE;
+}
+]=])
+endif()
 if(LITERAL_CASE STREQUAL "source-file-symlink")
     file(CREATE_LINK "${_source}" "${AROS_SOURCE_DIR}/src/alias.c" SYMBOLIC)
     set(_source "${AROS_SOURCE_DIR}/src/alias.c")

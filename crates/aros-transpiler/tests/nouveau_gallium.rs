@@ -35,8 +35,8 @@ fn production_nouveau_gallium_is_closed_and_canonical_for_all_current_architectu
     let mesa_mmakefile = root.join("workbench/libs/mesa/mmakefile.src");
 
     let expected_includes = [
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+        "${AROS_SDK_INCLUDE_DIR}/aros/posixc",
+        "${AROS_SDK_INCLUDE_DIR}/aros/stdc",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/GL",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src",

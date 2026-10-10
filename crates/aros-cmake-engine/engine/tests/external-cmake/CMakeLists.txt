@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
+# This fixture builds an ELF target, not a host Darwin binary. Declare that
+# before project() so CMake cannot inject a host -arch into target compiles.
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 project(ExternalCMakeFixture C)
 # This fixture stubs BootstrapSDK; its directory has to come first.
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_LIST_DIR}/cmake")

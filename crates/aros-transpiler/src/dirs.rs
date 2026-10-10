@@ -30,6 +30,9 @@ const MAX_EXPANSION_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXPANSION_SCANNED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXPANSION_WORK_UNITS: usize = 1_048_576;
 const MAX_EXPANSION_LIST_ITEMS: usize = 65_536;
+const MAX_SOURCE_DEPENDENCY_ITEMS: usize = MAX_EXPANSION_WORK_UNITS;
+const MAX_SOURCE_DEPENDENCY_BYTES: usize = MAX_EXPANSION_OUTPUT_BYTES;
+const MAX_SOURCE_DEPENDENCY_WORK: usize = MAX_EXPANSION_WORK_UNITS;
 const EXPANSION_RESOURCE_ERROR: &str = "directory expansion exceeded its resource budget";
 
 #[derive(Default)]
@@ -152,6 +155,32 @@ const SEEDS: &[(&str, &str)] = &[
 #[derive(Default)]
 pub struct DirVars {
     resolved: HashMap<String, String>,
+    /// Make-flavoured source values: recursive assignments retain their text,
+    /// while simple assignments capture the expansion available at that line.
+    /// This remains separate from the legacy resolver table below.
+    source_proven_resolved: HashMap<String, String>,
+    /// Names whose source value cannot be proven from the supported Make
+    /// subset. Legacy expansion still uses `resolved` as before; consumers
+    /// which need source authority must use `expand_source_proven`.
+    unproven_variables: BTreeSet<String>,
+    /// Names assigned with unsupported Make `override` priority. A later
+    /// ordinary assignment cannot replace these values.
+    sticky_unproven_variables: BTreeSet<String>,
+    /// Active dynamic Make evaluation may mutate any variable, so strict
+    /// source expansion is unavailable after an `eval`/dynamic macro use.
+    /// This is intentionally generic; consumers decide which roots they query.
+    source_evaluation_unproven: bool,
+    /// Direct Make-variable references in the source assignment for each name.
+    /// Kept separately because `:=` captures its value but the source
+    /// dependency still matters when rejecting command-line overrides.
+    source_dependencies: HashMap<String, BTreeSet<String>>,
+    source_dependency_items: usize,
+    source_dependency_bytes: usize,
+    source_dependency_work: usize,
+    source_dependency_scan_bytes: usize,
+    /// Exhausting dependency tracking means source authority can no longer be
+    /// established. Legacy expansion remains available to ordinary callers.
+    source_dependency_tracking_unproven: bool,
     /// Physical configure-time counterparts for selected deferred CMake
     /// roots.  Values written to generated CMake remain the symbolic entries
     /// in `resolved`; this map exists only so filesystem-dependent Make
@@ -176,6 +205,8 @@ impl DirVars {
             ("NATIVE_TARGET_RANLIB", "${CMAKE_RANLIB}"),
         ] {
             self.resolved.insert(name.to_owned(), value.to_owned());
+            self.source_proven_resolved
+                .insert(name.to_owned(), value.to_owned());
         }
     }
 
@@ -186,20 +217,43 @@ impl DirVars {
     /// same outcome and says more about what went wrong.
     #[must_use]
     pub fn load(root: &Path) -> Self {
+        let path = root.join("config/make.cfg.in");
+        read_source(&path).map_or_else(
+            |_| Self::from_config_text(""),
+            |text| Self::from_config_text(&text),
+        )
+    }
+
+    /// Resolves directory variables from an already-read `config/make.cfg.in`
+    /// snapshot, using the same build-specific defaults as [`Self::load`].
+    ///
+    /// Source-bound consumers use this constructor after measuring and
+    /// validating the exact bytes against their sealed input digest. Keeping
+    /// the seed table shared prevents the checked path from diverging from
+    /// ordinary graph generation.
+    #[must_use]
+    pub fn from_config_text(text: &str) -> Self {
+        let seeds = SEEDS
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect::<HashMap<_, _>>();
         let mut me = Self {
-            resolved: SEEDS
-                .iter()
-                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                .collect(),
+            resolved: seeds.clone(),
+            source_proven_resolved: seeds,
+            unproven_variables: BTreeSet::new(),
+            sticky_unproven_variables: BTreeSet::new(),
+            source_evaluation_unproven: false,
+            source_dependencies: HashMap::new(),
+            source_dependency_items: 0,
+            source_dependency_bytes: 0,
+            source_dependency_work: 0,
+            source_dependency_scan_bytes: 0,
+            source_dependency_tracking_unproven: false,
             materialized: HashMap::new(),
             unresolved: Vec::new(),
             undecided_conditions: Vec::new(),
         };
-        let path = root.join("config/make.cfg.in");
-        let Ok(text) = read_source(&path) else {
-            return me;
-        };
-        me.absorb(&text);
+        me.absorb(text);
         me
     }
 
@@ -218,57 +272,438 @@ impl DirVars {
         self.materialized.get(name).map(PathBuf::as_path)
     }
 
+    /// Returns the bounded transitive source-variable closure for proven
+    /// assignments. Captured `:=` references remain dependencies even though
+    /// their current values no longer contain Make variable syntax.
+    #[must_use]
+    pub fn source_dependency_closure(&self, roots: &[&str]) -> Option<BTreeSet<String>> {
+        if self.source_dependency_tracking_unproven {
+            return None;
+        }
+        self.source_dependency_closure_with_limits(
+            roots,
+            MAX_SOURCE_DEPENDENCY_ITEMS,
+            MAX_SOURCE_DEPENDENCY_BYTES,
+            MAX_SOURCE_DEPENDENCY_WORK,
+        )
+        .map(|(closure, _)| closure)
+    }
+
+    fn source_dependency_closure_with_limits(
+        &self,
+        roots: &[&str],
+        max_items: usize,
+        max_bytes: usize,
+        max_work: usize,
+    ) -> Option<(BTreeSet<String>, usize)> {
+        if roots.len() > max_items {
+            return None;
+        }
+        let mut closure = BTreeSet::new();
+        let mut pending = VecDeque::new();
+        let mut closure_bytes = 0usize;
+        let mut work = 0usize;
+        pending.try_reserve(roots.len()).ok()?;
+        for root in roots {
+            if !closure.contains(*root) {
+                let next_bytes = closure_bytes.checked_add(root.len())?;
+                if closure.len() >= max_items || next_bytes > max_bytes {
+                    return None;
+                }
+                closure.insert((*root).to_owned());
+                closure_bytes = next_bytes;
+                pending.push_back((*root).to_owned());
+            }
+        }
+        while let Some(name) = pending.pop_front() {
+            work = work.checked_add(1)?;
+            if work > max_work {
+                return None;
+            }
+            if let Some(dependencies) = self.source_dependencies.get(&name) {
+                for dependency in dependencies {
+                    work = work.checked_add(1)?;
+                    if work > max_work {
+                        return None;
+                    }
+                    if !closure.contains(dependency) {
+                        let next_bytes = closure_bytes.checked_add(dependency.len())?;
+                        if closure.len() >= max_items || next_bytes > max_bytes {
+                            return None;
+                        }
+                        pending.try_reserve(1).ok()?;
+                        closure.insert(dependency.clone());
+                        closure_bytes = next_bytes;
+                        pending.push_back(dependency.clone());
+                    }
+                }
+            }
+        }
+        Some((closure, work))
+    }
+
+    fn replace_source_dependencies(
+        &mut self,
+        name: &str,
+        dependencies: Option<BTreeSet<String>>,
+    ) -> bool {
+        self.remove_source_dependencies(name);
+        let Some(dependencies) = dependencies else {
+            return true;
+        };
+        if dependencies.is_empty() {
+            return true;
+        }
+        let Some(bytes) = dependencies
+            .iter()
+            .try_fold(name.len(), |total, dependency| {
+                total.checked_add(dependency.len())
+            })
+        else {
+            self.source_dependency_tracking_unproven = true;
+            return false;
+        };
+        let Some(items) = self
+            .source_dependency_items
+            .checked_add(dependencies.len())
+            .and_then(|items| items.checked_add(1))
+        else {
+            self.source_dependency_tracking_unproven = true;
+            return false;
+        };
+        let Some(total_bytes) = self.source_dependency_bytes.checked_add(bytes) else {
+            self.source_dependency_tracking_unproven = true;
+            return false;
+        };
+        if items > MAX_SOURCE_DEPENDENCY_ITEMS || total_bytes > MAX_SOURCE_DEPENDENCY_BYTES {
+            self.source_dependency_tracking_unproven = true;
+            return false;
+        }
+        self.source_dependency_items = items;
+        self.source_dependency_bytes = total_bytes;
+        self.source_dependencies
+            .insert(name.to_owned(), dependencies);
+        true
+    }
+
+    fn remove_source_dependencies(&mut self, name: &str) {
+        if let Some(previous) = self.source_dependencies.remove(name) {
+            self.source_dependency_items = self
+                .source_dependency_items
+                .saturating_sub(previous.len().saturating_add(1));
+            let previous_bytes = previous.iter().fold(name.len(), |total, dependency| {
+                total.saturating_add(dependency.len())
+            });
+            self.source_dependency_bytes =
+                self.source_dependency_bytes.saturating_sub(previous_bytes);
+        }
+    }
+
     /// Reads the assignments of one Make fragment in file order.
     fn absorb(&mut self, text: &str) {
-        // Nesting is one level deep in the file as it stands, but the stack
-        // costs nothing and a false `ifeq` inside a true one has to stay false.
+        // These two stacks retain the historical resolver's behavior for
+        // supported `ifeq`/`ifneq` syntax. `source_conditions` is stricter: it
+        // also tracks unsupported conditional forms so source-bound consumers
+        // cannot mistake a value from one possible branch for a proven root.
         let mut taken: Vec<bool> = Vec::new();
         let mut undecided: Vec<bool> = Vec::new();
+        let mut source_conditions: Vec<SourceCondition> = Vec::new();
+        let mut define_depth = 0usize;
+        let mut define_name = None;
+        let mut define_is_simple = false;
+        let mut define_is_active = false;
+        let mut define_may_evaluate = false;
+        let mut dynamic_variables = BTreeSet::new();
+        let mut continuation_pending = false;
 
         for raw in text.lines() {
             let line = raw.trim();
-            if line.starts_with('#') {
-                continue;
-            }
+            let continued_from_previous = continuation_pending;
+            continuation_pending = has_make_line_continuation(line);
 
-            if let Some(cond) = line
-                .strip_prefix("ifeq")
-                .map(|c| (c, true))
-                .or_else(|| line.strip_prefix("ifneq").map(|c| (c, false)))
-            {
-                let (args, want_equal) = cond;
-                if let Some(value) = self.condition_holds(args, want_equal) {
-                    taken.push(value);
-                    undecided.push(false);
-                } else {
-                    self.undecided_conditions.push(line.to_owned());
-                    // Neither branch is safe to absorb: choosing the else
-                    // side would be just as speculative as choosing the if.
-                    taken.push(false);
-                    undecided.push(true);
-                }
-                continue;
-            }
-            if line == "else" {
-                if let (false, Some(last)) =
-                    (undecided.last().copied().unwrap_or(false), taken.last_mut())
+            // A define body is a value, not a sequence of top-level Make
+            // directives. Track nested define/endef pairs without trying to
+            // interpret the macro body as directory assignments.
+            if define_depth > 0 {
+                if !continued_from_previous && define_variable_name(line).is_some() {
+                    define_depth = define_depth.saturating_add(1);
+                    if source_branch_certainty(&source_conditions) != BranchCertainty::Inactive {
+                        if let Some(name) = define_variable_name(line) {
+                            self.mark_unproven(name);
+                        }
+                    }
+                } else if !continued_from_previous && line == "endef" {
+                    define_depth -= 1;
+                    if define_depth == 0 {
+                        if define_is_active && define_may_evaluate {
+                            if let Some(name) = define_name.take() {
+                                if define_is_simple {
+                                    self.mark_source_evaluation_unproven();
+                                } else {
+                                    self.mark_dynamic_variable(&mut dynamic_variables, name);
+                                }
+                            }
+                        }
+                        define_name = None;
+                        define_is_simple = false;
+                        define_is_active = false;
+                        define_may_evaluate = false;
+                    }
+                } else if define_is_active
+                    && (contains_make_eval(line)
+                        || contains_make_call(line)
+                        || self.references_dynamic_variable(line, &dynamic_variables))
                 {
-                    *last = !*last;
+                    define_may_evaluate = true;
                 }
                 continue;
             }
-            if line == "endif" {
-                taken.pop();
-                undecided.pop();
-                continue;
-            }
-            if taken.iter().any(|t| !t) {
+            if line.starts_with('#') && !continued_from_previous {
                 continue;
             }
 
-            let Some((name, value)) = split_assignment(line) else {
+            if !continued_from_previous {
+                if let Some((args, want_equal)) = condition_directive(line) {
+                    let parent_certainty = source_branch_certainty(&source_conditions);
+                    if parent_certainty != BranchCertainty::Inactive
+                        && (contains_make_eval(line)
+                            || contains_make_call(line)
+                            || self.references_dynamic_variable(line, &dynamic_variables))
+                    {
+                        self.mark_source_evaluation_unproven();
+                    }
+                    let legacy_value = self.condition_holds_legacy(args, want_equal);
+                    if let Some(value) = legacy_value {
+                        taken.push(value);
+                        undecided.push(false);
+                    } else {
+                        taken.push(false);
+                        undecided.push(true);
+                    }
+                    let source_value = self.condition_holds(args, want_equal);
+                    if source_value.is_none() {
+                        self.undecided_conditions.push(line.to_owned());
+                    }
+                    source_conditions.push(SourceCondition::from_condition(source_value, true));
+                    continue;
+                }
+
+                if is_ifdef_or_ifndef(line) {
+                    self.undecided_conditions.push(line.to_owned());
+                    source_conditions.push(SourceCondition::unknown());
+                    continue;
+                }
+
+                if let Some((args, want_equal)) = else_if_condition(line) {
+                    let parent_certainty = source_branch_certainty(
+                        &source_conditions[..source_conditions.len().saturating_sub(1)],
+                    );
+                    if parent_certainty != BranchCertainty::Inactive
+                        && (contains_make_eval(line)
+                            || contains_make_call(line)
+                            || self.references_dynamic_variable(line, &dynamic_variables))
+                    {
+                        self.mark_source_evaluation_unproven();
+                    }
+                    let value = self.condition_holds(args, want_equal);
+                    if value.is_none() {
+                        self.undecided_conditions.push(line.to_owned());
+                    }
+                    let legacy_supported = if let Some(current) = source_conditions.last_mut() {
+                        current.next_alternative(value);
+                        current.legacy_supported
+                    } else {
+                        false
+                    };
+                    if legacy_supported {
+                        match source_branch_certainty(&source_conditions) {
+                            BranchCertainty::Inactive => {
+                                if let Some(last) = taken.last_mut() {
+                                    *last = false;
+                                }
+                                if let Some(last) = undecided.last_mut() {
+                                    *last = false;
+                                }
+                            }
+                            BranchCertainty::Uncertain => {
+                                if let Some(last) = taken.last_mut() {
+                                    *last = false;
+                                }
+                                if let Some(last) = undecided.last_mut() {
+                                    *last = true;
+                                }
+                            }
+                            BranchCertainty::Definite => {
+                                if let Some(last) = taken.last_mut() {
+                                    *last = true;
+                                }
+                                if let Some(last) = undecided.last_mut() {
+                                    *last = false;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if else_if_unsupported_condition(line) {
+                    let parent_certainty = source_branch_certainty(
+                        &source_conditions[..source_conditions.len().saturating_sub(1)],
+                    );
+                    if parent_certainty != BranchCertainty::Inactive
+                        && (contains_make_eval(line)
+                            || contains_make_call(line)
+                            || self.references_dynamic_variable(line, &dynamic_variables))
+                    {
+                        self.mark_source_evaluation_unproven();
+                    }
+                    self.undecided_conditions.push(line.to_owned());
+                    if let Some(current) = source_conditions.last_mut() {
+                        current.next_alternative(None);
+                        current.legacy_supported = false;
+                    } else {
+                        source_conditions.push(SourceCondition::unknown());
+                    }
+                    continue;
+                }
+
+                if line == "else" {
+                    if let (false, Some(last)) =
+                        (undecided.last().copied().unwrap_or(false), taken.last_mut())
+                    {
+                        *last = !*last;
+                    }
+                    if let Some(current) = source_conditions.last_mut() {
+                        current.else_alternative();
+                    }
+                    continue;
+                }
+                if line == "endif" {
+                    taken.pop();
+                    undecided.pop();
+                    source_conditions.pop();
+                    continue;
+                }
+            }
+
+            let certainty = source_branch_certainty(&source_conditions);
+            if let Some(name) = define_variable_name(line) {
+                if certainty != BranchCertainty::Inactive {
+                    self.mark_unproven(name);
+                }
+                define_name = Some(name.to_owned());
+                define_is_simple = define_is_simple_assignment(line);
+                define_is_active = certainty != BranchCertainty::Inactive;
+                define_may_evaluate = false;
+                define_depth = 1;
+                continue;
+            }
+
+            if certainty != BranchCertainty::Inactive {
+                if let Some(target) = shell_assignment_target(line) {
+                    if contains_make_eval(line)
+                        || contains_make_call(line)
+                        || self.references_dynamic_variable(line, &dynamic_variables)
+                    {
+                        self.mark_source_evaluation_unproven();
+                    }
+                    self.mark_unsupported_assignment_target(target, has_override_prefix(line));
+                    continue;
+                }
+                if let Some(target) = unsupported_assignment_target(line) {
+                    if contains_make_eval(line)
+                        || contains_make_call(line)
+                        || self.references_dynamic_variable(line, &dynamic_variables)
+                    {
+                        self.mark_source_evaluation_unproven();
+                    }
+                    self.mark_unsupported_assignment_target(target, has_override_prefix(line));
+                    // Preserve the historical raw-value resolver for this
+                    // spelling without admitting it as source proof. The old
+                    // splitter trimmed all trailing colons; native consumers
+                    // must not inherit that unsupported Make interpretation.
+                    if taken.iter().all(|branch_taken| *branch_taken) {
+                        if let Some((name, value, _)) = split_assignment_details(line) {
+                            if value.contains('@') {
+                                self.unresolved
+                                    .push(format!("{name} = {value} (configure placeholder)"));
+                            } else if !SEEDS.iter().any(|(seed, _)| *seed == name) {
+                                self.resolved.insert(name.to_owned(), value.to_owned());
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if let Some(name) = modified_assignment_name(line) {
+                    if contains_make_eval(line)
+                        || contains_make_call(line)
+                        || self.references_dynamic_variable(line, &dynamic_variables)
+                    {
+                        self.mark_source_evaluation_unproven();
+                    }
+                    if has_override_prefix(line) {
+                        self.mark_sticky_unproven(name);
+                    } else {
+                        self.mark_unproven(name);
+                    }
+                    continue;
+                }
+                if let Some(names) = undefine_names(line) {
+                    for name in names {
+                        self.mark_unproven(name);
+                    }
+                    continue;
+                }
+                if let Some(name) = append_assignment_name(line) {
+                    if contains_make_eval(line)
+                        || contains_make_call(line)
+                        || self.references_dynamic_variable(line, &dynamic_variables)
+                    {
+                        self.mark_source_evaluation_unproven();
+                    }
+                    self.mark_unproven(name);
+                    continue;
+                }
+                if continued_from_previous || continuation_pending {
+                    if let Some(name) = assignment_target_name(line) {
+                        self.mark_unproven(name);
+                    }
+                }
+            }
+
+            if certainty == BranchCertainty::Inactive {
+                continue;
+            }
+
+            let Some((name, value, operator)) = split_assignment_details(line) else {
+                if certainty != BranchCertainty::Inactive
+                    && (contains_make_eval(line)
+                        || contains_make_call(line)
+                        || self.references_dynamic_variable(line, &dynamic_variables))
+                {
+                    self.mark_source_evaluation_unproven();
+                }
                 continue;
             };
+            if certainty == BranchCertainty::Uncertain {
+                self.mark_unproven(name);
+            }
+            // Keep the pre-existing resolver behavior for unsupported
+            // `ifdef`/`ifndef` and `else ifeq` source, but never let a value
+            // absorbed from those possibly active branches pass strict source
+            // expansion.
+            if taken.iter().any(|branch_taken| !branch_taken) {
+                continue;
+            }
+            let already_defined = SEEDS.iter().any(|(seed, _)| *seed == name)
+                || self.source_proven_resolved.contains_key(name)
+                || self.unproven_variables.contains(name);
+            // Make's `?=` assigns only when a variable has no prior value. Do
+            // not let this supported form replace a previously proven or
+            // possibly-defined value in the source snapshot.
+            if operator == AssignmentOperator::IfUndefined && already_defined {
+                continue;
+            }
             // An autoconf placeholder is filled in by configure, which this
             // build does not run. Recorded as unresolved rather than stored, so
             // a path built from it is reported instead of coming out with an
@@ -276,12 +711,94 @@ impl DirVars {
             if value.contains('@') {
                 self.unresolved
                     .push(format!("{name} = {value} (configure placeholder)"));
+                self.mark_unproven(name);
                 continue;
             }
             // Seeds win: they are this build's answer where the historic file
             // has a different one.
             if SEEDS.iter().any(|(k, _)| *k == name) {
                 continue;
+            }
+            // `${...}` in the sealed Make source is not part of the supported
+            // variable syntax. The same spelling may appear after expanding a
+            // trusted seed such as TARGETDIR; only raw source text is rejected.
+            if value.contains("${") {
+                self.mark_unproven(name);
+                self.source_proven_resolved.remove(name);
+                self.remove_source_dependencies(name);
+                self.resolved.insert(name.to_owned(), value.to_owned());
+                continue;
+            }
+            // An ordinary assignment replaces an earlier source value, so it
+            // also resolves prior uncertainty. `?=` reaches here only when
+            // the source variable has not already been defined and the branch
+            // is definitely active.
+            if certainty == BranchCertainty::Definite
+                && !continued_from_previous
+                && !continuation_pending
+            {
+                self.unproven_variables.remove(name);
+                dynamic_variables.remove(name);
+            } else if continued_from_previous || continuation_pending {
+                self.mark_unproven(name);
+            }
+            let mut dependency_tracking_exhausted = false;
+            let dependencies = if let Some(direct) = variable_references(value) {
+                let mut dependencies = direct;
+                if operator == AssignmentOperator::Simple && !dependencies.is_empty() {
+                    let roots = dependencies.iter().map(String::as_str).collect::<Vec<_>>();
+                    let remaining_work =
+                        MAX_SOURCE_DEPENDENCY_WORK.saturating_sub(self.source_dependency_work);
+                    match self.source_dependency_closure_with_limits(
+                        &roots,
+                        MAX_SOURCE_DEPENDENCY_ITEMS,
+                        MAX_SOURCE_DEPENDENCY_BYTES,
+                        remaining_work,
+                    ) {
+                        Some((closure, work)) => {
+                            self.source_dependency_work += work;
+                            dependencies = closure;
+                        }
+                        None => dependency_tracking_exhausted = true,
+                    }
+                }
+                Some(dependencies)
+            } else {
+                None
+            };
+            let may_evaluate = contains_make_eval(value)
+                || contains_make_call(value)
+                || self.references_dynamic_variable(value, &dynamic_variables);
+            if dependency_tracking_exhausted {
+                self.source_dependency_tracking_unproven = true;
+            }
+            let dependencies_available = dependencies.is_some();
+            if !self.replace_source_dependencies(name, dependencies) || !dependencies_available {
+                self.mark_unproven(name);
+            }
+            if may_evaluate {
+                if operator == AssignmentOperator::Simple {
+                    self.mark_source_evaluation_unproven();
+                } else {
+                    self.mark_dynamic_variable(&mut dynamic_variables, name.to_owned());
+                    self.mark_unproven(name);
+                }
+            }
+            let source_value = match operator {
+                AssignmentOperator::Simple => self.expand_source_proven(value),
+                AssignmentOperator::Recursive | AssignmentOperator::IfUndefined => {
+                    Some(value.to_owned())
+                }
+            };
+            if let Some(source_value) = source_value {
+                self.source_proven_resolved
+                    .insert(name.to_owned(), source_value);
+            } else {
+                // Simple assignments capture their expansion now. A later
+                // definition of a dependency must not retroactively make an
+                // unknown captured value look source-proven.
+                self.mark_unproven(name);
+                self.source_proven_resolved.remove(name);
             }
             self.resolved.insert(name.to_owned(), value.to_owned());
         }
@@ -292,10 +809,21 @@ impl DirVars {
     fn condition_holds(&self, args: &str, want_equal: bool) -> Option<bool> {
         let inner = args.trim().strip_prefix('(')?.strip_suffix(')')?;
         let (a, b) = inner.split_once(',')?;
-        let a = self.expand(a.trim())?;
-        let b = self.expand(b.trim())?;
+        let a = self.expand_source_proven(a.trim())?;
+        let b = self.expand_source_proven(b.trim())?;
         // Target parameters remain CMake expressions in the table. Their
         // value is deliberately not guessed while the Rust transpiler runs.
+        if a.contains("${") || b.contains("${") {
+            return None;
+        }
+        Some((a == b) == want_equal)
+    }
+
+    fn condition_holds_legacy(&self, args: &str, want_equal: bool) -> Option<bool> {
+        let inner = args.trim().strip_prefix('(')?.strip_suffix(')')?;
+        let (a, b) = inner.split_once(',')?;
+        let a = self.expand(a.trim())?;
+        let b = self.expand(b.trim())?;
         if a.contains("${") || b.contains("${") {
             return None;
         }
@@ -309,7 +837,16 @@ impl DirVars {
     /// and expanded there.
     #[must_use]
     pub fn expand(&self, raw: &str) -> Option<String> {
-        self.expand_depth(raw, MAX_DEPTH, &mut ExpansionBudget::default())
+        self.expand_depth(raw, MAX_DEPTH, &mut ExpansionBudget::default(), false)
+    }
+
+    /// Expands source assignments only when every referenced variable has a
+    /// value proven by the supported Make subset. Unlike [`Self::expand`], this
+    /// rejects values that may have been changed by an unsupported directive
+    /// or a possibly active undecidable branch.
+    #[must_use]
+    pub fn expand_source_proven(&self, raw: &str) -> Option<String> {
+        self.expand_depth(raw, MAX_DEPTH, &mut ExpansionBudget::default(), true)
     }
 
     fn expand_depth(
@@ -317,7 +854,13 @@ impl DirVars {
         raw: &str,
         depth: usize,
         budget: &mut ExpansionBudget,
+        require_source_proven: bool,
     ) -> Option<String> {
+        if require_source_proven
+            && (self.source_evaluation_unproven || self.source_dependency_tracking_unproven)
+        {
+            return None;
+        }
         if depth == 0 {
             return None;
         }
@@ -352,14 +895,143 @@ impl DirVars {
                 return None;
             }
             budget.charge_work(1)?;
-            let value = self.resolved.get(name)?;
-            let expanded = self.expand_depth(value, depth - 1, budget)?;
+            if require_source_proven
+                && (self.unproven_variables.contains(name)
+                    || self.sticky_unproven_variables.contains(name))
+            {
+                return None;
+            }
+            let value = if require_source_proven {
+                self.source_proven_resolved.get(name)?
+            } else {
+                self.resolved.get(name)?
+            };
+            let expanded = self.expand_depth(value, depth - 1, budget, require_source_proven)?;
             append_expansion(&mut out, &expanded, budget)?;
             cursor += 1;
             segment_start = cursor;
         }
         append_expansion(&mut out, &raw[segment_start..], budget)?;
         Some(out)
+    }
+
+    fn mark_unproven(&mut self, name: &str) {
+        if !SEEDS.iter().any(|(seed, _)| *seed == name) {
+            self.unproven_variables.insert(name.to_owned());
+        }
+    }
+
+    fn mark_sticky_unproven(&mut self, name: &str) {
+        if !SEEDS.iter().any(|(seed, _)| *seed == name) {
+            self.sticky_unproven_variables.insert(name.to_owned());
+        }
+    }
+
+    fn mark_unsupported_assignment_target(
+        &mut self,
+        target: UnsupportedAssignmentTarget<'_>,
+        override_priority: bool,
+    ) {
+        match target {
+            UnsupportedAssignmentTarget::Known(name)
+                if SEEDS.iter().any(|(seed, _)| *seed == name) =>
+            {
+                self.mark_source_evaluation_unproven();
+            }
+            UnsupportedAssignmentTarget::Known(name) if override_priority => {
+                self.mark_sticky_unproven(name);
+            }
+            UnsupportedAssignmentTarget::Known(name) => self.mark_unproven(name),
+            UnsupportedAssignmentTarget::Unknown => self.mark_source_evaluation_unproven(),
+        }
+    }
+
+    fn mark_dynamic_variable(&mut self, variables: &mut BTreeSet<String>, name: String) {
+        if !variables.contains(&name) && variables.len() >= MAX_EXPANSION_LIST_ITEMS {
+            self.mark_source_evaluation_unproven();
+            return;
+        }
+        variables.insert(name);
+    }
+
+    const fn mark_source_evaluation_unproven(&mut self) {
+        self.source_evaluation_unproven = true;
+    }
+
+    fn references_dynamic_variable(
+        &mut self,
+        raw: &str,
+        dynamic_variables: &BTreeSet<String>,
+    ) -> bool {
+        if dynamic_variables.is_empty() {
+            return false;
+        }
+        let Some(initial_names) = self.dynamic_expansion_names(raw) else {
+            return true;
+        };
+        let mut pending = VecDeque::new();
+        if pending.try_reserve(initial_names.len()).is_err() {
+            self.source_dependency_tracking_unproven = true;
+            return true;
+        }
+        pending.extend(initial_names);
+        let mut visited = BTreeSet::new();
+        while let Some(name) = pending.pop_front() {
+            if !self.charge_source_dependency_work(1) {
+                return true;
+            }
+            if dynamic_variables.contains(&name) {
+                return true;
+            }
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let Some(value) = self.source_proven_resolved.get(&name).cloned() else {
+                continue;
+            };
+            let Some(names) = self.dynamic_expansion_names(&value) else {
+                return true;
+            };
+            if pending.try_reserve(names.len()).is_err() {
+                self.source_dependency_tracking_unproven = true;
+                return true;
+            }
+            pending.extend(names);
+        }
+        false
+    }
+
+    fn dynamic_expansion_names(&mut self, raw: &str) -> Option<BTreeSet<String>> {
+        let Some(total_bytes) = self.source_dependency_scan_bytes.checked_add(raw.len()) else {
+            self.source_dependency_tracking_unproven = true;
+            return None;
+        };
+        if total_bytes > MAX_EXPANSION_SCANNED_BYTES {
+            self.source_dependency_tracking_unproven = true;
+            return None;
+        }
+        self.source_dependency_scan_bytes = total_bytes;
+        let Some(names) = make_expansion_names(raw) else {
+            self.source_dependency_tracking_unproven = true;
+            return None;
+        };
+        if !self.charge_source_dependency_work(names.len()) {
+            return None;
+        }
+        Some(names)
+    }
+
+    const fn charge_source_dependency_work(&mut self, amount: usize) -> bool {
+        let Some(total) = self.source_dependency_work.checked_add(amount) else {
+            self.source_dependency_tracking_unproven = true;
+            return false;
+        };
+        if total > MAX_SOURCE_DEPENDENCY_WORK {
+            self.source_dependency_tracking_unproven = true;
+            return false;
+        }
+        self.source_dependency_work = total;
+        true
     }
 
     /// Expands `$(...)` against the declaring mmakefile first, then this table.
@@ -616,25 +1288,420 @@ impl DirVars {
 /// `+=` is rejected: appending needs the prior value and none of the directory
 /// variables use it. A name with a character Make would not accept is rejected
 /// too, which is what keeps rule lines such as `$(X)/%.info : ...` out.
+#[cfg(test)]
 fn split_assignment(line: &str) -> Option<(&str, &str)> {
+    split_assignment_details(line).map(|(name, value, _)| (name, value))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AssignmentOperator {
+    IfUndefined,
+    Recursive,
+    Simple,
+}
+
+fn split_assignment_details(line: &str) -> Option<(&str, &str, AssignmentOperator)> {
     let idx = line.find('=')?;
     if idx == 0 {
         return None;
     }
     let (lhs, rhs) = line.split_at(idx);
     let rhs = &rhs[1..];
-    let name = lhs.trim_end().trim_end_matches([':', '?']).trim_end();
-    if lhs.trim_end().ends_with('+') {
+    let lhs = lhs.trim_end();
+    if lhs.ends_with('+') {
         return None;
     }
-    if name.is_empty()
-        || !name
+    let operator = if lhs.ends_with('?') {
+        AssignmentOperator::IfUndefined
+    } else if lhs.ends_with(':') {
+        AssignmentOperator::Simple
+    } else {
+        AssignmentOperator::Recursive
+    };
+    let name = lhs.trim_end_matches([':', '?']).trim_end();
+    if !valid_variable_name(name) {
+        return None;
+    }
+    Some((name, rhs.trim(), operator))
+}
+
+fn valid_variable_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BranchCertainty {
+    Inactive,
+    Uncertain,
+    Definite,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PriorSelection {
+    None,
+    Selected,
+    Maybe,
+}
+
+struct SourceCondition {
+    prior_selection: PriorSelection,
+    current: BranchCertainty,
+    legacy_supported: bool,
+}
+
+impl SourceCondition {
+    const fn from_condition(value: Option<bool>, legacy_supported: bool) -> Self {
+        Self {
+            prior_selection: PriorSelection::None,
+            current: condition_certainty(value),
+            legacy_supported,
+        }
+    }
+
+    const fn unknown() -> Self {
+        Self::from_condition(None, false)
+    }
+
+    const fn else_alternative(&mut self) {
+        self.prior_selection = merge_prior_selection(self.prior_selection, self.current);
+        self.current = BranchCertainty::Definite;
+    }
+
+    const fn next_alternative(&mut self, value: Option<bool>) {
+        self.prior_selection = merge_prior_selection(self.prior_selection, self.current);
+        self.current = condition_certainty(value);
+    }
+
+    fn certainty(&self) -> BranchCertainty {
+        match self.prior_selection {
+            PriorSelection::Selected => BranchCertainty::Inactive,
+            PriorSelection::None => self.current,
+            PriorSelection::Maybe if self.current == BranchCertainty::Inactive => {
+                BranchCertainty::Inactive
+            }
+            PriorSelection::Maybe => BranchCertainty::Uncertain,
+        }
+    }
+}
+
+const fn condition_certainty(value: Option<bool>) -> BranchCertainty {
+    match value {
+        Some(true) => BranchCertainty::Definite,
+        Some(false) => BranchCertainty::Inactive,
+        None => BranchCertainty::Uncertain,
+    }
+}
+
+const fn merge_prior_selection(prior: PriorSelection, current: BranchCertainty) -> PriorSelection {
+    match prior {
+        PriorSelection::Selected => PriorSelection::Selected,
+        PriorSelection::Maybe => PriorSelection::Maybe,
+        PriorSelection::None => match current {
+            BranchCertainty::Inactive => PriorSelection::None,
+            BranchCertainty::Uncertain => PriorSelection::Maybe,
+            BranchCertainty::Definite => PriorSelection::Selected,
+        },
+    }
+}
+
+fn source_branch_certainty(conditions: &[SourceCondition]) -> BranchCertainty {
+    let mut uncertain = false;
+    for condition in conditions {
+        match condition.certainty() {
+            BranchCertainty::Inactive => return BranchCertainty::Inactive,
+            BranchCertainty::Uncertain => uncertain = true,
+            BranchCertainty::Definite => {}
+        }
+    }
+    if uncertain {
+        BranchCertainty::Uncertain
+    } else {
+        BranchCertainty::Definite
+    }
+}
+
+fn condition_directive(line: &str) -> Option<(&str, bool)> {
+    line.strip_prefix("ifeq")
+        .map(|args| (args, true))
+        .or_else(|| line.strip_prefix("ifneq").map(|args| (args, false)))
+}
+
+fn else_if_condition(line: &str) -> Option<(&str, bool)> {
+    let alternative = line.strip_prefix("else")?;
+    if !alternative.chars().next().is_some_and(char::is_whitespace) {
         return None;
     }
-    Some((name, rhs.trim()))
+    condition_directive(alternative.trim_start())
+}
+
+fn else_if_unsupported_condition(line: &str) -> bool {
+    let Some(alternative) = line.strip_prefix("else") else {
+        return false;
+    };
+    if !alternative.chars().next().is_some_and(char::is_whitespace) {
+        return false;
+    }
+    is_ifdef_or_ifndef(alternative.trim_start())
+}
+
+fn is_ifdef_or_ifndef(line: &str) -> bool {
+    ["ifdef", "ifndef"].iter().any(|directive| {
+        line.strip_prefix(directive)
+            .and_then(|arguments| arguments.chars().next())
+            .is_some_and(char::is_whitespace)
+    })
+}
+
+fn directive_arguments<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let arguments = line.strip_prefix(keyword)?;
+    arguments
+        .chars()
+        .next()
+        .filter(|character| character.is_whitespace())?;
+    Some(arguments.trim_start())
+}
+
+fn has_make_line_continuation(line: &str) -> bool {
+    let trailing_slashes = line
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(|character| *character == '\\')
+        .count();
+    trailing_slashes % 2 == 1
+}
+
+fn assignment_target_name(line: &str) -> Option<&str> {
+    modified_assignment_name(line)
+        .or_else(|| append_assignment_name(line))
+        .or_else(|| split_assignment_details(line).map(|(name, _, _)| name))
+}
+
+fn modified_assignment_name(line: &str) -> Option<&str> {
+    let remainder = assignment_after_modifiers(line)?;
+    split_assignment_details(remainder)
+        .map(|(name, _, _)| name)
+        .or_else(|| append_assignment_name(remainder))
+}
+
+fn assignment_after_modifiers(line: &str) -> Option<&str> {
+    let mut remainder = line;
+    let mut modified = false;
+    loop {
+        let mut next = None;
+        for keyword in ["override", "export"] {
+            if let Some(arguments) = directive_arguments(remainder, keyword) {
+                next = Some(arguments);
+                break;
+            }
+        }
+        let Some(arguments) = next else {
+            break;
+        };
+        modified = true;
+        remainder = arguments;
+    }
+    modified.then_some(remainder)
+}
+
+#[derive(Clone, Copy)]
+enum UnsupportedAssignmentTarget<'a> {
+    Known(&'a str),
+    Unknown,
+}
+
+fn shell_assignment_target(line: &str) -> Option<UnsupportedAssignmentTarget<'_>> {
+    let remainder = assignment_after_modifiers(line).unwrap_or(line);
+    let (name, _) = remainder.split_once("!=")?;
+    let name = name.trim();
+    Some(if valid_variable_name(name) {
+        UnsupportedAssignmentTarget::Known(name)
+    } else {
+        UnsupportedAssignmentTarget::Unknown
+    })
+}
+
+fn unsupported_assignment_target(line: &str) -> Option<UnsupportedAssignmentTarget<'_>> {
+    let remainder = assignment_after_modifiers(line).unwrap_or(line);
+    let (name, _) = remainder.split_once(":::=")?;
+    let name = name.trim();
+    Some(if valid_variable_name(name) {
+        UnsupportedAssignmentTarget::Known(name)
+    } else {
+        UnsupportedAssignmentTarget::Unknown
+    })
+}
+
+fn has_override_prefix(line: &str) -> bool {
+    let mut remainder = line;
+    loop {
+        if directive_arguments(remainder, "override").is_some() {
+            return true;
+        }
+        let Some(arguments) = directive_arguments(remainder, "export") else {
+            return false;
+        };
+        remainder = arguments;
+    }
+}
+
+fn append_assignment_name(line: &str) -> Option<&str> {
+    let (name, _) = line.split_once("+=")?;
+    let name = name.trim();
+    valid_variable_name(name).then_some(name)
+}
+
+fn undefine_names(line: &str) -> Option<Vec<&str>> {
+    let arguments = line.strip_prefix("undefine")?;
+    if !arguments.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    Some(
+        arguments
+            .split_whitespace()
+            .filter(|name| valid_variable_name(name))
+            .collect(),
+    )
+}
+
+fn define_variable_name(line: &str) -> Option<&str> {
+    let arguments = line.strip_prefix("define")?;
+    if !arguments.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let token = arguments.split_whitespace().next()?;
+    let name = token.trim_end_matches(['=', ':', '?', '+']);
+    valid_variable_name(name).then_some(name)
+}
+
+fn define_is_simple_assignment(line: &str) -> bool {
+    let Some(arguments) = directive_arguments(line, "define") else {
+        return false;
+    };
+    let mut parts = arguments.split_whitespace();
+    let _name = parts.next();
+    matches!(parts.next(), Some(":=" | "::=" | ":::="))
+}
+
+fn variable_references(raw: &str) -> Option<BTreeSet<String>> {
+    if raw.len() > MAX_EXPANSION_VALUE_BYTES {
+        return None;
+    }
+    let bytes = raw.as_bytes();
+    let mut references = BTreeSet::new();
+    let mut cursor = 0usize;
+    while cursor + 1 < bytes.len() {
+        if bytes[cursor] != b'$' || bytes[cursor + 1] != b'(' {
+            cursor += 1;
+            continue;
+        }
+        cursor += 2;
+        let start = cursor;
+        while cursor < bytes.len() && bytes[cursor] != b')' {
+            cursor += 1;
+        }
+        if cursor == bytes.len() {
+            return None;
+        }
+        let name = raw.get(start..cursor)?;
+        if !valid_variable_name(name) {
+            return None;
+        }
+        references.insert(name.to_owned());
+        if references.len() > MAX_EXPANSION_LIST_ITEMS {
+            return None;
+        }
+        cursor += 1;
+    }
+    Some(references)
+}
+
+fn contains_make_eval(raw: &str) -> bool {
+    if raw.len() > MAX_EXPANSION_VALUE_BYTES {
+        return true;
+    }
+    make_expansion_names(raw).is_none_or(|names| names.iter().any(|name| name == "eval"))
+}
+
+fn contains_make_call(raw: &str) -> bool {
+    if raw.len() > MAX_EXPANSION_VALUE_BYTES {
+        return true;
+    }
+    make_expansion_names(raw).is_none_or(|names| names.iter().any(|name| name == "call"))
+}
+
+fn make_expansion_names(raw: &str) -> Option<BTreeSet<String>> {
+    if raw.len() > MAX_EXPANSION_VALUE_BYTES {
+        return None;
+    }
+    let bytes = raw.as_bytes();
+    let mut names = BTreeSet::new();
+    let mut stack: Vec<(u8, usize)> = Vec::new();
+    let mut name_bytes = 0usize;
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if cursor + 1 < bytes.len()
+            && bytes[cursor] == b'$'
+            && matches!(bytes[cursor + 1], b'(' | b'{')
+        {
+            if stack.len() >= MAX_EXPANSION_LIST_ITEMS || stack.try_reserve(1).is_err() {
+                return None;
+            }
+            let close = if bytes[cursor + 1] == b'(' {
+                b')'
+            } else {
+                b'}'
+            };
+            stack.push((close, cursor + 2));
+            cursor += 2;
+            continue;
+        }
+        if matches!(bytes[cursor], b')' | b'}') {
+            if let Some((close, start)) = stack.last().copied() {
+                if bytes[cursor] == close {
+                    stack.pop();
+                    let expression = raw.get(start..cursor)?.trim_start();
+                    let mut parts = expression
+                        .split(|character: char| character.is_whitespace() || character == ',');
+                    let name = parts.next()?;
+                    if !name.is_empty() {
+                        name_bytes = name_bytes.checked_add(name.len())?;
+                        if name_bytes > MAX_SOURCE_DEPENDENCY_BYTES {
+                            return None;
+                        }
+                        names.insert(name.to_owned());
+                    }
+                    if name == "call" {
+                        if let Some(macro_name) = parts.next() {
+                            if !macro_name.is_empty() {
+                                name_bytes = name_bytes.checked_add(macro_name.len())?;
+                                if name_bytes > MAX_SOURCE_DEPENDENCY_BYTES {
+                                    return None;
+                                }
+                                names.insert(macro_name.to_owned());
+                            }
+                        }
+                    }
+                    if names.len() > MAX_EXPANSION_LIST_ITEMS {
+                        return None;
+                    }
+                } else if stack.iter().any(|(expected, _)| *expected == bytes[cursor]) {
+                    // A close matching an outer frame before the current frame
+                    // is malformed nesting. Fail closed instead of losing an
+                    // inner eval while scanning its enclosing function call.
+                    return None;
+                }
+            }
+        }
+        cursor += 1;
+    }
+    if !stack.is_empty() {
+        return None;
+    }
+    Some(names)
 }
 
 #[cfg(test)]
@@ -642,11 +1709,22 @@ mod tests {
     use super::{split_assignment, DirVars};
 
     fn from_text(text: &str) -> DirVars {
+        let resolved = super::SEEDS
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect::<std::collections::HashMap<_, _>>();
         let mut d = DirVars {
-            resolved: super::SEEDS
-                .iter()
-                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                .collect(),
+            resolved: resolved.clone(),
+            source_proven_resolved: resolved,
+            unproven_variables: std::collections::BTreeSet::new(),
+            sticky_unproven_variables: std::collections::BTreeSet::new(),
+            source_evaluation_unproven: false,
+            source_dependencies: std::collections::HashMap::new(),
+            source_dependency_items: 0,
+            source_dependency_bytes: 0,
+            source_dependency_work: 0,
+            source_dependency_scan_bytes: 0,
+            source_dependency_tracking_unproven: false,
             materialized: std::collections::HashMap::new(),
             unresolved: Vec::new(),
             undecided_conditions: Vec::new(),
@@ -757,6 +1835,43 @@ mod tests {
         assert!(d.expand("$(CROSSTOOLSDIR)").is_none());
         assert_eq!(d.unresolved.len(), 1);
         assert!(d.unresolved[0].contains("CROSSTOOLSDIR"));
+    }
+
+    #[test]
+    fn active_dynamic_make_evaluation_invalidates_any_strict_query_only() {
+        let d = from_text("UNRELATED_ROOT := proven\n$(eval AROS_INCLUDES := changed)\n");
+        assert_eq!(d.expand("$(UNRELATED_ROOT)").as_deref(), Some("proven"));
+        assert!(d.expand_source_proven("$(UNRELATED_ROOT)").is_none());
+    }
+
+    #[test]
+    fn unsupported_triple_colon_assignment_preserves_legacy_expansion_but_not_source_proof() {
+        let d = from_text("LEGACY_VALUE :::= $(TARGETDIR)/legacy\n");
+        assert_eq!(
+            d.expand("$(LEGACY_VALUE)").as_deref(),
+            Some("${AROS_BUILD_DIR}/legacy")
+        );
+        assert!(d.expand_source_proven("$(LEGACY_VALUE)").is_none());
+
+        let placeholder = from_text("TARGETDIR :::= @TARGETDIR@\n");
+        assert_eq!(placeholder.unresolved.len(), 1);
+        assert_eq!(
+            placeholder.expand("$(TARGETDIR)").as_deref(),
+            Some("${AROS_BUILD_DIR}")
+        );
+        assert!(placeholder.expand_source_proven("$(TARGETDIR)").is_none());
+    }
+
+    #[test]
+    fn source_dependency_closure_honors_small_explicit_resource_budgets() {
+        let d = from_text("LEAF := include\nROOT := $(LEAF)\n");
+        assert!(d.source_dependency_closure(&["ROOT"]).is_some());
+        assert!(d
+            .source_dependency_closure_with_limits(&["ROOT"], 8, 128, 0)
+            .is_none());
+        assert!(d
+            .source_dependency_closure_with_limits(&["ROOT"], 8, 1, 128)
+            .is_none());
     }
 
     #[test]

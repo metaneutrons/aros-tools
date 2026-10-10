@@ -10,6 +10,17 @@ include_guard(GLOBAL)
 # selection. Only nonempty validated identity arguments are expanded as a
 # CMake list; the caller's ordinary empty ABI selectors remain quoted.
 function(aros_native_transpiler_arguments out_var)
+    if(AROS_NATIVE_CONSUMER_CONTRACT)
+        if(AROS_NATIVE_BUILD_CONTRACT)
+            message(FATAL_ERROR "Native build and consumer selections are mutually exclusive")
+        endif()
+        _aros_native_consumer_current(_source _path _digest)
+        set(${out_var}
+            --native-consumer-profile "${AROS_NATIVE_CONSUMER_PROFILE}"
+            --native-consumer-contract-sha256 "${_digest}"
+            PARENT_SCOPE)
+        return()
+    endif()
     if(NOT AROS_NATIVE_BUILD_CONTRACT)
         set(${out_var} "" PARENT_SCOPE)
         return()

@@ -1,4 +1,5 @@
 include_guard(GLOBAL)
+include("${CMAKE_CURRENT_LIST_DIR}/NativeConsumerContract.cmake")
 
 # Source-declared standalone compilation and exact Developer-library staging.
 # No Make intermediate is read: each object has a private CMake compilation
@@ -192,6 +193,9 @@ endfunction()
 # board-specific object inventory. Resolve them only from registered source
 # owners; never fall back to compiling a guessed source in native mode.
 function(aros_bind_source_sdk_program_inputs)
+    if(AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)
+        _aros_native_source_selection_validated(_source_selected)
+    endif()
     cmake_parse_arguments(PARSE_ARGV 0 B "" "" "REQUIRE")
     if(B_UNPARSED_ARGUMENTS OR B_KEYWORDS_MISSING_VALUES)
         message(FATAL_ERROR "Native program link contract: invalid required roles")
