@@ -10,6 +10,32 @@ use super::{
 };
 use crate::Cli;
 
+#[test]
+fn producer_profile_source_policy_requires_both_explicit_source_selectors() {
+    let base = [
+        "aros",
+        "toolchain",
+        "producer",
+        "profile",
+        "--recipe",
+        "/recipe.json",
+        "--profiles",
+        "/profiles.json",
+        "--preset",
+        "rv32-esp32p4",
+    ];
+    let parse = |extra: &[&str]| Cli::try_parse_from(base.into_iter().chain(extra.iter().copied()));
+    assert!(parse(&[]).is_ok());
+    assert!(parse(&["--source-dir", "/source", "--source-preset", "example-rv32"]).is_ok());
+    for incomplete in [
+        &["--source-dir", "/source"][..],
+        &["--source-preset", "example-rv32"][..],
+    ] {
+        let error = parse(incomplete).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+}
+
 fn parse_package_format(command: &str, package_format: &str) -> Result<Cli, clap::Error> {
     let mut args = vec![
         "aros",

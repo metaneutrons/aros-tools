@@ -70,6 +70,15 @@ The protected collector must independently select `native_sdk_required` from
 the pinned source contract; downloaded input observations cannot disable it.
 Parsing or rehashing a complete forged export does not authenticate execution.
 
+`producer profile` accepts paired `--source-dir` and `--source-preset` options
+to inspect that policy through the shared source-contract loader. The clean
+checkout must match the recipe's source commit/tree, and its source preset must
+select the requested compiler profile. The optional `source_policy` JSON
+projection binds the exact source/profile/contract bytes and derives the SDK
+requirement without reading compatibility exports. No policy is emitted when
+the source options are absent. A protected producer must require this projection
+and independently pin its source; a projection does not authenticate execution.
+
 Still required before release: actual execution through this new integration,
 authenticated owning-job/artifact provenance, a released runtime and the
 complete selected three-host release matrix.

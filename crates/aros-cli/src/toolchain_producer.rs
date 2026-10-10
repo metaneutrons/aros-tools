@@ -214,6 +214,12 @@ struct ProfileArgs {
     /// Exact profile from the recipe-bound profiles matrix
     #[arg(long)]
     preset: String,
+    /// Inspect SDK policy from this clean checkout, bound to the recipe's source identity
+    #[arg(long, requires = "source_preset")]
+    source_dir: Option<PathBuf>,
+    /// Exact source preset selecting this compiler profile; requires --source-dir
+    #[arg(long, requires = "source_dir")]
+    source_preset: Option<String>,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -720,7 +726,7 @@ fn profile(args: &ProfileArgs) -> miette::Result<()> {
     let selected = profiles
         .select(&args.preset)
         .map_err(|error| native_error(&error))?;
-    let document = serde_json::json!({
+    let mut document = serde_json::json!({
         "schema": "aros-toolchain-producer-stage-v1",
         "operation": "profile",
         "preset": selected.name(),
@@ -733,13 +739,49 @@ fn profile(args: &ProfileArgs) -> miette::Result<()> {
         "float_abi": selected.float_abi(),
         "capabilities": selected.capabilities(),
     });
-    match args.format {
-        ResultFormat::Human => aros_common::outputln!(
-            "Native profile: {}\nUpstream commit: {}\nTarget: {}",
-            selected.name(),
-            profiles.upstream_commit().as_str(),
-            selected.target_triple(),
+    let source_policy = match (&args.source_dir, &args.source_preset) {
+        (None, None) => None,
+        (Some(source_root), Some(source_preset)) => Some(
+            aros_toolchain::source_policy::inspect_native_source_policy(
+                &aros_toolchain::source_policy::SourcePolicyRequest {
+                    source_root: source_root.clone(),
+                    expected_source: CommittedSourceIdentity {
+                        commit: recipe.source().0.clone(),
+                        tree: recipe.source().1.clone(),
+                    },
+                    source_preset: source_preset.clone(),
+                    compiler_profile: selected.name().to_owned(),
+                },
+            )
+            .map_err(|error| native_error(&error))?,
         ),
+        _ => {
+            return Err(miette::miette!(
+                "select both --source-dir and --source-preset"
+            ))
+        }
+    };
+    if let Some(policy) = &source_policy {
+        document["source_policy"] = serde_json::to_value(policy)
+            .map_err(|_| miette::miette!("cannot serialize selected source policy"))?;
+    }
+    match args.format {
+        ResultFormat::Human => {
+            aros_common::outputln!(
+                "Native profile: {}\nUpstream commit: {}\nTarget: {}",
+                selected.name(),
+                profiles.upstream_commit().as_str(),
+                selected.target_triple(),
+            );
+            if let Some(policy) = source_policy {
+                aros_common::outputln!(
+                    "Source preset: {}\nOrdinary SDK links required: {}\nSource commit: {}",
+                    policy.source_preset,
+                    policy.native_sdk_required,
+                    policy.source_commit,
+                );
+            }
+        }
         ResultFormat::Json => print_json(&document)?,
     }
     Ok(())

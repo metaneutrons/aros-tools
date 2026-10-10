@@ -118,7 +118,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | --- | --- |
 | `aros toolchain producer recipe` | Construct one non-overwriting recipe from committed source, producer and tools inputs |
 | `aros toolchain producer environment` | Write a deterministic build-environment receipt |
-| `aros toolchain producer profile` | Read one recipe-bound profile without duplicating selectors |
+| `aros toolchain producer profile` | Read one recipe-bound profile; paired source selectors additionally inspect the committed SDK policy |
 | `aros toolchain producer release-plan` | Derive every family-v2 group and host/profile lane from the digest-selected input collection; read-only, no build or qualification |
 | `aros toolchain producer materialize-engine-free-source` | Materialize an audited compatibility snapshot without the source-tree engine |
 | `aros toolchain producer package` | Create one deterministic local package set from a completed candidate |
@@ -163,6 +163,15 @@ referenced recipe, source lock and profile document from `--directory`.
 JSON contains the complete group and host/profile lane set; runner labels and
 A/B scheduling remain workflow policy. No archive, index, compiler execution
 or signature is required or qualified by this input projection.
+
+`producer profile --source-dir DIR --source-preset NAME` derives the SDK-link
+requirement from the clean source revision selected by its recipe. The source
+preset must select the requested compiler profile. Consumer-v2 requires ordinary
+SDK links; missing or malformed declared contracts fail rather than disabling
+the gate. JSON adds `source_policy` with the exact source and contract hashes.
+Without both options the command does not inspect source policy and emits no
+policy result. This is a read-only input projection, not execution or release
+authentication.
 
 `producer verify-release-evidence` requires the complete final family-v2
 inventory, an external closed lane selection and independently retained raw
