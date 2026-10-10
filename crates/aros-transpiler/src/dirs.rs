@@ -19,6 +19,10 @@ use aros_common::read_source;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
+mod source_conditions;
+
+use source_conditions::{source_branch_certainty, BranchCertainty, SourceCondition};
+
 /// How deep a `$(VAR)` chain may nest before it is treated as unresolvable.
 ///
 /// The real chains are three or four deep -- AROS_WALLPAPERS -> AROS_PRESETS ->
@@ -1330,97 +1334,6 @@ fn valid_variable_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BranchCertainty {
-    Inactive,
-    Uncertain,
-    Definite,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PriorSelection {
-    None,
-    Selected,
-    Maybe,
-}
-
-struct SourceCondition {
-    prior_selection: PriorSelection,
-    current: BranchCertainty,
-    legacy_supported: bool,
-}
-
-impl SourceCondition {
-    const fn from_condition(value: Option<bool>, legacy_supported: bool) -> Self {
-        Self {
-            prior_selection: PriorSelection::None,
-            current: condition_certainty(value),
-            legacy_supported,
-        }
-    }
-
-    const fn unknown() -> Self {
-        Self::from_condition(None, false)
-    }
-
-    const fn else_alternative(&mut self) {
-        self.prior_selection = merge_prior_selection(self.prior_selection, self.current);
-        self.current = BranchCertainty::Definite;
-    }
-
-    const fn next_alternative(&mut self, value: Option<bool>) {
-        self.prior_selection = merge_prior_selection(self.prior_selection, self.current);
-        self.current = condition_certainty(value);
-    }
-
-    fn certainty(&self) -> BranchCertainty {
-        match self.prior_selection {
-            PriorSelection::Selected => BranchCertainty::Inactive,
-            PriorSelection::None => self.current,
-            PriorSelection::Maybe if self.current == BranchCertainty::Inactive => {
-                BranchCertainty::Inactive
-            }
-            PriorSelection::Maybe => BranchCertainty::Uncertain,
-        }
-    }
-}
-
-const fn condition_certainty(value: Option<bool>) -> BranchCertainty {
-    match value {
-        Some(true) => BranchCertainty::Definite,
-        Some(false) => BranchCertainty::Inactive,
-        None => BranchCertainty::Uncertain,
-    }
-}
-
-const fn merge_prior_selection(prior: PriorSelection, current: BranchCertainty) -> PriorSelection {
-    match prior {
-        PriorSelection::Selected => PriorSelection::Selected,
-        PriorSelection::Maybe => PriorSelection::Maybe,
-        PriorSelection::None => match current {
-            BranchCertainty::Inactive => PriorSelection::None,
-            BranchCertainty::Uncertain => PriorSelection::Maybe,
-            BranchCertainty::Definite => PriorSelection::Selected,
-        },
-    }
-}
-
-fn source_branch_certainty(conditions: &[SourceCondition]) -> BranchCertainty {
-    let mut uncertain = false;
-    for condition in conditions {
-        match condition.certainty() {
-            BranchCertainty::Inactive => return BranchCertainty::Inactive,
-            BranchCertainty::Uncertain => uncertain = true,
-            BranchCertainty::Definite => {}
-        }
-    }
-    if uncertain {
-        BranchCertainty::Uncertain
-    } else {
-        BranchCertainty::Definite
-    }
 }
 
 fn condition_directive(line: &str) -> Option<(&str, bool)> {
