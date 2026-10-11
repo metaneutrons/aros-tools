@@ -9,7 +9,7 @@ use aros_toolchain::{
     compatibility::{extract_two_roots, extract_two_roots_with_format, TwoRootRelocationRequest},
     package::{package_with_format, PackageFormat, PackageRequest},
     package_verify::PackageVerificationRequest,
-    release_index_v2::NativeReleaseIndexV2,
+    release_index_v2::{NativeReleaseArtifactV2, NativeReleaseIndexV2},
     release_inputs::ReleaseInputs,
 };
 use serde_json::{json, Value};
@@ -42,6 +42,17 @@ const SUPPORT_FILES: &[&str] = &[
 struct Fixture {
     collection: Value,
     documents: BTreeMap<String, Vec<u8>>,
+}
+
+#[derive(serde::Serialize)]
+struct LegacyCompilerOnlyIndex<'a> {
+    schema: u32,
+    release_id: &'a str,
+    base_url: &'a str,
+    inputs_sha256: &'a aros_common::Sha256Digest,
+    producer_commit: &'a aros_toolchain::recipe::GitObjectId,
+    tools_commit: &'a aros_toolchain::recipe::GitObjectId,
+    artifacts: &'a [NativeReleaseArtifactV2],
 }
 
 type MutationCase = (&'static str, fn(&mut Value));
@@ -282,6 +293,87 @@ fn fixture() -> Fixture {
         }),
         documents,
     }
+}
+
+fn sdk_identity(id: &str, variant: u8) -> Value {
+    let triple = if variant == 1 {
+        "i686-unknown-aros"
+    } else {
+        "riscv32-unknown-aros"
+    };
+    json!({
+        "sdk_id": id,
+        "version": "1.2.3",
+        "target": {
+            "target_triple": triple,
+            "abi": {
+                "target_triple": triple,
+                "data_model": if variant == 1 { "ilp32" } else { "ilp32f" }
+            }
+        },
+        "source": {
+            "commit": format!("{:040x}", u64::from(variant) + 1),
+            "git_tree": format!("{:040x}", u64::from(variant) + 11),
+            "content_sha256": format!("{:064x}", u64::from(variant) + 21),
+            "contract_sha256": format!("{:064x}", u64::from(variant) + 31)
+        },
+        "source_date_epoch": 1234_u64 + u64::from(variant)
+    })
+}
+
+fn sdk_fixture() -> Fixture {
+    let mut fixture = fixture();
+    let mut selections = Vec::new();
+    for (id, variant) in [("aros-amiga-dev", 1), ("aros-riscv-dev", 2)] {
+        let identity = sdk_identity(id, variant);
+        let bytes = serde_json::to_vec(&identity).unwrap();
+        let file = format!("{id}-identity.json");
+        fixture.documents.insert(file.clone(), bytes.clone());
+        selections.push(json!({
+            "id": id,
+            "identity": reference(&file, &bytes),
+            "source_preset": "aros-sdk-source-v1",
+            "compiler_profiles": [{"group_id": "gnu-riscv", "profile": "rv32-aros"}]
+        }));
+    }
+    fixture.collection["sdks"] = json!(selections);
+    fixture
+}
+
+const SDK_RELEASE_TAG: &str = "v0.9.0";
+const SDK_RELEASE_URL: &str = "https://example.invalid/aros/releases/v0.9.0";
+
+fn valid_sdk_lock(identity: &Value) -> Value {
+    json!({
+        "schema": "aros-sdk-lock-v2",
+        "release_tag": SDK_RELEASE_TAG,
+        "base_url": SDK_RELEASE_URL,
+        "identity": identity,
+        "tree_sha256": "6".repeat(64),
+        "archive": {"sha256": "7".repeat(64), "size": 1024},
+        "manifest": {"sha256": "8".repeat(64), "size": 256}
+    })
+}
+
+fn sdk_locks(fixture: &Fixture) -> Vec<Value> {
+    fixture.collection["sdks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|selection| {
+            let file = selection["identity"]["file"].as_str().unwrap();
+            let identity: Value = serde_json::from_slice(&fixture.documents[file]).unwrap();
+            valid_sdk_lock(&identity)
+        })
+        .collect()
+}
+
+fn sdk_index_value(fixture: &Fixture) -> Value {
+    let mut index = index_value(fixture);
+    index["release_id"] = json!(SDK_RELEASE_TAG);
+    index["base_url"] = json!(SDK_RELEASE_URL);
+    index["sdks"] = json!(sdk_locks(fixture));
+    index
 }
 
 fn collection_bytes(fixture: &Fixture) -> Vec<u8> {
@@ -559,6 +651,21 @@ fn binds_mixed_compiler_lanes_roundtrips_and_derives_exact_inventory() {
     let encoded = index.to_json_bytes().unwrap();
     let encoded_value: Value = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(encoded_value, wire);
+    assert!(encoded_value.get("sdks").is_none());
+    assert_eq!(
+        encoded,
+        serde_json::to_vec(&LegacyCompilerOnlyIndex {
+            schema: 2,
+            release_id: index.release_id(),
+            base_url: index.base_url(),
+            inputs_sha256: index.inputs_sha256(),
+            producer_commit: index.producer_commit(),
+            tools_commit: index.tools_commit(),
+            artifacts: index.artifacts(),
+        })
+        .unwrap(),
+        "empty SDK support must preserve the pre-SDK compiler-only wire bytes"
+    );
     let roundtrip = NativeReleaseIndexV2::parse(&encoded, &inputs).unwrap();
     assert_eq!(roundtrip.to_json_bytes().unwrap(), encoded);
     for (parsed, declared) in index
@@ -631,6 +738,231 @@ fn binds_mixed_compiler_lanes_roundtrips_and_derives_exact_inventory() {
         .map(|name| name.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
     assert_eq!(folded.len(), index.expected_inventory().len());
+}
+
+#[test]
+fn sdk_index_roundtrips_exact_locks_and_unions_host_independent_inventory() {
+    let sdk_fixture_data = sdk_fixture();
+    let inputs = validated_inputs(&sdk_fixture_data);
+    assert_eq!(inputs.sdks().len(), 2);
+    let wire = sdk_index_value(&sdk_fixture_data);
+    let index = parse_value(&inputs, &wire).unwrap();
+
+    assert_eq!(index.artifacts().len(), 9);
+    assert_eq!(index.sdks().len(), 2);
+    assert_eq!(
+        serde_json::to_value(index.sdks()).unwrap(),
+        wire["sdks"],
+        "the wire value must be a product-ID-ordered array of plain release locks"
+    );
+    let encoded = index.to_json_bytes().unwrap();
+    let encoded_value: Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(encoded_value, wire);
+    assert_eq!(
+        NativeReleaseIndexV2::parse(&encoded, &inputs)
+            .unwrap()
+            .to_json_bytes()
+            .unwrap(),
+        encoded
+    );
+
+    let compiler_fixture = fixture();
+    let compiler_inputs = validated_inputs(&compiler_fixture);
+    let compiler_only = parse_value(&compiler_inputs, &index_value(&compiler_fixture)).unwrap();
+    assert_eq!(
+        index.expected_inventory().len() - compiler_only.expected_inventory().len(),
+        10,
+        "two SDK selections add two identity documents and four files each"
+    );
+    let mut expected = compiler_only.expected_inventory().clone();
+    for sdk in inputs.sdks() {
+        expected.insert(sdk.identity_reference().file().to_owned());
+        let asset = sdk.identity().asset_name().unwrap();
+        for name in [
+            asset.clone(),
+            format!("{asset}.manifest.json"),
+            format!("{asset}.sha256"),
+            format!("{asset}.spdx.json"),
+        ] {
+            expected.insert(name);
+        }
+    }
+    assert_eq!(index.expected_inventory(), &expected);
+    for sdk in inputs.sdks() {
+        let asset = sdk.identity().asset_name().unwrap();
+        assert_eq!(
+            index
+                .expected_inventory()
+                .iter()
+                .filter(|name| name.as_str() == asset.as_str())
+                .count(),
+            1,
+            "SDK assets are host-independent and must not be multiplied by hosts"
+        );
+    }
+}
+
+#[test]
+fn sdk_index_requires_exact_sorted_identity_bound_locks_and_shared_release_location() {
+    let fixture = sdk_fixture();
+    let inputs = validated_inputs(&fixture);
+    let valid = sdk_index_value(&fixture);
+    assert!(parse_value(&inputs, &valid).is_ok());
+
+    let cases: &[MutationCase] = &[
+        ("omitted SDK lock array", |v| {
+            v.as_object_mut().unwrap().remove("sdks");
+        }),
+        ("missing SDK lock", |v| {
+            v["sdks"].as_array_mut().unwrap().pop();
+        }),
+        ("extra SDK lock", |v| {
+            let extra = v["sdks"][0].clone();
+            v["sdks"].as_array_mut().unwrap().push(extra);
+        }),
+        ("unsorted SDK locks", |v| {
+            v["sdks"].as_array_mut().unwrap().swap(0, 1);
+        }),
+        ("swapped SDK identities", |v| {
+            let first = v["sdks"][0]["identity"].clone();
+            v["sdks"][0]["identity"] = v["sdks"][1]["identity"].clone();
+            v["sdks"][1]["identity"] = first;
+        }),
+        ("wrong SDK product identity", |v| {
+            v["sdks"][0]["identity"]["sdk_id"] = json!("aros-other-dev");
+        }),
+        ("wrong SDK source commit", |v| {
+            v["sdks"][0]["identity"]["source"]["commit"] = json!("f".repeat(40));
+        }),
+        ("wrong SDK source tree", |v| {
+            v["sdks"][0]["identity"]["source"]["git_tree"] = json!("e".repeat(40));
+        }),
+        ("wrong SDK source projection digest", |v| {
+            v["sdks"][0]["identity"]["source"]["content_sha256"] = json!("d".repeat(64));
+        }),
+        ("wrong SDK source contract digest", |v| {
+            v["sdks"][0]["identity"]["source"]["contract_sha256"] = json!("c".repeat(64));
+        }),
+        ("wrong SDK target identity", |v| {
+            v["sdks"][0]["identity"]["target"]["target_triple"] = json!("x86_64-unknown-aros");
+            v["sdks"][0]["identity"]["target"]["abi"]["target_triple"] =
+                json!("x86_64-unknown-aros");
+        }),
+        ("wrong SDK ABI identity", |v| {
+            v["sdks"][0]["identity"]["target"]["abi"]["data_model"] = json!("lp64d");
+        }),
+        ("wrong SDK version", |v| {
+            v["sdks"][0]["identity"]["version"] = json!("1.2.4");
+        }),
+        ("wrong SDK source-date epoch", |v| {
+            v["sdks"][0]["identity"]["source_date_epoch"] = json!(9999);
+        }),
+        ("wrong SDK release tag", |v| {
+            v["sdks"][0]["release_tag"] = json!("v1.2.4");
+            v["sdks"][0]["base_url"] = json!("https://example.invalid/aros/releases/v1.2.4");
+        }),
+        ("wrong SDK release URL", |v| {
+            v["sdks"][0]["base_url"] = json!("https://example.invalid/alternate/releases/v1.2.3");
+        }),
+    ];
+    for (name, mutate) in cases {
+        let mut changed = valid.clone();
+        mutate(&mut changed);
+        assert_index_error(&inputs, &changed);
+        assert!(
+            parse_value(&inputs, &valid).is_ok(),
+            "{name} changed valid input"
+        );
+    }
+}
+
+#[test]
+fn sdk_index_rejects_invalid_lock_digests_sizes_and_duplicate_closed_fields() {
+    let fixture = sdk_fixture();
+    let inputs = validated_inputs(&fixture);
+    let valid = sdk_index_value(&fixture);
+    let cases: &[MutationCase] = &[
+        ("zero tree digest", |v| {
+            v["sdks"][0]["tree_sha256"] = json!("0".repeat(64));
+        }),
+        ("invalid archive digest", |v| {
+            v["sdks"][0]["archive"]["sha256"] = json!("x".repeat(64));
+        }),
+        ("zero manifest digest", |v| {
+            v["sdks"][0]["manifest"]["sha256"] = json!("0".repeat(64));
+        }),
+        ("zero archive size", |v| {
+            v["sdks"][0]["archive"]["size"] = json!(0);
+        }),
+        ("archive exceeds lock bound", |v| {
+            v["sdks"][0]["archive"]["size"] = json!(4_u64 * 1024 * 1024 * 1024 + 1);
+        }),
+        ("manifest exceeds metadata bound", |v| {
+            v["sdks"][0]["manifest"]["size"] = json!(16_u64 * 1024 * 1024 + 1);
+        }),
+        ("unknown closed-lock field", |v| {
+            v["sdks"][0]["private-lock-field-marker"] = json!("private-lock-value-marker");
+        }),
+    ];
+    for (name, mutate) in cases {
+        let mut changed = valid.clone();
+        mutate(&mut changed);
+        let error = assert_index_error(&inputs, &changed);
+        assert!(!error.to_string().contains("private-lock-field"), "{name}");
+        assert!(
+            !error.to_string().contains("private-lock-value-marker"),
+            "{name}"
+        );
+    }
+
+    let encoded = String::from_utf8(serde_json::to_vec(&valid).unwrap()).unwrap();
+    for (needle, duplicate) in [
+        (
+            "\"release_tag\":\"v0.9.0\"",
+            "\"release_tag\":\"v0.9.0\",\"release_tag\":\"v0.9.0\"",
+        ),
+        (
+            "\"sdk_id\":\"aros-amiga-dev\"",
+            "\"sdk_id\":\"aros-amiga-dev\",\"sdk_id\":\"aros-amiga-dev\"",
+        ),
+    ] {
+        let changed = encoded.replacen(needle, duplicate, 1);
+        assert_ne!(
+            changed, encoded,
+            "duplicate SDK lock probe must target one field"
+        );
+        let error = NativeReleaseIndexV2::parse(changed.as_bytes(), &inputs).unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code,
+            DiagnosticCode::ProducerIndex
+        );
+    }
+}
+
+#[test]
+fn sdk_derived_identity_filename_collision_is_rejected_by_index_inventory() {
+    let mut fixture = sdk_fixture();
+    let old_file = fixture.collection["sdks"][0]["identity"]["file"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let identity_bytes = fixture.documents.remove(&old_file).unwrap();
+    let identity: Value = serde_json::from_slice(&identity_bytes).unwrap();
+    let colliding_file = format!(
+        "aros-sdk-{}-{}.tar.xz.manifest.json",
+        identity["sdk_id"].as_str().unwrap(),
+        identity["version"].as_str().unwrap()
+    );
+    fixture.collection["sdks"][0]["identity"]["file"] = json!(colliding_file);
+    fixture
+        .documents
+        .insert(colliding_file, identity_bytes.clone());
+    fixture.collection["sdks"][0]["identity"]["sha256"] = json!(sha256_bytes(&identity_bytes));
+
+    // The input contract allows a safe, globally unique JSON filename here;
+    // index inventory derivation must catch its collision with the SDK sidecar.
+    let inputs = validated_inputs(&fixture);
+    assert_index_error(&inputs, &sdk_index_value(&fixture));
 }
 
 #[test]
@@ -1249,6 +1581,90 @@ fn compiler_family_v2_candidate_baseline_requires_all_llvm_and_rv32_lanes_withou
         &inputs,
         &qualification_policy(150),
     );
+}
+
+#[test]
+fn sdk_selected_release_rejects_fully_covered_compiler_only_qualification() {
+    let fixture = sdk_fixture();
+    let inputs = validated_inputs(&fixture);
+    let index_bytes = NativeReleaseIndexV2::parse(
+        &serde_json::to_vec(&sdk_index_value(&fixture)).unwrap(),
+        &inputs,
+    )
+    .unwrap()
+    .to_json_bytes()
+    .unwrap();
+    let evidence_value = qualification_evidence_value(&inputs, &index_bytes, "release-candidate");
+    let evidence = aros_toolchain::qualification_evidence_v2::QualificationEvidenceV2::parse(
+        &serde_json::to_vec(&evidence_value).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        evidence.lanes.len(),
+        9,
+        "fixture covers every compiler lane"
+    );
+
+    let error = evidence
+        .validate_against_index(
+            &index_bytes,
+            &inputs,
+            &serde_json::from_value(qualification_policy(150)).unwrap(),
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "SDK-selected release requires complete authenticated SDK qualification, not compiler-only lanes"
+        ),
+        "the complete compiler matrix must fail specifically at the SDK qualification gate: {error}"
+    );
+}
+
+#[test]
+fn sdk_selected_release_requires_independent_package_selections_before_filesystem_io() {
+    use aros_toolchain::release_index_v2_builder::{
+        build_measured_index_v2, MeasuredReleaseIndexRequestV2,
+    };
+    use aros_toolchain::release_index_v2_readback::{
+        readback_indexed_packages, IndexedPackageReadbackRequestV2,
+    };
+    let fixture = sdk_fixture();
+    let inputs = validated_inputs(&fixture);
+    let index = parse_value(&inputs, &sdk_index_value(&fixture)).unwrap();
+    let isolated = tempfile::tempdir().unwrap();
+    let absent = isolated.path().join("must-not-be-created");
+    let errors = [
+        build_measured_index_v2(&MeasuredReleaseIndexRequestV2 {
+            directory: absent.clone(),
+            inputs: inputs.clone(),
+            release_id: SDK_RELEASE_TAG.into(),
+            base_url: SDK_RELEASE_URL.into(),
+            build_environments: BTreeMap::new(),
+            required_paths: BTreeMap::new(),
+            sdk_packages: BTreeMap::new(),
+            forbidden_prefixes: Vec::new(),
+        })
+        .unwrap_err(),
+        readback_indexed_packages(&IndexedPackageReadbackRequestV2 {
+            directory: absent.clone(),
+            inputs,
+            index,
+            build_environments: BTreeMap::new(),
+            sdk_packages: BTreeMap::new(),
+            forbidden_prefixes: Vec::new(),
+        })
+        .unwrap_err(),
+    ];
+    for error in errors {
+        assert!(
+            error
+                .to_string()
+                .contains("SDK package map must exactly cover the complete selected SDK input set"),
+            "{error}"
+        );
+    }
+    assert!(!absent.exists());
+    assert_eq!(fs::read_dir(isolated.path()).unwrap().count(), 0);
 }
 
 #[test]

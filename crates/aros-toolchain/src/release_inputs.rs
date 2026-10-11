@@ -1,8 +1,9 @@
 //! Separately versioned release-input collection and in-memory binding.
 //!
 //! A validated collection closes exact recipe, source-lock and profiles bytes
-//! for each compiler family. It describes expected host/profile lanes only; it
-//! is not evidence that any compiler was built, signed or released.
+//! for each compiler family and optional source-owned SDK identity documents.
+//! It describes expected compiler lanes and SDK selections; it is not evidence
+//! that any compiler or SDK was built, qualified, signed or released.
 //! [`ReleaseInputs::parse`] is the pure in-memory boundary;
 //! [`ReleaseInputs::load`] adds bounded local filesystem reads before applying
 //! that same binding.
@@ -10,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use aros_common::sdk_manifest::SdkIdentity;
 use aros_common::{measure_regular_file_bounded, sha256_bytes, FileIdentity, Sha256Digest};
 use serde::{Deserialize, Deserializer};
 
@@ -23,9 +25,11 @@ use crate::{canonical, package_identity, ContractError, Recipe};
 pub const ACTIVE_HOSTS: &[&str] = &["linux-aarch64", "linux-x86_64", "macos-aarch64"];
 
 const MAX_GROUPS: usize = 32;
+const MAX_SDKS: usize = 32;
+const MAX_SDK_COMPILER_PROFILES: usize = 64;
 const MAX_FILE_NAME_BYTES: usize = 128;
 const COLLECTION_FILE_NAME: &str = "toolchain-release-inputs-v2.json";
-const MAX_INPUT_SET_BYTES: usize = canonical::MAX_DOCUMENT_BYTES * (1 + MAX_GROUPS * 3);
+const MAX_INPUT_SET_BYTES: usize = canonical::MAX_DOCUMENT_BYTES * (1 + MAX_GROUPS * 3 + MAX_SDKS);
 const RESERVED_INVENTORY_NAMES: &[&str] = &[
     "SHA256SUMS",
     "toolchain-index-v1.json",
@@ -56,6 +60,24 @@ struct Record {
     tools_commit: GitObjectId,
     hosts: Vec<String>,
     groups: Vec<GroupRecord>,
+    #[serde(default)]
+    sdks: Vec<SdkRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SdkRecord {
+    id: String,
+    identity: DocumentReferenceRecord,
+    source_preset: String,
+    compiler_profiles: Vec<SdkCompilerProfileRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SdkCompilerProfileRecord {
+    group_id: String,
+    profile: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +115,79 @@ impl DocumentReference {
     #[must_use]
     pub const fn sha256(&self) -> &Sha256Digest {
         &self.sha256
+    }
+}
+
+/// One source-owned SDK selection, independent of the native host matrix.
+///
+/// The identity document and compiler references are exact selections, not
+/// execution evidence or proof that the selected compiler implements this ABI.
+#[derive(Debug, Clone)]
+pub struct BoundSdk {
+    id: String,
+    identity_reference: DocumentReference,
+    identity: SdkIdentity,
+    identity_bytes: Vec<u8>,
+    source_preset: String,
+    compiler_profiles: Vec<SdkCompilerProfileReference>,
+}
+
+impl BoundSdk {
+    /// Sorted unique SDK product ID, not a board alias.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Exact raw identity-document filename and byte digest.
+    #[must_use]
+    pub const fn identity_reference(&self) -> &DocumentReference {
+        &self.identity_reference
+    }
+
+    /// Validated independent SDK product, source and target/ABI identity.
+    #[must_use]
+    pub const fn identity(&self) -> &SdkIdentity {
+        &self.identity
+    }
+
+    /// Exact document bytes bound to the collection, without canonical rewrites.
+    #[must_use]
+    pub fn identity_bytes(&self) -> &[u8] {
+        &self.identity_bytes
+    }
+
+    /// Explicit source preset to verify against the committed source later.
+    #[must_use]
+    pub fn source_preset(&self) -> &str {
+        &self.source_preset
+    }
+
+    /// Explicit compiler profiles required to qualify this SDK.
+    #[must_use]
+    pub fn compiler_profiles(&self) -> &[SdkCompilerProfileReference] {
+        &self.compiler_profiles
+    }
+}
+
+/// One compiler-group/profile reference required by a selected SDK.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdkCompilerProfileReference {
+    group_id: String,
+    profile: String,
+}
+
+impl SdkCompilerProfileReference {
+    /// Exact bound compiler-family group ID.
+    #[must_use]
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    /// Exact profile within that group; no alias or host inference.
+    #[must_use]
+    pub fn profile(&self) -> &str {
+        &self.profile
     }
 }
 
@@ -215,6 +310,7 @@ pub struct ReleaseInputs {
     hosts: Vec<String>,
     groups: Vec<BoundGroup>,
     lanes: Vec<ExpectedLane>,
+    sdks: Vec<BoundSdk>,
 }
 
 impl ReleaseInputs {
@@ -296,9 +392,9 @@ impl ReleaseInputs {
     ///
     /// `documents` must contain exactly the referenced filenames. Extra and
     /// missing entries are rejected before any referenced document is parsed.
-    /// All three documents are hashed as raw bytes before their existing
-    /// closed parsers are called. No filesystem, network or publication work is
-    /// performed.
+    /// Every referenced compiler and SDK document is hashed as raw bytes before
+    /// its closed parser is called. No filesystem, network or publication work
+    /// is performed.
     ///
     /// # Errors
     ///
@@ -332,6 +428,13 @@ impl ReleaseInputs {
                 };
                 referenced_bytes(documents, &borrowed)?;
             }
+        }
+        for sdk in &record.sdks {
+            let reference = DocumentReference {
+                file: sdk.identity.file.clone(),
+                sha256: sdk.identity.sha256.clone(),
+            };
+            referenced_bytes(documents, &reference)?;
         }
 
         let mut groups = Vec::with_capacity(record.groups.len());
@@ -457,6 +560,7 @@ impl ReleaseInputs {
             });
         }
 
+        let sdks = bind_sdk_selections(record.sdks, documents, &groups)?;
         Ok(Self {
             collection_sha256: sha256_bytes(input),
             producer_commit: record.producer_commit,
@@ -464,6 +568,7 @@ impl ReleaseInputs {
             hosts: record.hosts,
             groups,
             lanes,
+            sdks,
         })
     }
 
@@ -501,6 +606,12 @@ impl ReleaseInputs {
     #[must_use]
     pub fn expected_lanes(&self) -> &[ExpectedLane] {
         &self.lanes
+    }
+
+    /// Host-independent SDK selections, not additional compiler lanes.
+    #[must_use]
+    pub fn sdks(&self) -> &[BoundSdk] {
+        &self.sdks
     }
 }
 
@@ -557,7 +668,162 @@ fn parse_collection_record(input: &[u8]) -> Result<(Record, BTreeSet<String>), C
             }
         }
     }
+    if record.sdks.len() > MAX_SDKS {
+        return Err(ContractError::invalid(
+            "release-inputs-v2 SDK selection count exceeds 32",
+        ));
+    }
+    let mut previous_sdk: Option<&str> = None;
+    for sdk in &record.sdks {
+        if !safe_sdk_id(&sdk.id)
+            || previous_sdk.is_some_and(|previous| previous >= sdk.id.as_str())
+            || !safe_source_preset(&sdk.source_preset)
+        {
+            return Err(ContractError::invalid(
+                "release-inputs-v2 SDK IDs must be sorted and unique with safe source presets",
+            ));
+        }
+        previous_sdk = Some(&sdk.id);
+        if !safe_document_filename(&sdk.identity.file)
+            || !expected_files.insert(sdk.identity.file.clone())
+        {
+            return Err(ContractError::invalid(
+                "release-inputs-v2 SDK identity filenames must be safe and globally unique",
+            ));
+        }
+        if sdk.compiler_profiles.is_empty()
+            || sdk.compiler_profiles.len() > MAX_SDK_COMPILER_PROFILES
+        {
+            return Err(ContractError::invalid(
+                "release-inputs-v2 SDK requires 1..64 explicit compiler profiles",
+            ));
+        }
+        let mut previous_profile: Option<(&str, &str)> = None;
+        for profile in &sdk.compiler_profiles {
+            let selected = (profile.group_id.as_str(), profile.profile.as_str());
+            if !safe_group_id(&profile.group_id)
+                || !safe_source_preset(&profile.profile)
+                || previous_profile.is_some_and(|previous| previous >= selected)
+            {
+                return Err(ContractError::invalid(
+                    "release-inputs-v2 SDK compiler references must be sorted, unique safe pairs",
+                ));
+            }
+            previous_profile = Some(selected);
+        }
+    }
     Ok((record, expected_files))
+}
+
+fn bind_sdk_selections(
+    records: Vec<SdkRecord>,
+    documents: &BTreeMap<String, Vec<u8>>,
+    groups: &[BoundGroup],
+) -> Result<Vec<BoundSdk>, ContractError> {
+    let mut assets = BTreeSet::new();
+    let mut source_trees = groups
+        .iter()
+        .map(|group| {
+            let (commit, tree) = group.recipe.source();
+            (commit.as_str().to_owned(), tree.as_str().to_owned())
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut source_contents = BTreeMap::new();
+    let mut sdks = Vec::with_capacity(records.len());
+    for record in records {
+        let identity_reference = own_reference(record.identity);
+        let identity_bytes = referenced_bytes(documents, &identity_reference)?;
+        let identity: SdkIdentity = serde_json::from_slice(identity_bytes)
+            .map_err(|_| ContractError::invalid("SDK identity is not a closed JSON document"))?;
+        identity
+            .validate()
+            .map_err(|_| ContractError::identity("selected SDK identity is invalid"))?;
+        if record.id != identity.sdk_id {
+            return Err(ContractError::identity(
+                "SDK selection ID differs from its independently bound product identity",
+            ));
+        }
+        let asset = identity
+            .asset_name()
+            .map_err(|_| ContractError::identity("selected SDK asset identity is invalid"))?;
+        if !assets.insert(asset.to_ascii_lowercase()) {
+            return Err(ContractError::identity(
+                "SDK selections derive colliding canonical asset names",
+            ));
+        }
+        if let Some(previous) = source_trees.insert(
+            identity.source.commit.clone(),
+            identity.source.git_tree.clone(),
+        ) {
+            if previous != identity.source.git_tree {
+                return Err(ContractError::identity(
+                    "SDK source Git tree contradicts another selection of the same commit",
+                ));
+            }
+        }
+        if let Some(previous) = source_contents.insert(
+            identity.source.git_tree.clone(),
+            identity.source.content_sha256.clone(),
+        ) {
+            if previous != identity.source.content_sha256 {
+                return Err(ContractError::identity(
+                    "SDK source content contradicts another selection of the same Git tree",
+                ));
+            }
+        }
+        let mut compiler_profiles = Vec::with_capacity(record.compiler_profiles.len());
+        for reference in record.compiler_profiles {
+            let group = groups
+                .iter()
+                .find(|group| group.id() == reference.group_id)
+                .ok_or_else(|| {
+                    ContractError::identity("SDK references an unbound compiler group")
+                })?;
+            group.profiles().select(&reference.profile).map_err(|_| {
+                ContractError::identity("SDK references an unbound compiler profile")
+            })?;
+            compiler_profiles.push(SdkCompilerProfileReference {
+                group_id: reference.group_id,
+                profile: reference.profile,
+            });
+        }
+        sdks.push(BoundSdk {
+            id: record.id,
+            identity_reference,
+            identity,
+            identity_bytes: identity_bytes.to_vec(),
+            source_preset: record.source_preset,
+            compiler_profiles,
+        });
+    }
+    Ok(sdks)
+}
+
+fn safe_source_preset(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte))
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .next_back()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn safe_sdk_id(value: &str) -> bool {
+    // Match the shared SDK product-ID grammar, not compiler-group IDs.
+    !value.is_empty()
+        && value.len() <= 96
+        && value != "."
+        && value != ".."
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_.+".contains(&byte)
+        })
 }
 
 fn read_bounded_input_file(

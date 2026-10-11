@@ -13,16 +13,23 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use aros_common::{sha256_bytes, ArosCompilerIdentity};
+use aros_common::sdk_manifest::SdkIdentity;
+use aros_common::{
+    sha256_bytes, toolchain_tree_inventory_excluding, ArosCompilerIdentity, Sha256Digest,
+};
 use aros_toolchain::canonical;
 use aros_toolchain::package::{package_with_format, PackageFormat, PackageRequest};
 use aros_toolchain::profiles::Profile;
 use aros_toolchain::release_inputs::{ReleaseInputs, ACTIVE_HOSTS};
+use aros_toolchain::sdk_package::{self, SdkPackageRequest, SdkVerificationRequest};
+use aros_toolchain::sdk_sbom::build_measured_sdk_sbom;
 use aros_toolchain::source_lock::{CompilerFamily, SourceLock};
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 
 const RELEASE_ID: &str = "release-2026.10-cli-fixture";
+const SDK_RELEASE_ID: &str = "v2.0.0";
+const SDK_BASE_URL: &str = "https://example.invalid/aros/releases/v2.0.0";
 const GNU_SOURCE_COMMIT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
 const LLVM_SOURCE_COMMIT: &str = "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2";
 const PRODUCER_COMMIT: &str = "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3";
@@ -70,18 +77,46 @@ struct Fixture {
     root: PathBuf,
     base_preindex: PathBuf,
     lanes: Value,
+    release_id: String,
+    base_url: String,
+    sdk_asset: Option<String>,
+    sdk_identity_filename: Option<String>,
 }
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_sdk(false)
+    }
+
+    fn new_with_sdk() -> Self {
+        Self::with_sdk(true)
+    }
+
+    fn with_sdk(include_sdk: bool) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().canonicalize().unwrap();
         let base_preindex = root.join("base-preindex");
         fs::create_dir(&base_preindex).unwrap();
 
-        let (collection, documents) = target_scope_input_documents();
+        let (collection, documents) = if include_sdk {
+            sdk_target_scope_input_documents()
+        } else {
+            target_scope_input_documents()
+        };
         let collection_bytes = serde_json::to_vec(&collection).unwrap();
         let inputs = ReleaseInputs::parse(&collection_bytes, &documents).unwrap();
+        let release_id = if include_sdk {
+            SDK_RELEASE_ID
+        } else {
+            RELEASE_ID
+        }
+        .to_owned();
+        let base_url = if include_sdk {
+            SDK_BASE_URL
+        } else {
+            "https://example.invalid/aros/releases/2026.10"
+        }
+        .to_owned();
         let actual_profiles = inputs
             .groups()
             .iter()
@@ -123,6 +158,53 @@ impl Fixture {
         )
         .unwrap();
 
+        let (sdk_lane, sdk_asset, sdk_identity_filename) = if include_sdk {
+            let selected = &inputs.sdks()[0];
+            let identity: SdkIdentity = serde_json::from_slice(selected.identity_bytes()).unwrap();
+            let candidate = sdk_candidate(&root, selected.id());
+            let (tree_sha256, _) =
+                toolchain_tree_inventory_excluding(&candidate, &["sdk-manifest.json"]).unwrap();
+            let tree_sha256 = Sha256Digest::parse(&tree_sha256).unwrap();
+            let package_dir = root.join(format!("sdk-package-{}", selected.id()));
+            let package = sdk_package::package(&SdkPackageRequest {
+                candidate_root: candidate,
+                output_dir: package_dir.clone(),
+                identity: identity.clone(),
+                expected_tree_sha256: tree_sha256.clone(),
+                forbidden_prefixes: Vec::new(),
+            })
+            .expect("synthetic SDK package is valid");
+            let verification = SdkVerificationRequest {
+                package_dir,
+                identity,
+                expected_tree_sha256: tree_sha256.clone(),
+                expected_archive_sha256: package.archive_sha256.clone(),
+                expected_archive_size: package.archive_size,
+                forbidden_prefixes: Vec::new(),
+            };
+            let asset = verification.identity.asset_name().unwrap();
+            for source in [&package.archive, &package.manifest, &package.checksum] {
+                fs::copy(source, base_preindex.join(source.file_name().unwrap())).unwrap();
+            }
+            fs::write(
+                base_preindex.join(format!("{asset}.spdx.json")),
+                build_measured_sdk_sbom(&verification)
+                    .expect("synthetic SDK SPDX metadata is measured"),
+            )
+            .unwrap();
+            (
+                Some(json!({
+                    "tree_sha256": tree_sha256,
+                    "archive_sha256": package.archive_sha256,
+                    "archive_size": package.archive_size
+                })),
+                Some(asset),
+                Some(selected.identity_reference().file().to_owned()),
+            )
+        } else {
+            (None, None, None)
+        };
+
         let mut lanes = BTreeMap::new();
         for group in inputs.groups() {
             for profile in group.profiles().entries() {
@@ -151,7 +233,7 @@ impl Fixture {
                             group.id(),
                             profile.name()
                         )),
-                        release_id: RELEASE_ID.to_owned(),
+                        release_id: release_id.clone(),
                         host: (*host).to_owned(),
                         recipe: group.recipe().clone(),
                         source_lock: group.source_lock().clone(),
@@ -184,13 +266,23 @@ impl Fixture {
             }
         }
         assert_eq!(lanes.len(), 12);
-        assert_eq!(fs::read_dir(&base_preindex).unwrap().count(), 57);
-        let lanes = json!({"schema":"aros-toolchain-index-lanes-v1", "lanes":lanes});
+        assert_eq!(
+            fs::read_dir(&base_preindex).unwrap().count(),
+            if include_sdk { 62 } else { 57 }
+        );
+        let mut lanes = json!({"schema":"aros-toolchain-index-lanes-v1", "lanes":lanes});
+        if let Some(sdk_lane) = sdk_lane {
+            lanes["sdks"] = json!({"core-sdk": sdk_lane});
+        }
         Self {
             _temporary: temporary,
             root,
             base_preindex,
             lanes,
+            release_id,
+            base_url,
+            sdk_asset,
+            sdk_identity_filename,
         }
     }
 
@@ -233,12 +325,10 @@ impl Fixture {
                 "--directory",
             ])
             .arg(directory)
-            .args([
-                "--release-id",
-                RELEASE_ID,
-                "--base-url",
-                "https://example.invalid/aros/releases/2026.10",
-            ]);
+            .args(["--release-id"])
+            .arg(&self.release_id)
+            .args(["--base-url"])
+            .arg(&self.base_url);
         if let Some(release_format) = release_format {
             command.args(["--release-format", release_format]);
         }
@@ -554,6 +644,56 @@ fn target_scope_input_documents() -> (Value, BTreeMap<String, Vec<u8>>) {
         }),
         documents,
     )
+}
+
+fn sdk_target_scope_input_documents() -> (Value, BTreeMap<String, Vec<u8>>) {
+    let (mut collection, mut documents) = target_scope_input_documents();
+    let identity = json!({
+        "sdk_id":"core-sdk", "version":"1.2.3",
+        "target":{
+            "target_triple":"i686-aros",
+            "abi":{"data_model":"ilp32", "pointer_width":32}
+        },
+        "source":{
+            "commit":"9".repeat(40), "git_tree":"8".repeat(40),
+            "content_sha256":"a".repeat(64), "contract_sha256":"b".repeat(64)
+        },
+        "source_date_epoch":946_684_800
+    });
+    let identity_bytes = serde_json::to_vec(&identity).unwrap();
+    let identity_filename = "core-sdk-identity.json";
+    documents.insert(identity_filename.to_owned(), identity_bytes.clone());
+    collection["sdks"] = json!([{
+        "id":"core-sdk",
+        "identity":{
+            "file":identity_filename,
+            "sha256":sha256_bytes(&identity_bytes)
+        },
+        "source_preset":"aros-core",
+        "compiler_profiles":[
+            {"group_id":"gnu-riscv", "profile":"rv32-esp32p4"},
+            {"group_id":"llvm-pc", "profile":"pc-x86_64"}
+        ]
+    }]);
+    (collection, documents)
+}
+
+fn sdk_candidate(root: &Path, sdk_id: &str) -> PathBuf {
+    let candidate = root.join(format!("sdk-candidate-{sdk_id}"));
+    fs::create_dir(&candidate).unwrap();
+    fs::create_dir(candidate.join("bin")).unwrap();
+    fs::create_dir(candidate.join("include")).unwrap();
+    let executable = candidate.join("bin/aros");
+    fs::write(&executable, b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(candidate.join("include/aros.h"), b"#define AROS_SDK 1\n").unwrap();
+    fs::write(
+        candidate.join("toolchain-manifest.json"),
+        b"source metadata /tmp/aros-sdk-cli-fixture-private-prefix\n",
+    )
+    .unwrap();
+    symlink("bin/aros", candidate.join("aros")).unwrap();
+    candidate
 }
 
 fn build_environment(host: &str, asset: &str) -> Map<String, Value> {
@@ -1580,5 +1720,223 @@ fn family_v2_index_cli_binds_staged_outputs_and_rejects_invalid_process_inputs()
         Some(&subject_hash),
         "release directory does not contain the exact indexed inventory",
         Some(PRIVATE_MARKER),
+    );
+}
+
+#[test]
+fn family_v2_sdk_index_cli_binds_package_identity_and_independent_measurements() {
+    let fixture = Fixture::new_with_sdk();
+    let sdk_asset = fixture.sdk_asset.as_deref().unwrap();
+    let identity_filename = fixture.sdk_identity_filename.as_deref().unwrap();
+    assert_eq!(fixture.release_id, SDK_RELEASE_ID);
+    assert_eq!(fixture.base_url, SDK_BASE_URL);
+    assert_eq!(sdk_asset, "aros-sdk-core-sdk-1.2.3.tar.xz");
+
+    let canonical_lanes = fixture.lane_bytes();
+    let pre_directory = fixture.copy_preindex("sdk-valid-preindex");
+    let lane_inputs = fixture.lane_file("sdk-valid", &canonical_lanes);
+    let subject_manifest = fixture.root.join("sdk-valid-subjects.sha256");
+    assert_eq!(inventory_count(&pre_directory), 62);
+    let pre_output = fixture.invoke(
+        &pre_directory,
+        &lane_inputs,
+        &subject_manifest,
+        "pre-attestation",
+        Some("family-v2"),
+        None,
+    );
+    let pre_result = successful_json(&pre_output, "SDK pre-attestation family-v2 index");
+    assert_eq!(pre_result["release_id"], SDK_RELEASE_ID);
+    assert_eq!(pre_result["lane_count"], 12);
+    assert_eq!(pre_result["sdk_count"], 1);
+    assert_eq!(pre_result["inventory_count"], 65);
+    assert_eq!(pre_result["subject_count"], 63);
+    assert_eq!(inventory_count(&pre_directory), 63);
+    assert!(subject_manifest.is_file());
+
+    let index: Value =
+        serde_json::from_slice(&fs::read(pre_directory.join("toolchain-index-v2.json")).unwrap())
+            .unwrap();
+    assert_eq!(index["release_id"], SDK_RELEASE_ID);
+    assert_eq!(index["base_url"], SDK_BASE_URL);
+    assert_eq!(index["artifacts"].as_array().unwrap().len(), 12);
+    assert_eq!(index["sdks"].as_array().unwrap().len(), 1);
+    assert_eq!(index["sdks"][0]["identity"]["sdk_id"], "core-sdk");
+    assert_eq!(index["sdks"][0]["identity"]["version"], "1.2.3");
+    assert_eq!(index["sdks"][0]["release_tag"], SDK_RELEASE_ID);
+
+    let sdk_members = [
+        sdk_asset.to_owned(),
+        format!("{sdk_asset}.manifest.json"),
+        format!("{sdk_asset}.sha256"),
+        format!("{sdk_asset}.spdx.json"),
+        identity_filename.to_owned(),
+    ];
+    let subject_text = fs::read_to_string(&subject_manifest).unwrap();
+    assert_eq!(subject_text.lines().count(), 63);
+    for member in &sdk_members {
+        assert_eq!(
+            subject_text
+                .lines()
+                .filter(|line| line.ends_with(member.as_str()))
+                .count(),
+            1,
+            "subject manifest must bind {member} exactly once"
+        );
+    }
+    let subject_hash = expected_manifest_digest(&pre_result, &subject_manifest);
+    let indexed_template =
+        copy_directory(&pre_directory, &fixture.root.join("sdk-indexed-template"));
+
+    let final_directory = copy_directory(&indexed_template, &fixture.root.join("sdk-valid-final"));
+    fs::write(
+        final_directory.join("toolchain-provenance.sigstore.json"),
+        SYNTHETIC_PROVENANCE,
+    )
+    .unwrap();
+    let final_output = fixture.invoke(
+        &final_directory,
+        &lane_inputs,
+        &subject_manifest,
+        "final",
+        Some("family-v2"),
+        Some(&subject_hash),
+    );
+    let final_result = successful_json(&final_output, "SDK final family-v2 index");
+    assert_eq!(final_result["sdk_count"], 1);
+    assert_eq!(final_result["lane_count"], 12);
+    assert_eq!(final_result["subject_manifest_sha256"], subject_hash);
+    assert_eq!(inventory_count(&final_directory), 65);
+    let checksums = fs::read_to_string(final_directory.join("SHA256SUMS")).unwrap();
+    assert_eq!(checksums.lines().count(), 64);
+    for member in &sdk_members {
+        assert_eq!(
+            checksums
+                .lines()
+                .filter(|line| line.ends_with(member.as_str()))
+                .count(),
+            1,
+            "final checksums must bind {member} exactly once"
+        );
+    }
+
+    let mut missing_sdk = fixture.lanes.clone();
+    missing_sdk["sdks"] = json!({});
+    let (directory, lanes, manifest) = pre_stage_case(
+        &fixture,
+        "sdk-missing-independent-lane",
+        &lane_bytes(&missing_sdk),
+    );
+    assert_pre_rejected(
+        &fixture,
+        &directory,
+        &lanes,
+        &manifest,
+        Some("family-v2"),
+        "independent SDK lanes must exactly cover the selected SDK products",
+        None,
+    );
+
+    let mut wrong_key = fixture.lanes.clone();
+    let sdk_lane = wrong_key["sdks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("core-sdk")
+        .unwrap();
+    wrong_key["sdks"]["other-sdk"] = sdk_lane;
+    let (directory, lanes, manifest) = pre_stage_case(
+        &fixture,
+        "sdk-wrong-independent-key",
+        &lane_bytes(&wrong_key),
+    );
+    assert_pre_rejected(
+        &fixture,
+        &directory,
+        &lanes,
+        &manifest,
+        Some("family-v2"),
+        "independent SDK lanes must exactly cover the selected SDK products",
+        None,
+    );
+
+    for (case, field, wrong_value) in [
+        ("sdk-wrong-independent-tree", "tree_sha256", "f".repeat(64)),
+        (
+            "sdk-wrong-independent-archive",
+            "archive_sha256",
+            "e".repeat(64),
+        ),
+    ] {
+        let mut lanes_value = fixture.lanes.clone();
+        lanes_value["sdks"]["core-sdk"][field] = json!(wrong_value);
+        let (directory, lanes, manifest) =
+            pre_stage_case(&fixture, case, &lane_bytes(&lanes_value));
+        assert_pre_rejected(
+            &fixture,
+            &directory,
+            &lanes,
+            &manifest,
+            Some("family-v2"),
+            "selected SDK package failed shared release measurement",
+            None,
+        );
+    }
+
+    let mut wrong_size = fixture.lanes.clone();
+    let original_size = wrong_size["sdks"]["core-sdk"]["archive_size"]
+        .as_u64()
+        .unwrap();
+    wrong_size["sdks"]["core-sdk"]["archive_size"] = json!(original_size + 1);
+    let (directory, lanes, manifest) = pre_stage_case(
+        &fixture,
+        "sdk-wrong-independent-size",
+        &lane_bytes(&wrong_size),
+    );
+    assert_pre_rejected(
+        &fixture,
+        &directory,
+        &lanes,
+        &manifest,
+        Some("family-v2"),
+        "selected SDK package failed shared release measurement",
+        None,
+    );
+
+    let (directory, lanes, manifest) =
+        pre_stage_case(&fixture, "sdk-changed-spdx", &canonical_lanes);
+    let spdx = directory.join(format!("{sdk_asset}.spdx.json"));
+    let mut spdx_bytes = fs::read(&spdx).unwrap();
+    spdx_bytes.extend_from_slice(PRIVATE_MARKER.as_bytes());
+    fs::write(spdx, spdx_bytes).unwrap();
+    assert_pre_rejected(
+        &fixture,
+        &directory,
+        &lanes,
+        &manifest,
+        Some("family-v2"),
+        "SDK SPDX metadata differs from its exact measured package",
+        Some(PRIVATE_MARKER),
+    );
+
+    let (directory, lanes, manifest) =
+        pre_stage_case(&fixture, "sdk-changed-identity-document", &canonical_lanes);
+    let identity_path = directory.join(identity_filename);
+    let mut identity: Value = serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();
+    identity["source"]["content_sha256"] = json!("c".repeat(64));
+    let changed_identity_bytes = serde_json::to_vec(&identity).unwrap();
+    fs::write(&identity_path, &changed_identity_bytes).unwrap();
+    let collection_path = directory.join("toolchain-release-inputs-v2.json");
+    let mut collection: Value =
+        serde_json::from_slice(&fs::read(&collection_path).unwrap()).unwrap();
+    collection["sdks"][0]["identity"]["sha256"] = json!(sha256_bytes(&changed_identity_bytes));
+    fs::write(&collection_path, serde_json::to_vec(&collection).unwrap()).unwrap();
+    assert_pre_rejected(
+        &fixture,
+        &directory,
+        &lanes,
+        &manifest,
+        Some("family-v2"),
+        "selected SDK package failed shared release measurement",
+        None,
     );
 }

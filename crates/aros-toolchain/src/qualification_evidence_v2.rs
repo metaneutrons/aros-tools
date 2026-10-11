@@ -190,6 +190,9 @@ impl QualificationEvidenceV2 {
         inputs: &ReleaseInputs,
         policy: &EvidencePolicy,
     ) -> Result<(), ContractError> {
+        crate::release_index_v2::require_compiler_only_inputs(inputs).map_err(|_| {
+            error("SDK-selected release requires complete authenticated SDK qualification, not compiler-only lanes")
+        })?;
         self.validate_structure()?;
         validate_policy(policy)?;
         if self.created_at > policy.now || self.expires_at <= policy.now {

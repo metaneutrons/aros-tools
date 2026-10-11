@@ -14,6 +14,10 @@ use crate::release_index_v2::{
     expected_artifacts, expected_inventory_for_assets, safe_release_id, validate_base_url,
     validate_required_paths, NativeReleaseIndexV2, CHECKSUMS_NAME, INDEX_NAME, PROVENANCE_NAME,
 };
+#[cfg(unix)]
+use crate::release_index_v2_readback::{
+    measure_sdk_packages, validate_sdk_package_selections, IndexedSdkPackageV2,
+};
 use crate::release_index_v2_readback::{
     require_exact_inventory, validate_directory_path, verify_bound_documents,
     verify_input_collection, verify_required_paths, verify_static_support, MAX_METADATA_BYTES,
@@ -41,6 +45,9 @@ pub struct MeasuredReleaseIndexRequestV2 {
     pub build_environments: BTreeMap<String, Map<String, Value>>,
     /// Sorted safe required payload paths, keyed by canonical archive.
     pub required_paths: BTreeMap<String, Vec<String>>,
+    /// Independent SDK byte/identity selections keyed by the exact selected SDK IDs.
+    #[cfg(unix)]
+    pub sdk_packages: BTreeMap<String, crate::sdk_package::SdkVerificationRequest>,
     /// Absolute build roots forbidden in regular archive payload contents.
     pub forbidden_prefixes: Vec<PathBuf>,
 }
@@ -69,6 +76,10 @@ pub struct MeasuredReleaseIndexRequestV2 {
 pub fn build_measured_index_v2(
     request: &MeasuredReleaseIndexRequestV2,
 ) -> Result<NativeReleaseIndexV2, ContractError> {
+    #[cfg(unix)]
+    validate_sdk_package_selections(&request.directory, &request.inputs, &request.sdk_packages)?;
+    #[cfg(not(unix))]
+    crate::release_index_v2::require_compiler_only_inputs(&request.inputs)?;
     if !safe_release_id(&request.release_id) {
         return Err(ContractError::index(
             "measured release has an unsafe release identifier",
@@ -187,7 +198,16 @@ pub fn build_measured_index_v2(
             "required_paths": required_paths,
         }));
     }
-    let bytes = serde_json::to_vec(&json!({
+    #[cfg(unix)]
+    let sdk_packages = measure_sdk_packages(
+        &request.directory,
+        &request.inputs,
+        &request.sdk_packages,
+        &request.release_id,
+        &request.base_url,
+        &request.forbidden_prefixes,
+    )?;
+    let record = json!({
         "schema": 2,
         "release_id": request.release_id,
         "base_url": request.base_url,
@@ -195,8 +215,20 @@ pub fn build_measured_index_v2(
         "producer_commit": request.inputs.producer_commit(),
         "tools_commit": request.inputs.tools_commit(),
         "artifacts": artifacts,
-    }))
-    .map_err(|_| ContractError::index("cannot encode the measured release index"))?;
+    });
+    #[cfg(unix)]
+    let record = {
+        let mut record = record;
+        if !sdk_packages.is_empty() {
+            record["sdks"] = json!(sdk_packages
+                .iter()
+                .map(IndexedSdkPackageV2::lock)
+                .collect::<Vec<_>>());
+        }
+        record
+    };
+    let bytes = serde_json::to_vec(&record)
+        .map_err(|_| ContractError::index("cannot encode the measured release index"))?;
     let index = NativeReleaseIndexV2::parse(&bytes, &request.inputs)?;
 
     validate_directory_path(&request.directory)?;

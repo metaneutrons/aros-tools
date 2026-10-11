@@ -292,6 +292,7 @@ fn prepare_release_for_family(gnu: bool) -> PreparedRelease {
     }
 
     let measured_request = MeasuredReleaseIndexRequestV2 {
+        sdk_packages: BTreeMap::new(),
         directory: release_dir.clone(),
         inputs: input.inputs.clone(),
         release_id: RELEASE_ID.into(),
@@ -302,6 +303,7 @@ fn prepare_release_for_family(gnu: bool) -> PreparedRelease {
     };
     let written_index = write_measured_index_v2(&measured_request).unwrap();
     let packages = IndexedPackageReadbackRequestV2 {
+        sdk_packages: BTreeMap::new(),
         directory: release_dir,
         inputs: input.inputs,
         index: written_index.index().clone(),

@@ -4,9 +4,18 @@ description: Reuse a matching AROS compiler and SDK for an external application,
 ---
 
 You can keep application source outside the operating-system tree and use the
-same cross-compiler and generated SDK. There is currently no `aros app`
-command, application manifest, standalone SDK installer or application-package
-frontend.
+same cross-compiler and generated SDK. The SDK commands support explicit
+lock-selected installation and project selection. There is no `aros app`
+command or application-package frontend.
+
+`aros-tools` builds and manages SDKs; compiler and SDK artifacts are intended
+to ship together in `aros-toolchains` releases. SDKs are target/ABI-specific,
+not host-specific. This distribution model does not mean an SDK is already
+published; check [release status](/aros-tools/reference/release-status/).
+
+See [SDK management](/aros-tools/reference/cli/#developer-sdk-artifacts-and-management)
+for the explicit release/project lock requirements. Matching hashes and
+successful links do not prove binary compatibility with a Vanilla AROS runtime.
 
 ## Prepare matching inputs
 

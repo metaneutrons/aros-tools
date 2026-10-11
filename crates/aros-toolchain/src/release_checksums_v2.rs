@@ -147,6 +147,17 @@ fn measure_checksum_members(
         .iter()
         .map(|artifact| (artifact.asset(), artifact))
         .collect::<BTreeMap<_, _>>();
+    let mut sdk_members = BTreeMap::new();
+    let mut sdk_archives = std::collections::BTreeSet::new();
+    for lock in index.sdks() {
+        let asset = lock
+            .identity
+            .asset_name()
+            .map_err(|_| ContractError::index("invalid indexed SDK archive name"))?;
+        sdk_archives.insert(asset.clone());
+        sdk_members.insert(format!("{asset}.manifest.json"), &lock.manifest);
+        sdk_members.insert(asset, &lock.archive);
+    }
     let mut members = Vec::with_capacity(index.expected_inventory().len() - 1);
     let mut lines = Vec::with_capacity(members.capacity());
     for name in index.expected_inventory() {
@@ -154,7 +165,10 @@ fn measure_checksum_members(
             continue;
         }
         let archive = archives.get(name.as_str());
-        let limit = if archive.is_some() {
+        let limit = if sdk_archives.contains(name) {
+            // SDK payloads have their own smaller bounded artifact contract.
+            4 * 1024 * 1024 * 1024
+        } else if archive.is_some() {
             MAX_ARCHIVE_BYTES
         } else {
             MAX_METADATA_BYTES
@@ -172,6 +186,13 @@ fn measure_checksum_members(
         }) {
             return Err(ContractError::index(
                 "measured checksum archive identity differs from the bound index",
+            ));
+        }
+        if sdk_members.get(name).is_some_and(|selected| {
+            member.sha256() != &selected.sha256 || member.size() != selected.size
+        }) {
+            return Err(ContractError::index(
+                "measured SDK checksum member differs from the bound index",
             ));
         }
         lines.push(format!("{}  {}\n", member.sha256(), member.name()));

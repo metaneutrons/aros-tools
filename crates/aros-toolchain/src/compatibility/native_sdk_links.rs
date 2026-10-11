@@ -426,6 +426,30 @@ pub fn readback_native_sdk_links(
     readback_native_sdk_links_bytes(request, expected, &bytes, true)
 }
 
+/// Derive a candidate only after the complete retained SDK proof is checked.
+pub(super) fn readback_generated_root(
+    request: &NativeSdkLinkRequest,
+    expected: &NativeSdkLinkReport,
+) -> Result<PathBuf, ContractError> {
+    readback_native_sdk_links(request, expected)?;
+    let source = &request.preparation.source_root;
+    let relative = request
+        .source_profile
+        .native_consumer_contract
+        .as_deref()
+        .ok_or_else(|| error("generated SDK lost its source contract"))?;
+    let loaded =
+        load_bound_native_consumer_contract(source, Path::new(relative), &request.source_profile)
+            .map_err(|_| error("generated SDK source contract differs"))?;
+    let build = checked_directory(&request.cmake_build_root, "generated SDK CMake build")?;
+    let binding = read_regular_bounded(
+        &build.join(BINDING_FILE),
+        "generated SDK CMake binding",
+        canonical::MAX_DOCUMENT_BYTES,
+    )?;
+    resolve_binding(&binding, &build, source, &loaded)
+}
+
 fn readback_native_sdk_links_bytes(
     request: &NativeSdkLinkRequest,
     expected: &NativeSdkLinkReport,

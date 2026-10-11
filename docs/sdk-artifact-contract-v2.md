@@ -24,9 +24,12 @@ checkout or of the generated SDK payload.
 
 The caller must select the identity document and its raw SHA-256 independently.
 Packaging does not derive a version from the installed compiler or manufacture
-a released source identity from an uncommitted tree. The first public SDK
-version and repository/channel selection remain release-integration decisions;
-local package success does not make them published.
+a released source identity from an uncommitted tree. `aros-tools` builds and
+manages SDKs; `aros-toolchains` distributes SDK and compiler artifacts together
+in one release. No separate SDK repository is required. SDK product versions
+remain independent of the enclosing release and compiler versions. The first
+public SDK product version still requires explicit selection; local package
+success does not make it published.
 
 ## Read-only source binding
 
@@ -48,10 +51,57 @@ The library returns an opaque `VerifiedSdkSource` with read-only revalidation;
 CLI JSON states `local-source-binding-not-execution-or-release-admission`.
 
 The identity's epoch is explicit selection, not proof that generation consumed
-it. This source check does not yet join the native execution/link receipts with
-the package stage. That generation/package binding and the release matrix are
-separate remaining producer requirements; source verification alone cannot
-qualify or publish an SDK.
+it. Source verification alone cannot qualify or publish an SDK.
+
+## Bound native generation and package API
+
+`sdk_generation::generate` takes the opaque source selection, independently
+selected native compatibility request and recipe-bound compiler profiles. It
+requires the exact projected source, preset, content digest and explicit SDK
+epoch before execution. The compiler package's source identity remains separate
+from the SDK source identity. A family-v2 GNU compiler and source-v2 ordinary
+SDK links are mandatory.
+
+The adapter runs all six compatibility phases and four original/relocated
+ordinary C/C++ links, then reads back their complete retained evidence. It
+derives the generated SDK root from the validated CMake source binding, never
+from a caller-supplied candidate path. An absent record outside the protected
+source and execution roots binds the SDK identity, source profile, generation
+environment, compatibility/link receipt digests and complete SDK inventory.
+The record uses `aros-sdk-generation-record-v1`; its schema version is independent
+of the SDK artifact version.
+
+Only successful execution returns an opaque `CompletedSdkGeneration`.
+`package_generated` accepts that value, an absent output and forbidden prefixes;
+the caller cannot substitute another candidate, identity or inventory. It
+revalidates the source and retained evidence around packaging and independently
+reads back the complete archive against the generation selection. Changed
+records, SDK bytes, maps, outputs or source inputs fail; diagnostic roots and
+uncertain published local outputs are retained, not repaired.
+
+This orchestration boundary has assurance
+`local-generation-binding-not-release-admission`. `aros sdk build` verifies the
+source selection before preparing execution roots, derives the epoch from its
+identity, and runs generation and packaging in one process. It accepts no
+independent candidate or SDK tree digest. The current generation executor
+requires a family-v2 GNU compiler matching the source preset's compiler profile;
+unsupported families fail before preparation. The separate local CLI stages below
+retain their byte-consistency claims. Public producer integration, authenticated
+owning-job evidence, release index and full release qualification remain required;
+neither this record nor its self-hash grants publication rights.
+
+`sdk_generation::generate_with_export` executes the same generation once and
+returns its opaque completion together with the existing native compatibility
+export. Input claims are measured before execution; the export includes all
+six phases and the complete original/relocated SDK link closure. It is not
+reconstructed from a generation record or a downloaded receipt.
+
+`aros sdk build --evidence-dir DIR` writes that local export after packaging and
+retained-evidence revalidation. The absent directory must be separate from the
+generation record, package output and every selected input/execution root. Its
+`inputs.json` and `evidence/` are published together without clobbering existing
+outputs. Failure retains diagnostic roots and any completed local package;
+neither a portable export nor its digests authenticate an external owning job.
 
 ## Complete local package
 
@@ -107,7 +157,7 @@ isolation from a hostile concurrent filesystem writer.
 
 ## CLI and assurance
 
-`aros sdk package`, `aros sdk verify-package` and `aros sdk extract` are explicit local
+`aros sdk package`, `aros sdk verify-package`, `aros sdk sbom` and `aros sdk extract` are explicit local
 stages, usable outside an AROS checkout. Their required selectors are shown by
 the generated CLI reference. JSON results state
 `local-byte-consistency-not-release-admission`.
@@ -117,7 +167,60 @@ establish cross-host SDK reproducibility, substitute for C/C++ relocated-link
 qualification, or grant publication authority. The native SDK link receipt
 remains separate evidence; an inventory assertion is not SDK archive bytes.
 
+## Supplemental SPDX metadata
+
+`sdk_sbom::build_measured_sdk_sbom` verifies the complete local package before
+and after rendering deterministic SPDX 2.3 bytes. It writes nothing and does
+not add a fourth member to that package. A shared release stage owns the
+supplemental `<archive>.spdx.json` document and its closed release inventory.
+
+`aros sdk sbom` bridges those measured bytes to one absent absolute `--output`
+file named `<archive>.spdx.json` outside the three-member package directory.
+It uses the same independent identity, tree and archive selectors as
+`verify-package`, rechecks the package and identity, and writes through a
+no-follow directory descriptor without replacing existing output. The JSON
+result records the output path, measured SHA-256 and size. A failed write may
+retain output for inspection; it does not authorize publication.
+
+The single SPDX package identifies the SDK product/version and the actual
+archive SHA-256, not the payload tree digest. Its timestamp is the selected
+source epoch; `sourceInfo` records the exact source, SDK contract, payload
+inventory and target descriptor identities. `filesAnalyzed` is false: no file
+analysis, third-party component discovery or license completeness is asserted.
+Licenses and copyright use `NOASSERTION`; the document data license is CC0-1.0.
+The SDK manifest remains the complete payload inventory. This metadata does
+not authenticate the generation job or grant release admission.
+
 ## Consumer release lock
+
+### Shared release-input selection
+
+The unreleased `aros-toolchain-release-inputs-v2` collection may explicitly
+select host-independent SDKs in `sdks`. Each sorted unique selection binds an
+exact identity-document filename/hash, source preset and sorted compiler
+group/profile references. Its ID must equal the bound SDK product ID, not an
+alias. The referenced identity is closed and validated;
+its source, target/ABI and independent product version are not inferred from
+the compiler recipe. Every referenced document is required, hash-checked and
+remeasured during filesystem loading. Missing, extra, changed, ambiguous or
+unbound selections fail. SDKs do not multiply the compiler host matrix.
+
+An absent SDK list preserves compiler-only input behavior and index bytes.
+Pure V2 index parsing binds exactly one SDK release lock per selected product,
+in SDK-ID order, to the exact identity and enclosing release tag/base URL. It
+derives the union inventory, including each identity document and archive,
+manifest, sidecar and supplemental SPDX; SDKs do not multiply host lanes.
+Missing, extra, reordered or swapped SDK locks and filename collisions fail.
+
+This declaration does not admit SDK publication. On Unix, measured shared index
+construction and readback verify independently selected SDK packages, exact
+identity documents and deterministic SPDX. Final checksum/attestation stages
+include all selected SDK members; archive and manifest hashes/sizes must equal
+the indexed locks even if a checksum document is freshly regenerated.
+Qualification still rejects SDK-bearing releases until authenticated generation
+and owning-job evidence are joined. Compiler-only lanes cannot qualify a release
+which selects SDKs. A selected ABI descriptor or compiler profile is not proof
+of binary compatibility.
 
 `aros-sdk-lock-v2` selects an exact release tag, canonical credential-free
 HTTPS base URL, SDK identity, payload tree digest, archive SHA-256/size and
@@ -127,6 +230,15 @@ Asset names are derived from the SDK identity, not a host or board selector.
 Unknown or duplicate fields, URL aliases/credentials, zero digests and oversized
 metadata are rejected. The lock itself has a 1 MiB limit and its URL a 4096-byte
 limit.
+
+`sdk_release_selection::build_measured_sdk_release_lock` constructs that lock
+from a complete local package. The caller independently selects its identity,
+payload tree, archive hash/size, release tag and URL. The builder verifies the
+closed package, measures the external manifest through bounded no-follow
+descriptors, validates canonical lock serialization, and verifies the archive
+against the resulting lock. Final package and manifest checks reject changed
+inputs. It neither writes package files nor publishes the lock. This measured
+selection is not authenticated owning-job evidence or release admission.
 
 The consumer read-back API measures the exact opened archive, checks the
 embedded canonical manifest against the independent lock, and verifies the

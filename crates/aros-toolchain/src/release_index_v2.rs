@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use aros_common::sdk_release_lock::SdkReleaseLock;
 use aros_common::{parse_credential_free_https_url, ArosCompilerIdentity, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,8 @@ struct Record {
     producer_commit: GitObjectId,
     tools_commit: GitObjectId,
     artifacts: Vec<ArtifactRecord>,
+    #[serde(default)]
+    sdks: Vec<SdkReleaseLock>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +83,8 @@ pub struct NativeReleaseIndexV2 {
     producer_commit: GitObjectId,
     tools_commit: GitObjectId,
     artifacts: Vec<NativeReleaseArtifactV2>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sdks: Vec<SdkReleaseLock>,
     #[serde(skip)]
     expected_inventory: BTreeSet<String>,
 }
@@ -88,7 +93,9 @@ impl NativeReleaseIndexV2 {
     /// Parse a bounded, closed v2 index and bind it to validated release inputs.
     ///
     /// Artifact lanes and package names are derived from the exact bound
-    /// groups and profiles in `inputs`. The returned inventory is a declared
+    /// groups and profiles in `inputs`. Optional SDK locks must cover the exact
+    /// bound SDK identities in product-ID order at this release tag/base URL.
+    /// They add one package set per SDK, not one per host. The returned inventory is a declared
     /// expectation only; this method performs no filesystem, network, archive,
     /// checksum, signature, provenance or publication operation.
     ///
@@ -195,6 +202,23 @@ impl NativeReleaseIndexV2 {
             });
         }
 
+        if record.sdks.len() != inputs.sdks().len() {
+            return Err(index_error(
+                "release index SDK selections do not cover the complete bound SDK input set",
+            ));
+        }
+        for (lock, selected) in record.sdks.iter().zip(inputs.sdks()) {
+            lock.validate()
+                .map_err(|_| index_error("release index SDK lock is invalid"))?;
+            if &lock.identity != selected.identity()
+                || lock.release_tag != record.release_id
+                || lock.base_url != record.base_url
+            {
+                return Err(index_error(
+                    "release index SDK identity or release location differs from its bound selection",
+                ));
+            }
+        }
         let expected_inventory = expected_inventory(inputs, &artifacts)?;
         Ok(Self {
             schema: record.schema,
@@ -204,6 +228,7 @@ impl NativeReleaseIndexV2 {
             producer_commit: record.producer_commit,
             tools_commit: record.tools_commit,
             artifacts,
+            sdks: record.sdks,
             expected_inventory,
         })
     }
@@ -242,6 +267,14 @@ impl NativeReleaseIndexV2 {
     #[must_use]
     pub fn artifacts(&self) -> &[NativeReleaseArtifactV2] {
         &self.artifacts
+    }
+
+    /// Complete SDK selections in input-derived product-ID order, without
+    /// multiplying them by the compiler host matrix. Locks declare selected
+    /// bytes only; they do not measure or authenticate SDK packages.
+    #[must_use]
+    pub fn sdks(&self) -> &[SdkReleaseLock] {
+        &self.sdks
     }
 
     /// Declared package and support filenames expected for this release.
@@ -474,7 +507,37 @@ pub(crate) fn expected_inventory_for_assets<'a>(
             insert_inventory_name(name, &mut exact_names, &mut folded_names)?;
         }
     }
+    for sdk in inputs.sdks() {
+        insert_inventory_name(
+            sdk.identity_reference().file().to_owned(),
+            &mut exact_names,
+            &mut folded_names,
+        )?;
+        let asset = sdk
+            .identity()
+            .asset_name()
+            .map_err(|_| index_error("cannot derive bound SDK asset name"))?;
+        for name in [
+            asset.clone(),
+            format!("{asset}.manifest.json"),
+            format!("{asset}.sha256"),
+            format!("{asset}.spdx.json"),
+        ] {
+            insert_inventory_name(name, &mut exact_names, &mut folded_names)?;
+        }
+    }
     Ok(exact_names)
+}
+
+// SDK byte measurement is distinct from authenticated execution. Qualification
+// remains compiler-only until the SDK generation/job-origin join exists.
+pub(crate) fn require_compiler_only_inputs(inputs: &ReleaseInputs) -> Result<(), ContractError> {
+    if !inputs.sdks().is_empty() {
+        return Err(index_error(
+            "SDK-bearing release inputs require complete shared SDK package readback and authenticated qualification",
+        ));
+    }
+    Ok(())
 }
 
 fn insert_inventory_name(

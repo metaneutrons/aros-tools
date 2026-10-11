@@ -42,6 +42,16 @@ required-path and forbidden-prefix budgets apply before package verification.
 Repeat `--forbidden-prefix` for absolute build roots that must not occur in
 archive payloads. The file map itself is an input, not a release asset.
 
+For SDK-selected releases the same lane document additionally supplies a closed
+`sdks` map keyed by the complete selected SDK product IDs. Each value contains
+`tree_sha256`, `archive_sha256` and `archive_size`: independently selected nonzero
+lowercase digests and a size of 1 byte through 4 GiB. Identity comes from the
+bound SDK input document, never from the archive being checked. Missing or extra
+SDK entries fail before index output; all selected SDK packages and their SPDX
+are fully measured in the shared inventory. Compiler-only documents may omit
+`sdks`. These local stages still do not authenticate generation or authorize
+SDK publication.
+
 ## Pre-attestation
 
 `--stage pre-attestation` requires a complete pre-index inventory. Index,
