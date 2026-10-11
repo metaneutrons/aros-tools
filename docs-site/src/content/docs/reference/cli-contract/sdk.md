@@ -7,6 +7,10 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 
 | Command | ID | Spelling | Position | Constraint | Arity | Default | Values | Environment | Conflicts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `aros sdk download` | release_lock | --release-lock | — | required | 1 |  |  | — |  |
+| `aros sdk download` | lock_sha256 | --lock-sha256 | — | required | 1 |  |  | — |  |
+| `aros sdk download` | cache | --cache | — | optional | 1 |  |  | — |  |
+| `aros sdk download` | offline | --offline | — | optional | 0 | false |  | — |  |
 | `aros sdk extract` | identity | --identity | — | required | 1 |  |  | — |  |
 | `aros sdk extract` | identity_sha256 | --identity-sha256 | — | required | 1 |  |  | — |  |
 | `aros sdk extract` | tree_sha256 | --tree-sha256 | — | required | 1 |  |  | — |  |
@@ -15,16 +19,30 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros sdk extract` | archive_sha256 | --archive-sha256 | — | required | 1 |  |  | — |  |
 | `aros sdk extract` | archive_size | --archive-size | — | required | 1 |  |  | — |  |
 | `aros sdk extract` | output_root | --output-root | — | required | 1 |  |  | — |  |
+| `aros sdk install` | release_lock | --release-lock | — | required | 1 |  |  | — |  |
+| `aros sdk install` | lock_sha256 | --lock-sha256 | — | required | 1 |  |  | — |  |
+| `aros sdk install` | store | --store | — | optional | 1 |  |  | — |  |
+| `aros sdk install` | archive | --archive | — | optional | 1 |  |  | — | cache, offline |
+| `aros sdk install` | cache | --cache | — | optional | 1 |  |  | — |  |
+| `aros sdk install` | offline | --offline | — | optional | 0 | false |  | — |  |
+| `aros sdk list` | store | --store | — | optional | 1 |  |  | — |  |
+| `aros sdk list` | max_entries | --max-entries | — | optional | 1 | 10000 |  | — |  |
 | `aros sdk package` | identity | --identity | — | required | 1 |  |  | — |  |
 | `aros sdk package` | identity_sha256 | --identity-sha256 | — | required | 1 |  |  | — |  |
 | `aros sdk package` | tree_sha256 | --tree-sha256 | — | required | 1 |  |  | — |  |
 | `aros sdk package` | forbidden_prefixes | --forbidden-prefix | — | required | 1 |  |  | — |  |
 | `aros sdk package` | candidate_root | --candidate-root | — | required | 1 |  |  | — |  |
 | `aros sdk package` | output_dir | --output-dir | — | required | 1 |  |  | — |  |
-| `aros sdk verify` | identity | --identity | — | required | 1 |  |  | — |  |
-| `aros sdk verify` | identity_sha256 | --identity-sha256 | — | required | 1 |  |  | — |  |
-| `aros sdk verify` | tree_sha256 | --tree-sha256 | — | required | 1 |  |  | — |  |
-| `aros sdk verify` | forbidden_prefixes | --forbidden-prefix | — | required | 1 |  |  | — |  |
-| `aros sdk verify` | package_dir | --package-dir | — | required | 1 |  |  | — |  |
-| `aros sdk verify` | archive_sha256 | --archive-sha256 | — | required | 1 |  |  | — |  |
-| `aros sdk verify` | archive_size | --archive-size | — | required | 1 |  |  | — |  |
+| `aros sdk path` | release_lock | --release-lock | — | required | 1 |  |  | — |  |
+| `aros sdk path` | lock_sha256 | --lock-sha256 | — | required | 1 |  |  | — |  |
+| `aros sdk path` | store | --store | — | optional | 1 |  |  | — |  |
+| `aros sdk verify` | release_lock | --release-lock | — | required | 1 |  |  | — |  |
+| `aros sdk verify` | lock_sha256 | --lock-sha256 | — | required | 1 |  |  | — |  |
+| `aros sdk verify` | store | --store | — | optional | 1 |  |  | — |  |
+| `aros sdk verify-package` | identity | --identity | — | required | 1 |  |  | — |  |
+| `aros sdk verify-package` | identity_sha256 | --identity-sha256 | — | required | 1 |  |  | — |  |
+| `aros sdk verify-package` | tree_sha256 | --tree-sha256 | — | required | 1 |  |  | — |  |
+| `aros sdk verify-package` | forbidden_prefixes | --forbidden-prefix | — | required | 1 |  |  | — |  |
+| `aros sdk verify-package` | package_dir | --package-dir | — | required | 1 |  |  | — |  |
+| `aros sdk verify-package` | archive_sha256 | --archive-sha256 | — | required | 1 |  |  | — |  |
+| `aros sdk verify-package` | archive_size | --archive-size | — | required | 1 |  |  | — |  |

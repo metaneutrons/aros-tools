@@ -106,21 +106,38 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros toolchain verify` | Verify an installed or explicit local cross-toolchain for one preset |
 | `aros toolchain path` | Print the verified cross-toolchain prefix for one preset |
 
-### Local Developer SDK artifacts
+### Developer SDK artifacts and management
 
 | Command | Effect and boundary |
 | --- | --- |
 | `aros sdk package` | Package a source-produced Developer tree against an explicit source/ABI identity and inventory digest; local only |
-| `aros sdk verify` | Read back all package members and payload bytes against independent archive, tree and identity selections |
+| `aros sdk verify-package` | Read back all local package members and payload bytes against independent archive, tree and identity selections |
 | `aros sdk extract` | Verify then extract into one absent directory and recheck the payload; not managed installation |
+| `aros sdk download` | Acquire the exact lock-selected archive and manifest, then verify the complete payload without installation |
+| `aros sdk install` | Install or fully verify reuse of one lock-selected SDK in the content-addressed store |
+| `aros sdk list` | List bounded store metadata without hashing or executing payloads; integrity remains unchecked |
+| `aros sdk verify` | Fully verify the exact lock-selected installed SDK; never repair corrupt files |
+| `aros sdk path` | Print the fully verified installed SDK path for application build tools |
 
-SDK identity is target/ABI-specific, not build-host-specific. These commands
-do not build the SDK, install it into the managed store, select it for a
-checkout or publish a release. They require exact identity-document and
-payload digests; verification additionally requires archive digest and size.
-At least one absolute `--forbidden-prefix` is required to scan for build-path
-leakage. The [SDK artifact contract](https://github.com/metaneutrons/aros-tools/blob/main/docs/sdk-artifact-contract-v2.md)
-defines the local format and the remaining distribution boundary.
+SDK identity is target/ABI-specific, not build-host-specific. Local packaging,
+package verification and extraction require independent identity/tree digests
+and an absolute `--forbidden-prefix` to scan for build-path leakage.
+
+Managed commands require `--release-lock FILE --lock-sha256 SHA256`. They do
+not discover a latest release or trust a downloaded lock as its own authority.
+`install --archive FILE` verifies a local archive instead of downloading;
+it conflicts with `--cache` and `--offline`. Otherwise download/install may
+acquire missing locked bytes over HTTPS; `--offline` forbids network access.
+Existing poisoned cache entries and corrupt installations are rejected,
+not replaced. The default store is `AROS_HOME/sdks`; `--store` and `--cache`
+accept explicit absolute roots. `list` does not create an absent store.
+
+The installed SDK is an application-build input, not the AROS source build's
+SDK generation directory. `path` does not change CMake generation settings.
+These commands neither build the SDK, select a project SDK nor publish a
+release. Hash consistency is not publisher authentication.
+The [SDK artifact contract](https://github.com/metaneutrons/aros-tools/blob/main/docs/sdk-artifact-contract-v2.md)
+defines the format and the remaining release/selection boundary.
 
 ### Native producer control plane
 
