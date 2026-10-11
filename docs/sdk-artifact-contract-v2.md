@@ -81,8 +81,12 @@ authenticated CI evidence or release admission.
 
 The owned CMake engine admits the generic response only for LLVM. Execution
 requires explicit source `flavour` and `platform_smp` facts in addition to CPU,
-pointer width and MMU selection. After compiler detection it checks both Clang
-driver target triples, pointer width and the selected ARM float ABI flags. A
+pointer width and MMU selection. Before compiler detection, language-rule
+hooks apply the sealed `compiler_arch` or `compiler_cpu`, `compiler_fpu` and
+ARM `float_abi` options to C, C++ and Assembly. Unrelated environment and
+initial flags remain intact; explicit flags are not reconstructed. Repeated
+configuration must not duplicate selected options. After compiler detection
+it checks all three driver targets, pointer width and selected options. A
 target/sysroot override, conflicting configuration flag or changed binding
 fails without publishing a current consumer binding. The source-derived
 Developer include root is shared by bootstrap and target producers.

@@ -81,6 +81,12 @@ elseif(AROS_NATIVE_BUILD_CONTRACT_SHA256 OR AROS_NATIVE_CONSUMER_CONTRACT_SHA256
         "use a separate build tree for a different source contract")
 endif()
 
+# Register language-rule overrides after the source contract and identity are
+# locked, but before project() initializes any compiler. The override runs
+# after toolchain/platform *_FLAGS_INIT values are set and before CMake folds
+# those values together with CFLAGS/CXXFLAGS/ASMFLAGS into its cache.
+aros_register_sdk_consumer_compiler_option_overrides()
+
 project(AROS-NX
     VERSION 0.1.0
     LANGUAGES C CXX ASM
