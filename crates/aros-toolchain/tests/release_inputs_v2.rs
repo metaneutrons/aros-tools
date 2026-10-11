@@ -1252,14 +1252,12 @@ fn sdk_selection_ids_preserve_the_shared_sdk_product_id_grammar() {
 }
 
 #[test]
-fn sdk_selections_cannot_fall_back_to_compiler_only_release_index_admission() {
+fn sdk_selections_cannot_parse_an_incomplete_release_index() {
     let fixture = sdk_fixture();
     let inputs = ReleaseInputs::parse(&collection_bytes(&fixture), &fixture.documents).unwrap();
     let error =
         aros_toolchain::release_index_v2::NativeReleaseIndexV2::parse(b"{}", &inputs).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("complete shared SDK index and readback support"));
+    assert!(error.to_string().contains("closed JSON document"));
 }
 
 #[test]

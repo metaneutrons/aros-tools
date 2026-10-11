@@ -197,12 +197,19 @@ the compiler recipe. Every referenced document is required, hash-checked and
 remeasured during filesystem loading. Missing, extra, changed, ambiguous or
 unbound selections fail. SDKs do not multiply the compiler host matrix.
 
-An absent SDK list preserves compiler-only input behavior. This input slice
-does not yet admit SDK publication: index construction explicitly rejects
-SDK-bearing inputs until complete SDK package/readback, inventory, checksum,
-attestation and authenticated qualification are joined to the same V2 index.
-There is no compiler-only fallback which silently omits selected SDKs. A
-selected ABI descriptor or compiler profile is not proof of binary compatibility.
+An absent SDK list preserves compiler-only input behavior and index bytes.
+Pure V2 index parsing binds exactly one SDK release lock per selected product,
+in SDK-ID order, to the exact identity and enclosing release tag/base URL. It
+derives the union inventory, including each identity document and archive,
+manifest, sidecar and supplemental SPDX; SDKs do not multiply host lanes.
+Missing, extra, reordered or swapped SDK locks and filename collisions fail.
+
+This declaration does not admit SDK publication. Measured index construction,
+package readback, checksum/attestation preparation and qualification still
+reject SDK-bearing releases until SDK package measurements and authenticated
+generation evidence are joined to those paths. Compiler-only lanes cannot
+qualify a release which selects SDKs. A selected ABI descriptor or compiler
+profile is not proof of binary compatibility.
 
 `aros-sdk-lock-v2` selects an exact release tag, canonical credential-free
 HTTPS base URL, SDK identity, payload tree digest, archive SHA-256/size and

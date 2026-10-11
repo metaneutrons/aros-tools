@@ -108,6 +108,8 @@ pub(crate) fn readback_indexed_packages_with_inventory(
     request: &IndexedPackageReadbackRequestV2,
     inventory: &BTreeSet<String>,
 ) -> Result<IndexedPackageReadbackV2, ContractError> {
+    crate::release_index_v2::require_compiler_only_inputs(&request.inputs)?;
+    crate::release_index_v2::require_compiler_only_index(&request.index)?;
     validate_directory_path(&request.directory)?;
 
     let rebound = NativeReleaseIndexV2::parse(

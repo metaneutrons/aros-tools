@@ -38,6 +38,22 @@ across the three hosts declare 48 filenames, not the historical v1 inventory's
 44. Inventory size is derived from the selected inputs, never fixed to one
 board list.
 
+An optional `sdks` array contains closed `aros-sdk-lock-v2` records, exactly one
+per selected SDK product in input-derived SDK-ID order. Each lock's complete
+SDK identity must equal its bound input document, and its release tag/base URL
+must equal the enclosing index. Product versions remain independent of the
+release version. Every selected SDK adds its exact identity document and one
+archive, manifest, SHA sidecar and supplemental SPDX document to the same union
+inventory, without multiplying compiler host lanes. Missing, extra, reordered
+or swapped selections and derived filename collisions fail. Empty SDK lists
+are omitted in canonical serialization, preserving compiler-only index bytes.
+
+SDK locks here are declarations, not verified packages. While the shared SDK
+measurement and authenticated generation join are pending, the measured
+builder, package readback, checksum/attestation preparation and qualification
+paths explicitly reject SDK-selected releases. A compiler-only candidate
+cannot qualify a release which selects SDKs.
+
 Archive hashes, sizes and tree digests are producer declarations here; the
 parser does not independently measure or verify them. The expected inventory
 is a name set, not a statement that files exist. Parsing performs no filesystem

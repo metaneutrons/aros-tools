@@ -23,6 +23,12 @@ pair, not from a Rust board list. Release-candidate coverage requires every
 indexed lane exactly once. Diagnostic coverage permits nonempty subsets; a
 subset does not become a qualified release candidate.
 
+An SDK-selected V2 index is not covered by those compiler lanes. Until the
+SDK generation/package evidence and separately verified owning-job origin are
+joined to qualification, `validate_against_index` explicitly rejects any SDK
+selection for both candidate and diagnostic coverage. Pure shared-index
+parsing cannot silently turn compiler-only evidence into SDK release admission.
+
 The record names four report digests per lane: build A, build B, byte comparison
 and compatibility/relocation. These are claims, not independently measured
 report contents. This contract does not execute a compiler, measure an archive,

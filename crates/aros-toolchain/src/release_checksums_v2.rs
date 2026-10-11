@@ -91,6 +91,7 @@ pub fn verify_final_checksums_v2(
     directory: &Path,
     index: &NativeReleaseIndexV2,
 ) -> Result<FinalChecksumsReadbackV2, ContractError> {
+    crate::release_index_v2::require_compiler_only_index(index)?;
     validate_directory_path(directory)?;
     require_exact_inventory(directory, index.expected_inventory())?;
     let checksum_path = directory.join(CHECKSUMS_NAME);
@@ -138,6 +139,7 @@ fn measure_checksum_members(
     index: &NativeReleaseIndexV2,
     pre_attestation: bool,
 ) -> Result<(Vec<u8>, Vec<FinalChecksumMemberV2>), ContractError> {
+    crate::release_index_v2::require_compiler_only_index(index)?;
     let index_bytes = index
         .to_json_bytes()
         .map_err(|_| ContractError::index("cannot serialize the bound checksum release index"))?;

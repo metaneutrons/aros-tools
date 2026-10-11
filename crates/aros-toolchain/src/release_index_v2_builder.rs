@@ -69,6 +69,7 @@ pub struct MeasuredReleaseIndexRequestV2 {
 pub fn build_measured_index_v2(
     request: &MeasuredReleaseIndexRequestV2,
 ) -> Result<NativeReleaseIndexV2, ContractError> {
+    crate::release_index_v2::require_compiler_only_inputs(&request.inputs)?;
     if !safe_release_id(&request.release_id) {
         return Err(ContractError::index(
             "measured release has an unsafe release identifier",
