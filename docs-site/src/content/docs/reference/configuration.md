@@ -204,6 +204,7 @@ configuration, and may be compiled out or inert in release builds:
 - `AROS_FETCH_TEST_LOG_FAIL_AT`, `AROS_FETCH_TEST_PAUSE_AT`, `AROS_FETCH_TEST_PAUSE_MS`
 - `AROS_CARGO_VENDOR_CREDENTIAL_TEST_CHILD`
 - `AROS_HOST_GENMODULE` selects a classic host genmodule executable for differential tests.
+- `AROS_TEST_LLVM_DRIVER_ROOT`, `AROS_TEST_LLVM_DRIVER_TRIPLE`, `AROS_TEST_LLVM_DRIVER_VERSION` select the installed LLVM payload and target for the ignored driver-binding integration test.
 - `AROS_TEST_LOG_FAIL_EVENT`
 - `AROS_GUARD_TEST_BUSY`, `AROS_GUARD_TEST_PATH`
 - `AROS_PROCESS_TEST_ESCAPE_PID`, `AROS_PROCESS_TEST_ESCAPE_STYLE`

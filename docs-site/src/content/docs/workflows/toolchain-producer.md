@@ -37,9 +37,10 @@ The transpiler uses it for strict inventory and graph export; CMake checks the
 LLVM driver triples, pointer width and ARM float ABI against the source
 selection. Read-only `producer profile --source-dir … --source-preset …`
 verifies the committed contract and sealed inputs and marks SDK evidence as
-required. This does not yet enable generic
-`aros sdk build`: ordinary C/C++
-link and retained-evidence adapters are still required. GNU/RV32 local SDK
+required. The LLVM library adapter also measures both payload drivers and checks
+their version and selected triple; this is not package authentication or SDK
+link qualification. This does not yet enable generic `aros sdk build`:
+ordinary C/C++ link and retained-evidence adapters are still required. GNU/RV32 local SDK
 generation retains its existing native-consumer-v2 path.
 
 - A clean AROS source checkout, an `aros-toolchains` producer checkout, and an
