@@ -18,15 +18,17 @@ use crate::ContractError;
 const MAX_PROBE_SOURCE_BYTES: usize = 1_024;
 const MAX_ADDITIONAL_LIBRARIES: usize = 64;
 const MAX_LIBRARY_BYTES: usize = 64;
+const MAX_COMPILER_OPTION_BYTES: usize = 64;
 const MAX_APPLICATION_ARGUMENTS: usize = 256;
 const REQUIRED_COLLECTOR_SYMBOL: &str = "__TOOLCHAIN_LIST__";
 
 /// Build one ordinary C or C++ LLVM SDK application-link command.
 ///
 /// Driver defaults remain enabled. The complete source-owned target is
-/// validated without CPU/board allowlists; only an explicitly declared
-/// `float_abi` becomes a driver flag. The caller remains responsible for
-/// authenticating the selected source and SDK and for proving the full ABI.
+/// validated without CPU/board allowlists; explicitly declared `float_abi`,
+/// `compiler_arch`, `compiler_cpu` and `compiler_fpu` facts become driver
+/// flags. The caller remains responsible for authenticating the selected
+/// source and SDK and for proving the full ABI.
 ///
 /// # Errors
 /// Rejects invalid target facts, selectors, paths, probe source or libraries.
@@ -81,6 +83,15 @@ pub(super) fn application_command(
     if let Some(float_abi) = facts.float_abi {
         arguments.push(format!("-mfloat-abi={float_abi}"));
     }
+    if let Some(compiler_arch) = facts.compiler_arch {
+        arguments.push(format!("-march={compiler_arch}"));
+    }
+    if let Some(compiler_cpu) = facts.compiler_cpu {
+        arguments.push(format!("-mcpu={compiler_cpu}"));
+    }
+    if let Some(compiler_fpu) = facts.compiler_fpu {
+        arguments.push(format!("-mfpu={compiler_fpu}"));
+    }
     if language == "cxx" {
         arguments.push("-std=c++17".to_owned());
     }
@@ -113,7 +124,8 @@ pub(super) fn validate_target(target: &SdkTarget) -> Result<(), ContractError> {
 ///
 /// This requires only the common defined collector list symbol. It does not
 /// infer a C++ initialization proof from that symbol or validate ABI facts
-/// beyond the selected class, machine, flags mask and AROS marking.
+/// beyond the selected class, machine, flags mask, ARM file attributes and
+/// AROS marking. ISA intentions are not execution on physical hardware.
 ///
 /// # Errors
 /// Rejects malformed ELF or disagreement with the source-selected facts.
@@ -143,6 +155,17 @@ pub(super) fn verify_application_elf(
             "LLVM SDK application ELF flags differ from the source mask/value",
         ));
     }
+    if let Some(expected) = &facts.arm_attributes {
+        let measured = elf::arm::read(bytes)
+            .map_err(|_| error("LLVM SDK application ARM attributes are absent or invalid"))?;
+        for (tag, value) in expected {
+            if measured.integer(*tag).ok() != Some(*value) {
+                return Err(error(
+                    "LLVM SDK application ARM attributes differ from the source target",
+                ));
+            }
+        }
+    }
     if !object.symbols.iter().any(|symbol| {
         symbol.name == REQUIRED_COLLECTOR_SYMBOL
             && match symbol.home {
@@ -160,16 +183,28 @@ pub(super) fn verify_application_elf(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TargetFacts {
     class: Class,
     machine: u16,
     elf_flags_mask: u32,
     elf_flags_value: u32,
     float_abi: Option<&'static str>,
+    compiler_arch: Option<String>,
+    compiler_cpu: Option<String>,
+    compiler_fpu: Option<String>,
+    arm_attributes: Option<Vec<(u64, u64)>>,
 }
 
 fn target_facts(target: &SdkTarget) -> Result<TargetFacts, ContractError> {
+    if target.abi.contains_key("compiler_arch") && target.abi.contains_key("compiler_cpu") {
+        return Err(error(
+            "SDK target compiler_arch and compiler_cpu are mutually exclusive",
+        ));
+    }
+    let architecture_option = compiler_option_fact(target, "compiler_arch")?;
+    let cpu_option = compiler_option_fact(target, "compiler_cpu")?;
+    let floating_point_option = compiler_option_fact(target, "compiler_fpu")?;
     target
         .validate()
         .map_err(|_| error("LLVM SDK source target descriptor is invalid"))?;
@@ -205,6 +240,7 @@ fn target_facts(target: &SdkTarget) -> Result<TargetFacts, ContractError> {
             ));
         }
     };
+    let arm_attributes = arm_attribute_facts(target, elf_machine, class, float_abi)?;
 
     Ok(TargetFacts {
         class,
@@ -213,7 +249,94 @@ fn target_facts(target: &SdkTarget) -> Result<TargetFacts, ContractError> {
         elf_flags_mask,
         elf_flags_value,
         float_abi,
+        compiler_arch: architecture_option,
+        compiler_cpu: cpu_option,
+        compiler_fpu: floating_point_option,
+        arm_attributes,
     })
+}
+
+// These are ELF format tags, not a CPU or board capability table. Exact values
+// come from the sealed SDK target and are compared to the produced bytes.
+fn arm_attribute_facts(
+    target: &SdkTarget,
+    machine: u64,
+    class: Class,
+    float_abi: Option<&str>,
+) -> Result<Option<Vec<(u64, u64)>>, ContractError> {
+    const REQUIRED: [(&str, u64); 5] = [
+        ("arm_cpu_arch", 6),
+        ("arm_cpu_profile", 7),
+        ("arm_fp_arch", 10),
+        ("arm_simd_arch", 12),
+        ("arm_vfp_args", 28),
+    ];
+    const OPTIONAL: [(&str, u64); 2] = [("arm_arm_isa", 8), ("arm_thumb_isa", 9)];
+    if machine != u64::from(elf::arm::MACHINE) {
+        if target.abi.keys().any(|key| key.starts_with("arm_")) {
+            return Err(error("non-ARM SDK cannot declare ARM attribute facts"));
+        }
+        return Ok(None);
+    }
+    if class != Class::Elf32 {
+        return Err(error("ARM SDK attribute facts require ELF32"));
+    }
+    if float_abi.is_none() {
+        return Err(error("ARM SDK requires an explicit float ABI"));
+    }
+    if target.abi.keys().any(|key| {
+        key.starts_with("arm_")
+            && !REQUIRED
+                .iter()
+                .chain(OPTIONAL.iter())
+                .any(|(name, _)| key == name)
+    }) {
+        return Err(error(
+            "SDK target declares an unsupported ARM attribute fact",
+        ));
+    }
+    let mut values = Vec::new();
+    for (name, tag) in REQUIRED {
+        values.push((tag, unsigned_fact(target, name)?));
+    }
+    for (name, tag) in OPTIONAL {
+        if target.abi.contains_key(name) {
+            values.push((tag, unsigned_fact(target, name)?));
+        }
+    }
+    let vfp_args = unsigned_fact(target, "arm_vfp_args")?;
+    if !matches!(
+        (float_abi, vfp_args),
+        (Some("hard"), 1 | 3) | (Some("soft" | "softfp"), 0 | 3)
+    ) {
+        return Err(error(
+            "ARM VFP argument convention contradicts the selected float ABI",
+        ));
+    }
+    Ok(Some(values))
+}
+
+fn compiler_option_fact(target: &SdkTarget, name: &str) -> Result<Option<String>, ContractError> {
+    match target.abi.get(name) {
+        None => Ok(None),
+        Some(SdkAbiValue::Text(value))
+            if !value.is_empty()
+                && value.len() <= MAX_COMPILER_OPTION_BYTES
+                && value
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'+' | b'-')
+                }) =>
+        {
+            Ok(Some(value.clone()))
+        }
+        Some(SdkAbiValue::Text(_)) => Err(error(format!(
+            "SDK target {name} must be 1..=64 ASCII characters, start with a letter or digit, and contain only letters, digits, _, ., + or -"
+        ))),
+        Some(_) => Err(error(format!("SDK target {name} must be text"))),
+    }
 }
 
 fn unsigned_fact(target: &SdkTarget, name: &str) -> Result<u64, ContractError> {
