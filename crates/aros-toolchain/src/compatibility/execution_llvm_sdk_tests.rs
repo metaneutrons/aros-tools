@@ -39,17 +39,17 @@ const SDK_INCLUDE_RELATIVE: &str = "products/ci-selected-sdk-layout/include";
 const SOURCE_EPOCH: u64 = 946_684_800;
 
 #[derive(Clone, Copy)]
-enum BindingMode {
+pub(super) enum BindingMode {
     Valid,
     Missing,
     Stale,
 }
 
-struct Fixture {
-    request: NativeCompatibilityRequest,
-    profiles: Profiles,
-    cmake_log: PathBuf,
-    binding_path: PathBuf,
+pub(super) struct Fixture {
+    pub(super) request: NativeCompatibilityRequest,
+    pub(super) profiles: Profiles,
+    pub(super) cmake_log: PathBuf,
+    pub(super) binding_path: PathBuf,
 }
 
 #[test]
@@ -286,7 +286,7 @@ fn rejects_every_output_root_nested_in_original_source_before_writes() {
     }
 }
 
-fn fixture(root: &Path, binding_mode: BindingMode, arch: &str, machine: u16) -> Fixture {
+pub(super) fn fixture(root: &Path, binding_mode: BindingMode, arch: &str, machine: u16) -> Fixture {
     fixture_with_toolchain_profile(root, binding_mode, arch, machine, PROFILE_NAME)
 }
 
@@ -308,7 +308,9 @@ fn fixture_with_toolchain_profile(
         .clone();
     let helpers_root = helper_path.parent().unwrap().to_path_buf();
     let response = source_binding_response(&materialized_source_root, &identity);
-    fs::write(&response_path, serde_json::to_vec(&response).unwrap()).unwrap();
+    // The real source validator emits sorted JSON with one final LF; CMake
+    // retains those exact bytes. Keep the mock on that same boundary.
+    fs::write(&response_path, crate::canonical::bytes(&response).unwrap()).unwrap();
     write_executable(
         &helper_path,
         format!(
@@ -350,7 +352,7 @@ fn fixture_with_toolchain_profile(
             let stale_path = root.join("stale-binding.json");
             let mut stale = response;
             stale["contract_sha256"] = json!("f".repeat(64));
-            fs::write(&stale_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+            fs::write(&stale_path, crate::canonical::bytes(&stale).unwrap()).unwrap();
             stale_path
         }
     };

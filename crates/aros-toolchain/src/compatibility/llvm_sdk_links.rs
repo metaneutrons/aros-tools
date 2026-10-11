@@ -145,23 +145,23 @@ impl CompletedLlvmSdkLinks {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Member {
-    sha256: Sha256Digest,
-    size: u64,
+pub(super) struct Member {
+    pub(super) sha256: Sha256Digest,
+    pub(super) size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LinkRecord {
-    schema: String,
-    assurance: String,
-    identity: SdkIdentity,
-    compiler: ArosCompilerIdentity,
-    compiler_tree_sha256: Sha256Digest,
-    sdk_inventory_sha256: Sha256Digest,
-    sdk_entries: usize,
-    retained_tree_sha256: Sha256Digest,
-    members: BTreeMap<String, Member>,
+pub(super) struct LinkRecord {
+    pub(super) schema: String,
+    pub(super) assurance: String,
+    pub(super) identity: SdkIdentity,
+    pub(super) compiler: ArosCompilerIdentity,
+    pub(super) compiler_tree_sha256: Sha256Digest,
+    pub(super) sdk_inventory_sha256: Sha256Digest,
+    pub(super) sdk_entries: usize,
+    pub(super) retained_tree_sha256: Sha256Digest,
+    pub(super) members: BTreeMap<String, Member>,
 }
 
 /// Run four normal source-selected LLVM links, then validate their local closure.
@@ -568,7 +568,7 @@ fn compiler_root(drivers: &LlvmSdkDriverBinding) -> Result<PathBuf, ContractErro
         .ok_or_else(|| error("LLVM SDK compiler root is absent"))
 }
 
-fn environment(temporary: &Path) -> Result<CompatibilityEnvironment, ContractError> {
+pub(super) fn environment(temporary: &Path) -> Result<CompatibilityEnvironment, ContractError> {
     let tmp = temporary
         .to_str()
         .ok_or_else(|| error("LLVM SDK temporary root is not UTF-8"))?;
@@ -649,7 +649,7 @@ fn member(bytes: &[u8]) -> Member {
         size: bytes.len() as u64,
     }
 }
-fn encode(record: &LinkRecord) -> Result<Vec<u8>, ContractError> {
+pub(super) fn encode(record: &LinkRecord) -> Result<Vec<u8>, ContractError> {
     canonical::bytes(
         &serde_json::to_value(record).map_err(|_| error("cannot encode LLVM SDK link receipt"))?,
     )

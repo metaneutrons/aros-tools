@@ -171,8 +171,22 @@ the declared SDK roots, then runs the six compatibility phases and four ordinary
 C/C++ links. Its local v6 receipt binds the complete SDK identity, source/CMake
 binding, link receipt and inventory digests. Legacy LLVM v2/v4 and GNU v3/v5
 receipts keep their original shape. The retained/portable owning-job adapter
-rejects this new LLVM selection before execution until its complete evidence
-integration exists; no incomplete export is admitted.
+selects the generic SDK identity, source-validator response, sealed probes and
+measured compiler roles before execution. Its closed LLVM namespace retains
+22 files: the CMake binding, independently measured compiler inventory, link
+receipt, SDK inventory, four ELF outputs, four maps, two reports and eight logs.
+Rootless readback reconstructs the exact ordinary commands, resolves traced
+inputs against the selected inventories and checks byte-identical relocation
+without opening the original runner paths. The v6 aggregate joins the resulting
+proof to the independently selected SDK product/source/ABI identity.
+
+The SDK inventory is a claim about payload bytes, not proof of an SDK archive.
+The local receipt's full retained-tree digest cannot be reconstructed from this
+subset because the relocated SDK payload is not exported. Neither that field
+nor a matching hash authenticates the external job or admits a release. Owning
+origin, complete generated payload and package admission remain separate gates.
+Input-claim readers require an explicit generic LLVM SDK identity; the legacy
+GNU/no-SDK reader rejects such claims instead of silently dropping the policy.
 
 `aros sdk build` explicitly rejects this generic schema before compatibility
 preparation until the family-specific link and evidence adapters are implemented.

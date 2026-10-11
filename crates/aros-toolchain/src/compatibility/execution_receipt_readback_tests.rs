@@ -322,6 +322,8 @@ impl Fixture {
             cmake_build_required: self.cmake_build_required,
             native_sdk_required: false,
             native_sdk: None,
+            llvm_sdk_identity: None,
+            llvm_sdk: None,
             sdk_consumer_source_tree_sha256: &self.sdk_source_tree,
             engine_api_version: 3,
             engine_sha256: &self.engine_sha256,

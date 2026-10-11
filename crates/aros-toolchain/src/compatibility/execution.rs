@@ -1849,6 +1849,9 @@ pub use tests::{fixture_elf32, fixture_elf64};
 mod llvm_v2_tests;
 
 #[cfg(test)]
+#[path = "llvm_sdk_portable_tests.rs"]
+mod llvm_sdk_portable_tests;
+#[cfg(test)]
 #[path = "execution_llvm_sdk_tests.rs"]
 mod llvm_sdk_tests;
 
