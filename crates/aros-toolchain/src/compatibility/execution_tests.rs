@@ -435,21 +435,78 @@ pub(super) fn fixture_profiles(upstream_commit: &str) -> Profiles {
 }
 
 fn git(root: &Path, arguments: &[&str]) {
-    let mut command = Command::new("git");
-    command.args(arguments).current_dir(root);
+    let mut command = fixture_git_command(root, arguments);
     let status = run_status(&mut command).unwrap();
     assert!(status.status.success());
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> String {
-    let mut command = Command::new("git");
-    command.args(arguments).current_dir(root);
+    let mut command = fixture_git_command(root, arguments);
     let output = run_output(&mut command).unwrap();
     assert!(output.status.success());
     String::from_utf8(output.stdout.exact_bytes().unwrap().to_vec())
         .unwrap()
         .trim()
         .to_owned()
+}
+
+fn fixture_git_command(root: &Path, arguments: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    // Read-only snapshot assertions must not race fixture-owned background
+    // packing or execute hooks inherited from the developer or runner.
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args([
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(arguments)
+        .current_dir(root);
+    command
+}
+
+#[test]
+fn fixture_git_isolation_overrides_inherited_automatic_maintenance() {
+    let temporary = tempfile::tempdir().unwrap();
+    git(temporary.path(), &["init", "-q"]);
+    for (key, inherited, selected) in [("gc.auto", "1", "0"), ("maintenance.auto", "true", "false")]
+    {
+        let configure = |command: &mut Command| {
+            command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", key)
+                .env("GIT_CONFIG_VALUE_0", inherited);
+        };
+        let mut unisolated = Command::new("git");
+        unisolated
+            .current_dir(temporary.path())
+            .args(["config", "--get", key]);
+        configure(&mut unisolated);
+        let baseline = run_output(&mut unisolated).unwrap();
+        assert!(baseline.status.success());
+        assert_eq!(
+            baseline.stdout.exact_bytes().unwrap(),
+            format!("{inherited}\n").as_bytes()
+        );
+
+        let mut isolated = fixture_git_command(temporary.path(), &["config", "--get", key]);
+        configure(&mut isolated);
+        let result = run_output(&mut isolated).unwrap();
+        assert!(result.status.success());
+        assert_eq!(
+            result.stdout.exact_bytes().unwrap(),
+            format!("{selected}\n").as_bytes()
+        );
+    }
 }
 
 fn manifest() -> ArosToolchainManifest {
