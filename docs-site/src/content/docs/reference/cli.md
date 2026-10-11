@@ -110,6 +110,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 
 | Command | Effect and boundary |
 | --- | --- |
+| `aros sdk verify-source` | Bind an independently selected SDK identity to its clean committed checkout, engine-free projection and sealed source ABI contract; no build or writes |
 | `aros sdk package` | Package a source-produced Developer tree against an explicit source/ABI identity and inventory digest; local only |
 | `aros sdk verify-package` | Read back all local package members and payload bytes against independent archive, tree and identity selections |
 | `aros sdk extract` | Verify then extract into one absent directory and recheck the payload; not managed installation |
@@ -123,6 +124,16 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 SDK identity is target/ABI-specific, not build-host-specific. Local packaging,
 package verification and extraction require independent identity/tree digests
 and an absolute `--forbidden-prefix` to scan for build-path leakage.
+
+`verify-source` requires `--identity FILE --identity-sha256 SHA256`,
+`--source-dir DIR`, `--materialized-source-dir DIR` and `--source-preset NAME`.
+The original must be clean with initialized submodules. The projection must
+match raw Git contents with only top-level `cmake/` omitted. Commit/tree bind
+the original; `content_sha256` binds that normalized projection. Contract digest,
+target triple and all ABI facts must match the source's sealed v2 declaration.
+This command does not generate an SDK, prove execution or authorize packaging
+or publication. Its JSON assurance is
+`local-source-binding-not-execution-or-release-admission`.
 
 External SDK selection requires `--release-lock FILE --lock-sha256 SHA256`. Commands do
 not discover a latest release or trust a downloaded lock as its own authority.
