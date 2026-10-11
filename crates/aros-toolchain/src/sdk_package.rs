@@ -271,21 +271,46 @@ pub fn verify(request: &SdkVerificationRequest) -> Result<VerifiedSdkPackage, Co
         .map_err(|error| ContractError::verification(format!("invalid SDK identity: {error}")))?;
     require_nonzero_digest(&request.expected_tree_sha256, false)?;
     require_nonzero_digest(&request.expected_archive_sha256, false)?;
+    validate_forbidden_prefixes(&request.forbidden_prefixes, false)?;
+    let package_dir = checked_existing_directory(&request.package_dir, false)?;
+    let initial_directory_identity = directory_identity(&package_dir, false)?;
+    let expected_names = selected_outer_names(request)?;
+    require_selected_outer_members(&package_dir, &expected_names, true, false)?;
+    let verified = verify_selected_members_in_release_directory(request)?;
+    require_selected_outer_members(&package_dir, &expected_names, true, false)?;
+    if directory_identity(&package_dir, false)? != initial_directory_identity {
+        return Err(ContractError::verification(
+            "SDK package directory changed during verification",
+        ));
+    }
+    Ok(verified)
+}
+
+/// Verify the selected SDK archive, manifest and checksum in a shared release
+/// directory that may contain other artifacts.
+///
+/// This keeps the same SDK identity, byte, inventory and mutation checks as
+/// [`verify`], but deliberately omits only the containing directory's exact
+/// three-member enumeration. A caller validating a shared release directory
+/// must verify its exact union inventory before and after this call. This is a
+/// byte-consistency check, not publication provenance or release authorization.
+pub(crate) fn verify_selected_members_in_release_directory(
+    request: &SdkVerificationRequest,
+) -> Result<VerifiedSdkPackage, ContractError> {
+    request
+        .identity
+        .validate()
+        .map_err(|error| ContractError::verification(format!("invalid SDK identity: {error}")))?;
+    require_nonzero_digest(&request.expected_tree_sha256, false)?;
+    require_nonzero_digest(&request.expected_archive_sha256, false)?;
     let forbidden = validate_forbidden_prefixes(&request.forbidden_prefixes, false)?;
     let package_dir = checked_existing_directory(&request.package_dir, false)?;
     let package_identity = directory_identity(&package_dir, false)?;
-    let asset = request.identity.asset_name().map_err(|error| {
-        ContractError::verification(format!("invalid SDK asset identity: {error}"))
-    })?;
+    let (asset, expected_names) = selected_outer_names_for_identity(&request.identity)?;
     let archive_path = package_dir.join(&asset);
     let manifest_path = package_dir.join(format!("{asset}.manifest.json"));
     let checksum_path = package_dir.join(format!("{asset}.sha256"));
-    let expected_names = BTreeSet::from([
-        asset.clone(),
-        format!("{asset}.manifest.json"),
-        format!("{asset}.sha256"),
-    ]);
-    require_exact_outer_members(&package_dir, &expected_names, false)?;
+    require_selected_outer_members(&package_dir, &expected_names, false, false)?;
 
     let archive_file = open_outer_regular(&archive_path, false)?;
     let (archive_file, _, archive_measurement) =
@@ -345,7 +370,7 @@ pub fn verify(request: &SdkVerificationRequest) -> Result<VerifiedSdkPackage, Co
 
     // Re-read every selected outer input after archive parsing so a pathname
     // substitution or in-place update cannot be accepted on a stale first read.
-    require_exact_outer_members(&package_dir, &expected_names, false)?;
+    require_selected_outer_members(&package_dir, &expected_names, false, false)?;
     if read_metadata(&manifest_path, SDK_MAX_METADATA_BYTES as u64, false)? != manifest_bytes
         || read_metadata(&checksum_path, SDK_MAX_METADATA_BYTES as u64, false)?
             != expected_sidecar.as_bytes()
@@ -367,6 +392,26 @@ pub fn verify(request: &SdkVerificationRequest) -> Result<VerifiedSdkPackage, Co
         archive_sha256: archive_measurement.digest,
         archive_size: archive_measurement.size,
     })
+}
+
+fn selected_outer_names(
+    request: &SdkVerificationRequest,
+) -> Result<BTreeSet<String>, ContractError> {
+    selected_outer_names_for_identity(&request.identity).map(|(_, names)| names)
+}
+
+fn selected_outer_names_for_identity(
+    identity: &SdkIdentity,
+) -> Result<(String, BTreeSet<String>), ContractError> {
+    let asset = identity.asset_name().map_err(|error| {
+        ContractError::verification(format!("invalid SDK asset identity: {error}"))
+    })?;
+    let names = BTreeSet::from([
+        asset.clone(),
+        format!("{asset}.manifest.json"),
+        format!("{asset}.sha256"),
+    ]);
+    Ok((asset, names))
 }
 
 /// Verify a package, then extract its SDK members into one fresh retained root.
@@ -1376,25 +1421,28 @@ fn open_outer_regular(path: &Path, package: bool) -> Result<File, ContractError>
     Ok(file)
 }
 
-fn require_exact_outer_members(
+fn require_selected_outer_members(
     directory: &Path,
     expected: &BTreeSet<String>,
+    require_exact_directory: bool,
     package: bool,
 ) -> Result<(), ContractError> {
-    let names = directory_entry_names_nofollow_bounded(directory, expected.len() + 1)
-        .map_err(|_| operation_error(package, "cannot enumerate SDK package directory"))?;
-    let actual = names
-        .into_iter()
-        .map(|name| {
-            name.into_string()
-                .map_err(|_| operation_error(package, "SDK package member name is not UTF-8"))
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if actual != *expected {
-        return Err(operation_error(
-            package,
-            "SDK package directory must contain exactly the three required files",
-        ));
+    if require_exact_directory {
+        let names = directory_entry_names_nofollow_bounded(directory, expected.len() + 1)
+            .map_err(|_| operation_error(package, "cannot enumerate SDK package directory"))?;
+        let actual = names
+            .into_iter()
+            .map(|name| {
+                name.into_string()
+                    .map_err(|_| operation_error(package, "SDK package member name is not UTF-8"))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if actual != *expected {
+            return Err(operation_error(
+                package,
+                "SDK package directory must contain exactly the three required files",
+            ));
+        }
     }
     for name in expected {
         open_outer_regular(&directory.join(name), package)?;
@@ -1527,5 +1575,265 @@ mod manifest_size_tests {
                 target: None,
             }],
         }
+    }
+}
+
+#[cfg(test)]
+mod selected_member_verifier_tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::path::PathBuf;
+
+    use aros_common::sdk_manifest::{SdkAbiValue, SdkSourceIdentity, SdkTarget};
+    use aros_common::{sha256_bytes, toolchain_tree_inventory_excluding, Sha256Digest};
+
+    use super::*;
+
+    struct Fixture {
+        temporary: tempfile::TempDir,
+        package_dir: PathBuf,
+        request: SdkVerificationRequest,
+    }
+
+    fn fixture() -> Fixture {
+        let temporary = tempfile::tempdir().unwrap();
+        let candidate = temporary.path().join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        fs::create_dir(candidate.join("bin")).unwrap();
+        fs::create_dir(candidate.join("include")).unwrap();
+        fs::write(candidate.join("bin/aros"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(
+            candidate.join("bin/aros"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::write(candidate.join("include/aros.h"), b"#define AROS_SDK 1\n").unwrap();
+        fs::write(
+            candidate.join("toolchain-manifest.json"),
+            b"synthetic source\n",
+        )
+        .unwrap();
+        symlink("bin/aros", candidate.join("aros")).unwrap();
+
+        let (tree, _) =
+            toolchain_tree_inventory_excluding(&candidate, &["sdk-manifest.json"]).unwrap();
+        let identity = SdkIdentity {
+            sdk_id: "core".into(),
+            version: "1.2.3".into(),
+            target: SdkTarget {
+                target_triple: "i686-aros".into(),
+                abi: BTreeMap::from([("data_model".into(), SdkAbiValue::Text("ilp32".into()))]),
+            },
+            source: SdkSourceIdentity {
+                commit: "1".repeat(40),
+                git_tree: "2".repeat(40),
+                content_sha256: sha256_bytes(b"synthetic SDK source"),
+                contract_sha256: sha256_bytes(b"synthetic SDK contract"),
+            },
+            source_date_epoch: 946_684_800,
+        };
+        let package_dir = temporary.path().join("package");
+        let output = package(&SdkPackageRequest {
+            candidate_root: candidate,
+            output_dir: package_dir.clone(),
+            identity: identity.clone(),
+            expected_tree_sha256: Sha256Digest::parse(&tree).unwrap(),
+            forbidden_prefixes: vec![PathBuf::from("/tmp/synthetic-sdk-private-root")],
+        })
+        .unwrap();
+        Fixture {
+            temporary,
+            package_dir: package_dir.clone(),
+            request: SdkVerificationRequest {
+                package_dir,
+                identity,
+                expected_tree_sha256: Sha256Digest::parse(&tree).unwrap(),
+                expected_archive_sha256: output.archive_sha256,
+                expected_archive_size: output.archive_size,
+                forbidden_prefixes: vec![PathBuf::from("/tmp/synthetic-sdk-private-root")],
+            },
+        }
+    }
+
+    fn archive_path(request: &SdkVerificationRequest) -> PathBuf {
+        request
+            .package_dir
+            .join(request.identity.asset_name().unwrap())
+    }
+
+    fn assert_internal_rejects_with(request: &SdkVerificationRequest, expected: &str) {
+        let error = verify_selected_members_in_release_directory(request)
+            .expect_err("selected SDK package mutation must be rejected");
+        assert!(
+            error.to_string().contains(expected),
+            "expected rejection containing {expected:?}, got: {error}"
+        );
+    }
+
+    fn assert_public_rejects_with(request: &SdkVerificationRequest, expected: &str) {
+        let error = verify(request).expect_err("invalid SDK package must be rejected");
+        assert!(
+            error.to_string().contains(expected),
+            "expected rejection containing {expected:?}, got: {error}"
+        );
+    }
+
+    #[test]
+    fn exact_sdk_package_passes_public_and_selected_member_verifiers() {
+        let fixture = fixture();
+        assert_eq!(
+            verify(&fixture.request).unwrap(),
+            verify_selected_members_in_release_directory(&fixture.request).unwrap()
+        );
+    }
+
+    #[test]
+    fn selected_member_verifier_allows_only_unselected_siblings() {
+        let fixture = fixture();
+        fs::write(
+            fixture.package_dir.join("toolchain-index-v2.json"),
+            b"sibling release artifact\n",
+        )
+        .unwrap();
+
+        let error = verify(&fixture.request).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exactly the three required files"),
+            "unexpected public inventory rejection: {error}"
+        );
+        let verified = verify_selected_members_in_release_directory(&fixture.request).unwrap();
+        assert_eq!(
+            verified.archive_sha256,
+            fixture.request.expected_archive_sha256
+        );
+        assert_eq!(verified.archive_size, fixture.request.expected_archive_size);
+    }
+
+    #[test]
+    fn selected_member_verifier_rejects_hardlinks_to_each_selected_member() {
+        for member in ["archive", "manifest", "checksum"] {
+            let fixture = fixture();
+            let asset = fixture.request.identity.asset_name().unwrap();
+            let path = match member {
+                "archive" => fixture.package_dir.join(&asset),
+                "manifest" => fixture.package_dir.join(format!("{asset}.manifest.json")),
+                "checksum" => fixture.package_dir.join(format!("{asset}.sha256")),
+                _ => unreachable!(),
+            };
+            fs::hard_link(
+                &path,
+                fixture.temporary.path().join(format!("{member}-hardlink")),
+            )
+            .unwrap();
+            assert_internal_rejects_with(&fixture.request, "single-link regular file");
+        }
+    }
+
+    #[test]
+    fn selected_member_verifier_rejects_altered_archive_and_missing_member() {
+        let altered = fixture();
+        let archive = archive_path(&altered.request);
+        let mut bytes = fs::read(&archive).unwrap();
+        bytes[0] ^= 1;
+        fs::write(archive, bytes).unwrap();
+        assert_internal_rejects_with(&altered.request, "independently selected hash or size");
+
+        let missing = fixture();
+        let manifest = missing.package_dir.join(format!(
+            "{}.manifest.json",
+            missing.request.identity.asset_name().unwrap()
+        ));
+        fs::remove_file(manifest).unwrap();
+        assert_internal_rejects_with(&missing.request, "cannot safely open SDK package member");
+    }
+
+    #[test]
+    fn public_and_selected_member_verifiers_reject_wrong_nonzero_tree_digest() {
+        let fixture = fixture();
+        let mut wrong_tree = fixture.request;
+        wrong_tree.expected_tree_sha256 = Sha256Digest::parse(&"a".repeat(64)).unwrap();
+
+        let expected = "SDK manifest tree digest differs from the selected tree digest";
+        assert_public_rejects_with(&wrong_tree, expected);
+        assert_internal_rejects_with(&wrong_tree, expected);
+    }
+
+    #[test]
+    fn public_and_selected_member_verifiers_reject_symlinks_for_each_selected_member() {
+        for member in ["archive", "manifest", "checksum"] {
+            let fixture = fixture();
+            let asset = fixture.request.identity.asset_name().unwrap();
+            let path = match member {
+                "archive" => fixture.package_dir.join(&asset),
+                "manifest" => fixture.package_dir.join(format!("{asset}.manifest.json")),
+                "checksum" => fixture.package_dir.join(format!("{asset}.sha256")),
+                _ => unreachable!(),
+            };
+            let saved = fixture.temporary.path().join(format!("{member}-original"));
+            fs::rename(&path, &saved).unwrap();
+            symlink(&saved, &path).unwrap();
+
+            assert_public_rejects_with(&fixture.request, "cannot safely open SDK package member");
+            assert_internal_rejects_with(&fixture.request, "cannot safely open SDK package member");
+        }
+    }
+
+    #[test]
+    fn selected_member_verifier_rejects_wrong_target_abi_and_triple() {
+        let fixture = fixture();
+        let mut wrong_abi = fixture.request.clone();
+        wrong_abi
+            .identity
+            .target
+            .abi
+            .insert("data_model".into(), SdkAbiValue::Text("lp64".into()));
+        assert_internal_rejects_with(
+            &wrong_abi,
+            "SDK manifest identity differs from the selected identity",
+        );
+
+        let mut wrong_target_triple = fixture.request;
+        wrong_target_triple.identity.target.target_triple = "riscv32-aros".into();
+        assert_internal_rejects_with(
+            &wrong_target_triple,
+            "SDK manifest identity differs from the selected identity",
+        );
+    }
+
+    #[test]
+    fn selected_member_verifier_rejects_corrupt_sidecar_and_malformed_manifest() {
+        let sidecar_fixture = fixture();
+        let asset = sidecar_fixture.request.identity.asset_name().unwrap();
+        fs::write(
+            sidecar_fixture.package_dir.join(format!("{asset}.sha256")),
+            b"corrupt sidecar\n",
+        )
+        .unwrap();
+        assert_internal_rejects_with(&sidecar_fixture.request, "checksum sidecar does not match");
+
+        let manifest_fixture = fixture();
+        let asset = manifest_fixture.request.identity.asset_name().unwrap();
+        fs::write(
+            manifest_fixture
+                .package_dir
+                .join(format!("{asset}.manifest.json")),
+            b"not-json\n",
+        )
+        .unwrap();
+        assert_internal_rejects_with(
+            &manifest_fixture.request,
+            "external SDK manifest is invalid",
+        );
+    }
+
+    #[test]
+    fn wrong_product_version_selects_a_missing_asset_name() {
+        let fixture = fixture();
+        let mut wrong_version = fixture.request;
+        wrong_version.identity.version = "1.2.4".into();
+        assert_internal_rejects_with(&wrong_version, "cannot safely open SDK package member");
     }
 }
