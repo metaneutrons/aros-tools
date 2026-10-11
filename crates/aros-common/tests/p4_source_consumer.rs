@@ -23,7 +23,7 @@ fn source_owned_p4_sdk_contract_is_bound_and_rejects_drift() {
     let relative = Path::new(profile.native_consumer_contract.as_deref().unwrap());
     let binding = load_bound_native_consumer_contract(root, relative, profile).unwrap();
     let contract = &binding.contract;
-    assert_eq!(contract.roots, ["includes", "linklibs"]);
+    assert_eq!(contract.roots, ["core-linklibs", "includes", "linklibs"]);
     let probes = contract.require_native_sdk_link_probes().unwrap();
     assert_eq!(
         probes.c.source,
