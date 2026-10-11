@@ -12,6 +12,13 @@ pub struct ContractError {
 }
 
 impl ContractError {
+    pub(crate) fn sdk_store_hint(mut self) -> Self {
+        for diagnostic in &mut self.diagnostics.diagnostics {
+            diagnostic.hint = Some("inspect the selected SDK lock, archive and exact store envelope; private installation staging is cleaned on prepublication failure, but a possibly published destination is never overwritten, repaired or removed automatically".into());
+        }
+        self
+    }
+
     pub(crate) fn retained_material(mut self) -> Self {
         for diagnostic in &mut self.diagnostics.diagnostics {
             diagnostic.hint = Some("stop and inspect the owned work/output roots; partial or complete source material is retained, never adopted, removed or authorized for execution by this failure".into());

@@ -88,8 +88,59 @@ establish cross-host SDK reproducibility, substitute for C/C++ relocated-link
 qualification, or grant publication authority. The native SDK link receipt
 remains separate evidence; an inventory assertion is not SDK archive bytes.
 
-SDK source-input SBOM/signatures/attestations, a published SDK index/consumer
-lock, download/install/list/verify/selection lifecycle and release/consumer
-qualification remain required distribution work. The three local files are
-not an SDK release inventory and do not expand or replace the compiler release
-asset contract.
+## Consumer release lock
+
+`aros-sdk-lock-v2` selects an exact release tag, canonical credential-free
+HTTPS base URL, SDK identity, payload tree digest, archive SHA-256/size and
+manifest SHA-256/size. Its release version may differ from the SDK version:
+one release can distribute independently versioned compiler and SDK artifacts.
+Asset names are derived from the SDK identity, not a host or board selector.
+Unknown or duplicate fields, URL aliases/credentials, zero digests and oversized
+metadata are rejected. The lock itself has a 1 MiB limit and its URL a 4096-byte
+limit.
+
+The consumer read-back API measures the exact opened archive, checks the
+embedded canonical manifest against the independent lock, and verifies the
+complete payload inventory. Installed verification repeats bounded no-follow
+inventory acquisition, compares all bytes and rechecks the tree and manifest
+before returning. Installed payload modes must equal the normalized archive
+modes; changed permissions or set-ID bits are rejected, not normalized away.
+The enclosing installation root remains the store's private access boundary.
+Consumer verification does not infer build-root prefixes;
+those are producer qualification inputs. A matching consumer lock proves
+selected byte consistency, not publisher authentication or release admission.
+
+## Managed store boundary
+
+The Unix store API uses this host-independent namespace:
+
+```text
+<store>/v2/<sdk-id>/<sdk-version>/<canonical-lock-sha256>/
+  lock.json
+  .complete
+  sdk/
+    sdk-manifest.json
+    ...complete SDK payload...
+```
+
+It verifies the selected archive before creating a store namespace. A writer
+lock serializes installation; a private sibling stage is fully read back before
+durable no-clobber publication. Reuse requires complete installed verification.
+Corrupt envelopes are rejected, never repaired or overwritten. Prepublication
+private staging is cleaned automatically; an uncertain published destination
+is retained and reported with an explicit commit state. Persistent empty
+publication locks are recognized only by names derived from actual envelopes.
+
+Read-only inventory has an explicit namespace-entry budget and reports malformed
+entries and incomplete coverage. It reads bounded control metadata, does not
+hash or execute payloads, and marks every listed SDK `not-checked`. Full
+verification is a separate operation. An absent store stays absent; a symlinked
+store is reported as unsafe and is not followed. There is no global active SDK,
+automatic removal or project selection in this API.
+
+These are library contracts, not a claim of a complete public CLI or published
+SDK. Download, CLI installation/list/verification, project-bound selection,
+source-input SBOM/signatures/attestations, a published SDK index/consumer lock
+and release/consumer qualification remain required distribution work. The
+three local files are not an SDK release inventory and do not expand or
+replace the compiler release asset contract.
