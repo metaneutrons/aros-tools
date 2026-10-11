@@ -944,7 +944,10 @@ fn llvm_link_selection(
         preparation,
         sdk_root: selection.original_sdk,
         output_root: selection.output_root,
-        timeout: std::time::Duration::from_secs(10),
+        // This fixture proves ordinary link correctness, not ten-second host
+        // performance. Cold parallel CI also runs repeated source/driver audits.
+        // Dedicated deadline tests override this budget and remain strict.
+        timeout: std::time::Duration::from_secs(60),
     }
 }
 
