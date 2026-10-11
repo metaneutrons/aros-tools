@@ -22,9 +22,17 @@ pub enum SdkCommand {
     Install(crate::sdk_managed::InstallArgs),
     /// List bounded store metadata without hashing or executing SDK payloads
     List(crate::sdk_managed::ListArgs),
-    /// Fully verify the exact installed SDK selected by a release lock
+    /// Preview or apply one application project's verified SDK selection
+    Select(crate::sdk_managed::SelectArgs),
+    /// Fully verify the SDK selected by explicit release or project metadata
+    #[command(
+        after_help = "Select either `--release-lock FILE --lock-sha256 SHA256` or `--project-lock FILE`. A project lock is explicit local application configuration, not publisher authentication."
+    )]
     Verify(crate::sdk_managed::InstalledArgs),
     /// Print the fully verified installed SDK path for application build tools
+    #[command(
+        after_help = "Select either `--release-lock FILE --lock-sha256 SHA256` or `--project-lock FILE`. A project lock is explicit local application configuration, not publisher authentication."
+    )]
     Path(crate::sdk_managed::InstalledArgs),
 }
 
@@ -38,6 +46,7 @@ impl SdkCommand {
             Self::Download(_) => "sdk.download",
             Self::Install(_) => "sdk.install",
             Self::List(_) => "sdk.list",
+            Self::Select(_) => "sdk.select",
             Self::Verify(_) => "sdk.verify",
             Self::Path(_) => "sdk.path",
         }
@@ -149,6 +158,7 @@ pub async fn run(command: SdkCommand) -> Result<()> {
         SdkCommand::Download(args) => crate::sdk_managed::download(args).await,
         SdkCommand::Install(args) => crate::sdk_managed::install(args).await,
         SdkCommand::List(args) => crate::sdk_managed::list(args),
+        SdkCommand::Select(args) => crate::sdk_managed::select(args),
         SdkCommand::Verify(args) => crate::sdk_managed::verify(args, false),
         SdkCommand::Path(args) => crate::sdk_managed::verify(args, true),
         local => run_local(local),

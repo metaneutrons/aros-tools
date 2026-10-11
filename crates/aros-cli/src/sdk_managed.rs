@@ -64,13 +64,55 @@ pub struct ListArgs {
 }
 
 #[derive(Args)]
-/// Exact release selection and read-only installed payload verification.
+/// One independently selected release or version-controlled project SDK lock.
+pub struct ReadSelectionArgs {
+    /// Absolute SDK release-lock document; requires --lock-sha256
+    #[arg(
+        long,
+        value_name = "FILE",
+        required_unless_present = "project_lock",
+        requires = "lock_sha256",
+        conflicts_with = "project_lock"
+    )]
+    release_lock: Option<PathBuf>,
+    /// Independently selected release-lock SHA-256; requires --release-lock
+    #[arg(
+        long,
+        value_name = "SHA256",
+        required_unless_present = "project_lock",
+        requires = "release_lock",
+        conflicts_with = "project_lock"
+    )]
+    lock_sha256: Option<Sha256Digest>,
+    /// Absolute application project lock; alternative to the release selectors
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["release_lock", "lock_sha256"])]
+    project_lock: Option<PathBuf>,
+}
+
+#[derive(Args)]
+/// Explicit SDK selection and read-only installed payload verification.
 pub struct InstalledArgs {
     #[command(flatten)]
-    release: ReleaseArgs,
+    selection: ReadSelectionArgs,
     /// Absolute SDK store; default: AROS_HOME/sdks
     #[arg(long, value_name = "DIR")]
     store: Option<PathBuf>,
+}
+
+#[derive(Args)]
+/// Preview or explicitly apply one application project's SDK selection.
+pub struct SelectArgs {
+    #[command(flatten)]
+    release: ReleaseArgs,
+    /// Absolute application-owned destination; one target/ABI per lock file
+    #[arg(long, value_name = "FILE")]
+    project_lock: PathBuf,
+    /// Absolute installed SDK store; default: AROS_HOME/sdks
+    #[arg(long, value_name = "DIR")]
+    store: Option<PathBuf>,
+    /// Apply only the exact preview confirmation token; default is read-only
+    #[arg(long, value_name = "TOKEN")]
+    apply: Option<Sha256Digest>,
 }
 
 struct SelectedRelease {
@@ -239,10 +281,33 @@ pub fn list(args: ListArgs) -> Result<()> {
 
 #[cfg(unix)]
 pub fn verify(args: InstalledArgs, path_only: bool) -> Result<()> {
-    let selected = SelectedRelease::read(&args.release)?;
-    let installed = aros_toolchain::sdk_store::verify(&store_path(args.store)?, &selected.lock)
-        .map_err(|error| native_error(&error))?;
-    selected.revalidate()?;
+    let store = store_path(args.store)?;
+    let installed = if let Some(path) = args.selection.project_lock {
+        let selected = aros_toolchain::sdk_project::read_project_lock(&path)
+            .map_err(|error| native_error(&error))?;
+        let installed = aros_toolchain::sdk_store::verify(&store, &selected.lock)
+            .map_err(|error| native_error(&error))?;
+        selected
+            .revalidate()
+            .map_err(|error| native_error(&error))?;
+        installed
+    } else {
+        let release = ReleaseArgs {
+            release_lock: args
+                .selection
+                .release_lock
+                .ok_or_else(|| miette::miette!("--release-lock or --project-lock is required"))?,
+            lock_sha256: args
+                .selection
+                .lock_sha256
+                .ok_or_else(|| miette::miette!("--release-lock requires --lock-sha256"))?,
+        };
+        let selected = SelectedRelease::read(&release)?;
+        let installed = aros_toolchain::sdk_store::verify(&store, &selected.lock)
+            .map_err(|error| native_error(&error))?;
+        selected.revalidate()?;
+        installed
+    };
     if path_only {
         aros_common::outputln!("{}", installed.payload.display());
     } else {
@@ -251,6 +316,30 @@ pub fn verify(args: InstalledArgs, path_only: bool) -> Result<()> {
             &serde_json::to_value(installed).into_diagnostic()?,
         );
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn select(args: SelectArgs) -> Result<()> {
+    let request = aros_toolchain::sdk_project::SdkProjectRequest {
+        candidate_lock: args.release.release_lock,
+        candidate_sha256: args.release.lock_sha256,
+        project_lock: args.project_lock,
+        store: store_path(args.store)?,
+    };
+    let result = if let Some(token) = args.apply {
+        let selected = aros_toolchain::sdk_project::apply(&request, &token)
+            .map_err(|error| native_error(&error))?;
+        if !selected.already_selected {
+            crate::observability::record_committed_mutation();
+        }
+        serde_json::to_value(selected).into_diagnostic()?
+    } else {
+        let planned =
+            aros_toolchain::sdk_project::preview(&request).map_err(|error| native_error(&error))?;
+        serde_json::to_value(planned).into_diagnostic()?
+    };
+    emit("sdk.select", &result);
     Ok(())
 }
 
