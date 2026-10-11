@@ -101,6 +101,12 @@ pub struct NativeCompatibilityRequest {
     /// Explicit source-owned preset for GNU consumers, distinct from the
     /// compiler profile. LLVM's legacy adapter does not use this selector.
     pub source_preset: Option<String>,
+    /// Explicit generation timestamp for the SDK/consumer source. Required for
+    /// new source-v2 SDK executions; never inferred from the compiler package,
+    /// wall clock or ambient environment. The recorded SDK environment digest
+    /// binds this value. None preserves legacy non-SDK execution and the exact
+    /// environment of historical retained evidence.
+    pub consumer_source_date_epoch: Option<u64>,
     /// Explicit prepared cache for raw source-declared host-generator inputs.
     /// Required only when the bound native source contract declares them.
     /// Execution verifies every exact size/hash and never downloads a miss.
@@ -275,6 +281,16 @@ pub fn execute_native_compatibility(
         ));
     }
     let inputs = validate_inputs(request)?;
+    if inputs
+        .native_consumer_contract
+        .as_ref()
+        .is_some_and(|binding| binding.contract.native_sdk_link_probes.is_some())
+        && request.consumer_source_date_epoch.is_none()
+    {
+        return Err(ContractError::compatibility(
+            "native SDK generation requires an explicit consumer source-date epoch",
+        ));
+    }
     // Reject an incomplete measured command environment before creating any
     // phase roots or staging the CMake cache, not after an expensive consumer
     // has already started or discovered a missing tool indirectly.
@@ -282,6 +298,7 @@ pub fn execute_native_compatibility(
         &request.host_python,
         &request.host_tools,
         &request.host,
+        request.consumer_source_date_epoch,
     )?;
     let outputs = create_output_roots(request, &inputs)?;
     let cmake_source_cache = request

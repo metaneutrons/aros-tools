@@ -158,6 +158,53 @@ fn executes_consumer_v2_with_six_compatibility_phases_and_four_native_sdk_links(
 }
 
 #[test]
+fn native_sdk_requires_an_explicit_epoch_before_any_phase_output() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut fixture = gnu_native_sdk_fixture(temporary.path(), NativeSdkBindingMode::Valid);
+    fixture.request.consumer_source_date_epoch = None;
+    let before = super::retained_tests::snapshot_tree(temporary.path());
+    let error = execute_native_compatibility_with_readback(
+        &fixture.request,
+        &fixture.profiles,
+        &CancellationToken::default(),
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("native SDK generation requires an explicit consumer source-date epoch"));
+    assert_eq!(
+        super::retained_tests::snapshot_tree(temporary.path()),
+        before
+    );
+}
+
+#[test]
+fn native_sdk_retained_readback_rejects_changed_or_omitted_epoch_without_mutation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut fixture = gnu_native_sdk_fixture(temporary.path(), NativeSdkBindingMode::Valid);
+    execute_native_compatibility_with_readback(
+        &fixture.request,
+        &fixture.profiles,
+        &CancellationToken::default(),
+    )
+    .unwrap();
+    let before = super::retained_tests::snapshot_tree(temporary.path());
+    for epoch in [None, Some(946_684_801)] {
+        fixture.request.consumer_source_date_epoch = epoch;
+        let error =
+            super::readback_retained_native_compatibility(&fixture.request, &fixture.profiles)
+                .unwrap_err();
+        assert!(error.to_string().contains(
+            "SDK phase host-tool or environment identity differs from independent expectation"
+        ));
+        assert_eq!(
+            super::retained_tests::snapshot_tree(temporary.path()),
+            before
+        );
+    }
+}
+
+#[test]
 fn consumer_v2_portable_sdk_evidence_roundtrips_rootlessly_and_rejects_mutations() {
     let original_root = tempfile::tempdir().unwrap();
     let original_root_path = original_root.path().to_path_buf();
@@ -1107,12 +1154,14 @@ fn alias_probe_request(
 
 fn assert_successful_gnu_execution(fixture: &Fixture, width: u8) {
     let request = &fixture.request;
-    let environment = crate::compatibility::derive_native_compatibility_environment_identity(
-        &request.host_python,
-        &request.host_tools,
-        &request.host,
-    )
-    .unwrap();
+    let environment =
+        crate::compatibility::derive_native_compatibility_environment_identity_with_epoch(
+            &request.host_python,
+            &request.host_tools,
+            &request.host,
+            request.consumer_source_date_epoch,
+        )
+        .unwrap();
     let report = execute_native_compatibility_with_readback(
         request,
         &fixture.profiles,
@@ -1539,6 +1588,7 @@ enum NativeSdkBindingMode {
 
 fn gnu_native_sdk_fixture(root: &Path, mode: NativeSdkBindingMode) -> Fixture {
     let mut fixture = gnu_fixture(root, 32, false);
+    fixture.request.consumer_source_date_epoch = Some(946_684_800);
     let profile = fixture.request.profile.clone();
     let contract_path =
         write_native_consumer_contract_fixture(&mut fixture.request, &profile, false);

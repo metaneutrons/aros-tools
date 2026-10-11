@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use aros_common::Sha256Digest;
+use aros_common::{sdk_manifest::SDK_MAX_SOURCE_DATE_EPOCH, Sha256Digest};
 
 use super::{
     environment, native_compatibility_host_tools, CompatibilityEnvironment,
@@ -62,7 +62,29 @@ pub fn derive_native_compatibility_environment_identity(
     host_tools: &HostToolClosure,
     host: &str,
 ) -> Result<NativeCompatibilityEnvironmentIdentity, ContractError> {
-    let environments = prepare_native_environments(host_python, host_tools, host)?;
+    derive_native_compatibility_environment_identity_with_epoch(host_python, host_tools, host, None)
+}
+
+/// Derive the exact environment with an independently selected consumer epoch.
+///
+/// The epoch belongs to the SDK/consumer source, not the compiler package or
+/// ambient process. It is included in the SDK environment digest; standalone
+/// collector commands keep their historical PATH-only environment. `None`
+/// reconstructs the historical environment for retained read-back, not a
+/// reproducible SDK generation claim. The value must fit the SDK's portable
+/// tar timestamp range, including zero.
+///
+/// # Errors
+/// Returns AX0703 for an out-of-range epoch or the same environment errors as
+/// [`derive_native_compatibility_environment_identity`]. No phases are run.
+pub fn derive_native_compatibility_environment_identity_with_epoch(
+    host_python: &PythonEnvironment,
+    host_tools: &HostToolClosure,
+    host: &str,
+    consumer_source_date_epoch: Option<u64>,
+) -> Result<NativeCompatibilityEnvironmentIdentity, ContractError> {
+    let environments =
+        prepare_native_environments(host_python, host_tools, host, consumer_source_date_epoch)?;
     let sdk = environment::resolve(&environments.sdk)?;
     let standalone = environment::resolve(&environments.standalone)?;
     Ok(NativeCompatibilityEnvironmentIdentity {
@@ -81,7 +103,13 @@ pub(super) fn prepare_native_environments(
     host_python: &PythonEnvironment,
     host_tools: &HostToolClosure,
     host: &str,
+    consumer_source_date_epoch: Option<u64>,
 ) -> Result<NativeCompatibilityEnvironments, ContractError> {
+    if consumer_source_date_epoch.is_some_and(|epoch| epoch > SDK_MAX_SOURCE_DATE_EPOCH) {
+        return Err(ContractError::compatibility(
+            "consumer source-date epoch exceeds the SDK portable tar timestamp range",
+        ));
+    }
     // Validate the selector before probing the prepared interpreter.
     let required_host_tools = native_compatibility_host_tools(host)?;
     let mut variables = host_python.compatibility_environment()?;
@@ -93,7 +121,15 @@ pub(super) fn prepare_native_environments(
     // lock-verified source closure. A cache miss is a failed qualification,
     // never permission for the classic fetcher to download an unmeasured input.
     variables.insert("AROS_FETCH_OFFLINE".into(), "1".into());
-    validate_host_environment(&variables, host_tools, &required_host_tools)?;
+    if let Some(epoch) = consumer_source_date_epoch {
+        variables.insert("SOURCE_DATE_EPOCH".into(), epoch.to_string());
+    }
+    validate_host_environment(
+        &variables,
+        host_tools,
+        &required_host_tools,
+        consumer_source_date_epoch,
+    )?;
     Ok(NativeCompatibilityEnvironments {
         sdk: CompatibilityEnvironment::SealedHostTools {
             variables,
@@ -109,8 +145,9 @@ fn validate_host_environment(
     environment: &BTreeMap<String, String>,
     host_tools: &HostToolClosure,
     required_host_tools: &[&str],
+    consumer_source_date_epoch: Option<u64>,
 ) -> Result<(), ContractError> {
-    let expected = BTreeSet::from([
+    let mut expected = BTreeSet::from([
         "AROS_FETCH_OFFLINE",
         "ac_cv_prog_cc_c23",
         "PATH",
@@ -120,11 +157,16 @@ fn validate_host_environment(
         "PYTHONNOUSERSITE",
         "PYTHONPATH",
     ]);
+    let epoch = consumer_source_date_epoch.map(|value| value.to_string());
+    if epoch.is_some() {
+        expected.insert("SOURCE_DATE_EPOCH");
+    }
     if environment
         .keys()
         .map(String::as_str)
         .collect::<BTreeSet<_>>()
         != expected
+        || environment.get("SOURCE_DATE_EPOCH").map(String::as_str) != epoch.as_deref()
         || environment.get("PATH").map(String::as_str) != Some(POISONED_PATH)
         || environment.get("AROS_FETCH_OFFLINE").map(String::as_str) != Some("1")
         || environment

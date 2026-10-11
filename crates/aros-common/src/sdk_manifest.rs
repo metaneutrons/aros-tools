@@ -19,6 +19,8 @@ pub const SDK_MANIFEST_FILE: &str = "sdk-manifest.json";
 pub const SDK_MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
 pub const SDK_MAX_ENTRIES: usize = 100_000;
 pub const SDK_MAX_REGULAR_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Largest nonnegative timestamp representable in the portable SDK tar header.
+pub const SDK_MAX_SOURCE_DATE_EPOCH: u64 = 0o77_777_777_777;
 
 /// Scalar source-owned ABI facts. No executable extensions or board enum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,7 +94,7 @@ impl SdkIdentity {
         for value in [&self.source.content_sha256, &self.source.contract_sha256] {
             nonzero_digest(value)?;
         }
-        if self.source_date_epoch > 0o77_777_777_777 {
+        if self.source_date_epoch > SDK_MAX_SOURCE_DATE_EPOCH {
             return Err("SDK source-date epoch exceeds portable tar timestamp range".into());
         }
         Ok(())

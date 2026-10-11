@@ -280,6 +280,15 @@ source/build flow; it makes no board or hardware qualification claim.
 A verified SDK consumer does not publish guest runtime selections such as
 Mesa's `GL.default` or add dependencies on the guest GL implementation.
 The full-build runtime checks remain separate.
+New source-v2 SDK executions require `--consumer-source-date-epoch SECONDS`.
+Select it explicitly for the consumer/SDK source; do not substitute the
+compiler recipe's epoch when the sources differ. It is passed as
+`SOURCE_DATE_EPOCH` to CMake and upstream Make and bound in their recorded
+environment digest. Retained read-back derives the same selected environment;
+a changed or omitted epoch rejects new evidence. Historical receipts retain
+their original environment. Standalone collector commands stay PATH-only.
+Use this same epoch for the SDK package identity. The range is zero through
+8,589,934,591 seconds, matching the portable SDK tar timestamp contract.
 If the source contract declares host file generators, `--ports-cache-dir` must
 also contain their raw input files. Each declaration supplies the exact filename,
 size and SHA-256. The adapter verifies them before configuration and supplies

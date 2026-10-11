@@ -387,6 +387,7 @@ pub(super) fn request(root: &Path) -> (NativeCompatibilityRequest, PathBuf, Path
             profile: profiles.select("pc-x86_64").unwrap().clone(),
             package_source_commit: None,
             source_preset: None,
+            consumer_source_date_epoch: None,
             host_generator_cache_root: None,
             cmake_program: cmake,
             ninja_program: ninja,

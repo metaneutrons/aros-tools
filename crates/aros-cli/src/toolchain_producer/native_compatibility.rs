@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use aros_common::CancellationToken;
+use aros_common::{sdk_manifest::SDK_MAX_SOURCE_DATE_EPOCH, CancellationToken};
 use aros_toolchain::compatibility::{
     self, CompatibilityHostTool, CompatibilityPreparationRequest, HostToolClosureRequest,
     NativeCompatibilityRequest, StandaloneFixtures, TwoRootRelocationRequest,
@@ -49,6 +49,10 @@ pub(super) struct CompatibilityArgs {
     /// Explicit source-owned preset from aros-targets.toml (required for GNU)
     #[arg(long)]
     source_preset: Option<String>,
+    /// Explicit SDK/consumer generation epoch, distinct from the compiler's;
+    /// required for source-owned SDK links and recorded in the environment digest
+    #[arg(long = "consumer-source-date-epoch", value_parser = clap::value_parser!(u64).range(..=SDK_MAX_SOURCE_DATE_EPOCH))]
+    consumer_source_date_epoch: Option<u64>,
     /// Existing work root where the embedded engine receives one fresh leaf
     #[arg(long)]
     engine_work_dir: PathBuf,
@@ -123,6 +127,11 @@ pub(super) struct CompatibilityArgs {
 /// Execute the complete native compatibility contract for one package lane.
 pub(super) async fn compatibility(args: CompatibilityArgs) -> miette::Result<()> {
     let format = args.format;
+    preflight_consumer_epoch(
+        &args.source_dir,
+        args.source_preset.as_deref(),
+        args.consumer_source_date_epoch,
+    )?;
     preflight_export(&args)?;
     if let Some(format) = args.package_format {
         validate_export_format(args.evidence_dir.is_some(), format.into())?;
@@ -225,6 +234,55 @@ pub(super) async fn compatibility(args: CompatibilityArgs) -> miette::Result<()>
 struct CompatibilityResult {
     report: compatibility::NativeCompatibilityReport,
     export: Option<PublishedCompatibilityExport>,
+}
+
+// Reject the source-dependent missing option before extracting packages or
+// preparing any owned runtime roots. This is read-only input validation, not
+// source authentication; execution revalidates the bound source contract.
+fn preflight_consumer_epoch(
+    source_root: &std::path::Path,
+    source_preset: Option<&str>,
+    epoch: Option<u64>,
+) -> miette::Result<()> {
+    if epoch.is_some_and(|value| value > SDK_MAX_SOURCE_DATE_EPOCH) {
+        return Err(miette::miette!(
+            "consumer source-date epoch exceeds the SDK portable tar timestamp range"
+        ));
+    }
+    if epoch.is_some() {
+        return Ok(());
+    }
+    let Some(name) = source_preset else {
+        return Ok(());
+    };
+    let bytes = read_regular_input(
+        &source_root.join("aros-targets.toml"),
+        "consumer target profiles",
+    )?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| miette::miette!("consumer target profiles must be UTF-8"))?;
+    let configuration = aros_common::TargetProfile::parse_config(text, "aros-targets.toml")
+        .map_err(|error| miette::miette!("{error}"))?;
+    let profile = configuration
+        .targets
+        .into_iter()
+        .find(|profile| profile.name == name)
+        .ok_or_else(|| miette::miette!("compatibility source preset is not declared"))?;
+    let Some(path) = &profile.native_consumer_contract else {
+        return Ok(());
+    };
+    let loaded = aros_common::native_consumer_contract::load_bound_native_consumer_contract(
+        source_root,
+        std::path::Path::new(path),
+        &profile,
+    )
+    .map_err(|error| miette::miette!("{error}"))?;
+    if loaded.contract.native_sdk_link_probes.is_some() {
+        return Err(miette::miette!(
+            "compatibility requires --consumer-source-date-epoch for the source-owned SDK contract"
+        ));
+    }
+    Ok(())
 }
 
 fn preflight_export(args: &CompatibilityArgs) -> miette::Result<()> {
@@ -350,6 +408,7 @@ fn execute_compatibility(
     let request = NativeCompatibilityRequest {
         package_source_commit: Some(package_source_commit),
         source_preset: args.source_preset,
+        consumer_source_date_epoch: args.consumer_source_date_epoch,
         host_generator_cache_root: Some(args.ports_cache_dir),
         preparation,
         relocation,
@@ -440,8 +499,48 @@ fn parse_jobs(value: &str) -> Result<usize, String> {
 }
 
 #[cfg(test)]
+#[path = "native_compatibility_epoch_tests.rs"]
+mod epoch_tests;
+
+#[cfg(test)]
 mod tests {
     use clap::CommandFactory as _;
+
+    #[test]
+    fn consumer_epoch_is_explicit_bounded_and_has_no_ambient_default() {
+        let root = crate::Cli::command();
+        let command = root
+            .find_subcommand("toolchain")
+            .unwrap()
+            .find_subcommand("producer")
+            .unwrap()
+            .find_subcommand("compatibility")
+            .unwrap();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "consumer_source_date_epoch")
+            .unwrap();
+        assert_eq!(argument.get_long(), Some("consumer-source-date-epoch"));
+        assert!(argument.get_default_values().is_empty());
+        assert!(argument.get_env().is_none());
+        let parser = clap::Command::new("epoch-test").arg(argument.clone());
+        for value in ["0", "946684800", "8589934591"] {
+            let matches = parser
+                .clone()
+                .try_get_matches_from(["epoch-test", "--consumer-source-date-epoch", value])
+                .unwrap();
+            assert_eq!(
+                matches.get_one::<u64>("consumer_source_date_epoch"),
+                Some(&value.parse::<u64>().unwrap())
+            );
+        }
+        for value in ["-1", "8589934592", "18446744073709551616", "garbage"] {
+            assert!(parser
+                .clone()
+                .try_get_matches_from(["epoch-test", "--consumer-source-date-epoch", value])
+                .is_err());
+        }
+    }
 
     #[test]
     fn compatibility_export_is_explicit_optional_and_not_origin_authentication() {
