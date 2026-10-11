@@ -124,7 +124,7 @@ SDK identity is target/ABI-specific, not build-host-specific. Local packaging,
 package verification and extraction require independent identity/tree digests
 and an absolute `--forbidden-prefix` to scan for build-path leakage.
 
-Download, install and select require `--release-lock FILE --lock-sha256 SHA256`. They do
+External SDK selection requires `--release-lock FILE --lock-sha256 SHA256`. Commands do
 not discover a latest release or trust a downloaded lock as its own authority.
 `install --archive FILE` verifies a local archive instead of downloading;
 it conflicts with `--cache` and `--offline`. Otherwise download/install may
@@ -139,9 +139,11 @@ the selection. One lock selects one target/ABI; multi-target projects use
 separate files. The SDK must already be installed. Changed inputs, malformed
 existing locks and target/ABI replacements are rejected.
 
-`verify` and `path` accept either `--project-lock FILE` or the external
+Download, install, verify and path accept either `--project-lock FILE` or the external
 `--release-lock FILE --lock-sha256 SHA256` pair, never both. A project lock is
 explicit local application configuration, not publisher authentication.
+This lets a fresh application checkout install its checked-in SDK selection.
+Download/install never rewrite that file or select a different SDK implicitly.
 
 The installed SDK is an application-build input, not the AROS source build's
 SDK generation directory. `path` does not change CMake generation settings.

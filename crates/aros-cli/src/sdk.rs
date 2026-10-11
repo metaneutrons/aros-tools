@@ -7,6 +7,8 @@ use miette::{IntoDiagnostic, Result};
 use std::io::Read;
 use std::path::PathBuf;
 
+const SDK_SELECTION_HELP: &str = "Select either `--release-lock FILE --lock-sha256 SHA256` or `--project-lock FILE`. A project lock is explicit local application configuration, not publisher authentication.";
+
 #[derive(Subcommand)]
 /// Local artifact stages and management for a separately identified SDK.
 pub enum SdkCommand {
@@ -17,22 +19,20 @@ pub enum SdkCommand {
     /// Verify and extract one SDK into an absent directory; not managed installation
     Extract(ExtractArgs),
     /// Acquire and completely verify locked SDK bytes without installing them
+    #[command(after_help = SDK_SELECTION_HELP)]
     Download(crate::sdk_managed::DownloadArgs),
     /// Install or fully verify reuse of one exact lock-selected SDK
+    #[command(after_help = SDK_SELECTION_HELP)]
     Install(crate::sdk_managed::InstallArgs),
     /// List bounded store metadata without hashing or executing SDK payloads
     List(crate::sdk_managed::ListArgs),
     /// Preview or apply one application project's verified SDK selection
     Select(crate::sdk_managed::SelectArgs),
     /// Fully verify the SDK selected by explicit release or project metadata
-    #[command(
-        after_help = "Select either `--release-lock FILE --lock-sha256 SHA256` or `--project-lock FILE`. A project lock is explicit local application configuration, not publisher authentication."
-    )]
+    #[command(after_help = SDK_SELECTION_HELP)]
     Verify(crate::sdk_managed::InstalledArgs),
     /// Print the fully verified installed SDK path for application build tools
-    #[command(
-        after_help = "Select either `--release-lock FILE --lock-sha256 SHA256` or `--project-lock FILE`. A project lock is explicit local application configuration, not publisher authentication."
-    )]
+    #[command(after_help = SDK_SELECTION_HELP)]
     Path(crate::sdk_managed::InstalledArgs),
 }
 

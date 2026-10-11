@@ -691,3 +691,146 @@ fn sdk_project_cli_rejects_stale_token_and_unsafe_local_authority_without_repair
     );
     assert!(!fixture.root.join("aros-toolchains.lock.toml").exists());
 }
+
+#[test]
+fn sdk_project_cli_restores_a_fresh_checkout_from_verified_offline_cache() {
+    let fixture = Fixture::new();
+    let package = fixture.root.join("package");
+    let packaged = success(&fixture.package(&package));
+    let (_, _, lock) = release_fixture(&fixture, &package, &packaged);
+    let application = fixture.root.join("application");
+    fs::create_dir(&application).unwrap();
+    let project = application.join("aros-sdk.lock.json");
+    let project_bytes = lock.canonical_bytes().unwrap();
+    fs::write(&project, &project_bytes).unwrap();
+    let cache = fixture.root.join("cache");
+    for leaf in ["download", "install"] {
+        assert!(!project_command(&fixture, leaf, &project)
+            .arg("--cache")
+            .arg(&cache)
+            .arg("--offline")
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(
+            !cache.exists(),
+            "offline absence cannot reserve cache state"
+        );
+        assert!(!fixture.root.join("state/sdks").exists());
+    }
+    let entry = cache.join(lock.digest().unwrap().as_str());
+    fs::create_dir_all(&entry).unwrap();
+    let archive = lock.identity.asset_name().unwrap();
+    for name in [&archive, &format!("{archive}.manifest.json")] {
+        fs::copy(package.join(name), entry.join(name)).unwrap();
+    }
+    let downloaded = managed_success(
+        &project_command(&fixture, "download", &project)
+            .arg("--cache")
+            .arg(&cache)
+            .arg("--offline")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        downloaded["result"]["lock_sha256"],
+        lock.digest().unwrap().as_str()
+    );
+    assert_eq!(downloaded["result"]["installed"], false);
+    assert!(!fixture.root.join("state/sdks").exists());
+    let installed = managed_success(
+        &project_command(&fixture, "install", &project)
+            .arg("--cache")
+            .arg(&cache)
+            .arg("--offline")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(installed["result"]["already_installed"], false);
+    managed_success(
+        &project_command(&fixture, "verify", &project)
+            .output()
+            .unwrap(),
+    );
+    let path = project_command(&fixture, "path", &project)
+        .output()
+        .unwrap();
+    assert!(path.status.success());
+    assert_eq!(
+        String::from_utf8(path.stdout).unwrap(),
+        format!("{}\n", installed["result"]["payload"].as_str().unwrap())
+    );
+    let reused = managed_success(
+        &project_command(&fixture, "install", &project)
+            .arg("--archive")
+            .arg(package.join(&archive))
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(reused["result"]["already_installed"], true);
+    assert_eq!(fs::read(&project).unwrap(), project_bytes);
+    assert_eq!(
+        fs::read_dir(&application).unwrap().count(),
+        1,
+        "acquisition does not create a selection guard"
+    );
+    assert!(!fixture.root.join("aros-toolchains.lock.toml").exists());
+}
+
+#[test]
+fn sdk_project_acquisition_rejects_unsafe_config_and_corrupt_cache_without_repair() {
+    let fixture = Fixture::new();
+    let package = fixture.root.join("package");
+    let packaged = success(&fixture.package(&package));
+    let (_, _, lock) = release_fixture(&fixture, &package, &packaged);
+    let project = fixture.root.join("project-sdk.json");
+    fs::write(&project, lock.canonical_bytes().unwrap()).unwrap();
+    let cache = fixture.root.join("cache");
+    let link = fixture.root.join("unsafe-project-link.json");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+    let hardlink = fixture.root.join("unsafe-project-hardlink.json");
+    fs::hard_link(&project, &hardlink).unwrap();
+    let malformed = fixture.root.join("malformed-project.json");
+    fs::write(&malformed, b"{}\n").unwrap();
+    for input in [&link, &hardlink, &malformed] {
+        for leaf in ["download", "install"] {
+            assert!(!project_command(&fixture, leaf, input)
+                .arg("--cache")
+                .arg(&cache)
+                .arg("--offline")
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+    }
+    assert!(!cache.exists());
+    assert!(!fixture.root.join("state/sdks").exists());
+    // Use a distinct single-link copy; do not repair the intentionally aliased authority.
+    let canonical = fixture.root.join("safe-project.json");
+    let bytes = lock.canonical_bytes().unwrap();
+    fs::write(&canonical, &bytes).unwrap();
+    let entry = cache.join(lock.digest().unwrap().as_str());
+    fs::create_dir_all(&entry).unwrap();
+    let archive = lock.identity.asset_name().unwrap();
+    fs::write(entry.join(&archive), b"poison").unwrap();
+    fs::copy(
+        package.join(format!("{archive}.manifest.json")),
+        entry.join(format!("{archive}.manifest.json")),
+    )
+    .unwrap();
+    for leaf in ["download", "install"] {
+        assert!(!project_command(&fixture, leaf, &canonical)
+            .arg("--cache")
+            .arg(&cache)
+            .arg("--offline")
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    assert_eq!(fs::read(entry.join(&archive)).unwrap(), b"poison");
+    assert_eq!(fs::read(&canonical).unwrap(), bytes);
+    assert!(!fixture.root.join("state/sdks").exists());
+}

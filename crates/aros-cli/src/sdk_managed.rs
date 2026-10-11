@@ -24,7 +24,7 @@ pub struct ReleaseArgs {
 /// Acquire locked SDK artifacts without installing or selecting an SDK.
 pub struct DownloadArgs {
     #[command(flatten)]
-    release: ReleaseArgs,
+    selection: ReadSelectionArgs,
     /// Absolute SDK archive-cache parent; default: AROS archive cache/sdk-v2
     #[arg(long, value_name = "DIR")]
     cache: Option<PathBuf>,
@@ -37,7 +37,7 @@ pub struct DownloadArgs {
 /// Install a completely verified SDK without creating a global selection.
 pub struct InstallArgs {
     #[command(flatten)]
-    release: ReleaseArgs,
+    selection: ReadSelectionArgs,
     /// Absolute SDK store; default: AROS_HOME/sdks
     #[arg(long, value_name = "DIR")]
     store: Option<PathBuf>,
@@ -151,6 +151,51 @@ impl SelectedRelease {
     }
 }
 
+#[cfg(unix)]
+enum SelectedInput {
+    External(SelectedRelease),
+    Project(aros_toolchain::sdk_project::SdkProjectLockSnapshot),
+}
+
+#[cfg(unix)]
+impl SelectedInput {
+    fn read(args: &ReadSelectionArgs) -> Result<Self> {
+        if let Some(path) = &args.project_lock {
+            if args.release_lock.is_some() || args.lock_sha256.is_some() {
+                miette::bail!("--project-lock conflicts with external release selectors");
+            }
+            return aros_toolchain::sdk_project::read_project_lock(path)
+                .map(Self::Project)
+                .map_err(|error| native_error(&error));
+        }
+        let release = ReleaseArgs {
+            release_lock: args
+                .release_lock
+                .clone()
+                .ok_or_else(|| miette::miette!("--release-lock or --project-lock is required"))?,
+            lock_sha256: args
+                .lock_sha256
+                .clone()
+                .ok_or_else(|| miette::miette!("--release-lock requires --lock-sha256"))?,
+        };
+        SelectedRelease::read(&release).map(Self::External)
+    }
+
+    const fn lock(&self) -> &SdkReleaseLock {
+        match self {
+            Self::External(selected) => &selected.lock,
+            Self::Project(selected) => &selected.lock,
+        }
+    }
+
+    fn revalidate(&self) -> Result<()> {
+        match self {
+            Self::External(selected) => selected.revalidate(),
+            Self::Project(selected) => selected.revalidate().map_err(|error| native_error(&error)),
+        }
+    }
+}
+
 fn require_absolute(label: &str, path: &Path) -> Result<()> {
     if path
         .to_str()
@@ -204,18 +249,18 @@ fn emit(operation: &str, result: &serde_json::Value) {
 
 #[cfg(unix)]
 pub async fn download(args: DownloadArgs) -> Result<()> {
-    let selected = SelectedRelease::read(&args.release)?;
+    let selected = SelectedInput::read(&args.selection)?;
+    let lock = selected.lock();
     let acquired =
-        crate::sdk_acquisition::prepare(&selected.lock, &cache_path(args.cache)?, args.offline)
-            .await?;
+        crate::sdk_acquisition::prepare(lock, &cache_path(args.cache)?, args.offline).await?;
     selected.revalidate()?;
     acquired.revalidate()?;
     emit(
         "sdk.download",
         &serde_json::json!({
-            "identity":selected.lock.identity, "lock_sha256":selected.lock.digest().map_err(|e| miette::miette!("{e}"))?,
+            "identity":lock.identity, "lock_sha256":lock.digest().map_err(|e| miette::miette!("{e}"))?,
             "archive":acquired.cache_archive, "manifest":acquired.cache_manifest,
-            "archive_sha256":selected.lock.archive.sha256, "archive_size":selected.lock.archive.size,
+            "archive_sha256":lock.archive.sha256, "archive_size":lock.archive.size,
             "installed":false,
         }),
     );
@@ -224,14 +269,12 @@ pub async fn download(args: DownloadArgs) -> Result<()> {
 
 #[cfg(unix)]
 pub async fn install(args: InstallArgs) -> Result<()> {
-    let selected = SelectedRelease::read(&args.release)?;
+    let selected = SelectedInput::read(&args.selection)?;
+    let lock = selected.lock();
     let store = store_path(args.store)?;
     // Keep private verified snapshots alive through publication and readback.
     let acquired = if args.archive.is_none() {
-        Some(
-            crate::sdk_acquisition::prepare(&selected.lock, &cache_path(args.cache)?, args.offline)
-                .await?,
-        )
+        Some(crate::sdk_acquisition::prepare(lock, &cache_path(args.cache)?, args.offline).await?)
     } else {
         None
     };
@@ -249,7 +292,7 @@ pub async fn install(args: InstallArgs) -> Result<()> {
     let installed =
         aros_toolchain::sdk_store::install(&aros_toolchain::sdk_store::SdkStoreRequest {
             store,
-            lock: selected.lock.clone(),
+            lock: lock.clone(),
             archive,
         })
         .map_err(|error| native_error(&error))?;
@@ -282,32 +325,10 @@ pub fn list(args: ListArgs) -> Result<()> {
 #[cfg(unix)]
 pub fn verify(args: InstalledArgs, path_only: bool) -> Result<()> {
     let store = store_path(args.store)?;
-    let installed = if let Some(path) = args.selection.project_lock {
-        let selected = aros_toolchain::sdk_project::read_project_lock(&path)
-            .map_err(|error| native_error(&error))?;
-        let installed = aros_toolchain::sdk_store::verify(&store, &selected.lock)
-            .map_err(|error| native_error(&error))?;
-        selected
-            .revalidate()
-            .map_err(|error| native_error(&error))?;
-        installed
-    } else {
-        let release = ReleaseArgs {
-            release_lock: args
-                .selection
-                .release_lock
-                .ok_or_else(|| miette::miette!("--release-lock or --project-lock is required"))?,
-            lock_sha256: args
-                .selection
-                .lock_sha256
-                .ok_or_else(|| miette::miette!("--release-lock requires --lock-sha256"))?,
-        };
-        let selected = SelectedRelease::read(&release)?;
-        let installed = aros_toolchain::sdk_store::verify(&store, &selected.lock)
-            .map_err(|error| native_error(&error))?;
-        selected.revalidate()?;
-        installed
-    };
+    let selected = SelectedInput::read(&args.selection)?;
+    let installed = aros_toolchain::sdk_store::verify(&store, selected.lock())
+        .map_err(|error| native_error(&error))?;
+    selected.revalidate()?;
     if path_only {
         aros_common::outputln!("{}", installed.payload.display());
     } else {
