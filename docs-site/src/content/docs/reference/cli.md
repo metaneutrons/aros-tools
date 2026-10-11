@@ -106,6 +106,22 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros toolchain verify` | Verify an installed or explicit local cross-toolchain for one preset |
 | `aros toolchain path` | Print the verified cross-toolchain prefix for one preset |
 
+### Local Developer SDK artifacts
+
+| Command | Effect and boundary |
+| --- | --- |
+| `aros sdk package` | Package a source-produced Developer tree against an explicit source/ABI identity and inventory digest; local only |
+| `aros sdk verify` | Read back all package members and payload bytes against independent archive, tree and identity selections |
+| `aros sdk extract` | Verify then extract into one absent directory and recheck the payload; not managed installation |
+
+SDK identity is target/ABI-specific, not build-host-specific. These commands
+do not build the SDK, install it into the managed store, select it for a
+checkout or publish a release. They require exact identity-document and
+payload digests; verification additionally requires archive digest and size.
+At least one absolute `--forbidden-prefix` is required to scan for build-path
+leakage. The [SDK artifact contract](https://github.com/metaneutrons/aros-tools/blob/main/docs/sdk-artifact-contract-v2.md)
+defines the local format and the remaining distribution boundary.
+
 ### Native producer control plane
 
 These commands are maintainer-only, explicit local stages. They have no

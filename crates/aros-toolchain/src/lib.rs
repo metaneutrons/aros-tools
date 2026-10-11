@@ -75,6 +75,8 @@ pub mod release_inputs;
 pub mod repackage;
 #[cfg(unix)]
 pub mod repackage_v2;
+#[cfg(unix)]
+pub mod sdk_package;
 pub mod snapshot;
 #[cfg(unix)]
 mod source_audit;
