@@ -42,6 +42,10 @@ their version and selected triple; this is not package authentication or SDK
 link qualification. The library can also plan four normal C/C++ links from
 sealed probes and equal original/relocated SDK trees, using source-declared ELF
 facts rather than a board table. Planning does not run or qualify those links.
+The source ABI selects `compiler_arch` or `compiler_cpu`, optional
+`compiler_fpu` and `compiler_code_model`. The SDK build and application links
+use the same declared options; the tools do not infer them from a board name.
+Conflicting environment or configuration flags are rejected.
 This does not yet enable generic `aros sdk build`:
 ordinary C/C++ link and retained-evidence adapters are still required. GNU/RV32 local SDK
 generation retains its existing native-consumer-v2 path.

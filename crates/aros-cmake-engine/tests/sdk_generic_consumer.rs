@@ -591,7 +591,7 @@ fn assert_failure(outcome: &Outcome, expected: &str) {
     let normalized_expected = expected.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         !outcome.output.status.success(),
-        "unexpected configure success\n{error}"
+        "unexpected configure success; expected rejection: {expected}\n{error}"
     );
     assert!(!outcome.marker, "failure left a pass marker\n{error}");
     assert!(
@@ -785,6 +785,143 @@ string(JSON _response SET "${_response}" target "${_target}")"#,
         &configure(&harness(&configuration_override), false),
         "C per-configuration flags cannot override source-selected -march",
     );
+}
+
+#[test]
+fn source_code_model_reaches_each_driver_once_without_architecture_inference() {
+    let select_model = r#"string(JSON _abi SET "${_abi}" compiler_code_model "\"large\"")
+string(JSON _target SET "${_target}" abi "${_abi}")
+string(JSON _response SET "${_response}" target "${_target}")"#;
+    for (cpu, triple) in [
+        ("x86_64", "x86_64-unknown-aros"),
+        ("aarch64", "aarch64-unknown-aros"),
+    ] {
+        let selected = Probe::new(cpu, triple, "64", "")
+            .response(select_model)
+            .initial_c_flags("-O2 -mcmodel=large -fno-common")
+            .repeat_apply()
+            .compiler();
+        let test_harness = harness(&selected);
+        let outcome = configure(&test_harness, false);
+        assert_success(&test_harness, &outcome);
+        assert_eq!(
+            String::from_utf8_lossy(outcome.compiler_flags.as_ref().unwrap()),
+            "C=-O2 -mcmodel=large -fno-common\nCXX=-mcmodel=large\nASM=-mcmodel=large\n"
+        );
+        let second = configure(&test_harness, false);
+        assert_success(&test_harness, &second);
+        assert_eq!(second.compiler_flags, outcome.compiler_flags);
+
+        let absent = Probe::new(cpu, triple, "64", "")
+            .initial_c_flags("-O2 -fno-common")
+            .compiler();
+        let absent_harness = harness(&absent);
+        let outcome = configure(&absent_harness, false);
+        assert_success(&absent_harness, &outcome);
+        assert_eq!(
+            String::from_utf8_lossy(outcome.compiler_flags.as_ref().unwrap()),
+            "C=-O2 -fno-common\nCXX=\nASM=\n"
+        );
+    }
+
+    let generic = Probe::new("aarch64", "aarch64-unknown-aros", "64", "")
+        .response(
+            r#"string(JSON _abi SET "${_abi}" compiler_code_model "\"future-model.v2\"")
+string(JSON _target SET "${_target}" abi "${_abi}")
+string(JSON _response SET "${_response}" target "${_target}")"#,
+        )
+        .compiler();
+    let test_harness = harness(&generic);
+    let outcome = configure(&test_harness, false);
+    assert_success(&test_harness, &outcome);
+    assert_eq!(
+        String::from_utf8_lossy(outcome.compiler_flags.as_ref().unwrap()),
+        "C=-mcmodel=future-model.v2\nCXX=-mcmodel=future-model.v2\nASM=-mcmodel=future-model.v2\n"
+    );
+}
+
+#[test]
+fn source_code_model_rejects_untyped_undeclared_conflicting_and_configuration_flags() {
+    let select_model = r#"string(JSON _abi SET "${_abi}" compiler_code_model "\"large\"")
+string(JSON _target SET "${_target}" abi "${_abi}")
+string(JSON _response SET "${_response}" target "${_target}")"#;
+    for (probe, expected) in [
+        (
+            Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+                .response(
+                    r#"string(JSON _abi SET "${_abi}" compiler_code_model true)
+string(JSON _target SET "${_target}" abi "${_abi}")
+string(JSON _response SET "${_response}" target "${_target}")"#,
+                ),
+            "SDK target.compiler_code_model: must be STRING",
+        ),
+        (
+            Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+                .response(
+                    r#"string(JSON _abi SET "${_abi}" compiler_code_model "\"large;-O0\"")
+string(JSON _target SET "${_target}" abi "${_abi}")
+string(JSON _response SET "${_response}" target "${_target}")"#,
+                ),
+            "SDK target compiler_code_model: must be 1..=64 ASCII characters",
+        ),
+        (
+            Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+                .initial_c_flags("-mcmodel=large")
+                .compiler(),
+            "C flags contain an undeclared -mcmodel option",
+        ),
+        (
+            Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+                .response(select_model)
+                .initial_c_flags("-mcmodel=small")
+                .compiler(),
+            "C flags must contain exactly one selected -mcmodel=large option",
+        ),
+        (
+            Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+                .response(select_model)
+                .initial_c_flags("-mcmodel=large -mcmodel=large")
+                .compiler(),
+            "C flags must contain exactly one selected -mcmodel=large option",
+        ),
+        (
+            Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+                .response(select_model)
+                .initial_c_flags("-mcmodel large")
+                .compiler(),
+            "C flags use split -mcmodel syntax",
+        ),
+        (
+            Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+                .response(select_model)
+                .after("set(CMAKE_CONFIGURATION_TYPES Coverage)\nset(CMAKE_C_FLAGS_COVERAGE_INIT \"-mcmodel=small\")")
+                .compiler(),
+            "C per-configuration flags cannot override source-selected -mcmodel",
+        ),
+        (
+            Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+                .response(select_model)
+                .compiler_edit("set(CMAKE_CXX_FLAGS_DEBUG \"-mcmodel=large\")"),
+            "CXX per-configuration flags cannot override source-selected -mcmodel",
+        ),
+        (
+            Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+                .response(select_model)
+                .after("set(CMAKE_ASM_FLAGS_RELEASE_INIT \"-mcmodel=large\")")
+                .compiler(),
+            "ASM per-configuration flags cannot override source-selected -mcmodel",
+        ),
+        (
+            Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+                .response(select_model)
+                .compiler()
+                .compiler_edit("set(CMAKE_ASM_FLAGS \"-mcmodel=small\")"),
+            "ASM flags must contain exactly one selected -mcmodel=large option",
+        ),
+    ] {
+        let outcome = configure(&harness(&probe), false);
+        assert_failure(&outcome, expected);
+    }
 }
 
 #[test]
