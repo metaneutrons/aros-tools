@@ -751,13 +751,37 @@ impl<W: Write> Write for CountingWriter<W> {
 }
 
 fn write_archive(path: &Path, root: &Path, epoch: u64) -> Result<(), ContractError> {
+    write_payload_archive(path, root, epoch, ARCHIVE_ROOT)
+}
+
+/// Write a deterministic XZ-compressed tar archive for one trusted payload root.
+///
+/// Callers must pass a fixed archive-root component rather than user input.
+pub(crate) fn write_payload_archive(
+    path: &Path,
+    root: &Path,
+    epoch: u64,
+    archive_root: &str,
+) -> Result<(), ContractError> {
+    let archive_root_path = Path::new(archive_root);
+    if archive_root_path.components().count() != 1
+        || !matches!(
+            archive_root_path.components().next(),
+            Some(Component::Normal(name)) if name.to_str() == Some(archive_root)
+        )
+        || payload_casefold_path_key(archive_root_path).is_err()
+    {
+        return Err(ContractError::package(
+            "payload archive root must be one portable path component",
+        ));
+    }
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .map_err(|_| ContractError::package("cannot create package archive"))?;
     let mut archive = CountingWriter::new(XzEncoder::new(file, 9));
-    append_entry(&mut archive, root, Path::new(""), epoch)?;
+    append_entry(&mut archive, root, Path::new(""), epoch, archive_root)?;
     let mut paths = Vec::new();
     collect_paths(root, Path::new(""), &mut paths)?;
     // `collect_paths` must recurse to discover the complete staged tree, but
@@ -767,7 +791,7 @@ fn write_archive(path: &Path, root: &Path, epoch: u64) -> Result<(), ContractErr
     // only after discovery and before serializing any payload member.
     paths.sort_by(|left, right| left.to_string_lossy().cmp(&right.to_string_lossy()));
     for relative in paths {
-        append_entry(&mut archive, root, &relative, epoch)?;
+        append_entry(&mut archive, root, &relative, epoch, archive_root)?;
     }
     archive
         .write_all(&[0_u8; 1024])
@@ -816,6 +840,7 @@ fn append_entry<W: Write>(
     root: &Path,
     relative: &Path,
     epoch: u64,
+    archive_root: &str,
 ) -> Result<(), ContractError> {
     let owned_source = root.join(relative);
     let source = if relative.as_os_str().is_empty() {
@@ -826,9 +851,9 @@ fn append_entry<W: Write>(
     let metadata = fs::symlink_metadata(source)
         .map_err(|_| ContractError::package("cannot inspect staged archive entry"))?;
     let mut name = if relative.as_os_str().is_empty() {
-        format!("{ARCHIVE_ROOT}/")
+        format!("{archive_root}/")
     } else {
-        format!("{ARCHIVE_ROOT}/{}", relative.to_string_lossy())
+        format!("{archive_root}/{}", relative.to_string_lossy())
     };
     let mode = if metadata.file_type().is_symlink() {
         0o777
@@ -1370,6 +1395,35 @@ mod tests {
             .position(|member| member == "include/clang/Tooling/Refactoring/Rename")
             .unwrap();
         assert!(sibling < nested);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn payload_archive_writer_uses_the_caller_selected_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("payload");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("sdk-manifest.json"), b"{}\n").unwrap();
+        let archive = temporary.path().join("sdk.tar.xz");
+        write_payload_archive(&archive, &root, 946_684_800, "sdk").unwrap();
+
+        let decoder = xz2::read::XzDecoder::new(File::open(archive).unwrap());
+        let mut tar = tar::Archive::new(decoder);
+        let names = tar
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .trim_end_matches('/')
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["sdk", "sdk/sdk-manifest.json"]);
     }
 
     #[test]

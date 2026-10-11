@@ -26,6 +26,11 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use xz2::read::XzDecoder;
 
+mod raw_tar;
+#[cfg(test)]
+use raw_tar::account_pax_extension;
+use raw_tar::scan_archive;
+
 use crate::package::{spdx_bytes, validate_link_target, PackageFormat};
 use crate::profiles::Profile;
 use crate::source_lock::{CompilerFamily, SourceLock};
@@ -38,6 +43,8 @@ pub(crate) const MAX_EXPANDED_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_XZ_DECODER_MEMORY: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOOLCHAIN_TOOLS_BYTES: u64 = 16 * 1024;
+const MAX_PAX_EXTENSION_BYTES: u64 = 64 * 1024;
+const MAX_TOTAL_PAX_EXTENSION_BYTES: u64 = 64 * 1024 * 1024;
 const SCAN_BUFFER_BYTES: usize = 128 * 1024;
 
 #[cfg(test)]
@@ -432,6 +439,45 @@ struct ArchiveTree {
     toolchain_tools: Option<Vec<u8>>,
 }
 
+/// Fixed archive and resource policy for one payload tar stream.
+///
+/// `max_entries` includes the archive-root directory and embedded manifest;
+/// `max_regular_file_bytes` is the total declared size of regular-file members.
+/// Callers should use fixed literals for `archive_root` and `manifest_file`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PayloadArchiveContract<'a> {
+    pub(crate) archive_root: &'a str,
+    pub(crate) manifest_file: &'a str,
+    pub(crate) source_date_epoch: u64,
+    pub(crate) capture_toolchain_tools: bool,
+    pub(crate) max_entries: u64,
+    pub(crate) max_regular_file_bytes: u64,
+}
+
+/// Read-back of a payload archive independent of compiler-package metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayloadArchiveReadback {
+    pub(crate) embedded_manifest: Vec<u8>,
+    pub(crate) entries: Vec<ArosToolchainManifestEntry>,
+    pub(crate) tree_sha256: String,
+}
+
+const fn compiler_archive_contract(
+    manifest: &ArosToolchainManifest,
+) -> PayloadArchiveContract<'static> {
+    PayloadArchiveContract {
+        archive_root: ARCHIVE_ROOT,
+        manifest_file: AROS_TOOLCHAIN_MANIFEST_FILE,
+        source_date_epoch: manifest.source_date_epoch,
+        capture_toolchain_tools: matches!(
+            manifest.compiler,
+            Some(aros_common::ArosCompilerIdentity::Gnu { .. })
+        ),
+        max_entries: MAX_ARCHIVE_ENTRIES,
+        max_regular_file_bytes: MAX_EXPANDED_ARCHIVE_BYTES,
+    }
+}
+
 fn verify_archive_tree(
     input: File,
     manifest: &ArosToolchainManifest,
@@ -439,10 +485,30 @@ fn verify_archive_tree(
 ) -> Result<ArchiveTree, ContractError> {
     scan_archive(
         input,
-        manifest,
+        compiler_archive_contract(manifest),
         forbidden_prefixes,
         &mut VerifyingArchiveConsumer,
     )
+}
+
+/// Validate and hash one XZ-compressed payload tar archive.
+///
+/// The caller owns outer-file hashing, size identity, and SDK-manifest checks;
+/// this function enforces the bounded tar structure and returns its embedded
+/// manifest plus portable payload inventory.
+#[cfg(test)]
+pub(crate) fn verify_payload_archive(
+    input: File,
+    contract: PayloadArchiveContract<'_>,
+    forbidden_prefixes: &[PathBuf],
+) -> Result<PayloadArchiveReadback, ContractError> {
+    let tree = scan_archive(
+        input,
+        contract,
+        forbidden_prefixes,
+        &mut VerifyingArchiveConsumer,
+    )?;
+    Ok(payload_readback(tree))
 }
 
 /// Revalidate and materialize one already measured native package archive.
@@ -458,190 +524,38 @@ pub(crate) fn extract_verified_archive(
     forbidden_prefixes: &[PathBuf],
     destination: &Path,
 ) -> Result<(), ContractError> {
-    let mut consumer = ExtractingArchiveConsumer::new(destination)?;
-    scan_archive(input, manifest, forbidden_prefixes, &mut consumer).map(|_| ())
+    extract_payload_archive(
+        input,
+        compiler_archive_contract(manifest),
+        forbidden_prefixes,
+        destination,
+    )?;
+    Ok(())
 }
 
-fn scan_archive<C: ArchiveConsumer>(
+/// Validate and extract one payload archive into a fresh caller-owned root.
+///
+/// The destination must already be a real directory. The caller is responsible
+/// for creating it only after any required outer-manifest and archive identity
+/// checks have succeeded.
+#[cfg(unix)]
+pub(crate) fn extract_payload_archive(
     input: File,
-    manifest: &ArosToolchainManifest,
+    contract: PayloadArchiveContract<'_>,
     forbidden_prefixes: &[PathBuf],
-    consumer: &mut C,
-) -> Result<ArchiveTree, ContractError> {
-    let stream = xz2::stream::Stream::new_stream_decoder(MAX_XZ_DECODER_MEMORY, 0)
-        .map_err(|_| ContractError::verification("cannot initialize bounded package XZ decoder"))?;
-    let decoder = XzDecoder::new_stream(input, stream);
-    let mut archive = tar::Archive::new(decoder);
-    let mut entries = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut directories = BTreeSet::from([PathBuf::new()]);
-    let mut previous = None;
-    let mut embedded_manifest = None;
-    let mut toolchain_tools = None;
-    let mut budget = ArchiveBudget::default();
-    for (index, entry) in archive
-        .entries()
-        .map_err(|_| ContractError::verification("cannot read package tar stream"))?
-        .enumerate()
-    {
-        let mut entry = entry.map_err(|_| {
-            ContractError::verification("package tar stream contains an invalid entry")
-        })?;
-        let header = entry.header().clone();
-        let entry_type = header.entry_type();
-        let size = header
-            .size()
-            .map_err(|_| ContractError::verification("package tar entry has an invalid size"))?;
-        budget.account(entry_type.as_byte() == b'0', size)?;
-        let path = entry
-            .path()
-            .map_err(|_| ContractError::verification("package tar entry has an invalid path"))?;
-        let (relative, is_root) = package_relative_path(&path)?;
-        if index == 0 {
-            if !is_root || entry_type.as_byte() != b'5' {
-                return Err(ContractError::verification(
-                    "package tar must begin with the toolchain root directory",
-                ));
-            }
-            verify_header(&header, manifest.source_date_epoch, Some(0o755), 0)?;
-            continue;
-        }
-        if is_root {
-            return Err(ContractError::verification(
-                "package tar contains a duplicate toolchain root directory",
-            ));
-        }
-        let relative = relative.ok_or_else(|| {
-            ContractError::verification("package tar entry has no relative payload path")
-        })?;
-        let relative_text = relative
-            .to_str()
-            .ok_or_else(|| ContractError::verification("package tar entry path is not UTF-8"))?
-            .replace('\\', "/");
-        if previous
-            .as_ref()
-            .is_some_and(|previous: &String| previous >= &relative_text)
-        {
-            return Err(ContractError::verification(
-                "package tar members are not in strict lexical order",
-            ));
-        }
-        previous = Some(relative_text.clone());
-        let collision = payload_casefold_path_key(&relative)
-            .map_err(|_| ContractError::verification("package tar entry path is not portable"))?;
-        if !seen.insert(collision) {
-            return Err(ContractError::verification(
-                "package tar contains a duplicate or case-folding path collision",
-            ));
-        }
-        let parent = relative.parent().ok_or_else(|| {
-            ContractError::verification("package tar entry has no relative parent")
-        })?;
-        if !directories.contains(parent) {
-            return Err(ContractError::verification(
-                "package tar entry has no previously declared real parent directory",
-            ));
-        }
-        match entry_type.as_byte() {
-            b'5' => {
-                verify_header(&header, manifest.source_date_epoch, Some(0o755), 0)?;
-                consumer.directory(&relative)?;
-                directories.insert(relative.clone());
-                entries.push(directory_entry(relative_text));
-            }
-            b'2' => {
-                verify_header(&header, manifest.source_date_epoch, Some(0o777), 0)?;
-                let target = entry
-                    .link_name()
-                    .map_err(|_| {
-                        ContractError::verification("package tar symlink has an invalid target")
-                    })?
-                    .ok_or_else(|| {
-                        ContractError::verification("package tar symlink has no target")
-                    })?;
-                validate_link_target(&relative, &target)?;
-                let target = target.to_str().ok_or_else(|| {
-                    ContractError::verification("package tar symlink target is not UTF-8")
-                })?;
-                consumer.symlink(&relative, Path::new(target))?;
-                entries.push(ArosToolchainManifestEntry {
-                    path: relative_text,
-                    mode: "0777".into(),
-                    kind: "symlink".into(),
-                    sha256: None,
-                    size: None,
-                    target: Some(target.into()),
-                });
-            }
-            b'0' => {
-                verify_header(&header, manifest.source_date_epoch, None, size)?;
-                if relative == Path::new(AROS_TOOLCHAIN_MANIFEST_FILE) {
-                    if embedded_manifest.is_some() || size > MAX_METADATA_BYTES {
-                        return Err(ContractError::verification(
-                            "package tar embedded manifest is missing, duplicated, or too large",
-                        ));
-                    }
-                    let bytes = consumer.embedded_manifest(&relative, &mut entry, size)?;
-                    embedded_manifest = Some(bytes);
-                } else {
-                    let mode = header.mode().map_err(|_| {
-                        ContractError::verification("package tar entry has an invalid mode")
-                    })?;
-                    let mode = if mode & 0o111 == 0 { "0644" } else { "0755" };
-                    let sha256 = if matches!(
-                        manifest.compiler,
-                        Some(aros_common::ArosCompilerIdentity::Gnu { .. })
-                    ) && relative == Path::new(TOOLCHAIN_TOOLS_FILE)
-                    {
-                        if size > MAX_TOOLCHAIN_TOOLS_BYTES || toolchain_tools.is_some() {
-                            return Err(ContractError::verification(
-                                "package tar toolchain tools contract is duplicated or too large",
-                            ));
-                        }
-                        let bytes = read_exact_entry(&mut entry, size)?;
-                        let mut cursor = io::Cursor::new(bytes.as_slice());
-                        let sha256 = consumer.regular(
-                            &relative,
-                            mode,
-                            &mut cursor,
-                            size,
-                            forbidden_prefixes,
-                        )?;
-                        toolchain_tools = Some(bytes);
-                        sha256
-                    } else {
-                        consumer.regular(&relative, mode, &mut entry, size, forbidden_prefixes)?
-                    };
-                    entries.push(ArosToolchainManifestEntry {
-                        path: relative_text,
-                        mode: mode.into(),
-                        kind: "file".into(),
-                        sha256: Some(sha256.to_string()),
-                        size: Some(size),
-                        target: None,
-                    });
-                }
-            }
-            _ => {
-                return Err(ContractError::verification(
-                    "package tar contains an unsupported entry type",
-                ));
-            }
-        }
+    destination: &Path,
+) -> Result<PayloadArchiveReadback, ContractError> {
+    let mut consumer = ExtractingArchiveConsumer::new(destination)?;
+    let tree = scan_archive(input, contract, forbidden_prefixes, &mut consumer)?;
+    Ok(payload_readback(tree))
+}
+
+fn payload_readback(tree: ArchiveTree) -> PayloadArchiveReadback {
+    PayloadArchiveReadback {
+        embedded_manifest: tree.embedded_manifest,
+        entries: tree.entries,
+        tree_sha256: tree.tree_sha256,
     }
-    let mut decoder = archive.into_inner();
-    verify_archive_terminal(&mut decoder)?;
-    let embedded_manifest = embedded_manifest.ok_or_else(|| {
-        ContractError::verification("package tar does not contain an embedded manifest")
-    })?;
-    let tree_sha256 = toolchain_inventory_sha256(&entries)
-        .map_err(|_| ContractError::verification("cannot serialize package tar inventory"))?;
-    Ok(ArchiveTree {
-        embedded_manifest,
-        entries,
-        tree_sha256,
-        toolchain_tools,
-    })
 }
 
 trait ArchiveConsumer {
@@ -850,7 +764,7 @@ impl ArchiveConsumer for ExtractingArchiveConsumer<'_> {
             _ => {
                 return Err(ContractError::verification(
                     "package extraction received a noncanonical regular-file mode",
-                ))
+                ));
             }
         };
         self.write_regular(relative, mode, entry, size, forbidden_prefixes)
@@ -882,7 +796,10 @@ fn verify_archive_terminal(decoder: &mut XzDecoder<File>) -> Result<(), Contract
     }
 }
 
-fn package_relative_path(path: &Path) -> Result<(Option<PathBuf>, bool), ContractError> {
+fn package_relative_path(
+    path: &Path,
+    archive_root: &str,
+) -> Result<(Option<PathBuf>, bool), ContractError> {
     let components = path.components().collect::<Vec<_>>();
     if components.is_empty()
         || components
@@ -898,7 +815,7 @@ fn package_relative_path(path: &Path) -> Result<(Option<PathBuf>, bool), Contrac
             "package tar entry path is not a safe relative path",
         ));
     };
-    if root != ARCHIVE_ROOT {
+    if root != archive_root {
         return Err(ContractError::verification(
             "package tar entry is outside the toolchain root",
         ));
@@ -916,6 +833,40 @@ fn package_relative_path(path: &Path) -> Result<(Option<PathBuf>, bool), Contrac
         relative.push(component);
     }
     Ok((Some(relative), false))
+}
+
+fn validate_payload_archive_contract(
+    contract: PayloadArchiveContract<'_>,
+) -> Result<(), ContractError> {
+    let root = Path::new(contract.archive_root);
+    let root_components = root.components().collect::<Vec<_>>();
+    if root_components.len() != 1
+        || !matches!(root_components.as_slice(), [Component::Normal(name)] if name.to_str() == Some(contract.archive_root))
+        || contract.max_entries == 0
+        || contract.max_regular_file_bytes == 0
+    {
+        return Err(ContractError::verification(
+            "payload archive contract has an invalid root or resource limit",
+        ));
+    }
+    payload_casefold_path_key(root).map_err(|_| {
+        ContractError::verification("payload archive root is not a portable path component")
+    })?;
+
+    let manifest = Path::new(contract.manifest_file);
+    let manifest_components = manifest.components().collect::<Vec<_>>();
+    if manifest_components.is_empty()
+        || manifest_components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(ContractError::verification(
+            "payload archive contract has an invalid embedded-manifest path",
+        ));
+    }
+    payload_casefold_path_key(manifest)
+        .map_err(|_| ContractError::verification("embedded-manifest path is not portable"))?;
+    Ok(())
 }
 
 fn verify_header(
@@ -968,11 +919,20 @@ fn read_exact_entry<R: Read + ?Sized>(
     entry: &mut R,
     expected_size: u64,
 ) -> Result<Vec<u8>, ContractError> {
+    if expected_size > MAX_METADATA_BYTES {
+        return Err(ContractError::verification(
+            "package metadata entry exceeds the configured resource limit",
+        ));
+    }
     let capacity = usize::try_from(expected_size).map_err(|_| {
         ContractError::verification("package metadata size exceeds addressable memory")
     })?;
     let mut output = Vec::with_capacity(capacity);
+    let read_limit = expected_size
+        .checked_add(1)
+        .ok_or_else(|| ContractError::verification("package metadata size overflowed"))?;
     entry
+        .take(read_limit)
         .read_to_end(&mut output)
         .map_err(|_| ContractError::verification("cannot read package metadata entry"))?;
     if u64::try_from(output.len()).ok() != Some(expected_size) {
@@ -1080,12 +1040,18 @@ struct ArchiveBudget {
 }
 
 impl ArchiveBudget {
-    fn account(&mut self, regular_file: bool, size: u64) -> Result<(), ContractError> {
+    fn account(
+        &mut self,
+        regular_file: bool,
+        size: u64,
+        max_entries: u64,
+        max_regular_file_bytes: u64,
+    ) -> Result<(), ContractError> {
         self.entries = self
             .entries
             .checked_add(1)
             .ok_or_else(|| ContractError::verification("package tar entry count overflowed"))?;
-        if self.entries > MAX_ARCHIVE_ENTRIES {
+        if self.entries > max_entries {
             return Err(ContractError::verification(
                 "package tar exceeds the entry-count resource limit",
             ));
@@ -1094,7 +1060,7 @@ impl ArchiveBudget {
             self.expanded_bytes = self.expanded_bytes.checked_add(size).ok_or_else(|| {
                 ContractError::verification("package tar expanded size overflowed")
             })?;
-            if self.expanded_bytes > MAX_EXPANDED_ARCHIVE_BYTES {
+            if self.expanded_bytes > max_regular_file_bytes {
                 return Err(ContractError::verification(
                     "package tar exceeds the expanded-size resource limit",
                 ));
@@ -1124,6 +1090,11 @@ mod tests {
     ) -> tar::Header {
         let manifest = fixture_manifest();
         let mut header = tar::Header::new_ustar();
+        let path = if entry_type.is_dir() && !path.ends_with('/') {
+            format!("{path}/")
+        } else {
+            path.to_owned()
+        };
         header.set_path(path).unwrap();
         header.set_entry_type(entry_type);
         header.set_size(size);
@@ -1135,7 +1106,42 @@ mod tests {
         header
     }
 
+    fn canonical_pax_header(size: u64) -> tar::Header {
+        let mut header = tar::Header::new_ustar();
+        let name = b"././@PaxHeader";
+        header.as_mut_bytes()[..name.len()].copy_from_slice(name);
+        header.set_entry_type(tar::EntryType::XHeader);
+        header.set_size(size);
+        header.set_mode(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_cksum();
+        header
+    }
+
+    fn pax_record(key: &str, value: &str) -> Vec<u8> {
+        let base = key.len() + value.len() + 3;
+        let mut record_len = base + 1;
+        loop {
+            let next = base + record_len.to_string().len();
+            if next == record_len {
+                break;
+            }
+            record_len = next;
+        }
+        format!("{record_len} {key}={value}\n").into_bytes()
+    }
+
     fn write_xz_tar(path: &Path, append: impl FnOnce(&mut xz2::write::XzEncoder<File>)) {
+        write_xz_tar_with_root(path, ARCHIVE_ROOT, append);
+    }
+
+    fn write_xz_tar_with_root(
+        path: &Path,
+        archive_root: &str,
+        append: impl FnOnce(&mut xz2::write::XzEncoder<File>),
+    ) {
         use std::io::Write as _;
 
         let output = File::create(path).unwrap();
@@ -1143,7 +1149,12 @@ mod tests {
         let mut builder = tar::Builder::new(encoder);
         builder
             .append(
-                &canonical_header("toolchain", tar::EntryType::Directory, 0, 0o755),
+                &canonical_header(
+                    &format!("{archive_root}/"),
+                    tar::EntryType::Directory,
+                    0,
+                    0o755,
+                ),
                 &b""[..],
             )
             .unwrap();
@@ -1157,6 +1168,14 @@ mod tests {
         path: &Path,
         append: impl FnOnce(&mut tar::Builder<xz2::write::XzEncoder<File>>),
     ) {
+        write_xz_tar_entries_with_root(path, ARCHIVE_ROOT, append);
+    }
+
+    fn write_xz_tar_entries_with_root(
+        path: &Path,
+        archive_root: &str,
+        append: impl FnOnce(&mut tar::Builder<xz2::write::XzEncoder<File>>),
+    ) {
         use std::io::Write as _;
 
         let output = File::create(path).unwrap();
@@ -1164,7 +1183,12 @@ mod tests {
         let mut builder = tar::Builder::new(encoder);
         builder
             .append(
-                &canonical_header("toolchain", tar::EntryType::Directory, 0, 0o755),
+                &canonical_header(
+                    &format!("{archive_root}/"),
+                    tar::EntryType::Directory,
+                    0,
+                    0o755,
+                ),
                 &b""[..],
             )
             .unwrap();
@@ -1176,10 +1200,10 @@ mod tests {
 
     #[test]
     fn rejects_paths_outside_the_single_toolchain_root() {
-        assert!(package_relative_path(Path::new("other/payload")).is_err());
-        assert!(package_relative_path(Path::new("toolchain/../escape")).is_err());
+        assert!(package_relative_path(Path::new("other/payload"), ARCHIVE_ROOT).is_err());
+        assert!(package_relative_path(Path::new("toolchain/../escape"), ARCHIVE_ROOT).is_err());
         assert_eq!(
-            package_relative_path(Path::new("toolchain/bin/clang"))
+            package_relative_path(Path::new("toolchain/bin/clang"), ARCHIVE_ROOT)
                 .unwrap()
                 .0,
             Some(PathBuf::from("bin/clang"))
@@ -1192,12 +1216,478 @@ mod tests {
             entries: MAX_ARCHIVE_ENTRIES,
             expanded_bytes: 0,
         };
-        assert!(entries.account(false, 0).is_err());
+        assert!(entries
+            .account(false, 0, MAX_ARCHIVE_ENTRIES, MAX_EXPANDED_ARCHIVE_BYTES)
+            .is_err());
         let mut bytes = ArchiveBudget {
             entries: 0,
             expanded_bytes: MAX_EXPANDED_ARCHIVE_BYTES,
         };
-        assert!(bytes.account(true, 1).is_err());
+        assert!(bytes
+            .account(true, 1, MAX_ARCHIVE_ENTRIES, MAX_EXPANDED_ARCHIVE_BYTES)
+            .is_err());
+    }
+
+    #[test]
+    fn generic_payload_reader_uses_sdk_root_and_manifest_without_toolchain_metadata() {
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = temporary.path().join("sdk.tar.xz");
+        write_xz_tar_entries_with_root(&archive, "sdk", |builder| {
+            builder
+                .append(
+                    &canonical_header("sdk/include", tar::EntryType::Directory, 0, 0o755),
+                    &b""[..],
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header("sdk/include/header.h", tar::EntryType::Regular, 4, 0o644),
+                    &b"HEAD"[..],
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header("sdk/sdk-manifest.json", tar::EntryType::Regular, 2, 0o644),
+                    &b"{}"[..],
+                )
+                .unwrap();
+        });
+        let contract = PayloadArchiveContract {
+            archive_root: "sdk",
+            manifest_file: "sdk-manifest.json",
+            source_date_epoch: fixture_manifest().source_date_epoch,
+            capture_toolchain_tools: false,
+            max_entries: 4,
+            max_regular_file_bytes: 6,
+        };
+
+        let readback =
+            verify_payload_archive(File::open(&archive).unwrap(), contract, &[]).unwrap();
+        assert_eq!(readback.embedded_manifest, b"{}");
+        assert_eq!(
+            readback
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["include", "include/header.h"]
+        );
+        assert_eq!(
+            readback.tree_sha256,
+            toolchain_inventory_sha256(&readback.entries).unwrap()
+        );
+        assert!(verify_payload_archive(
+            File::open(&archive).unwrap(),
+            PayloadArchiveContract {
+                max_entries: 3,
+                ..contract
+            },
+            &[],
+        )
+        .is_err());
+        assert!(verify_payload_archive(
+            File::open(&archive).unwrap(),
+            PayloadArchiveContract {
+                max_regular_file_bytes: 5,
+                ..contract
+            },
+            &[],
+        )
+        .is_err());
+
+        #[cfg(unix)]
+        {
+            // macOS commonly exposes the temporary directory through a `/var`
+            // symlink. The no-follow extractor intentionally rejects that
+            // noncanonical path, so pass its resolved spelling here.
+            let destination = temporary
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("extracted-sdk");
+            fs::create_dir(&destination).unwrap();
+            let extracted =
+                extract_payload_archive(File::open(&archive).unwrap(), contract, &[], &destination)
+                    .unwrap();
+            assert_eq!(extracted, readback);
+            assert_eq!(
+                fs::read(destination.join("include/header.h")).unwrap(),
+                b"HEAD"
+            );
+            assert_eq!(
+                fs::read(destination.join("sdk-manifest.json")).unwrap(),
+                b"{}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deterministic_writer_long_utf8_paths_and_combined_symlink_pax_fields_are_read_back() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("sdk-root");
+        fs::create_dir_all(root.join("include")).unwrap();
+        fs::write(root.join("sdk-manifest.json"), b"{}").unwrap();
+        let long_name = format!("Größe-{}", "x".repeat(110));
+        fs::write(root.join("include").join(&long_name), b"x").unwrap();
+        let long_link_name = format!("Verknüpfung-{}", "l".repeat(100));
+        let long_target = format!("../{}", "target-".repeat(20));
+        symlink(&long_target, root.join("include").join(&long_link_name)).unwrap();
+        let archive = temporary.path().join("sdk.tar.xz");
+        let epoch = fixture_manifest().source_date_epoch;
+        crate::package::write_payload_archive(&archive, &root, epoch, "sdk").unwrap();
+
+        let readback = verify_payload_archive(
+            File::open(&archive).unwrap(),
+            PayloadArchiveContract {
+                archive_root: "sdk",
+                manifest_file: "sdk-manifest.json",
+                source_date_epoch: epoch,
+                capture_toolchain_tools: false,
+                max_entries: 5,
+                max_regular_file_bytes: 3,
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(readback.embedded_manifest, b"{}");
+        assert!(readback
+            .entries
+            .iter()
+            .any(|entry| entry.path == format!("include/{long_name}")));
+        assert!(readback.entries.iter().any(|entry| {
+            entry.path == format!("include/{long_link_name}")
+                && entry.kind == "symlink"
+                && entry.target.as_deref() == Some(long_target.as_str())
+        }));
+    }
+
+    #[test]
+    fn pax_extension_accounting_checks_aggregate_limit_without_allocating_payloads() {
+        let mut total = 0;
+        account_pax_extension(&mut total, 1).unwrap();
+        assert_eq!(total, 1);
+
+        total = MAX_TOTAL_PAX_EXTENSION_BYTES - MAX_PAX_EXTENSION_BYTES;
+        account_pax_extension(&mut total, MAX_PAX_EXTENSION_BYTES).unwrap();
+        assert_eq!(total, MAX_TOTAL_PAX_EXTENSION_BYTES);
+        assert!(account_pax_extension(&mut total, 1).is_err());
+
+        total = u64::MAX - 1;
+        assert!(account_pax_extension(&mut total, 2).is_err());
+        assert_eq!(total, u64::MAX - 1);
+    }
+
+    #[test]
+    fn raw_tar_reader_rejects_pax_size_overrides_and_oversized_extensions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let size_override = temporary.path().join("pax-size.tar.xz");
+        let size_record = pax_record("size", "4096");
+        write_xz_tar_entries(&size_override, |builder| {
+            builder
+                .append(
+                    &canonical_pax_header(size_record.len() as u64),
+                    size_record.as_slice(),
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header("toolchain/probe", tar::EntryType::Regular, 1, 0o644),
+                    &b"x"[..],
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header(
+                        "toolchain/toolchain-manifest.json",
+                        tar::EntryType::Regular,
+                        2,
+                        0o644,
+                    ),
+                    &b"{}"[..],
+                )
+                .unwrap();
+        });
+        assert!(verify_archive_tree(
+            File::open(&size_override).unwrap(),
+            &fixture_manifest(),
+            &[],
+        )
+        .is_err());
+
+        let oversized = temporary.path().join("oversized-pax.tar.xz");
+        let oversized_body = vec![b'x'; MAX_PAX_EXTENSION_BYTES as usize + 1];
+        write_xz_tar_entries(&oversized, |builder| {
+            builder
+                .append(
+                    &canonical_pax_header(oversized_body.len() as u64),
+                    oversized_body.as_slice(),
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header("toolchain/probe", tar::EntryType::Regular, 1, 0o644),
+                    &b"x"[..],
+                )
+                .unwrap();
+        });
+        assert!(
+            verify_archive_tree(File::open(&oversized).unwrap(), &fixture_manifest(), &[],)
+                .is_err()
+        );
+
+        let duplicate = temporary.path().join("duplicate-pax.tar.xz");
+        let first_record = pax_record("path", "toolchain/probe");
+        let second_record = pax_record("path", "toolchain/other");
+        write_xz_tar_entries(&duplicate, |builder| {
+            builder
+                .append(
+                    &canonical_pax_header(first_record.len() as u64),
+                    first_record.as_slice(),
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_pax_header(second_record.len() as u64),
+                    second_record.as_slice(),
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header("toolchain/probe", tar::EntryType::Regular, 1, 0o644),
+                    &b"x"[..],
+                )
+                .unwrap();
+        });
+        assert!(
+            verify_archive_tree(File::open(&duplicate).unwrap(), &fixture_manifest(), &[],)
+                .is_err()
+        );
+
+        let orphan = temporary.path().join("orphan-pax.tar.xz");
+        write_xz_tar_entries(&orphan, |builder| {
+            builder
+                .append(
+                    &canonical_pax_header(first_record.len() as u64),
+                    first_record.as_slice(),
+                )
+                .unwrap();
+        });
+        assert!(
+            verify_archive_tree(File::open(&orphan).unwrap(), &fixture_manifest(), &[],).is_err()
+        );
+    }
+
+    #[test]
+    fn raw_tar_reader_rejects_noncanonical_raw_and_pax_paths() {
+        let temporary = tempfile::tempdir().unwrap();
+        let raw_backslash = temporary.path().join("raw-backslash.tar.xz");
+        write_xz_tar_entries(&raw_backslash, |builder| {
+            builder
+                .append(
+                    &canonical_header("toolchain/probe\\escape", tar::EntryType::Regular, 1, 0o644),
+                    &b"x"[..],
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header(
+                        "toolchain/toolchain-manifest.json",
+                        tar::EntryType::Regular,
+                        2,
+                        0o644,
+                    ),
+                    &b"{}"[..],
+                )
+                .unwrap();
+        });
+        assert!(verify_archive_tree(
+            File::open(&raw_backslash).unwrap(),
+            &fixture_manifest(),
+            &[],
+        )
+        .is_err());
+
+        for (name, effective_path) in [
+            ("pax-backslash", "toolchain/probe\\escape"),
+            ("pax-nul", "toolchain/probe\0escape"),
+            ("pax-double-separator", "toolchain/probe//escape"),
+            ("pax-dot-component", "toolchain/./escape"),
+            ("pax-parent-component", "toolchain/../escape"),
+        ] {
+            let archive = temporary.path().join(format!("{name}.tar.xz"));
+            let record = pax_record("path", effective_path);
+            write_xz_tar_entries(&archive, |builder| {
+                builder
+                    .append(
+                        &canonical_pax_header(record.len() as u64),
+                        record.as_slice(),
+                    )
+                    .unwrap();
+                builder
+                    .append(
+                        &canonical_header("toolchain/probe", tar::EntryType::Regular, 1, 0o644),
+                        &b"x"[..],
+                    )
+                    .unwrap();
+                builder
+                    .append(
+                        &canonical_header(
+                            "toolchain/toolchain-manifest.json",
+                            tar::EntryType::Regular,
+                            2,
+                            0o644,
+                        ),
+                        &b"{}"[..],
+                    )
+                    .unwrap();
+            });
+            assert!(
+                verify_archive_tree(File::open(&archive).unwrap(), &fixture_manifest(), &[],)
+                    .is_err()
+            );
+        }
+
+        let pax_link = temporary.path().join("pax-link-backslash.tar.xz");
+        let link_record = pax_record("linkpath", "../target\\escape");
+        write_xz_tar_entries(&pax_link, |builder| {
+            builder
+                .append(
+                    &canonical_pax_header(link_record.len() as u64),
+                    link_record.as_slice(),
+                )
+                .unwrap();
+            let mut link = canonical_header("toolchain/link", tar::EntryType::Symlink, 0, 0o777);
+            link.set_link_name("safe").unwrap();
+            link.set_cksum();
+            builder.append(&link, &b""[..]).unwrap();
+            builder
+                .append(
+                    &canonical_header(
+                        "toolchain/toolchain-manifest.json",
+                        tar::EntryType::Regular,
+                        2,
+                        0o644,
+                    ),
+                    &b"{}"[..],
+                )
+                .unwrap();
+        });
+        assert!(
+            verify_archive_tree(File::open(&pax_link).unwrap(), &fixture_manifest(), &[],).is_err()
+        );
+
+        let mut embedded_nul =
+            canonical_header("toolchain/probe", tar::EntryType::Regular, 1, 0o644);
+        let raw_name = &mut embedded_nul.as_mut_bytes()[..100];
+        raw_name[15] = 0;
+        raw_name[16] = b'x';
+        embedded_nul.set_cksum();
+        let nul_archive = temporary.path().join("raw-nul.tar.xz");
+        write_xz_tar_entries(&nul_archive, |builder| {
+            builder.append(&embedded_nul, &b"x"[..]).unwrap();
+            builder
+                .append(
+                    &canonical_header(
+                        "toolchain/toolchain-manifest.json",
+                        tar::EntryType::Regular,
+                        2,
+                        0o644,
+                    ),
+                    &b"{}"[..],
+                )
+                .unwrap();
+        });
+        assert!(
+            verify_archive_tree(File::open(&nul_archive).unwrap(), &fixture_manifest(), &[],)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn raw_xz_reader_rejects_junk_and_concatenated_streams() {
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = temporary.path().join("valid.tar.xz");
+        write_xz_tar_entries_with_root(&archive, "sdk", |builder| {
+            builder
+                .append(
+                    &canonical_header("sdk/sdk-manifest.json", tar::EntryType::Regular, 2, 0o644),
+                    &b"{}"[..],
+                )
+                .unwrap();
+        });
+        let contract = PayloadArchiveContract {
+            archive_root: "sdk",
+            manifest_file: "sdk-manifest.json",
+            source_date_epoch: fixture_manifest().source_date_epoch,
+            capture_toolchain_tools: false,
+            max_entries: 2,
+            max_regular_file_bytes: 2,
+        };
+        let valid_bytes = fs::read(&archive).unwrap();
+
+        let junk = temporary.path().join("trailing-junk.tar.xz");
+        let mut junk_bytes = valid_bytes.clone();
+        junk_bytes.extend_from_slice(b"not an XZ stream");
+        fs::write(&junk, junk_bytes).unwrap();
+        assert!(verify_payload_archive(File::open(&junk).unwrap(), contract, &[]).is_err());
+
+        let concatenated = temporary.path().join("concatenated.tar.xz");
+        let mut concatenated_bytes = valid_bytes.clone();
+        concatenated_bytes.extend_from_slice(&valid_bytes);
+        fs::write(&concatenated, concatenated_bytes).unwrap();
+        assert!(
+            verify_payload_archive(File::open(&concatenated).unwrap(), contract, &[],).is_err()
+        );
+    }
+
+    #[test]
+    fn compiler_archive_wrapper_retains_the_generic_payload_readback() {
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = temporary.path().join("toolchain.tar.xz");
+        write_xz_tar_entries(&archive, |builder| {
+            builder
+                .append(
+                    &canonical_header("toolchain/bin", tar::EntryType::Directory, 0, 0o755),
+                    &b""[..],
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header("toolchain/bin/tool", tar::EntryType::Regular, 4, 0o755),
+                    &b"tool"[..],
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header(
+                        "toolchain/toolchain-manifest.json",
+                        tar::EntryType::Regular,
+                        2,
+                        0o644,
+                    ),
+                    &b"{}"[..],
+                )
+                .unwrap();
+        });
+        let manifest = fixture_manifest();
+        let compiler_readback =
+            verify_archive_tree(File::open(&archive).unwrap(), &manifest, &[]).unwrap();
+        let generic_readback = verify_payload_archive(
+            File::open(&archive).unwrap(),
+            compiler_archive_contract(&manifest),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            generic_readback.embedded_manifest,
+            compiler_readback.embedded_manifest
+        );
+        assert_eq!(generic_readback.entries, compiler_readback.entries);
+        assert_eq!(generic_readback.tree_sha256, compiler_readback.tree_sha256);
     }
 
     #[test]
