@@ -106,6 +106,39 @@ impl Fixture {
         .unwrap();
     }
 
+    fn select_generic_contract(&mut self, ambiguous: bool) {
+        let profile_path = self.source.join("aros-targets.toml");
+        let native = fs::read_to_string(&profile_path).unwrap();
+        let declaration = "native_consumer_contract='consumer.json'";
+        let generic = "sdk_consumer_contract='consumer.json'";
+        let profiles = native.replace(
+            declaration,
+            &if ambiguous {
+                format!("{declaration}\n{generic}")
+            } else {
+                generic.to_owned()
+            },
+        );
+        fs::write(profile_path, &profiles).unwrap();
+        let path = self.source.join("consumer.json");
+        let mut consumer: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut abi = consumer.as_object_mut().unwrap().remove("abi").unwrap();
+        abi["pointer_width"] = json!(32);
+        abi["float_abi"] = json!("ilp32f");
+        consumer["schema"] = json!("aros-sdk-consumer-contract-v1");
+        consumer["target"] = json!({"target_triple":"riscv-aros", "abi":abi});
+        consumer["inputs"][0]["sha256"] = json!(sha256_bytes(profiles.as_bytes()));
+        fs::write(path, serde_json::to_vec(&consumer).unwrap()).unwrap();
+        git(&self.source, &["add", "."]);
+        git(
+            &self.source,
+            &["commit", "-qm", "test: generic source policy fixture"],
+        );
+        self.recipe["source_commit"] = json!(git(&self.source, &["rev-parse", "HEAD"]));
+        self.recipe["source_tree"] = json!(git(&self.source, &["rev-parse", "HEAD:"]));
+        self.save_recipe();
+    }
+
     fn run(&self, source_policy: bool, preset: &str) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
         command
@@ -238,4 +271,49 @@ fn uncommitted_sdk_probe_is_rejected_without_source_writes() {
         git(&fixture.source, &["status", "--porcelain"]),
         status_before
     );
+}
+
+#[test]
+fn generic_source_policy_requires_sdk_evidence_and_rejects_unsealed_probe() {
+    let mut fixture = Fixture::new();
+    fixture.select_generic_contract(false);
+    let before = git(&fixture.source, &["status", "--porcelain"]);
+    let selected = fixture.run(true, PRESET);
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert!(selected.stderr.is_empty());
+    let document: Value = serde_json::from_slice(&selected.stdout).unwrap();
+    let policy = &document["source_policy"];
+    assert_eq!(policy["native_sdk_required"], true);
+    assert_eq!(
+        policy["native_consumer"]["schema"],
+        "aros-sdk-consumer-contract-v1"
+    );
+    assert_eq!(policy["native_consumer"]["file"], "consumer.json");
+    assert_eq!(
+        policy["native_consumer"]["sha256"],
+        json!(sha256_bytes(
+            &fs::read(fixture.source.join("consumer.json")).unwrap()
+        ))
+    );
+    assert_eq!(policy["source_commit"], fixture.recipe["source_commit"]);
+    assert_eq!(git(&fixture.source, &["status", "--porcelain"]), before);
+
+    fs::write(fixture.source.join("probe.cpp"), b"unsealed C++ probe\n").unwrap();
+    let dirty = git(&fixture.source, &["status", "--porcelain"]);
+    assert_diagnostic(&fixture.run(true, PRESET), "sealed inputs are invalid");
+    assert_eq!(git(&fixture.source, &["status", "--porcelain"]), dirty);
+}
+
+#[test]
+fn ambiguous_consumer_declarations_cannot_emit_a_source_policy() {
+    let mut fixture = Fixture::new();
+    fixture.select_generic_contract(true);
+    let before = git(&fixture.source, &["status", "--porcelain"]);
+    let output = fixture.run(true, PRESET);
+    assert_diagnostic(&output, "ambiguous");
+    assert_eq!(git(&fixture.source, &["status", "--porcelain"]), before);
 }

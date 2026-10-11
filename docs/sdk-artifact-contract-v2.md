@@ -71,6 +71,14 @@ package or boot-media builds. Pre-compiler JSON uses
 `aros-sdk-consumer-validation-v1` with `target`; legacy consumers keep
 `aros-native-consumer-validation-v1` with `abi`.
 
+The read-only `aros toolchain producer profile` command also accepts this
+generic contract when `--source-dir` and `--source-preset` are selected.
+It verifies the contract and every sealed input against
+the selected clean Git checkout and reports `native_sdk_required: true`.
+Ambiguous native/generic declarations and invalid generic contracts fail
+without falling back to a non-SDK policy. This projection is not execution,
+authenticated CI evidence or release admission.
+
 The owned CMake engine admits the generic response only for LLVM. Execution
 requires explicit source `flavour` and `platform_smp` facts in addition to CPU,
 pointer width and MMU selection. After compiler detection it checks both Clang

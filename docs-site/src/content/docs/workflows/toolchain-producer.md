@@ -35,7 +35,10 @@ for current local generation and management options.
 SDK source profiles can declare a target-generic `sdk_consumer_contract`.
 The transpiler uses it for strict inventory and graph export; CMake checks the
 LLVM driver triples, pointer width and ARM float ABI against the source
-selection. This does not yet enable generic `aros sdk build`: ordinary C/C++
+selection. Read-only `producer profile --source-dir … --source-preset …`
+verifies the committed contract and sealed inputs and marks SDK evidence as
+required. This does not yet enable generic
+`aros sdk build`: ordinary C/C++
 link and retained-evidence adapters are still required. GNU/RV32 local SDK
 generation retains its existing native-consumer-v2 path.
 

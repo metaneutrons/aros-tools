@@ -1,4 +1,4 @@
-//! Read-only derivation of source-owned native SDK compatibility policy.
+//! Read-only derivation of source-owned SDK compatibility policy.
 //!
 //! The result binds one source preset to a pinned, recursively audited Git
 //! checkout. It is a policy projection, not source-origin authentication or
@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use aros_common::{
-    native_consumer_contract::load_bound_native_consumer_contract, sha256_bytes, CancellationToken,
+    native_build_contract::NativeBuildInput,
+    native_consumer_contract::load_bound_native_consumer_contract,
+    sdk_consumer_contract::load_bound_sdk_consumer_contract, sha256_bytes, CancellationToken,
     Sha256Digest, TargetProfile,
 };
 use serde::Serialize;
@@ -41,7 +43,7 @@ pub struct NativeConsumerPolicy {
     pub file: String,
     /// SHA-256 of the raw committed contract bytes.
     pub sha256: Sha256Digest,
-    /// Validated native consumer contract schema.
+    /// Validated native or generic SDK consumer contract schema.
     pub schema: String,
 }
 
@@ -60,11 +62,11 @@ pub struct NativeSourcePolicy {
     pub profiles_sha256: Sha256Digest,
     /// Validated source consumer contract, when declared by the preset.
     pub native_consumer: Option<NativeConsumerPolicy>,
-    /// True only when the bound consumer contract contains valid v2 SDK probes.
+    /// True when the bound consumer contract requires ordinary SDK links.
     pub native_sdk_required: bool,
 }
 
-/// Derive native SDK policy from a pinned and recursively clean source checkout.
+/// Derive source-owned SDK policy from a pinned and recursively clean checkout.
 ///
 /// This reads the selected source profile and every sealed consumer input from
 /// raw Git blobs, validates them with the shared source-contract loader, audits
@@ -106,60 +108,61 @@ pub fn inspect_native_source_policy(
         ));
     }
 
-    if profile.sdk_consumer_contract.is_some() {
-        return Err(ContractError::invalid(
-            "native source policy does not yet support a generic SDK consumer contract",
-        ));
-    }
     let mut committed_inputs = Vec::<(String, Vec<u8>)>::new();
-    let (native_consumer, native_sdk_required) = if let Some(relative) =
-        profile.native_consumer_contract.as_deref()
-    {
-        let contract_bytes = checkout.required_file(relative)?;
-        let loaded =
-            load_bound_native_consumer_contract(&source_root, Path::new(relative), profile)
-                .map_err(|_| {
-                    ContractError::invalid(
-                        "selected source consumer contract or its sealed inputs are invalid",
-                    )
-                })?;
-        if loaded.sha256 != sha256_bytes(&contract_bytes) {
-            return Err(ContractError::identity(
-                "loaded source consumer contract differs from its committed bytes",
+    let (native_consumer, native_sdk_required) = match (
+        profile.native_consumer_contract.as_deref(),
+        profile.sdk_consumer_contract.as_deref(),
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(ContractError::invalid(
+                "selected source preset declares ambiguous consumer contracts",
             ));
         }
+        (Some(relative), None) => {
+            let loaded =
+                load_bound_native_consumer_contract(&source_root, Path::new(relative), profile)
+                    .map_err(|_| invalid_consumer_contract())?;
+            let policy = measure_consumer_contract(
+                &checkout,
+                relative,
+                loaded.sha256,
+                &loaded.contract.schema,
+                &loaded.contract.inputs,
+                &mut committed_inputs,
+            )?;
 
-        for input in &loaded.contract.inputs {
-            let bytes = checkout.required_file(&input.path)?;
-            if sha256_bytes(&bytes) != input.sha256 {
-                return Err(ContractError::identity(
-                    "sealed source consumer input differs from its committed bytes",
-                ));
+            // The shared loader enforces the v1/v2 schema-to-probe relationship:
+            // v1 has no ordinary SDK probes; v2 must carry both sealed probes.
+            let native_sdk_required = loaded.contract.native_sdk_link_probes.is_some();
+            if native_sdk_required {
+                loaded
+                    .contract
+                    .require_native_sdk_link_probes()
+                    .map_err(|_| {
+                        ContractError::invalid(
+                            "source consumer v2 contract lacks required SDK probes",
+                        )
+                    })?;
             }
-            committed_inputs.push((input.path.clone(), bytes));
+            (Some(policy), native_sdk_required)
         }
-
-        // The shared loader enforces the v1/v2 schema-to-probe relationship:
-        // v1 has no ordinary SDK probes; v2 must carry both sealed probes.
-        let native_sdk_required = loaded.contract.native_sdk_link_probes.is_some();
-        if native_sdk_required {
-            loaded
-                .contract
-                .require_native_sdk_link_probes()
-                .map_err(|_| {
-                    ContractError::invalid("source consumer v2 contract lacks required SDK probes")
-                })?;
+        (None, Some(relative)) => {
+            let loaded =
+                load_bound_sdk_consumer_contract(&source_root, Path::new(relative), profile)
+                    .map_err(|_| invalid_consumer_contract())?;
+            let policy = measure_consumer_contract(
+                &checkout,
+                relative,
+                loaded.sha256,
+                &loaded.contract.schema,
+                &loaded.contract.inputs,
+                &mut committed_inputs,
+            )?;
+            // A valid generic SDK consumer contract requires ordinary C and C++
+            // link probes by schema, but this policy does not execute them.
+            (Some(policy), true)
         }
-        (
-            Some(NativeConsumerPolicy {
-                file: relative.to_owned(),
-                sha256: loaded.sha256,
-                schema: loaded.contract.schema,
-            }),
-            native_sdk_required,
-        )
-    } else {
-        (None, false)
+        (None, None) => (None, false),
     };
 
     // The audit compares every tracked entry to raw Git material, rejects all
@@ -207,6 +210,42 @@ fn require_unchanged(
     Ok(())
 }
 
+fn invalid_consumer_contract() -> ContractError {
+    ContractError::invalid("selected source consumer contract or its sealed inputs are invalid")
+}
+
+fn measure_consumer_contract(
+    checkout: &Checkout<'_>,
+    relative: &str,
+    contract_sha256: Sha256Digest,
+    schema: &str,
+    inputs: &[NativeBuildInput],
+    committed_inputs: &mut Vec<(String, Vec<u8>)>,
+) -> Result<NativeConsumerPolicy, ContractError> {
+    let contract_bytes = checkout.required_file(relative)?;
+    if contract_sha256 != sha256_bytes(&contract_bytes) {
+        return Err(ContractError::identity(
+            "loaded source consumer contract differs from its committed bytes",
+        ));
+    }
+
+    for input in inputs {
+        let bytes = checkout.required_file(&input.path)?;
+        if sha256_bytes(&bytes) != input.sha256 {
+            return Err(ContractError::identity(
+                "sealed source consumer input differs from its committed bytes",
+            ));
+        }
+        committed_inputs.push((input.path.clone(), bytes));
+    }
+
+    Ok(NativeConsumerPolicy {
+        file: relative.to_owned(),
+        sha256: contract_sha256,
+        schema: schema.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +258,7 @@ mod tests {
     const SOURCE_PRESET: &str = "esp32p4-riscv-gnu";
     const COMPILER_PROFILE: &str = "rv32-esp32p4";
     const CONTRACT_PATH: &str = "contracts/native-consumer.json";
+    const SDK_CONTRACT_PATH: &str = "contracts/sdk-consumer.json";
 
     struct Fixture {
         _temporary: tempfile::TempDir,
@@ -318,6 +358,68 @@ mod tests {
             self.identity.tree =
                 GitObjectId::try_from(git(&self.root, &["rev-parse", "HEAD:"])).unwrap();
         }
+
+        fn add_sdk_contract(&mut self, also_declare_native: bool) {
+            const PROBE_C: &[u8] = b"int sdk_c_probe(void) { return 0; }\n";
+            const PROBE_CXX: &[u8] = b"int sdk_cxx_probe() { return 0; }\n";
+            let profile_path = self.root.join(SOURCE_PROFILE_FILE);
+            let profile = fs::read_to_string(&profile_path).unwrap();
+            let native_declaration = if also_declare_native {
+                format!("native_consumer_contract = '{CONTRACT_PATH}'\n")
+            } else {
+                String::new()
+            };
+            let declaration =
+                format!("sdk_consumer_contract = '{SDK_CONTRACT_PATH}'\n{native_declaration}");
+            fs::write(
+                &profile_path,
+                profile.replace(
+                    "[targets.transpiler]",
+                    &format!("{declaration}[targets.transpiler]"),
+                ),
+            )
+            .unwrap();
+
+            fs::write(self.root.join("probe.c"), PROBE_C).unwrap();
+            fs::write(self.root.join("probe.cpp"), PROBE_CXX).unwrap();
+            fs::create_dir_all(self.root.join("contracts")).unwrap();
+            let profile_bytes = fs::read(&profile_path).unwrap();
+            let contract = json!({
+                "schema": "aros-sdk-consumer-contract-v1",
+                "profile": SOURCE_PRESET,
+                "source_baseline": "0123456789abcdef0123456789abcdef01234567",
+                "roots": ["includes", "linklibs"],
+                "inputs": [
+                    {"path": SOURCE_PROFILE_FILE, "sha256": sha256_bytes(&profile_bytes)},
+                    {"path": "policy.json", "sha256": sha256_bytes(b"{}\n")},
+                    {"path": "probe.c", "sha256": sha256_bytes(PROBE_C)},
+                    {"path": "probe.cpp", "sha256": sha256_bytes(PROBE_CXX)}
+                ],
+                "target": {
+                    "target_triple": "riscv-aros",
+                    "abi": {
+                        "source_cpu": "riscv",
+                        "pointer_width": 32,
+                        "use_mmu": false,
+                        "float_abi": "ilp32f",
+                        "flavour": "native",
+                        "platform_smp": true,
+                        "isa": "source-declared-isa"
+                    }
+                },
+                "metamake_projection": "policy.json",
+                "native_sdk_link_probes": {
+                    "c": {"source": "probe.c", "libraries": []},
+                    "cxx": {"source": "probe.cpp", "libraries": []}
+                }
+            });
+            fs::write(
+                self.root.join(SDK_CONTRACT_PATH),
+                serde_json::to_vec(&contract).unwrap(),
+            )
+            .unwrap();
+            self.recommit();
+        }
     }
 
     fn git(root: &Path, arguments: &[&str]) -> String {
@@ -356,6 +458,7 @@ mod tests {
     fn derives_absent_v1_and_v2_policy_from_the_source_preset() {
         let absent = Fixture::new(None);
         let policy = inspect_native_source_policy(&absent.request()).unwrap();
+        assert_policy_wire_shape(&absent, &policy, None, false);
         assert_eq!(policy.source_preset, SOURCE_PRESET);
         assert_eq!(policy.compiler_profile, COMPILER_PROFILE);
         assert!(policy.native_consumer.is_none());
@@ -363,6 +466,12 @@ mod tests {
 
         let v1 = Fixture::new(Some("aros-native-consumer-contract-v1"));
         let policy = inspect_native_source_policy(&v1.request()).unwrap();
+        assert_policy_wire_shape(
+            &v1,
+            &policy,
+            Some((CONTRACT_PATH, "aros-native-consumer-contract-v1")),
+            false,
+        );
         assert_eq!(
             policy.native_consumer.unwrap().schema,
             "aros-native-consumer-contract-v1"
@@ -371,6 +480,12 @@ mod tests {
 
         let v2 = Fixture::new(Some("aros-native-consumer-contract-v2"));
         let policy = inspect_native_source_policy(&v2.request()).unwrap();
+        assert_policy_wire_shape(
+            &v2,
+            &policy,
+            Some((CONTRACT_PATH, "aros-native-consumer-contract-v2")),
+            true,
+        );
         assert_eq!(
             policy.native_consumer.unwrap().schema,
             "aros-native-consumer-contract-v2"
@@ -378,28 +493,62 @@ mod tests {
         assert!(policy.native_sdk_required);
     }
 
-    #[test]
-    fn generic_sdk_policy_is_rejected_instead_of_reporting_sdk_not_required() {
-        let mut fixture = Fixture::new(None);
-        let path = fixture.root.join(SOURCE_PROFILE_FILE);
-        let text = fs::read_to_string(&path).unwrap().replace(
-            "[targets.transpiler]",
-            "sdk_consumer_contract = 'contracts/sdk-consumer.json'\n[targets.transpiler]",
+    fn assert_policy_wire_shape(
+        fixture: &Fixture,
+        policy: &NativeSourcePolicy,
+        contract: Option<(&str, &str)>,
+        required: bool,
+    ) {
+        let consumer = contract.map(|(file, schema)| {
+            json!({
+                "file":file,
+                "sha256":sha256_bytes(&fs::read(fixture.root.join(file)).unwrap()),
+                "schema":schema
+            })
+        });
+        assert_eq!(
+            serde_json::to_value(policy).unwrap(),
+            json!({
+                "source_commit":fixture.identity.commit.as_str(),
+                "source_tree":fixture.identity.tree.as_str(),
+                "source_preset":SOURCE_PRESET,
+                "compiler_profile":COMPILER_PROFILE,
+                "profiles_sha256":sha256_bytes(&fs::read(fixture.root.join(SOURCE_PROFILE_FILE)).unwrap()),
+                "native_consumer":consumer,
+                "native_sdk_required":required
+            })
         );
-        fs::write(path, text).unwrap();
-        fixture.recommit();
-        let before = fs::read(fixture.root.join(SOURCE_PROFILE_FILE)).unwrap();
+    }
+
+    #[test]
+    fn derives_generic_sdk_policy_from_the_committed_source_contract() {
+        let mut fixture = Fixture::new(None);
+        fixture.add_sdk_contract(false);
+        let profile_before = fs::read(fixture.root.join(SOURCE_PROFILE_FILE)).unwrap();
         let status_before = git(
             &fixture.root,
             &["status", "--porcelain", "--untracked-files=all"],
         );
-        let error = inspect_native_source_policy(&fixture.request()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("does not yet support a generic SDK consumer contract"));
+
+        // This synthetic generic descriptor tests policy binding, not compiler execution.
+        let policy = inspect_native_source_policy(&fixture.request()).unwrap();
+        assert_policy_wire_shape(
+            &fixture,
+            &policy,
+            Some((SDK_CONTRACT_PATH, "aros-sdk-consumer-contract-v1")),
+            true,
+        );
+        let consumer = policy.native_consumer.unwrap();
+        assert_eq!(consumer.file, SDK_CONTRACT_PATH);
+        assert_eq!(consumer.schema, "aros-sdk-consumer-contract-v1");
+        assert_eq!(
+            consumer.sha256,
+            sha256_bytes(&fs::read(fixture.root.join(SDK_CONTRACT_PATH)).unwrap())
+        );
+        assert!(policy.native_sdk_required);
         assert_eq!(
             fs::read(fixture.root.join(SOURCE_PROFILE_FILE)).unwrap(),
-            before
+            profile_before
         );
         assert_eq!(
             git(
@@ -408,6 +557,49 @@ mod tests {
             ),
             status_before
         );
+    }
+
+    #[test]
+    fn rejects_corrupt_or_missing_generic_contract_inputs() {
+        let mut corrupt = Fixture::new(None);
+        corrupt.add_sdk_contract(false);
+        let path = corrupt.root.join(SDK_CONTRACT_PATH);
+        let mut contract: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        contract["schema"] = json!("aros-sdk-consumer-contract-v99");
+        fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+        corrupt.recommit();
+        assert!(inspect_native_source_policy(&corrupt.request()).is_err());
+
+        let mut altered = Fixture::new(None);
+        altered.add_sdk_contract(false);
+        fs::write(altered.root.join("policy.json"), b"changed\n").unwrap();
+        altered.recommit();
+        assert!(inspect_native_source_policy(&altered.request()).is_err());
+
+        let mut missing = Fixture::new(None);
+        missing.add_sdk_contract(false);
+        fs::remove_file(missing.root.join("probe.c")).unwrap();
+        missing.recommit();
+        assert!(inspect_native_source_policy(&missing.request()).is_err());
+    }
+
+    #[test]
+    fn rejects_generic_dirty_checkout_compiler_mismatch_and_dual_binding() {
+        let mut dirty = Fixture::new(None);
+        dirty.add_sdk_contract(false);
+        fs::write(dirty.root.join("untracked-generic"), b"not committed\n").unwrap();
+        assert!(inspect_native_source_policy(&dirty.request()).is_err());
+
+        let mut mismatch = Fixture::new(None);
+        mismatch.add_sdk_contract(false);
+        let mut request = mismatch.request();
+        request.compiler_profile = "other-rv32-profile".into();
+        assert!(inspect_native_source_policy(&request).is_err());
+
+        let mut ambiguous = Fixture::new(None);
+        ambiguous.add_sdk_contract(true);
+        let error = inspect_native_source_policy(&ambiguous.request()).unwrap_err();
+        assert!(error.to_string().contains("ambiguous consumer contracts"));
     }
 
     #[test]
