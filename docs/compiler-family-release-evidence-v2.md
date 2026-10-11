@@ -39,6 +39,19 @@ The external selection is bounded to 16 MiB and uses the closed JSON schema
 | `lanes[asset].compatibility.inputs` | Selected-file record for the separate pre-execution `inputs.json` |
 | `lanes[asset].compatibility.manifest_sha256` | Independently retained raw compatibility manifest digest |
 | `lanes[asset].compatibility.native_sdk_required` | Required boolean selected from the qualified source contract; true for consumer-v2 application-link lanes, never inferred from `inputs.json` or reports |
+| `sdk_packages` | Optional map keyed by the exact SDK product IDs in the independently selected input collection; omission is valid only when that collection selects no SDKs |
+| `sdk_packages[id].tree_sha256` | Independently retained normalized SDK payload-tree digest |
+| `sdk_packages[id].archive_sha256` | Independently retained raw SDK archive digest |
+| `sdk_packages[id].archive_size` | Positive raw SDK archive byte count |
+
+The selection cannot supply an SDK identity or choose additional SDK products.
+Identity, source/ABI, product version and required compiler-profile references
+come from the digest-bound release inputs. The SDK map must cover that exact
+set, independent of compiler host lanes. Archive/manifest/sidecar bytes and
+deterministic SPDX are verified against the indexed SDK locks. SDK package
+measurements remain available through both attestation subject verification
+and the complete release-build readback; they are not discarded after checking
+the inventory. Final checksums and repeated package observations still apply.
 
 Unknown or duplicate object keys are rejected at every nesting depth, including
 environment objects. Selected paths must be absolute and free of parent
@@ -67,6 +80,13 @@ digests, measured final checksum and subject-manifest digests, exact lane/build
 counts, and each lane's build-result, export, finished-record, comparison,
 compatibility input/receipt/manifest and standalone ELF measurements. Finished-record
 self-digests are labeled separately from raw file digests.
+
+For SDK-bearing selections, JSON also returns `sdk_count` and an ID-sorted
+`sdks` array with source-owned identity and measured tree, archive and manifest
+digests/sizes. Compiler-only selections omit these fields. These are package
+byte measurements, not SDK generation or owning-job evidence. Qualification,
+recording and recovery still reject SDK-bearing releases until that separate
+authenticated generation join is implemented.
 
 Every lane is returned together or the operation fails. A rehashed report is
 not enough to admit changed package, log or ELF bytes. A valid selection still

@@ -27,9 +27,9 @@ The examples below retain the existing PC/LLVM selection.
 The unreleased V2 release-input collection can explicitly select a
 host-independent SDK identity and its required compiler profiles. Its source,
 target/ABI and product version stay separate from compiler and host identities.
-This selection alone does not enable SDK publication: the release index rejects
-SDK-bearing inputs until the complete shared package/evidence pipeline is
-implemented. See the [SDK commands](/aros-tools/reference/cli-contract/sdk/)
+The shared index can verify selected SDK packages. Publication remains blocked
+until SDK generation and owning-job evidence are joined. See the
+[SDK commands](/aros-tools/reference/cli-contract/sdk/)
 for current local generation and management options.
 
 SDK source profiles can declare a target-generic `sdk_consumer_contract`.
@@ -240,7 +240,10 @@ public package metadata. This transport does not authenticate execution.
 `producer verify-release-evidence` joins the complete indexed A/B export set to
 measured packages, comparisons, compatibility reports/logs/ELFs, final checksums
 and unchanged pre-attestation subjects. It requires external lane selections
-and retained raw digests; it does not qualify a release or authenticate jobs.
+and retained raw digests. Selected SDKs require an exact product map with independent
+tree/archive digests and archive sizes. Identities come from release inputs.
+The result retains measured SDK packages, not generation or origin proof.
+It does not qualify a release or authenticate jobs.
 
 A local file hash is not authenticated execution provenance. Hashing an
 untrusted result does not make it trusted; a release workflow must separately

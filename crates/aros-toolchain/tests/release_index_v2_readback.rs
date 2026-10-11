@@ -3473,6 +3473,16 @@ fn measured_shared_sdk_is_one_host_independent_package_in_index_readback_checksu
     let request = fixture.request(directory.clone());
     let attestation_path = fixture.root.join("shared-sdk-subjects.sha256");
     let subjects = write_attestation_manifest_v2(&request, &attestation_path).unwrap();
+    assert_eq!(subjects.sdk_packages().len(), 1);
+    assert_eq!(subjects.sdk_packages()[0].lock(), &fixture.index.sdks()[0]);
+    assert_eq!(
+        subjects.sdk_packages()[0].package().archive_sha256,
+        fixture.index.sdks()[0].archive.sha256
+    );
+    assert_eq!(
+        subjects.sdk_packages()[0].package().archive_size,
+        fixture.index.sdks()[0].archive.size
+    );
     assert_sdk_names_in_members(
         &sdk_names,
         subjects
@@ -3542,6 +3552,12 @@ fn distinct_sdk_products_keep_sorted_independent_measurements_and_reject_swapped
     let request = fixture.request(directory.clone());
     let subjects =
         write_attestation_manifest_v2(&request, &fixture.root.join("two-sdk-subjects")).unwrap();
+    assert_eq!(subjects.sdk_packages().len(), 2);
+    assert!(subjects
+        .sdk_packages()
+        .iter()
+        .map(aros_toolchain::release_index_v2_readback::IndexedSdkPackageV2::lock)
+        .eq(fixture.index.sdks()));
     assert_eq!(subjects.members().len(), 56);
     for sdk in fixture.inputs.sdks() {
         let asset = sdk.identity().asset_name().unwrap();

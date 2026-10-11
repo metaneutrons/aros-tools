@@ -392,6 +392,13 @@ and owning-job evidence are joined. Compiler-only lanes cannot qualify a release
 which selects SDKs. A selected ABI descriptor or compiler profile is not proof
 of binary compatibility.
 
+The release-evidence collector accepts an independent `sdk_packages` map with
+exact product-ID coverage and tree/archive digests plus archive sizes. It
+derives identities only from the selected release inputs and retains verified
+SDK locks/packages through its complete readback. Its JSON exposes those
+measurements without claiming generation, authenticity or publication
+readiness. See the [release evidence selection contract](compiler-family-release-evidence-v2.md).
+
 `aros-sdk-lock-v2` selects an exact release tag, canonical credential-free
 HTTPS base URL, SDK identity, payload tree digest, archive SHA-256/size and
 manifest SHA-256/size. Its release version may differ from the SDK version:

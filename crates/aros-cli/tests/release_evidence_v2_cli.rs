@@ -22,6 +22,111 @@ use support::{Fixture, BASE_URL, RELEASE_ID};
 
 const RECOVERED_RELEASE_ID: &str = "release-evidence-v2-recovered";
 
+#[test]
+fn process_measures_selected_shared_sdk_packages_without_qualifying_their_origin() {
+    let fixture = Fixture::with_sdk_products(&["core-sdk", "secondary-sdk"]);
+    let _ = fixture.write_selection("sdk-positive", &fixture.selection);
+    let before = support::snapshot_tree(&fixture.release_directory);
+    let success = command(&fixture, &fixture.selection, "sdk-positive");
+    assert!(
+        success.status.success(),
+        "{}",
+        String::from_utf8_lossy(&success.stderr)
+    );
+    let result: Value = serde_json::from_slice(&success.stdout).unwrap();
+    assert_eq!(result["assurance"], "byte-consistency-only");
+    assert_eq!(result["sdk_count"], 2);
+    let sdks = result["sdks"].as_array().unwrap();
+    assert_eq!(sdks[0]["sdk_id"], "core-sdk");
+    assert_eq!(sdks[1]["sdk_id"], "secondary-sdk");
+    for sdk in sdks {
+        let id = sdk["sdk_id"].as_str().unwrap();
+        let asset = format!("aros-sdk-{id}-0.1.0.tar.xz");
+        let archive = fs::read(fixture.release_directory.join(&asset)).unwrap();
+        let manifest = fs::read(
+            fixture
+                .release_directory
+                .join(format!("{asset}.manifest.json")),
+        )
+        .unwrap();
+        assert_eq!(sdk["archive_sha256"], sha256_bytes(&archive).as_str());
+        assert_eq!(sdk["archive_size"], archive.len() as u64);
+        assert_eq!(sdk["manifest_sha256"], sha256_bytes(&manifest).as_str());
+        assert_eq!(sdk["manifest_size"], manifest.len() as u64);
+    }
+    assert_eq!(support::snapshot_tree(&fixture.release_directory), before);
+
+    let mut missing = fixture.selection.clone();
+    missing.as_object_mut().unwrap().remove("sdk_packages");
+    assert_unchanged_after_failure(
+        &fixture,
+        &missing,
+        "sdk-missing",
+        "SDK package selection must exactly cover",
+        &[],
+    );
+    let mut extra = fixture.selection.clone();
+    extra["sdk_packages"]["unselected-sdk"] = extra["sdk_packages"]["core-sdk"].clone();
+    assert_unchanged_after_failure(
+        &fixture,
+        &extra,
+        "sdk-extra",
+        "SDK package selection must exactly cover",
+        &[],
+    );
+    let mut swapped = fixture.selection.clone();
+    let first = swapped["sdk_packages"]["core-sdk"].clone();
+    swapped["sdk_packages"]["core-sdk"] = swapped["sdk_packages"]["secondary-sdk"].clone();
+    swapped["sdk_packages"]["secondary-sdk"] = first;
+    assert_unchanged_after_failure(&fixture, &swapped, "sdk-swapped", "SDK", &[]);
+    for field in ["tree_sha256", "archive_sha256", "archive_size"] {
+        let mut changed = fixture.selection.clone();
+        changed["sdk_packages"]["core-sdk"][field] = if field == "archive_size" {
+            json!(changed["sdk_packages"]["core-sdk"][field].as_u64().unwrap() + 1)
+        } else {
+            json!("c".repeat(64))
+        };
+        assert_unchanged_after_failure(
+            &fixture,
+            &changed,
+            &format!("sdk-changed-{field}"),
+            "SDK",
+            &[],
+        );
+    }
+
+    // Successful shared package measurements must not bypass the still-missing
+    // SDK generation/original-job qualification join or create a claim file.
+    let claim_path = fixture.transport_directory.join("sdk-qualification.json");
+    let mut record = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "sdk-qualification-blocked",
+        &claim_path,
+    );
+    let _ = fixture.write_selection(
+        "record-sdk-qualification-blocked-selection.json",
+        &fixture.selection,
+    );
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let rejected = record.output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
+    let diagnostic: Value = serde_json::from_slice(&rejected.stderr).unwrap();
+    assert_eq!(diagnostic["diagnostics"][0]["code"], "AX0901");
+    assert_eq!(diagnostic["diagnostics"][0]["message"], "SDK-selected release requires complete authenticated SDK qualification, not compiler-only lanes");
+    assert!(!claim_path.exists());
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before
+    );
+}
+
 fn command(fixture: &Fixture, selection: &Value, name: &str) -> Output {
     let (selection_path, selection_sha256) = fixture.write_selection(name, selection);
     Command::new(env!("CARGO_BIN_EXE_aros"))
