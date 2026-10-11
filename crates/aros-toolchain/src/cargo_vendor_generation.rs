@@ -303,6 +303,7 @@ pub fn select_vendor_generation(
     let lock = tools.join("Cargo.lock");
     let manifest_bytes =
         read_regular_path(&manifest, MAX_MANIFEST_BYTES, "selected tools Cargo.toml")?;
+    validate_tools_rust_version(&manifest_bytes, &rust_channel)?;
     let lock_bytes = read_cargo_lock(&lock)?;
     let invocation = canonical_executable(&request.cargo, "selected Cargo executable", false)?;
     let resolved = canonical_executable(&request.cargo, "selected Cargo executable", true)?;
@@ -1013,6 +1014,62 @@ fn parse_rust_channel(bytes: &[u8]) -> Result<String, ContractError> {
         ));
     }
     Ok(document.toolchain.channel)
+}
+
+fn validate_tools_rust_version(
+    manifest_bytes: &[u8],
+    rust_channel: &str,
+) -> Result<(), ContractError> {
+    let manifest_text = std::str::from_utf8(manifest_bytes)
+        .map_err(|_| ContractError::environment("selected tools Cargo.toml is not UTF-8"))?;
+    let manifest: toml::Value = toml::from_str(manifest_text)
+        .map_err(|_| ContractError::environment("selected tools Cargo.toml is malformed"))?;
+    let Some(minimum) = manifest
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .and_then(|workspace| workspace.get("package"))
+        .and_then(toml::Value::as_table)
+        .and_then(|package| package.get("rust-version"))
+    else {
+        return Ok(());
+    };
+
+    let Some(minimum_text) = minimum.as_str() else {
+        return Err(ContractError::environment(format!(
+            "selected producer Rust pin {rust_channel} cannot be checked against malformed selected tools workspace rust-version {minimum}; expected a two- or three-component minimum version"
+        )));
+    };
+    let Some(minimum_version) = parse_rust_version_minimum(minimum_text) else {
+        return Err(ContractError::environment(format!(
+            "selected producer Rust pin {rust_channel} cannot be checked against malformed selected tools workspace rust-version {minimum_text:?}; expected a two- or three-component minimum version"
+        )));
+    };
+    let pinned_version = semver::Version::parse(rust_channel).map_err(|_| {
+        ContractError::environment("selected producer Rust pin is not a valid stable version")
+    })?;
+    if pinned_version < minimum_version {
+        return Err(ContractError::environment(format!(
+            "selected producer Rust pin {rust_channel} does not meet selected tools workspace rust-version minimum {minimum_text}"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_rust_version_minimum(value: &str) -> Option<semver::Version> {
+    let components = value.split('.').collect::<Vec<_>>();
+    if !matches!(components.len(), 2 | 3)
+        || components.iter().any(|component| {
+            component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+    let normalized = if components.len() == 2 {
+        format!("{value}.0")
+    } else {
+        value.to_owned()
+    };
+    semver::Version::parse(&normalized).ok()
 }
 
 fn probe_cargo_version(invocation: &Path, rust_channel: &str) -> Result<String, ContractError> {

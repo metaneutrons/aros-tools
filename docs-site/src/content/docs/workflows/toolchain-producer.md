@@ -112,6 +112,12 @@ validated directory placeholder, checks every vendor checksum and publishes
 only a complete generation under `$CACHE/cargo/v1/…`. It never copies a user
 Cargo configuration or credential into the cache.
 
+The tools workspace's declared minimum Rust version must not exceed the
+producer's pinned channel. An incompatible pin fails with `AX0401` before
+Cargo is invoked or a vendor generation is created, and before the native
+configure/compiler phases. Update the producer pin explicitly; there is no
+fallback to the ambient Rust toolchain.
+
 ```sh
 "$AROS" cache cargo fetch \
   --producer-dir "$PRODUCER" --tools-dir "$TOOLS" --dir "$CACHE" \
