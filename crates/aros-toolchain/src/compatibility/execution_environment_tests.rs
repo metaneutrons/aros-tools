@@ -6,7 +6,8 @@ use std::path::Path;
 use aros_common::{sha256_bytes, CancellationToken, DiagnosticCode};
 
 use crate::compatibility::{
-    derive_native_compatibility_environment_identity, prepare_host_tool_closure,
+    derive_native_compatibility_environment_identity,
+    derive_native_compatibility_environment_identity_with_epoch, prepare_host_tool_closure,
     CompatibilityHostTool, CompatibilityPhase, HostToolClosure, HostToolClosureRequest,
 };
 
@@ -70,6 +71,188 @@ fn independently_derived_environments_match_all_six_execution_reports() {
             "standalone environment digest differs for {phase:?}"
         );
         assert!(phase_report.host_tools.is_empty());
+    }
+}
+
+#[test]
+fn explicit_consumer_epoch_reaches_cmake_and_upstream_and_binds_all_sdk_phases() {
+    const EPOCH: u64 = 946_684_800;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let (mut request, _, _) = request(temporary.path());
+    request.consumer_source_date_epoch = Some(EPOCH);
+
+    let cmake_epoch_log = temporary.path().join("cmake-source-date-epoch.log");
+    append_script_line(
+        &request.cmake_program,
+        &format!(
+            "printf '%s\\n' \"$SOURCE_DATE_EPOCH\" > '{}'",
+            cmake_epoch_log.display()
+        ),
+    );
+
+    let make_program = request.host_tools.tools["make"].program.clone();
+    let make_epoch_log = temporary.path().join("make-source-date-epoch.log");
+    append_script_line(
+        &make_program,
+        &format!(
+            "printf '%s\\n' \"$SOURCE_DATE_EPOCH\" >> '{}'",
+            make_epoch_log.display()
+        ),
+    );
+    request.host_tools = prepare_host_tool_closure(&HostToolClosureRequest {
+        output_root: temporary.path().join("host-tools-with-epoch-logging"),
+        tools: closure_tools(&request.host_tools),
+    })
+    .unwrap();
+
+    let output_roots = [
+        &request.cmake_build_root,
+        &request.upstream_build_root,
+        &request.standalone_output_root,
+        &request.reports_root,
+    ];
+    for output_root in output_roots {
+        assert!(
+            !output_root.exists(),
+            "fixture unexpectedly created {output_root:?}"
+        );
+    }
+
+    let legacy = derive_native_compatibility_environment_identity(
+        &request.host_python,
+        &request.host_tools,
+        &request.host,
+    )
+    .unwrap();
+    let explicit_none = derive_native_compatibility_environment_identity_with_epoch(
+        &request.host_python,
+        &request.host_tools,
+        &request.host,
+        None,
+    )
+    .unwrap();
+    assert_eq!(explicit_none, legacy);
+
+    let mut selected_digests = std::collections::BTreeSet::new();
+    for epoch in [
+        0,
+        EPOCH,
+        EPOCH + 1,
+        aros_common::sdk_manifest::SDK_MAX_SOURCE_DATE_EPOCH,
+    ] {
+        let identity = derive_native_compatibility_environment_identity_with_epoch(
+            &request.host_python,
+            &request.host_tools,
+            &request.host,
+            Some(epoch),
+        )
+        .unwrap();
+        assert_eq!(
+            identity.sdk_environment_sha256,
+            expected_sdk_environment_digest(&request, epoch)
+        );
+        assert_ne!(
+            identity.sdk_environment_sha256,
+            legacy.sdk_environment_sha256
+        );
+        assert_eq!(
+            identity.standalone_environment_sha256,
+            legacy.standalone_environment_sha256
+        );
+        assert!(selected_digests.insert(identity.sdk_environment_sha256.to_string()));
+    }
+
+    let derived = derive_native_compatibility_environment_identity_with_epoch(
+        &request.host_python,
+        &request.host_tools,
+        &request.host,
+        Some(EPOCH),
+    )
+    .unwrap();
+    let independently_expected = expected_sdk_environment_digest(&request, EPOCH);
+    assert_eq!(derived.sdk_environment_sha256, independently_expected);
+    assert_ne!(
+        derived.sdk_environment_sha256,
+        legacy.sdk_environment_sha256
+    );
+    assert_eq!(derived.host_tools, legacy.host_tools);
+    assert_eq!(
+        derived.standalone_environment_sha256,
+        legacy.standalone_environment_sha256
+    );
+    assert_eq!(
+        derived.standalone_environment_sha256,
+        sha256_bytes(b"{\"environment\":{\"PATH\":\"/nonexistent\"},\"host_tools\":{}}\n")
+    );
+
+    for output_root in output_roots {
+        assert!(!output_root.exists(), "derivation created {output_root:?}");
+    }
+
+    let report = execute_native_compatibility(&request, &CancellationToken::default()).unwrap();
+    let sdk_phases = [
+        CompatibilityPhase::CmakeConsumer,
+        CompatibilityPhase::UpstreamConfigure,
+        CompatibilityPhase::UpstreamIncludes,
+        CompatibilityPhase::UpstreamLinklibs,
+    ];
+    for phase in sdk_phases {
+        let phase_report = &report.probes.reports[&phase];
+        assert_eq!(
+            phase_report.environment_sha256, independently_expected,
+            "{phase:?}"
+        );
+        assert_eq!(phase_report.host_tools, derived.host_tools);
+    }
+    for phase in [
+        CompatibilityPhase::StandaloneC,
+        CompatibilityPhase::StandaloneCxx,
+    ] {
+        let phase_report = &report.probes.reports[&phase];
+        assert_eq!(
+            phase_report.environment_sha256, derived.standalone_environment_sha256,
+            "{phase:?}"
+        );
+        assert!(phase_report.host_tools.is_empty());
+    }
+
+    assert_eq!(
+        fs::read_to_string(cmake_epoch_log).unwrap().trim(),
+        EPOCH.to_string()
+    );
+    let make_epochs = fs::read_to_string(make_epoch_log).unwrap();
+    assert_eq!(
+        make_epochs.lines().map(str::to_owned).collect::<Vec<_>>(),
+        vec![EPOCH.to_string(), EPOCH.to_string()]
+    );
+}
+
+#[test]
+fn rejects_out_of_range_consumer_epoch_before_creating_output_roots() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (mut request, _, _) = request(temporary.path());
+    request.consumer_source_date_epoch =
+        Some(aros_common::sdk_manifest::SDK_MAX_SOURCE_DATE_EPOCH + 1);
+    let output_roots = [
+        &request.cmake_build_root,
+        &request.upstream_build_root,
+        &request.standalone_output_root,
+        &request.reports_root,
+    ];
+    for output_root in output_roots {
+        assert!(
+            !output_root.exists(),
+            "fixture unexpectedly created {output_root:?}"
+        );
+    }
+
+    assert_ax0703(
+        &execute_native_compatibility(&request, &CancellationToken::default()).unwrap_err(),
+        "consumer source-date epoch exceeds the SDK portable tar timestamp range",
+    );
+    for output_root in output_roots {
+        assert!(!output_root.exists(), "rejection created {output_root:?}");
     }
 }
 
@@ -218,4 +401,43 @@ fn host_tool_closure(
         tools,
     })
     .unwrap()
+}
+
+fn append_script_line(path: &Path, line: &str) {
+    let mut script = fs::read_to_string(path).unwrap();
+    script.push('\n');
+    script.push_str(line);
+    script.push('\n');
+    fs::write(path, script).unwrap();
+}
+
+fn expected_sdk_environment_digest(
+    request: &crate::compatibility::NativeCompatibilityRequest,
+    epoch: u64,
+) -> aros_common::Sha256Digest {
+    let mut variables = request.host_python.compatibility_environment().unwrap();
+    variables.insert("ac_cv_prog_cc_c23".into(), String::new());
+    variables.insert("AROS_FETCH_OFFLINE".into(), "1".into());
+    variables.insert("SOURCE_DATE_EPOCH".into(), epoch.to_string());
+    variables.insert("PATH".into(), "/__aros_compatibility_host_tools__".into());
+    let host_tools = request
+        .host_tools
+        .tools
+        .iter()
+        .map(|(name, identity)| {
+            (
+                name.clone(),
+                serde_json::json!({
+                    "sha256": identity.sha256.clone(),
+                    "size": identity.size,
+                }),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let bytes = crate::canonical::bytes(&serde_json::json!({
+        "environment": variables,
+        "host_tools": host_tools,
+    }))
+    .unwrap();
+    sha256_bytes(&bytes)
 }

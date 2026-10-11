@@ -68,6 +68,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer compatibility` | second_root | `--second-root` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | source_dir | `--source-dir` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | source_preset | `--source-preset` | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer compatibility` | consumer_source_date_epoch | `--consumer-source-date-epoch` | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | engine_work_dir | `--engine-work-dir` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | helpers_dir | `--helpers-dir` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | cmake_program | `--cmake-program` | — | required | 1 |  |  | — |  |

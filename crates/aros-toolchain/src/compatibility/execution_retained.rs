@@ -18,8 +18,9 @@ use super::{
     StandaloneTargetArtifacts,
 };
 use crate::compatibility::{
-    derive_native_compatibility_environment_identity, verify_standalone_outputs_with_compilers,
-    CompatibilityHelperReport, NativeCompatibilityEnvironmentIdentity,
+    derive_native_compatibility_environment_identity_with_epoch,
+    verify_standalone_outputs_with_compilers, CompatibilityHelperReport,
+    NativeCompatibilityEnvironmentIdentity,
 };
 use crate::profiles::Profiles;
 use crate::recipe::GitObjectId;
@@ -153,10 +154,11 @@ impl ExpectedRetainedEvidence {
         validate_profiles(request, profiles)?;
         super::super::validate_preparation(&request.preparation)?;
         let inputs = validate_inputs(request)?;
-        let environments = derive_native_compatibility_environment_identity(
+        let environments = derive_native_compatibility_environment_identity_with_epoch(
             &request.host_python,
             &request.host_tools,
             &request.host,
+            request.consumer_source_date_epoch,
         )?;
         let helpers = request
             .preparation
@@ -215,10 +217,11 @@ impl ExpectedRetainedEvidence {
             &upstream_root,
             &request.upstream_source_commit,
         )?;
-        let environments = derive_native_compatibility_environment_identity(
+        let environments = derive_native_compatibility_environment_identity_with_epoch(
             &request.host_python,
             &request.host_tools,
             &request.host,
+            request.consumer_source_date_epoch,
         )?;
         if upstream_tree != self.upstream_tree || environments != self.environments {
             return Err(ContractError::compatibility(

@@ -41,7 +41,9 @@ mod relocation;
 mod standalone;
 pub use environment::{CompatibilityEnvironment, CompatibilityHostToolReport};
 pub use environment_plan::{
-    derive_native_compatibility_environment_identity, NativeCompatibilityEnvironmentIdentity,
+    derive_native_compatibility_environment_identity,
+    derive_native_compatibility_environment_identity_with_epoch,
+    NativeCompatibilityEnvironmentIdentity,
 };
 #[cfg(test)]
 pub(crate) use execution::fixture_riscv_elf;

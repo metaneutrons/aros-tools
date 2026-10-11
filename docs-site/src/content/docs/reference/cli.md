@@ -279,7 +279,13 @@ The six-phase `compatibility` adapter accepts LLVM and GNU packages. GNU require
 `--source-preset`, an explicit declaration in the measured consumer source's
 `aros-targets.toml`; its `toolchain_profile`, CPU, platform and compiler family
 must match the package. Source selectors remain separate from compiler profiles.
-LLVM retains its legacy adapter and rejects this option. GNU's v3 compatibility
+New source-v2 SDK builds also require `--consumer-source-date-epoch SECONDS`;
+select it for the SDK source, independently of the compiler recipe. CMake and
+upstream Make receive the explicit value as `SOURCE_DATE_EPOCH`. The recorded
+environment digest binds it; no wall-clock or shell default is used. Supply the
+same epoch in the SDK package identity. Zero is valid; values above
+8,589,934,591 are rejected.
+LLVM retains its legacy adapter and rejects `--source-preset`. GNU's v3 compatibility
 receipt is local evidence, not release admission. Complete V2 byte read-back
 is available; authenticated producer and recovery execution integration remain
 unqualified.
