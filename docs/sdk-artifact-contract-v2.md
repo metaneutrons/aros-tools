@@ -138,6 +138,13 @@ No code model is inferred from the architecture or board. An absent fact adds
 no option; a declared model is applied once and conflicting or per-configuration
 overrides fail before a consumer binding is published.
 
+Source boolean `compiler_red_zone`, `compiler_pic` and `compiler_pie` facts
+select the corresponding enabled or disabled driver switches for both SDK
+generation and all four application links. An absent fact adds no switch.
+Wrong types, duplicate/opposite general flags and configuration overrides fail;
+the engine never supplies these policies from a CPU or board name. This binds
+selected compiler arguments, not runtime behavior or complete ABI compatibility.
+
 ELF32 ARM selections additionally require explicit unsigned `arm_cpu_arch`,
 `arm_cpu_profile`, `arm_fp_arch`, `arm_simd_arch` and `arm_vfp_args` facts.
 Optional `arm_arm_isa` and `arm_thumb_isa` facts select further checks.

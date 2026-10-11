@@ -28,6 +28,122 @@ struct Probe {
     compiler_edit: &'static str,
 }
 
+const DISABLED_CODEGEN_SWITCHES: &str = r#"
+string(JSON _abi SET "${_abi}" compiler_red_zone false)
+string(JSON _abi SET "${_abi}" compiler_pic false)
+string(JSON _abi SET "${_abi}" compiler_pie false)
+string(JSON _target SET "${_target}" abi "${_abi}")
+string(JSON _response SET "${_response}" target "${_target}")
+"#;
+
+#[test]
+fn source_boolean_codegen_switches_apply_once_and_reject_direct_or_configuration_overrides() {
+    let probe = Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+        .response(DISABLED_CODEGEN_SWITCHES)
+        .compiler()
+        .repeat_apply();
+    let test_harness = harness(&probe);
+    let outcome = configure(&test_harness, false);
+    assert_success(&test_harness, &outcome);
+    let flags = String::from_utf8(outcome.compiler_flags.unwrap()).unwrap();
+    for line in flags.lines() {
+        let (_, arguments) = line.split_once('=').unwrap();
+        for switch in ["-mno-red-zone", "-fno-pic", "-fno-pie"] {
+            assert_eq!(
+                arguments
+                    .split_whitespace()
+                    .filter(|flag| *flag == switch)
+                    .count(),
+                1,
+                "{line}"
+            );
+        }
+    }
+    for (flag, expected) in [
+        ("-mred-zone", "exactly one selected -mno-red-zone"),
+        ("-fPIC", "exactly one selected -fno-pic"),
+        ("-fPIE", "exactly one selected -fno-pie"),
+        ("-fno-pic -fno-pic", "exactly one selected -fno-pic"),
+    ] {
+        let probe = Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+            .response(DISABLED_CODEGEN_SWITCHES)
+            .initial_c_flags(flag)
+            .compiler();
+        assert_failure(&configure(&harness(&probe), false), expected);
+    }
+    for flag in ["-mno-red-zone", "-fPIC", "-fPIE"] {
+        let probe = Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+            .initial_c_flags(flag)
+            .compiler();
+        assert_failure(&configure(&harness(&probe), false), "undeclared compiler_");
+        let probe = Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+            .response(DISABLED_CODEGEN_SWITCHES)
+            .initial_c_flags_release(flag)
+            .compiler();
+        assert_failure(
+            &configure(&harness(&probe), false),
+            "per-configuration flags cannot override",
+        );
+    }
+}
+
+#[test]
+fn source_boolean_codegen_switches_reject_non_boolean_facts() {
+    for edit in [
+        r#"string(JSON _abi SET "${_abi}" compiler_red_zone "\"false\"")"#,
+        r#"string(JSON _abi SET "${_abi}" compiler_pic 0)"#,
+        r#"string(JSON _abi SET "${_abi}" compiler_pie "\"true\"")"#,
+    ] {
+        let test_harness = harness(&Probe::new("x86_64", "x86_64-unknown-aros", "64", ""));
+        let script = fs::read_to_string(test_harness.root.join("CMakeLists.txt")).unwrap();
+        let script = script.replace("aros_validate_native_consumer_contract()", &format!(
+            "{edit}\nstring(JSON _target SET \"${{_target}}\" abi \"${{_abi}}\")\nstring(JSON _response SET \"${{_response}}\" target \"${{_target}}\")\nfile(WRITE \"${{CMAKE_CURRENT_BINARY_DIR}}/native-consumer-validation-response.json\" \"${{_response}}\\n\")\naros_validate_native_consumer_contract()"));
+        fs::write(test_harness.root.join("CMakeLists.txt"), script).unwrap();
+        assert_failure(&configure(&test_harness, false), "must be BOOLEAN");
+    }
+}
+
+#[test]
+fn source_pic_and_pie_switches_preserve_matching_environment_flags_during_real_initialization() {
+    let test_harness = initialization_harness("", "", "", false);
+    let script = fs::read_to_string(test_harness.root.join("CMakeLists.txt")).unwrap();
+    let anchor = "string(JSON _abi SET \"${_abi}\" compiler_fpu \"\\\"neon-vfpv4\\\"\")";
+    assert_eq!(script.matches(anchor).count(), 1);
+    let script = script.replace(anchor, &format!(
+        "{anchor}\nstring(JSON _abi SET \"${{_abi}}\" compiler_pic false)\nstring(JSON _abi SET \"${{_abi}}\" compiler_pie false)"));
+    fs::write(test_harness.root.join("CMakeLists.txt"), script).unwrap();
+    let outcome = configure_initialization(&test_harness, "-O0 -fno-pic", "-O1 -fno-pie", "-O2");
+    assert_success(&test_harness, &outcome);
+    let flags = String::from_utf8(outcome.compiler_flags.unwrap()).unwrap();
+    for line in flags.lines() {
+        let (_, arguments) = line.split_once('=').unwrap();
+        for switch in ["-fno-pic", "-fno-pie"] {
+            assert_eq!(
+                arguments
+                    .split_whitespace()
+                    .filter(|flag| *flag == switch)
+                    .count(),
+                1,
+                "{line}"
+            );
+        }
+    }
+    let build = Command::new("cmake")
+        .arg("--build")
+        .arg(&test_harness.build)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let repeated = configure_initialization(&test_harness, "-O0 -fno-pic", "-O1 -fno-pie", "-O2");
+    assert_success(&test_harness, &repeated);
+    assert_eq!(Some(flags.into_bytes()), repeated.compiler_flags);
+}
+
 impl Probe {
     const fn new(
         cpu: &'static str,

@@ -82,6 +82,67 @@ fn with_compiler_code_model(mut target: SdkTarget, code_model: SdkAbiValue) -> S
     target
 }
 
+#[test]
+fn source_boolean_codegen_switches_are_typed_and_reach_all_four_links_once() {
+    for enabled in [false, true] {
+        let mut target = target64();
+        for fact in ["compiler_red_zone", "compiler_pic", "compiler_pie"] {
+            target
+                .abi
+                .insert(fact.to_owned(), SdkAbiValue::Boolean(enabled));
+        }
+        for (language, label, suffix) in [
+            ("c", "original", "c"),
+            ("c", "relocated", "c"),
+            ("cxx", "original", "cpp"),
+            ("cxx", "relocated", "cpp"),
+        ] {
+            let fixture = format!("/source/app.{suffix}");
+            let command = application_command(
+                Path::new("/prefix/bin/clang"),
+                Path::new(&fixture),
+                &probe(&format!("app.{suffix}"), &[]),
+                &target,
+                Path::new("/sdk"),
+                Path::new("/proof"),
+                (language, label),
+            )
+            .unwrap();
+            for (yes, no) in [
+                ("-mred-zone", "-mno-red-zone"),
+                ("-fPIC", "-fno-pic"),
+                ("-fPIE", "-fno-pie"),
+            ] {
+                let selected = if enabled { yes } else { no };
+                assert_eq!(
+                    command
+                        .arguments
+                        .iter()
+                        .filter(|flag| flag.as_str() == selected)
+                        .count(),
+                    1
+                );
+                assert!(!command
+                    .arguments
+                    .iter()
+                    .any(|flag| flag == if enabled { no } else { yes }));
+            }
+        }
+    }
+    let absent = target64();
+    assert!(compiler_switch_facts(&absent).unwrap().is_empty());
+    for fact in ["compiler_red_zone", "compiler_pic", "compiler_pie"] {
+        for value in [SdkAbiValue::Text("false".into()), SdkAbiValue::Unsigned(0)] {
+            let mut target = target64();
+            target.abi.insert(fact.to_owned(), value);
+            assert_rejection(
+                validate_target(&target),
+                &format!("SDK target {fact} must be boolean"),
+            );
+        }
+    }
+}
+
 fn probe(source: &str, libraries: &[&str]) -> NativeSdkLinkProbe {
     NativeSdkLinkProbe {
         source: source.to_owned(),

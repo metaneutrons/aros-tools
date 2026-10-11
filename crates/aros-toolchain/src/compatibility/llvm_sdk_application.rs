@@ -95,6 +95,7 @@ pub(super) fn application_command(
     if let Some(compiler_code_model) = facts.compiler_code_model {
         arguments.push(format!("-mcmodel={compiler_code_model}"));
     }
+    arguments.extend(facts.compiler_switches);
     if language == "cxx" {
         arguments.push("-std=c++17".to_owned());
     }
@@ -197,6 +198,7 @@ struct TargetFacts {
     compiler_cpu: Option<String>,
     compiler_fpu: Option<String>,
     compiler_code_model: Option<String>,
+    compiler_switches: Vec<String>,
     arm_attributes: Option<Vec<(u64, u64)>>,
 }
 
@@ -210,6 +212,7 @@ fn target_facts(target: &SdkTarget) -> Result<TargetFacts, ContractError> {
     let cpu_option = compiler_option_fact(target, "compiler_cpu")?;
     let floating_point_option = compiler_option_fact(target, "compiler_fpu")?;
     let code_model_option = compiler_option_fact(target, "compiler_code_model")?;
+    let compiler_switches = compiler_switch_facts(target)?;
     target
         .validate()
         .map_err(|_| error("LLVM SDK source target descriptor is invalid"))?;
@@ -258,6 +261,7 @@ fn target_facts(target: &SdkTarget) -> Result<TargetFacts, ContractError> {
         compiler_cpu: cpu_option,
         compiler_fpu: floating_point_option,
         compiler_code_model: code_model_option,
+        compiler_switches,
         arm_attributes,
     })
 }
@@ -343,6 +347,26 @@ fn compiler_option_fact(target: &SdkTarget, name: &str) -> Result<Option<String>
         ))),
         Some(_) => Err(error(format!("SDK target {name} must be text"))),
     }
+}
+
+// Driver-option semantics, not an architecture/board-default table. Only a
+// source-declared boolean adds a switch; an absent fact preserves the driver.
+fn compiler_switch_facts(target: &SdkTarget) -> Result<Vec<String>, ContractError> {
+    let mut flags = Vec::new();
+    for (name, enabled, disabled) in [
+        ("compiler_red_zone", "-mred-zone", "-mno-red-zone"),
+        ("compiler_pic", "-fPIC", "-fno-pic"),
+        ("compiler_pie", "-fPIE", "-fno-pie"),
+    ] {
+        match target.abi.get(name) {
+            None => {}
+            Some(SdkAbiValue::Boolean(value)) => {
+                flags.push(if *value { enabled } else { disabled }.to_owned());
+            }
+            Some(_) => return Err(error(format!("SDK target {name} must be boolean"))),
+        }
+    }
+    Ok(flags)
 }
 
 fn unsigned_fact(target: &SdkTarget, name: &str) -> Result<u64, ContractError> {
