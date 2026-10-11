@@ -49,7 +49,10 @@ impl Fixture {
                 version: COMPILER_VERSION.to_owned(),
             },
             target: self.target.clone(),
-            timeout: Duration::from_secs(2),
+            // These probes assert the driver protocol, not host scheduling
+            // latency. The dedicated timeout test supplies its own short
+            // deadline; allow ordinary shell fixtures to start on busy hosts.
+            timeout: Duration::from_secs(10),
         }
     }
 }
