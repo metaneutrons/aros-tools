@@ -97,6 +97,23 @@ triple. A bounded compiler-tree snapshot includes executable bytes and aliases;
 revalidation rejects subsequent changes. It neither authenticates the package
 nor proves the scalar ABI facts, SDK completeness or ordinary application links.
 The caller must independently verify its selected compiler package.
+The additive `compatibility::plan_llvm_sdk_application_links` API binds four
+ordinary driver commands to that measured compiler, the sealed source probes,
+and equal, disjoint original/relocated SDK trees. It performs no build, link,
+copy or filesystem write. Commands preserve startup and standard-library
+defaults; additional library arguments are bounded names from the sealed
+contract, not arbitrary compiler or linker options.
+
+This planner requires explicit unsigned `pointer_width` (32 or 64),
+`elf_machine` (1–65535), `elf_flags_mask` and `elf_flags_value` (32-bit values,
+with no value bit outside the mask) in the source target's ABI map. Its ELF
+check uses those facts, AROS OSABI/ABI-version marking and the collector symbol;
+there is no CPU-to-machine table. Optional `float_abi` selects exactly one
+driver flag. These structural checks do not establish full ABI compatibility,
+C++ initialization, SDK completeness or which invocation produced an ELF.
+The execution owner must still qualify and retain all four application links,
+their input closure and byte-identical relocated outputs.
+
 `aros sdk build` explicitly rejects this generic schema before compatibility
 preparation until the family-specific link and evidence adapters are implemented.
 

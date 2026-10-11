@@ -211,6 +211,15 @@ fn create_source_fixture(
 }
 
 fn create_generic_fixture(arch: &str, family: &str, float_abi: Option<&str>) -> Fixture {
+    create_generic_fixture_with_elf(arch, family, float_abi, None)
+}
+
+fn create_generic_fixture_with_elf(
+    arch: &str,
+    family: &str,
+    float_abi: Option<&str>,
+    elf_machine: Option<u16>,
+) -> Fixture {
     let source_cpu = if arch == "riscv32" { "riscv" } else { arch };
     let width = if matches!(arch, "arm" | "riscv32") {
         32
@@ -226,6 +235,16 @@ fn create_generic_fixture(arch: &str, family: &str, float_abi: Option<&str>) -> 
     ]);
     if let Some(float) = float_abi {
         abi.insert("float_abi".into(), SdkAbiValue::Text(float.into()));
+    }
+    if let Some(machine) = elf_machine {
+        abi.extend([
+            (
+                "elf_machine".into(),
+                SdkAbiValue::Unsigned(u64::from(machine)),
+            ),
+            ("elf_flags_mask".into(), SdkAbiValue::Unsigned(0)),
+            ("elf_flags_value".into(), SdkAbiValue::Unsigned(0)),
+        ]);
     }
     let target = SdkTarget {
         target_triple: format!("{source_cpu}-unknown-aros"),
@@ -669,4 +688,202 @@ fn rejects_changed_source_or_projection_and_revalidation_writes_nothing() {
         &request(&fixture, fixture.identity.clone(), "example-sdk"),
         "SDK source consumer contract is not sealed to its profile and inputs",
     );
+}
+
+fn application_selection(
+    fixture: &Fixture,
+) -> aros_toolchain::compatibility::LlvmSdkApplicationPlanRequest {
+    use aros_common::{ArosCompilerIdentity, CancellationToken};
+    use aros_toolchain::compatibility::{
+        inspect_llvm_sdk_drivers, LlvmSdkApplicationPlanRequest, LlvmSdkDriverRequest,
+    };
+    let source =
+        verify_sdk_source(&request(fixture, fixture.identity.clone(), "example-sdk")).unwrap();
+    let compiler_root = fixture.temporary.path().join("compiler");
+    fs::create_dir_all(compiler_root.join("bin")).unwrap();
+    let driver = compiler_root.join("bin/clang");
+    fs::write(&driver, format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'clang version 11.0.0\\n'\nelse\n  printf '{}\\n'\nfi\n",
+            fixture.identity.target.target_triple,
+        )).unwrap();
+    fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("clang", compiler_root.join("bin/clang++")).unwrap();
+    let drivers = inspect_llvm_sdk_drivers(
+        &LlvmSdkDriverRequest {
+            compiler_root,
+            compiler: ArosCompilerIdentity::Llvm {
+                version: "11.0.0".into(),
+            },
+            target: fixture.identity.target.clone(),
+            timeout: std::time::Duration::from_secs(2),
+        },
+        &CancellationToken::default(),
+    )
+    .unwrap();
+    // These deliberately incomplete fixture trees prove planning only;
+    // neither tree is a generated SDK or a link-success claim.
+    let original_sdk = fixture.temporary.path().join("original-sdk");
+    let relocated_sdk = fixture.temporary.path().join("relocated-sdk");
+    for sdk in [&original_sdk, &relocated_sdk] {
+        fs::create_dir(sdk).unwrap();
+        fs::write(sdk.join("fixture.txt"), "unqualified SDK-tree fixture\n").unwrap();
+    }
+    let output_root = fixture.temporary.path().join("link-proof");
+    LlvmSdkApplicationPlanRequest {
+        source,
+        drivers,
+        original_sdk,
+        relocated_sdk,
+        output_root,
+    }
+}
+
+#[test]
+fn plans_four_ordinary_llvm_links_from_sealed_source_without_writes() {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::plan_llvm_sdk_application_links;
+
+    for (arch, machine, float) in [
+        ("x86_64", 62, None),
+        ("arm", 40, Some("hard")),
+        ("aarch64", 183, None),
+    ] {
+        let fixture = create_generic_fixture_with_elf(arch, "llvm", float, Some(machine));
+        let selection = application_selection(&fixture);
+        let original_sdk = &selection.original_sdk;
+        let relocated_sdk = &selection.relocated_sdk;
+        let output_root = &selection.output_root;
+        let source_before = snapshot(&fixture.source_root);
+        let projection_before = snapshot(&fixture.materialized_source_root);
+        let siblings_before = top_level_entries(fixture.temporary.path());
+        let plan =
+            plan_llvm_sdk_application_links(&selection, &CancellationToken::default()).unwrap();
+        assert_eq!(plan.commands().len(), 4);
+        for (index, command) in plan.commands().iter().enumerate() {
+            let cpp = index >= 2;
+            let sdk = if index % 2 == 0 {
+                original_sdk
+            } else {
+                relocated_sdk
+            };
+            assert_eq!(
+                command.program.file_name().unwrap(),
+                if cpp { "clang++" } else { "clang" }
+            );
+            assert!(command.arguments.contains(&format!(
+                "--target={}",
+                fixture.identity.target.target_triple
+            )));
+            assert!(command.arguments.contains(&format!(
+                "--sysroot={}",
+                sdk.canonicalize().unwrap().display()
+            )));
+            for forbidden in ["-c", "-r", "-nostdlib", "-nostartfiles", "-nodefaultlibs"] {
+                assert!(!command
+                    .arguments
+                    .iter()
+                    .any(|argument| argument == forbidden));
+            }
+            assert_eq!(command.arguments.contains(&"-std=c++17".into()), cpp);
+            assert_eq!(
+                command.arguments.contains(&"-mfloat-abi=hard".into()),
+                float.is_some()
+            );
+        }
+        plan.revalidate(&CancellationToken::default()).unwrap();
+        assert!(!output_root.exists());
+        assert_eq!(snapshot(&fixture.source_root), source_before);
+        assert_eq!(
+            snapshot(&fixture.materialized_source_root),
+            projection_before
+        );
+        assert_eq!(top_level_entries(fixture.temporary.path()), siblings_before);
+
+        let mut invalid = selection.clone();
+        invalid.relocated_sdk.clone_from(&invalid.original_sdk);
+        let error =
+            plan_llvm_sdk_application_links(&invalid, &CancellationToken::default()).unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].message,
+            "LLVM SDK application roots must be distinct and non-overlapping"
+        );
+        fs::write(relocated_sdk.join("fixture.txt"), "changed fixture\n").unwrap();
+        let error = plan.revalidate(&CancellationToken::default()).unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].message,
+            "LLVM SDK application trees differ before linking"
+        );
+        assert!(!output_root.exists());
+    }
+}
+
+#[test]
+fn rejects_unbound_llvm_plan_selections_before_writing() {
+    use aros_common::{ArosCompilerIdentity, CancellationToken};
+    use aros_toolchain::compatibility::{
+        inspect_llvm_sdk_drivers, plan_llvm_sdk_application_links, LlvmSdkDriverRequest,
+    };
+
+    let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
+    let selection = application_selection(&fixture);
+    let assert_rejected = |selection: &_, expected: &str, cancellation: &CancellationToken| {
+        let before = snapshot(fixture.temporary.path());
+        let error = plan_llvm_sdk_application_links(selection, cancellation).unwrap_err();
+        assert_eq!(error.diagnostics().diagnostics[0].message, expected);
+        assert_eq!(snapshot(fixture.temporary.path()), before);
+    };
+    let cancelled = CancellationToken::default();
+    cancelled.cancel();
+    assert_rejected(
+        &selection,
+        "LLVM SDK application planning was cancelled",
+        &cancelled,
+    );
+
+    let mut invalid = selection.clone();
+    invalid.output_root = selection.original_sdk.join("would-mutate-sdk");
+    assert_rejected(
+        &invalid,
+        "LLVM SDK application output overlaps an input",
+        &CancellationToken::default(),
+    );
+    let mut target = fixture.identity.target.clone();
+    target
+        .abi
+        .insert("extra_fact".into(), SdkAbiValue::Boolean(true));
+    invalid = selection.clone();
+    invalid.drivers = inspect_llvm_sdk_drivers(
+        &LlvmSdkDriverRequest {
+            compiler_root: fixture.temporary.path().join("compiler"),
+            compiler: ArosCompilerIdentity::Llvm {
+                version: "11.0.0".into(),
+            },
+            target,
+            timeout: std::time::Duration::from_secs(2),
+        },
+        &CancellationToken::default(),
+    )
+    .unwrap();
+    assert_rejected(
+        &invalid,
+        "LLVM SDK drivers differ from the complete source-selected target",
+        &CancellationToken::default(),
+    );
+    fs::write(&selection.output_root, "occupied output must remain\n").unwrap();
+    assert_rejected(
+        &selection,
+        "LLVM SDK application output already exists or cannot be inspected",
+        &CancellationToken::default(),
+    );
+
+    let fixture = create_generic_fixture("x86_64", "llvm", None);
+    let selection = application_selection(&fixture);
+    let before = snapshot(fixture.temporary.path());
+    let error =
+        plan_llvm_sdk_application_links(&selection, &CancellationToken::default()).unwrap_err();
+    assert_eq!(
+        error.diagnostics().diagnostics[0].message,
+        "SDK target is missing required unsigned ABI fact elf_machine"
+    );
+    assert_eq!(snapshot(fixture.temporary.path()), before);
 }
