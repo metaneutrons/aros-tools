@@ -100,6 +100,11 @@ overrides and Make-built outputs are not imported. This remains experimental;
 configuration binding alone does not qualify the complete kernel or BSP.
 
 Native SDK objects must have source-declared compile and staging rules.
+Explicit native configuration supplies their variable and compiler context.
+The compile, copy and aggregate owners must remain in the physical recipe;
+an included configuration cannot create providers. Unbound configuration or
+unsupported object/staging roots fail rather than falling back to an ordinary
+Make scope.
 The supported subset is a finite ordinary Make aggregate, local C/C++ sources,
 `%rule_compile`/`%rule_compile_cxx`, and an exact object-copy pattern.
 Declaration-time flags and generated-header prerequisites are retained.

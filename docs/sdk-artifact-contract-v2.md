@@ -138,6 +138,13 @@ No code model is inferred from the architecture or board. An absent fact adds
 no option; a declared model is applied once and conflicting or per-configuration
 overrides fail before a consumer binding is published.
 
+Physical SDK compile/stage aggregates consume explicitly bound native Make
+configuration. Included configuration can supply values but cannot own rules
+or compile macros. Successful declarations and refusal diagnostics retain
+physical source locations even after local fragments are inserted. Incomplete
+native scopes do not fall back to legacy values; unsupported staging roots
+remain errors. This scope projection does not qualify a complete SDK graph.
+
 Source boolean `compiler_red_zone`, `compiler_pic` and `compiler_pie` facts
 select the corresponding enabled or disabled driver switches for both SDK
 generation and all four application links. An absent fact adds no switch.

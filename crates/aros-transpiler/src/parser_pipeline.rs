@@ -704,15 +704,23 @@ pub(super) fn parse_mmakefile_impl(
             ),
         ));
     }
-    let (sdk_object_groups, sdk_object_rejections) = crate::sdk_objects::collect_from_snapshot(
-        &invocations,
-        &scope,
-        dirs,
-        root,
-        &rel_dir,
-        copy_directory_line_states,
-        &joined,
-    );
+    let sdk_object_physical_positions =
+        architecture_scope_positions(root, &relative_path, &content, &local_make_scan, &joined);
+    let (sdk_object_groups, sdk_object_rejections) =
+        crate::sdk_objects::collect_with_native_configuration(
+            crate::sdk_objects::SdkObjectSnapshot {
+                invocations: &invocations,
+                scope: &scope,
+                line_states: copy_directory_line_states,
+                text: &joined,
+                physical_positions: sdk_object_physical_positions.as_deref(),
+            },
+            &content,
+            target,
+            dirs,
+            root,
+            &rel_dir,
+        );
     // Literal recipes execute after all source assignments have been read.
     // Their native configuration is a separate, explicitly bound scope; it
     // must not silently expand the global configuration of unrelated macros.

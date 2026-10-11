@@ -14,6 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path};
 
+#[path = "sdk_objects_native_scope.rs"]
+mod native_scope;
+pub(crate) use native_scope::{collect_with_native_configuration, SdkObjectSnapshot};
+
 /// One exact source-derived compile and staging pair for a local SDK object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdkObjectDecl {
