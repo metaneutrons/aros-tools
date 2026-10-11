@@ -204,12 +204,15 @@ derives the union inventory, including each identity document and archive,
 manifest, sidecar and supplemental SPDX; SDKs do not multiply host lanes.
 Missing, extra, reordered or swapped SDK locks and filename collisions fail.
 
-This declaration does not admit SDK publication. Measured index construction,
-package readback, checksum/attestation preparation and qualification still
-reject SDK-bearing releases until SDK package measurements and authenticated
-generation evidence are joined to those paths. Compiler-only lanes cannot
-qualify a release which selects SDKs. A selected ABI descriptor or compiler
-profile is not proof of binary compatibility.
+This declaration does not admit SDK publication. On Unix, measured shared index
+construction and readback verify independently selected SDK packages, exact
+identity documents and deterministic SPDX. Final checksum/attestation stages
+include all selected SDK members; archive and manifest hashes/sizes must equal
+the indexed locks even if a checksum document is freshly regenerated.
+Qualification still rejects SDK-bearing releases until authenticated generation
+and owning-job evidence are joined. Compiler-only lanes cannot qualify a release
+which selects SDKs. A selected ABI descriptor or compiler profile is not proof
+of binary compatibility.
 
 `aros-sdk-lock-v2` selects an exact release tag, canonical credential-free
 HTTPS base URL, SDK identity, payload tree digest, archive SHA-256/size and

@@ -1621,7 +1621,7 @@ fn sdk_selected_release_rejects_fully_covered_compiler_only_qualification() {
 }
 
 #[test]
-fn sdk_selected_release_rejects_unimplemented_measurement_boundaries_before_filesystem_io() {
+fn sdk_selected_release_requires_independent_package_selections_before_filesystem_io() {
     use aros_toolchain::release_index_v2_builder::{
         build_measured_index_v2, MeasuredReleaseIndexRequestV2,
     };
@@ -1641,22 +1641,27 @@ fn sdk_selected_release_rejects_unimplemented_measurement_boundaries_before_file
             base_url: SDK_RELEASE_URL.into(),
             build_environments: BTreeMap::new(),
             required_paths: BTreeMap::new(),
+            sdk_packages: BTreeMap::new(),
             forbidden_prefixes: Vec::new(),
         })
         .unwrap_err(),
         readback_indexed_packages(&IndexedPackageReadbackRequestV2 {
             directory: absent.clone(),
             inputs,
-            index: index.clone(),
+            index,
             build_environments: BTreeMap::new(),
+            sdk_packages: BTreeMap::new(),
             forbidden_prefixes: Vec::new(),
         })
         .unwrap_err(),
-        aros_toolchain::release_checksums_v2::verify_final_checksums_v2(&absent, &index)
-            .unwrap_err(),
     ];
     for error in errors {
-        assert!(error.to_string().contains("SDK-bearing release inputs require complete shared SDK package readback and authenticated qualification"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("SDK package map must exactly cover the complete selected SDK input set"),
+            "{error}"
+        );
     }
     assert!(!absent.exists());
     assert_eq!(fs::read_dir(isolated.path()).unwrap().count(), 0);

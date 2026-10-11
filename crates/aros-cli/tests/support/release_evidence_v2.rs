@@ -204,6 +204,7 @@ impl Fixture {
         }
 
         let written_index = write_measured_index_v2(&MeasuredReleaseIndexRequestV2 {
+            sdk_packages: BTreeMap::new(),
             directory: release_directory.clone(),
             inputs: input.inputs.clone(),
             release_id: RELEASE_ID.into(),
@@ -216,6 +217,7 @@ impl Fixture {
         let index_sha256 = written_index.sha256().clone();
         let index = written_index.index().clone();
         let packages = IndexedPackageReadbackRequestV2 {
+            sdk_packages: BTreeMap::new(),
             directory: release_directory.clone(),
             inputs: input.inputs.clone(),
             index: index.clone(),

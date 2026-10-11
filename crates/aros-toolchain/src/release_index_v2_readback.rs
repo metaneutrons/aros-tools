@@ -9,6 +9,8 @@ use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(unix)]
+use aros_common::sdk_release_lock::SdkReleaseLock;
 use aros_common::{
     open_regular_file_nofollow, sha256_bytes, AROS_TOOLCHAIN_MANIFEST_FILE,
     AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2,
@@ -19,6 +21,8 @@ use crate::package::PackageFormat;
 use crate::package_verify::{PackageAssetPaths, PackageVerificationRequest, VerifiedPackage};
 use crate::release_index_v2::{NativeReleaseIndexV2, MANIFEST_SCHEMA_NAME, TREE_FIXTURE_NAME};
 use crate::release_inputs::ReleaseInputs;
+#[cfg(unix)]
+use crate::sdk_package::{SdkVerificationRequest, VerifiedSdkPackage};
 use crate::ContractError;
 
 pub(crate) const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
@@ -41,6 +45,10 @@ pub struct IndexedPackageReadbackRequestV2 {
     pub index: NativeReleaseIndexV2,
     /// Independently supplied build-environment receipt for each archive.
     pub build_environments: BTreeMap<String, Map<String, Value>>,
+    /// Independent SDK package selections keyed by the complete bound SDK ID set.
+    /// Each request must select this shared directory and the exact input identity.
+    #[cfg(unix)]
+    pub sdk_packages: BTreeMap<String, SdkVerificationRequest>,
     /// Absolute build roots forbidden in archive regular-file contents.
     pub forbidden_prefixes: Vec<PathBuf>,
 }
@@ -49,6 +57,8 @@ pub struct IndexedPackageReadbackRequestV2 {
 #[derive(Debug, Clone)]
 pub struct IndexedPackageReadbackV2 {
     packages: Vec<IndexedPackageV2>,
+    #[cfg(unix)]
+    sdk_packages: Vec<IndexedSdkPackageV2>,
 }
 
 impl IndexedPackageReadbackV2 {
@@ -56,6 +66,37 @@ impl IndexedPackageReadbackV2 {
     #[must_use]
     pub fn packages(&self) -> &[IndexedPackageV2] {
         &self.packages
+    }
+
+    /// Measured SDK packages in selected product-ID order, not compiler-host order.
+    #[must_use]
+    #[cfg(unix)]
+    pub fn sdk_packages(&self) -> &[IndexedSdkPackageV2] {
+        &self.sdk_packages
+    }
+}
+
+/// One fully measured SDK package and its release selection, without an
+/// execution, authenticity or publication-readiness claim.
+#[derive(Debug, Clone)]
+#[cfg(unix)]
+pub struct IndexedSdkPackageV2 {
+    lock: SdkReleaseLock,
+    package: VerifiedSdkPackage,
+}
+
+#[cfg(unix)]
+impl IndexedSdkPackageV2 {
+    /// Measured release lock for the selected target/ABI product.
+    #[must_use]
+    pub const fn lock(&self) -> &SdkReleaseLock {
+        &self.lock
+    }
+
+    /// Fully verified archive and manifest observations.
+    #[must_use]
+    pub const fn package(&self) -> &VerifiedSdkPackage {
+        &self.package
     }
 }
 
@@ -108,8 +149,10 @@ pub(crate) fn readback_indexed_packages_with_inventory(
     request: &IndexedPackageReadbackRequestV2,
     inventory: &BTreeSet<String>,
 ) -> Result<IndexedPackageReadbackV2, ContractError> {
+    #[cfg(unix)]
+    validate_sdk_package_selections(&request.directory, &request.inputs, &request.sdk_packages)?;
+    #[cfg(not(unix))]
     crate::release_index_v2::require_compiler_only_inputs(&request.inputs)?;
-    crate::release_index_v2::require_compiler_only_index(&request.index)?;
     validate_directory_path(&request.directory)?;
 
     let rebound = NativeReleaseIndexV2::parse(
@@ -179,10 +222,116 @@ pub(crate) fn readback_indexed_packages_with_inventory(
         });
     }
 
+    #[cfg(unix)]
+    let sdk_packages = measure_sdk_packages(
+        &request.directory,
+        &request.inputs,
+        &request.sdk_packages,
+        request.index.release_id(),
+        request.index.base_url(),
+        &request.forbidden_prefixes,
+    )?;
+    #[cfg(unix)]
+    if !sdk_packages
+        .iter()
+        .map(IndexedSdkPackageV2::lock)
+        .eq(request.index.sdks())
+    {
+        return Err(index_error(
+            "measured SDK packages differ from the bound indexed locks",
+        ));
+    }
     validate_directory_path(&request.directory)?;
     require_exact_inventory(&request.directory, inventory)?;
+    verify_input_collection(&request.directory, &request.inputs)?;
+    verify_bound_documents(&request.directory, &request.inputs)?;
+    verify_on_disk_index(request)?;
     verify_static_support(&request.directory)?;
-    Ok(IndexedPackageReadbackV2 { packages })
+    Ok(IndexedPackageReadbackV2 {
+        packages,
+        #[cfg(unix)]
+        sdk_packages,
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn validate_sdk_package_selections(
+    directory: &Path,
+    inputs: &ReleaseInputs,
+    requests: &BTreeMap<String, SdkVerificationRequest>,
+) -> Result<(), ContractError> {
+    if requests.len() != inputs.sdks().len()
+        || !requests.keys().map(String::as_str).eq(inputs
+            .sdks()
+            .iter()
+            .map(crate::release_inputs::BoundSdk::id))
+    {
+        return Err(index_error(
+            "SDK package map must exactly cover the complete selected SDK input set",
+        ));
+    }
+    for (request, selected) in requests.values().zip(inputs.sdks()) {
+        if request.package_dir != directory || &request.identity != selected.identity() {
+            return Err(index_error(
+                "SDK package request differs from the selected directory or input identity",
+            ));
+        }
+        crate::release_index_v2_builder::validate_request_material(
+            &BTreeMap::new(),
+            &request.forbidden_prefixes,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn measure_sdk_packages(
+    directory: &Path,
+    inputs: &ReleaseInputs,
+    requests: &BTreeMap<String, SdkVerificationRequest>,
+    release_id: &str,
+    base_url: &str,
+    forbidden_prefixes: &[PathBuf],
+) -> Result<Vec<IndexedSdkPackageV2>, ContractError> {
+    validate_sdk_package_selections(directory, inputs, requests)?;
+    let mut packages = Vec::with_capacity(inputs.sdks().len());
+    for request in requests.values() {
+        // Preserve both independent SDK-specific and complete release prefix
+        // restrictions. Bound the combined material before cloning a request.
+        let mut prefixes = request.forbidden_prefixes.clone();
+        prefixes.extend_from_slice(forbidden_prefixes);
+        prefixes.sort();
+        prefixes.dedup();
+        crate::release_index_v2_builder::validate_request_material(&BTreeMap::new(), &prefixes)?;
+        let mut package_request = request.clone();
+        package_request.forbidden_prefixes = prefixes;
+        let (lock, package) =
+            crate::sdk_release_selection::build_measured_sdk_release_lock_in_release_directory(
+                &crate::sdk_release_selection::MeasuredSdkReleaseLockRequest {
+                    package: package_request,
+                    release_tag: release_id.into(),
+                    base_url: base_url.into(),
+                },
+            )
+            .map_err(|_| index_error("selected SDK package failed shared release measurement"))?;
+        let asset = lock
+            .identity
+            .asset_name()
+            .map_err(|_| index_error("invalid measured SDK asset"))?;
+        let actual = read_bounded_regular_file(
+            &directory.join(format!("{asset}.spdx.json")),
+            "SDK SPDX metadata",
+        )?;
+        let expected = crate::sdk_sbom::sdk_spdx_bytes(&package)
+            .map_err(|_| index_error("cannot derive measured SDK SPDX metadata"))?;
+        if actual != expected {
+            return Err(index_error(
+                "SDK SPDX metadata differs from its exact measured package",
+            ));
+        }
+        packages.push(IndexedSdkPackageV2 { lock, package });
+    }
+    Ok(packages)
 }
 
 pub(crate) fn verify_static_support(directory: &Path) -> Result<(), ContractError> {
@@ -236,6 +385,17 @@ pub(crate) fn verify_bound_documents(
                     "on-disk release-input document differs from its bound exact bytes",
                 ));
             }
+        }
+    }
+    for selected in inputs.sdks() {
+        let actual = read_bounded_regular_file(
+            &directory.join(selected.identity_reference().file()),
+            "bound SDK identity document",
+        )?;
+        if actual != selected.identity_bytes() {
+            return Err(index_error(
+                "on-disk SDK identity differs from its bound exact bytes",
+            ));
         }
     }
     Ok(())

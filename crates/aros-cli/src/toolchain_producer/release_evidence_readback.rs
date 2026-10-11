@@ -171,6 +171,7 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         recording_preflight(selected, args, &selection)?;
     }
     let packages = IndexedPackageReadbackRequestV2 {
+        sdk_packages: BTreeMap::new(),
         directory: args.directory.clone(),
         inputs,
         index,

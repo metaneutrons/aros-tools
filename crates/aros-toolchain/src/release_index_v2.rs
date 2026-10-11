@@ -529,22 +529,10 @@ pub(crate) fn expected_inventory_for_assets<'a>(
     Ok(exact_names)
 }
 
-// Transitional safety boundary while SDK readback/qualification is joined to
-// this same index. Pure parsing may describe selected SDK bytes, but no legacy
-// compiler-only measurement or evidence path may silently omit them.
+// SDK byte measurement is distinct from authenticated execution. Qualification
+// remains compiler-only until the SDK generation/job-origin join exists.
 pub(crate) fn require_compiler_only_inputs(inputs: &ReleaseInputs) -> Result<(), ContractError> {
     if !inputs.sdks().is_empty() {
-        return Err(index_error(
-            "SDK-bearing release inputs require complete shared SDK package readback and authenticated qualification",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn require_compiler_only_index(
-    index: &NativeReleaseIndexV2,
-) -> Result<(), ContractError> {
-    if !index.sdks().is_empty() {
         return Err(index_error(
             "SDK-bearing release inputs require complete shared SDK package readback and authenticated qualification",
         ));

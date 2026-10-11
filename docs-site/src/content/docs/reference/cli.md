@@ -210,6 +210,12 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer verify-qualification` | Bind complete family-v2 qualification claims to all measured release evidence; byte consistency only, not signature or execution authentication |
 | `aros toolchain producer verify-recovery` | Reacquire complete family-v2 qualification and check recovery observations; read-only, no authentication or recovery execution |
 
+For an SDK-selected `family-v2` index, `--lane-inputs` must also provide a
+complete `sdks` map with each product's independent tree/archive SHA-256 and
+archive size. The index stages verify SDK packages and include their metadata
+in the shared checksum and attestation inventory. SDK publication remains
+unqualified until generation and owning-job provenance are authenticated.
+
 The local `package`, `verify-package` and `compatibility` commands accept the optional
 `--package-format legacy-v1|family-v2`. When omitted, LLVM keeps its historical
 schema-v1 package format and GNU uses compiler-family schema v2. Explicit

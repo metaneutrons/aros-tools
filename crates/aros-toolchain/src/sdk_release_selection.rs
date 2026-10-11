@@ -45,6 +45,28 @@ pub struct MeasuredSdkReleaseLockRequest {
 pub fn build_measured_sdk_release_lock(
     request: &MeasuredSdkReleaseLockRequest,
 ) -> Result<SdkReleaseLock, ContractError> {
+    build_measured_sdk_release_lock_with(request, sdk_package::verify).map(|(lock, _)| lock)
+}
+
+/// Measure a selected SDK package in a shared release directory.
+///
+/// The caller must establish and recheck the exact union inventory of the
+/// shared release directory around this call. This function verifies only the
+/// selected SDK members and retains the same manifest and archive measurement
+/// checks as [`build_measured_sdk_release_lock`].
+pub(crate) fn build_measured_sdk_release_lock_in_release_directory(
+    request: &MeasuredSdkReleaseLockRequest,
+) -> Result<(SdkReleaseLock, VerifiedSdkPackage), ContractError> {
+    build_measured_sdk_release_lock_with(
+        request,
+        sdk_package::verify_selected_members_in_release_directory,
+    )
+}
+
+fn build_measured_sdk_release_lock_with(
+    request: &MeasuredSdkReleaseLockRequest,
+    verify_package: impl Fn(&SdkVerificationRequest) -> Result<VerifiedSdkPackage, ContractError>,
+) -> Result<(SdkReleaseLock, VerifiedSdkPackage), ContractError> {
     let archive_digest = request.package.expected_archive_sha256.clone();
     let archive_size = request.package.expected_archive_size;
     let preflight = SdkReleaseLock {
@@ -78,7 +100,7 @@ pub fn build_measured_sdk_release_lock(
     let archive_path = request.package.package_dir.join(&archive_name);
     let manifest_path = manifest_path(&request.package.package_dir, &archive_name);
 
-    let initial = sdk_package::verify(&request.package)?;
+    let initial = verify_package(&request.package)?;
     ensure_selected_package(&request.package, &initial)?;
     let (manifest_identity_before, manifest_before) = measure_manifest(&manifest_path)?;
 
@@ -113,7 +135,7 @@ pub fn build_measured_sdk_release_lock(
         lock: lock.clone(),
     })?;
     let (manifest_identity_after, manifest_after) = measure_manifest(&manifest_path)?;
-    let final_package = sdk_package::verify(&request.package)?;
+    let final_package = verify_package(&request.package)?;
     ensure_selected_package(&request.package, &final_package)?;
     if initial != final_package
         || locked != final_package
@@ -124,7 +146,7 @@ pub fn build_measured_sdk_release_lock(
             "SDK package or external manifest changed while measuring its release lock",
         ));
     }
-    Ok(lock)
+    Ok((lock, final_package))
 }
 
 fn manifest_path(package_dir: &Path, archive_name: &str) -> PathBuf {

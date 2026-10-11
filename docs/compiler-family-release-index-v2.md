@@ -48,11 +48,11 @@ inventory, without multiplying compiler host lanes. Missing, extra, reordered
 or swapped selections and derived filename collisions fail. Empty SDK lists
 are omitted in canonical serialization, preserving compiler-only index bytes.
 
-SDK locks here are declarations, not verified packages. While the shared SDK
-measurement and authenticated generation join are pending, the measured
-builder, package readback, checksum/attestation preparation and qualification
-paths explicitly reject SDK-selected releases. A compiler-only candidate
-cannot qualify a release which selects SDKs.
+SDK locks here are declarations, not verified packages. The Unix measured
+builder and readback APIs additionally verify the complete selected SDK package
+set; qualification still rejects SDK-selected releases until authenticated
+SDK generation/job-origin evidence is joined. A compiler-only candidate cannot
+qualify a release which selects SDKs.
 
 Archive hashes, sizes and tree digests are producer declarations here; the
 parser does not independently measure or verify them. The expected inventory
@@ -76,6 +76,17 @@ archive hashes/sizes and payload tree digests rather than accepting them as
 caller declarations. Manifests, sidecars, SBOMs and compiler/input identities
 must agree; required paths must be present. The complete measured record then
 passes the same closed index parser described above.
+
+On Unix, `sdk_packages` supplies independent byte selections keyed by exactly
+the bound SDK product IDs. Each request must select the shared release directory
+and exact input identity. The builder fully verifies each SDK archive, manifest,
+sidecar and payload, measures the manifest digest/size into its release lock,
+and checks supplemental SPDX against the deterministic measured package. Both
+SDK-specific and release-wide forbidden prefixes apply. Identity documents
+are checked byte-for-byte before and after measurement. Indexed readback repeats
+this verification and requires measured locks to equal the index; SDK results
+are separately exposed in product-ID order. Non-Unix paths reject SDK-bearing
+inputs; no unsupported host implementation is inferred.
 
 The operation is read-only. It checks real directory ancestors, exact regular
 inventory, bound input bytes and static support bytes before and after package
