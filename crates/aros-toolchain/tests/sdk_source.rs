@@ -1049,7 +1049,9 @@ fn llvm_generated_selection(
             source: links.source,
             preparation,
             cmake_build_root: build,
-            timeout: std::time::Duration::from_secs(10),
+            // This fixture qualifies source/root binding, not cold CI speed.
+            // Dedicated deadline tests override this budget and remain strict.
+            timeout: std::time::Duration::from_secs(60),
         },
         links.drivers,
         links.output_root,
