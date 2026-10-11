@@ -20,6 +20,10 @@ pub(super) const MAX_STANDALONE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
 // upstream symbol name.
 pub(super) const C_COLLECTOR_SYMBOL: &str = "__TOOLCHAIN_LIST__";
 pub(super) const CXX_COLLECTOR_SYMBOL: &str = "__INIT_ARRAY_LIST__";
+// Source-owned collect-aros/gensets.c accepts both .init_array and .ctors
+// and emits the corresponding list bounds. GNU targets can use .ctors even
+// with a current compiler; neither form is a CPU- or board-specific exception.
+const CXX_CTORS_COLLECTOR_SYMBOL: &str = "__CTORS_LIST__";
 
 /// Explicit standalone C/C++ outputs for one selected target triple.
 #[derive(Debug, Clone)]
@@ -76,7 +80,7 @@ pub struct StandaloneOutputReport {
 /// Every output is opened through a no-follow descriptor, read once within a
 /// fixed bound, and parsed with the shared ELF reader. The object must carry
 /// AROS' `EI_OSABI`/`EI_ABIVERSION`, have the class required by its target
-/// triple, and define the language-specific collector symbol in an existing
+/// triple, and define a supported language-specific collector symbol in an existing
 /// section or as an absolute symbol. This has no
 /// network, source, cache, tag, release or publication authority.
 ///
@@ -172,7 +176,7 @@ fn verify_outputs(
             &output_root,
             &artifacts.c,
             (class, machine),
-            C_COLLECTOR_SYMBOL,
+            &[C_COLLECTOR_SYMBOL],
             riscv,
             &mut paths,
         )?;
@@ -180,7 +184,7 @@ fn verify_outputs(
             &output_root,
             &artifacts.cxx,
             (class, machine),
-            CXX_COLLECTOR_SYMBOL,
+            &[CXX_COLLECTOR_SYMBOL, CXX_CTORS_COLLECTOR_SYMBOL],
             riscv,
             &mut paths,
         )?;
@@ -213,7 +217,7 @@ fn verify_standalone_artifact(
     output_root: &Path,
     path: &Path,
     expected_identity: (elf::Class, Option<u16>),
-    required_symbol: &str,
+    required_symbols: &[&str],
     riscv: Option<&elf::riscv::TargetContract>,
     paths: &mut BTreeSet<PathBuf>,
 ) -> Result<StandaloneArtifactIdentity, ContractError> {
@@ -277,7 +281,7 @@ fn verify_standalone_artifact(
             })?;
     }
     if !object.symbols.iter().any(|symbol| {
-        symbol.name == required_symbol
+        required_symbols.contains(&symbol.name.as_str())
             && match symbol.home {
                 elf::Home::Absolute => true,
                 elf::Home::Undefined => false,

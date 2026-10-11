@@ -548,6 +548,103 @@ fn measures_gnu_rv32_and_rv64_outputs_and_legacy_verifier_rejects_them() {
 }
 
 #[test]
+fn accepts_both_source_supported_cxx_collector_forms() {
+    for symbol in ["__INIT_ARRAY_LIST__", "__CTORS_LIST__"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let output_root = create_output_root(temporary.path());
+        let artifacts = write_pair(&output_root, elf::Class::Elf32, RV32_ARCH, 0);
+        fs::write(
+            &artifacts.cxx,
+            make_elf(elf::Class::Elf32, symbol, RV32_ARCH, OS_ABI_AROS, 0),
+        )
+        .unwrap();
+        let request = one_target_request(&output_root, RV32_TRIPLE, artifacts.clone());
+        let compilers = BTreeMap::from([(RV32_TRIPLE.into(), rv32_compiler())]);
+        let before = snapshot_directory(&output_root);
+        let report = verify_standalone_outputs_with_compilers(&request, &compilers)
+            .unwrap_or_else(|error| panic!("supported C++ collector {symbol}: {error}"));
+        assert_identity(
+            &report.targets[RV32_TRIPLE].cxx,
+            &artifacts.cxx,
+            elf::Class::Elf32,
+        );
+        assert_eq!(snapshot_directory(&output_root), before);
+
+        // Constructor-section selection belongs to the source collector, not
+        // a GNU, CPU or board allowlist. Preserve the legacy LLVM surface too.
+        let legacy_temporary = tempfile::tempdir().unwrap();
+        let legacy_root = create_output_root(legacy_temporary.path());
+        let legacy_artifacts = write_pair_with_identity(
+            &legacy_root,
+            elf::Class::Elf64,
+            RV64_ARCH,
+            0,
+            EM_X86_64,
+            1,
+            2,
+        );
+        fs::write(
+            &legacy_artifacts.cxx,
+            make_elf_with_identity(
+                elf::Class::Elf64,
+                symbol,
+                RV64_ARCH,
+                OS_ABI_AROS,
+                0,
+                EM_X86_64,
+                1,
+                2,
+            ),
+        )
+        .unwrap();
+        let legacy_request = one_target_request(&legacy_root, X86_64_TRIPLE, legacy_artifacts);
+        let before_legacy = snapshot_directory(&legacy_root);
+        verify_standalone_outputs(&legacy_request).unwrap();
+        assert_eq!(snapshot_directory(&legacy_root), before_legacy);
+    }
+}
+
+#[test]
+fn rejects_invalid_cxx_collector_forms_with_a_valid_c_artifact() {
+    for (symbol, section) in [
+        ("__CTORS_LIST__", 0),
+        ("__INIT_ARRAY_LIST__", 0),
+        ("__CTORS_LIST__", SHN_COMMON),
+        ("__CTORS_LIST__", 7),
+        ("unrelated_symbol", 2),
+        ("__CTORS_END__", 2),
+        ("__INIT_ARRAY_END__", 2),
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let output_root = create_output_root(temporary.path());
+        let artifacts = write_pair(&output_root, elf::Class::Elf32, RV32_ARCH, 0);
+        fs::write(
+            &artifacts.cxx,
+            make_elf_with_identity(
+                elf::Class::Elf32,
+                symbol,
+                RV32_ARCH,
+                OS_ABI_AROS,
+                0,
+                elf::riscv::MACHINE,
+                1,
+                section,
+            ),
+        )
+        .unwrap();
+        let request = one_target_request(&output_root, RV32_TRIPLE, artifacts);
+        let compilers = BTreeMap::from([(RV32_TRIPLE.into(), rv32_compiler())]);
+        let before = snapshot_directory(&output_root);
+        let error = verify_standalone_outputs_with_compilers(&request, &compilers).unwrap_err();
+        assert_ax0703(&error, None);
+        assert!(error
+            .to_string()
+            .contains("lacks its required collector symbol"));
+        assert_eq!(snapshot_directory(&output_root), before);
+    }
+}
+
+#[test]
 fn rejects_empty_or_mismatched_compiler_maps_before_touching_outputs() {
     let temporary = tempfile::tempdir().unwrap();
     let output_root = create_output_root(temporary.path());
