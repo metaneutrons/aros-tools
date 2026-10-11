@@ -333,6 +333,24 @@ pub(super) fn select(
 }
 
 impl NativeSdkLinkSelection {
+    /// Exact source preset selected before generation.
+    #[must_use]
+    pub fn source_profile(&self) -> &str {
+        &self.source_profile
+    }
+
+    /// Selected source projection digest; this getter performs no authentication.
+    #[must_use]
+    pub const fn source_tree_sha256(&self) -> &Sha256Digest {
+        &self.source_tree_sha256
+    }
+
+    /// Source-owned consumer contract digest selected before generation.
+    #[must_use]
+    pub const fn contract_sha256(&self) -> &Sha256Digest {
+        &self.contract_sha256
+    }
+
     /// Recheck closed selection claims without opening any recorded root.
     pub(super) fn validate(&self) -> Result<(), ContractError> {
         if self.schema != SELECTION_SCHEMA

@@ -37,11 +37,14 @@ use aros_toolchain::release_index_v2_readback::{
 };
 use aros_toolchain::release_index_v2_writer::write_measured_index_v2;
 use aros_toolchain::release_inputs::{ReleaseInputs, ACTIVE_HOSTS};
+use aros_toolchain::sdk_package::{self, SdkPackageRequest, SdkVerificationRequest};
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 
-pub const RELEASE_ID: &str = "release-evidence-v2-synthetic";
-pub const BASE_URL: &str = "https://example.invalid/releases/release-evidence-v2-synthetic";
+// SDK release locks require a canonical v-prefixed SemVer and a matching URL.
+// This is a synthetic identity; the fixture never publishes or authenticates it.
+pub const RELEASE_ID: &str = "v0.1.0";
+pub const BASE_URL: &str = "https://example.invalid/releases/v0.1.0";
 
 #[derive(Clone)]
 pub struct SideSelection {
@@ -97,7 +100,13 @@ struct PackageSide {
 
 impl Fixture {
     pub fn new() -> Self {
-        let input = input_fixture();
+        Self::with_sdk_products(&[])
+    }
+
+    /// Packages real archive bytes for synthetic SDK identities. This adds no
+    /// SDK generation, consumer-link or original-job authenticity evidence.
+    pub fn with_sdk_products(ids: &[&str]) -> Self {
+        let input = input_fixture(ids);
         let release_root = tempfile::tempdir().unwrap();
         let release_directory = fs::canonicalize(release_root.path()).unwrap();
         write_release_inputs(&release_directory, &input);
@@ -203,8 +212,10 @@ impl Fixture {
             sides_by_asset.insert(asset, (asset_sides, comparison_path, comparison.sha256));
         }
 
+        let sdk_packages =
+            sdk_fixture_packages(&transport_directory, &release_directory, &input.inputs);
         let written_index = write_measured_index_v2(&MeasuredReleaseIndexRequestV2 {
-            sdk_packages: BTreeMap::new(),
+            sdk_packages: sdk_packages.clone(),
             directory: release_directory.clone(),
             inputs: input.inputs.clone(),
             release_id: RELEASE_ID.into(),
@@ -217,7 +228,7 @@ impl Fixture {
         let index_sha256 = written_index.sha256().clone();
         let index = written_index.index().clone();
         let packages = IndexedPackageReadbackRequestV2 {
-            sdk_packages: BTreeMap::new(),
+            sdk_packages: sdk_packages.clone(),
             directory: release_directory.clone(),
             inputs: input.inputs.clone(),
             index: index.clone(),
@@ -273,7 +284,24 @@ impl Fixture {
                 },
             );
         }
-        let selection = selection_document(&lanes);
+        let mut selection = selection_document(&lanes);
+        if !sdk_packages.is_empty() {
+            selection["sdk_packages"] = Value::Object(
+                sdk_packages
+                    .iter()
+                    .map(|(id, request)| {
+                        (
+                            id.clone(),
+                            json!({
+                                "tree_sha256":request.expected_tree_sha256,
+                                "archive_sha256":request.expected_archive_sha256,
+                                "archive_size":request.expected_archive_size
+                            }),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         Self {
             _release_root: release_root,
             _transport_root: transport_root,
@@ -301,7 +329,7 @@ impl Fixture {
     }
 }
 
-fn input_fixture() -> InputFixture {
+fn input_fixture(sdk_ids: &[&str]) -> InputFixture {
     let source_lock = fixture_source_lock();
     let profiles_bytes = fixture_profiles();
     let recipe = fixture_recipe(&source_lock, &profiles_bytes);
@@ -309,7 +337,7 @@ fn input_fixture() -> InputFixture {
     documents.insert("recipe.json".to_owned(), recipe);
     documents.insert("source-lock.json".to_owned(), source_lock);
     documents.insert("profiles.json".to_owned(), profiles_bytes.clone());
-    let collection = serde_json::to_vec(&json!({
+    let mut collection = json!({
         "schema":"aros-toolchain-release-inputs-v2",
         "producer_commit":PRODUCER_COMMIT,
         "tools_commit":TOOLS_COMMIT,
@@ -320,8 +348,41 @@ fn input_fixture() -> InputFixture {
             "source_lock":{"file":"source-lock.json","sha256":sha256_bytes(&documents["source-lock.json"]).as_str()},
             "profiles":{"file":"profiles.json","sha256":sha256_bytes(&documents["profiles.json"]).as_str()}
         }]
-    }))
-    .unwrap();
+    });
+    if !sdk_ids.is_empty() {
+        let sdks = sdk_ids
+            .iter()
+            .map(|id| {
+                let identity = json!({
+                    "sdk_id":id,
+                    "version":"0.1.0",
+                    "target":{
+                        "target_triple":"x86_64-unknown-aros",
+                        "abi":{"pointer_width":64,"data_model":"lp64"}
+                    },
+                    "source":{
+                        "commit":SOURCE_COMMIT,
+                        "git_tree":"2".repeat(40),
+                        "content_sha256":"a".repeat(64),
+                        "contract_sha256":"b".repeat(64)
+                    },
+                    "source_date_epoch":946_684_800
+                });
+                let bytes = serde_json::to_vec(&identity).unwrap();
+                let name = format!("{id}-identity.json");
+                let digest = sha256_bytes(&bytes);
+                documents.insert(name.clone(), bytes);
+                json!({
+                    "id":id,
+                    "identity":{"file":name,"sha256":digest},
+                    "source_preset":"pc-x86_64",
+                    "compiler_profiles":[{"group_id":"llvm-pc","profile":"pc-x86_64"}]
+                })
+            })
+            .collect::<Vec<_>>();
+        collection["sdks"] = json!(sdks);
+    }
+    let collection = serde_json::to_vec(&collection).unwrap();
     let inputs = ReleaseInputs::parse(&collection, &documents).unwrap();
     let profiles = Profiles::parse(&profiles_bytes).unwrap();
     let profile = profiles.select("pc-x86_64").unwrap().clone();
@@ -332,6 +393,59 @@ fn input_fixture() -> InputFixture {
         profiles,
         profile,
     }
+}
+
+fn sdk_fixture_packages(
+    root: &Path,
+    release: &Path,
+    inputs: &ReleaseInputs,
+) -> BTreeMap<String, SdkVerificationRequest> {
+    inputs
+        .sdks()
+        .iter()
+        .map(|sdk| {
+            let candidate = root.join(format!("sdk-candidate-{}", sdk.id()));
+            fs::create_dir(&candidate).unwrap();
+            fs::create_dir(candidate.join("include")).unwrap();
+            fs::write(
+                candidate.join("include/aros.h"),
+                format!("/* synthetic {} */\n", sdk.id()),
+            )
+            .unwrap();
+            let (tree, _) =
+                aros_common::toolchain_tree_inventory_excluding(&candidate, &["sdk-manifest.json"])
+                    .unwrap();
+            let tree = Sha256Digest::parse(&tree).unwrap();
+            let output = sdk_package::package(&SdkPackageRequest {
+                candidate_root: candidate,
+                output_dir: root.join(format!("sdk-package-{}", sdk.id())),
+                identity: sdk.identity().clone(),
+                expected_tree_sha256: tree.clone(),
+                forbidden_prefixes: Vec::new(),
+            })
+            .unwrap();
+            let mut request = SdkVerificationRequest {
+                package_dir: output.output_dir.clone(),
+                identity: sdk.identity().clone(),
+                expected_tree_sha256: tree,
+                expected_archive_sha256: output.archive_sha256,
+                expected_archive_size: output.archive_size,
+                forbidden_prefixes: Vec::new(),
+            };
+            let sbom = aros_toolchain::sdk_sbom::build_measured_sdk_sbom(&request).unwrap();
+            let asset = sdk.identity().asset_name().unwrap();
+            for (path, name) in [
+                (&output.archive, asset.clone()),
+                (&output.manifest, format!("{asset}.manifest.json")),
+                (&output.checksum, format!("{asset}.sha256")),
+            ] {
+                fs::copy(path, release.join(name)).unwrap();
+            }
+            fs::write(release.join(format!("{asset}.spdx.json")), sbom).unwrap();
+            request.package_dir = release.to_path_buf();
+            (sdk.id().to_owned(), request)
+        })
+        .collect()
 }
 
 const SOURCE_COMMIT: &str = "1111111111111111111111111111111111111111";

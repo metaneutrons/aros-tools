@@ -17,9 +17,11 @@ use crate::release_checksums_v2::{
     measure_attestation_members, verify_final_checksums_v2, FinalChecksumMemberV2,
 };
 use crate::release_index_v2::{CHECKSUMS_NAME, PROVENANCE_NAME};
+#[cfg(unix)]
+use crate::release_index_v2_readback::IndexedSdkPackageV2;
 use crate::release_index_v2_readback::{
     readback_indexed_packages_with_inventory, validate_directory_path,
-    IndexedPackageReadbackRequestV2, MAX_METADATA_BYTES,
+    IndexedPackageReadbackRequestV2, IndexedPackageReadbackV2, MAX_METADATA_BYTES,
 };
 use crate::ContractError;
 
@@ -40,6 +42,8 @@ pub struct AttestationManifestReadbackV2 {
     sha256: Sha256Digest,
     size: u64,
     members: Vec<FinalChecksumMemberV2>,
+    #[cfg(unix)]
+    sdk_packages: Vec<IndexedSdkPackageV2>,
 }
 
 impl AttestationManifestReadbackV2 {
@@ -59,6 +63,14 @@ impl AttestationManifestReadbackV2 {
     #[must_use]
     pub fn members(&self) -> &[FinalChecksumMemberV2] {
         &self.members
+    }
+
+    /// Fully measured indexed SDK packages; this is byte evidence only, not
+    /// SDK generation, origin, authenticity or publication authority.
+    #[must_use]
+    #[cfg(unix)]
+    pub fn sdk_packages(&self) -> &[IndexedSdkPackageV2] {
+        &self.sdk_packages
     }
 }
 
@@ -156,7 +168,7 @@ pub fn verify_attestation_manifest_v2(
         .map_err(|_| error("cannot open subject release stage without following links"))?;
     let release_identity = identity(&release)?;
     require_distinct_directories(parent_identity, release_identity)?;
-    verify_packages(request, stage)?;
+    let initial_packages = verify_packages(request, stage)?;
     let (bytes, members) = measure_attestation_members(&request.directory, &request.index)?;
     if bytes != existing {
         return Err(error(
@@ -165,7 +177,24 @@ pub fn verify_attestation_manifest_v2(
     }
     // Repeat package/input and inventory observation after streaming subjects.
     // This is still not a stable snapshot against concurrent mutation.
-    verify_packages(request, stage)?;
+    let final_packages = verify_packages(request, stage)?;
+    #[cfg(unix)]
+    if initial_packages.sdk_packages().len() != final_packages.sdk_packages().len()
+        || initial_packages
+            .sdk_packages()
+            .iter()
+            .zip(final_packages.sdk_packages())
+            .any(|(initial, final_package)| {
+                initial.lock() != final_package.lock()
+                    || initial.package() != final_package.package()
+            })
+    {
+        return Err(error(
+            "indexed SDK package bytes changed during subject verification",
+        ));
+    }
+    #[cfg(not(unix))]
+    let _ = (&initial_packages, &final_packages);
     let final_file = open_manifest(&directory, name)?;
     if identity(&final_file)? != manifest_identity || read_manifest(final_file)? != existing {
         return Err(error(
@@ -178,13 +207,15 @@ pub fn verify_attestation_manifest_v2(
         sha256: sha256_bytes(&existing),
         size: existing.len() as u64,
         members,
+        #[cfg(unix)]
+        sdk_packages: final_packages.sdk_packages().to_vec(),
     })
 }
 
 fn verify_packages(
     request: &IndexedPackageReadbackRequestV2,
     stage: AttestationManifestStageV2,
-) -> Result<(), ContractError> {
+) -> Result<IndexedPackageReadbackV2, ContractError> {
     let mut inventory = request.index.expected_inventory().clone();
     match stage {
         AttestationManifestStageV2::PreAttestation => {
@@ -196,11 +227,11 @@ fn verify_packages(
         }
         AttestationManifestStageV2::Final => {}
     }
-    readback_indexed_packages_with_inventory(request, &inventory)?;
+    let packages = readback_indexed_packages_with_inventory(request, &inventory)?;
     if matches!(stage, AttestationManifestStageV2::Final) {
         verify_final_checksums_v2(&request.directory, &request.index)?;
     }
-    Ok(())
+    Ok(packages)
 }
 
 fn manifest_destination<'a>(

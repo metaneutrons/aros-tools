@@ -39,6 +39,7 @@ use aros_toolchain::release_inputs::{ReleaseInputs, ACTIVE_HOSTS};
 use aros_toolchain::repackage_v2::{
     repackage_verified_package_v2, VerifiedPackageRepackageRequestV2,
 };
+use aros_toolchain::sdk_package::SdkVerificationRequest;
 
 use super::qualification_bytes::QualificationArgs;
 use super::recovery_family::RecoveryArgs;
@@ -161,6 +162,13 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
     let index =
         NativeReleaseIndexV2::parse(&index_bytes, &inputs).map_err(|error| native_error(&error))?;
     validate_selection(args, &index, &selection, qualification)?;
+    release_evidence_selection::require_sdk_package_ids(
+        &selection,
+        inputs
+            .sdks()
+            .iter()
+            .map(aros_toolchain::release_inputs::BoundSdk::id),
+    )?;
     if let Some(selected) = operation.recovery() {
         require_independent_document(args, &selection, &selected.recovery_request)?;
     }
@@ -170,8 +178,29 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
     if let Operation::Record(selected) = operation {
         recording_preflight(selected, args, &selection)?;
     }
+    // Identity comes only from the independently digest-bound input collection;
+    // the external selection contributes byte expectations, never source/ABI
+    // identity, product membership or execution/authenticity claims.
+    let sdk_packages = inputs
+        .sdks()
+        .iter()
+        .map(|sdk| {
+            let selected = &selection.sdk_packages[sdk.id()];
+            (
+                sdk.id().to_owned(),
+                SdkVerificationRequest {
+                    package_dir: args.directory.clone(),
+                    identity: sdk.identity().clone(),
+                    expected_tree_sha256: selected.tree_sha256.clone(),
+                    expected_archive_sha256: selected.archive_sha256.clone(),
+                    expected_archive_size: selected.archive_size,
+                    forbidden_prefixes: args.forbidden_prefixes.clone(),
+                },
+            )
+        })
+        .collect();
     let packages = IndexedPackageReadbackRequestV2 {
-        sdk_packages: BTreeMap::new(),
+        sdk_packages,
         directory: args.directory.clone(),
         inputs,
         index,
@@ -411,6 +440,28 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         "build_count": lanes.len() * 2,
         "lanes": lanes,
     });
+    let sdk_packages = readback.builds().sdk_packages();
+    if !sdk_packages.is_empty() {
+        // These are measured shared packages, not SDK-generation receipts or
+        // authenticated owning-job evidence. Compiler-only result bytes stay
+        // unchanged when no SDK products were selected.
+        result["sdk_count"] = serde_json::json!(sdk_packages.len());
+        result["sdks"] = serde_json::json!(sdk_packages
+            .iter()
+            .map(|sdk| {
+                let lock = sdk.lock();
+                serde_json::json!({
+                    "sdk_id":lock.identity.sdk_id,
+                    "identity":lock.identity,
+                    "tree_sha256":lock.tree_sha256,
+                    "archive_sha256":sdk.package().archive_sha256,
+                    "archive_size":sdk.package().archive_size,
+                    "manifest_sha256":lock.manifest.sha256,
+                    "manifest_size":lock.manifest.size,
+                })
+            })
+            .collect::<Vec<_>>());
+    }
     if let Some(selected) = qualification {
         result["qualification_sha256"] = serde_json::json!(selected.qualification_sha256);
         result["policy_sha256"] = serde_json::json!(selected.policy_sha256);

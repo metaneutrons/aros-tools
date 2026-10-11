@@ -291,6 +291,30 @@ generation record, package output and every selected input/execution root. Its
 outputs. Failure retains diagnostic roots and any completed local package;
 neither a portable export nor its digests authenticate an external owning job.
 
+### Downloaded generation readback
+
+The library `sdk_generation::readback_generation` checks one downloaded SDK
+generation closure without opening recorded source, compiler or runner roots.
+It requires an independently selected release-input collection, SDK ID,
+compiler group, raw generation-record digest, SDK package expectations and
+complete portable compatibility selection. The selected compiler group fixes
+the record schema; metadata cannot choose another family or source preset.
+
+The compiler manifest must match the selected group's compiler versions/ABI,
+recipe, source-lock and profile digests, source/producer/tools commits and epoch.
+Those expectations are derived from the release inputs, not the evidence itself.
+The closed canonical record must match the selected SDK identity, source
+projection/contract, compiler profile and environment expectation. Its payload
+tree and entry count must equal both the freshly verified SDK package and the
+four-link proof. Compatibility, SDK-link and LLVM binding digests must match
+the downloaded evidence. Package and compatibility bytes are observed again
+before returning measured results. The operation writes nothing.
+
+This is one byte-consistency join, not SDK generation execution or authenticated
+qualification. Other required compiler profiles/hosts, original owning-job
+origin, signatures and the final shared release inventory remain separate gates.
+The compiler-only qualification path still rejects SDK-selected releases.
+
 ## Complete local package
 
 The archive name is `aros-sdk-<sdk-id>-<version>.tar.xz`; there is no host
@@ -409,6 +433,13 @@ Qualification still rejects SDK-bearing releases until authenticated generation
 and owning-job evidence are joined. Compiler-only lanes cannot qualify a release
 which selects SDKs. A selected ABI descriptor or compiler profile is not proof
 of binary compatibility.
+
+The release-evidence collector accepts an independent `sdk_packages` map with
+exact product-ID coverage and tree/archive digests plus archive sizes. It
+derives identities only from the selected release inputs and retains verified
+SDK locks/packages through its complete readback. Its JSON exposes those
+measurements without claiming generation, authenticity or publication
+readiness. See the [release evidence selection contract](compiler-family-release-evidence-v2.md).
 
 `aros-sdk-lock-v2` selects an exact release tag, canonical credential-free
 HTTPS base URL, SDK identity, payload tree digest, archive SHA-256/size and

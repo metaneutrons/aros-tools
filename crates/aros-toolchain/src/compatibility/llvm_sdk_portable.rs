@@ -146,6 +146,12 @@ impl LlvmSdkPortableProof {
 }
 
 impl LlvmSdkLinkSelection {
+    /// Exact source profile selected before generation, not the compiler profile.
+    #[must_use]
+    pub fn source_profile(&self) -> &str {
+        &self.profile
+    }
+
     /// Selected complete source SDK identity.
     #[must_use]
     pub const fn identity(&self) -> &SdkIdentity {

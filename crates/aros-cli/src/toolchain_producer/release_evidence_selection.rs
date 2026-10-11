@@ -20,6 +20,19 @@ const SELECTION_SCHEMA: &str = "aros-toolchain-release-evidence-selection-v2";
 pub(super) struct Selection {
     pub schema: String,
     pub lanes: BTreeMap<String, Lane>,
+    /// Independent package-byte expectations, not generation or origin proof.
+    /// Omission preserves compiler-only selections; exact coverage is checked
+    /// against the independently selected release inputs before acquisition.
+    #[serde(default)]
+    pub sdk_packages: BTreeMap<String, SdkPackageSelection>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SdkPackageSelection {
+    pub tree_sha256: Sha256Digest,
+    pub archive_sha256: Sha256Digest,
+    pub archive_size: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,8 +111,46 @@ pub(super) fn parse(bytes: &[u8]) -> miette::Result<Selection> {
         validate_selected_path(&lane.compatibility.directory)?;
         validate_selected_path(&lane.compatibility.inputs.path)?;
     }
+    for (id, package) in &selection.sdk_packages {
+        PortableOutputName::new(id)
+            .map_err(|_| miette::miette!("SDK package key must be a portable product ID"))?;
+        if package.archive_size == 0
+            || package
+                .tree_sha256
+                .as_str()
+                .bytes()
+                .all(|byte| byte == b'0')
+            || package
+                .archive_sha256
+                .as_str()
+                .bytes()
+                .all(|byte| byte == b'0')
+        {
+            return Err(miette::miette!(
+                "SDK package byte expectations must be nonzero"
+            ));
+        }
+    }
 
     Ok(selection)
+}
+
+/// Selection metadata cannot choose which SDK products belong to a release.
+pub(super) fn require_sdk_package_ids<'a>(
+    selection: &Selection,
+    expected: impl IntoIterator<Item = &'a str>,
+) -> miette::Result<()> {
+    if !selection
+        .sdk_packages
+        .keys()
+        .map(String::as_str)
+        .eq(expected)
+    {
+        return Err(miette::miette!(
+            "SDK package selection must exactly cover the independently selected SDK input set"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_selected_path(path: &Path) -> miette::Result<()> {
@@ -187,7 +238,7 @@ impl<'de> Deserialize<'de> for UniqueJson {
 mod tests {
     use serde_json::{json, Value};
 
-    use super::{parse, MAX_SELECTION_BYTES, SELECTION_SCHEMA};
+    use super::{parse, require_sdk_package_ids, MAX_SELECTION_BYTES, SELECTION_SCHEMA};
 
     fn valid_selection() -> Value {
         let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -259,6 +310,93 @@ mod tests {
         value["lanes"]["llvm-pc-x86_64-linux.tar.xz"]["compatibility"]["native_sdk_required"] =
             json!("false");
         assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn sdk_package_selection_is_optional_only_for_an_empty_independent_product_set() {
+        let bytes = serde_json::to_vec(&valid_selection()).unwrap();
+        let compiler_only = parse(&bytes).unwrap();
+        assert!(compiler_only.sdk_packages.is_empty());
+        require_sdk_package_ids(&compiler_only, []).unwrap();
+        assert!(require_sdk_package_ids(&compiler_only, ["core-sdk"]).is_err());
+
+        let mut value = valid_selection();
+        let package = json!({
+            "tree_sha256":"a".repeat(64),
+            "archive_sha256":"b".repeat(64),
+            "archive_size":123
+        });
+        value["sdk_packages"] = json!({"second-sdk":package,"core-sdk":package});
+        let selected = parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        require_sdk_package_ids(&selected, ["core-sdk", "second-sdk"]).unwrap();
+        assert_eq!(selected.sdk_packages["core-sdk"].archive_size, 123);
+        assert!(require_sdk_package_ids(&selected, []).is_err());
+        assert!(require_sdk_package_ids(&selected, ["core-sdk"]).is_err());
+        assert!(require_sdk_package_ids(&selected, ["core-sdk", "other-sdk"]).is_err());
+    }
+
+    #[test]
+    fn rejects_incomplete_unknown_or_invalid_sdk_byte_expectations() {
+        let package = json!({
+            "tree_sha256":"a".repeat(64),
+            "archive_sha256":"b".repeat(64),
+            "archive_size":123
+        });
+        for field in ["tree_sha256", "archive_sha256", "archive_size"] {
+            let mut value = valid_selection();
+            value["sdk_packages"] = json!({"core-sdk":package});
+            value["sdk_packages"]["core-sdk"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+        for (field, bad) in [
+            ("tree_sha256", json!("0".repeat(64))),
+            ("archive_sha256", json!("0".repeat(64))),
+            ("archive_sha256", json!("invalid")),
+            ("archive_size", json!(0)),
+            ("archive_size", json!("123")),
+            ("identity", json!({})),
+        ] {
+            let mut value = valid_selection();
+            value["sdk_packages"] = json!({"core-sdk":package});
+            value["sdk_packages"]["core-sdk"][field] = bad;
+            assert!(
+                parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "{field}"
+            );
+        }
+        let mut value = valid_selection();
+        value["sdk_packages"] = json!({"../escape":package});
+        assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["sdk_packages"] = Value::Null;
+        assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_sdk_products_and_measurement_keys() {
+        let mut value = valid_selection();
+        value["sdk_packages"] = json!({
+            "core-sdk":{
+                "tree_sha256":"a".repeat(64),
+                "archive_sha256":"b".repeat(64),
+                "archive_size":123
+            }
+        });
+        let document = serde_json::to_string(&value).unwrap();
+        let duplicated_size = document.replace(
+            "\"archive_size\":123",
+            "\"archive_size\":123,\"archive_size\":123",
+        );
+        assert!(parse(duplicated_size.as_bytes()).is_err());
+        let package = serde_json::to_string(&value["sdk_packages"]["core-sdk"]).unwrap();
+        let duplicated_id = document.replace(
+            &format!("\"core-sdk\":{package}"),
+            &format!("\"core-sdk\":{package},\"core-sdk\":{package}"),
+        );
+        assert_ne!(duplicated_id, document);
+        assert!(parse(duplicated_id.as_bytes()).is_err());
     }
 
     #[test]
