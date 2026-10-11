@@ -61,6 +61,101 @@ fn elf64_fixture() -> Vec<u8> {
     bytes
 }
 
+fn elf64_fixture_with_undefined_global(symbol: &str) -> Vec<u8> {
+    let section_names = b"\0.shstrtab\0.text\0.strtab\0.symtab\0";
+    let section_name = |name: &str| {
+        let mut needle = name.as_bytes().to_vec();
+        needle.push(0);
+        u32::try_from(
+            section_names
+                .windows(needle.len())
+                .position(|window| window == needle)
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let mut symbol_names = vec![0];
+    let symbol_name = u32::try_from(symbol_names.len()).unwrap();
+    symbol_names.extend_from_slice(symbol.as_bytes());
+    symbol_names.push(0);
+
+    let section_table_offset = 0x80;
+    let section_count = 5;
+    let section_table_end = section_table_offset + section_count * 0x40;
+    let names_offset = section_table_end;
+    let strtab_offset = names_offset + section_names.len();
+    let symtab_offset = strtab_offset + symbol_names.len();
+    let symtab_size = 2 * 24;
+    let mut bytes = vec![0_u8; symtab_offset + symtab_size];
+    bytes[..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    put_u32(&mut bytes, 0x14, 1);
+    put_u16(&mut bytes, 0x34, 64);
+    put_u64(&mut bytes, 0x28, section_table_offset as u64);
+    put_u16(&mut bytes, 0x3a, 0x40);
+    put_u16(&mut bytes, 0x3c, section_count as u16);
+    put_u16(&mut bytes, 0x3e, 1);
+
+    {
+        let mut write_section = |index: usize,
+                                 name: u32,
+                                 kind: u32,
+                                 offset: usize,
+                                 size: usize,
+                                 link: u32,
+                                 align: u64,
+                                 entsize: u64| {
+            let at = section_table_offset + index * 0x40;
+            put_u32(&mut bytes, at, name);
+            put_u32(&mut bytes, at + 4, kind);
+            put_u64(&mut bytes, at + 0x18, offset as u64);
+            put_u64(&mut bytes, at + 0x20, size as u64);
+            put_u32(&mut bytes, at + 0x28, link);
+            put_u64(&mut bytes, at + 0x30, align);
+            put_u64(&mut bytes, at + 0x38, entsize);
+        };
+        write_section(
+            1,
+            section_name(".shstrtab"),
+            3,
+            names_offset,
+            section_names.len(),
+            0,
+            1,
+            0,
+        );
+        write_section(2, section_name(".text"), 1, 0, 0, 0, 1, 0);
+        write_section(
+            3,
+            section_name(".strtab"),
+            3,
+            strtab_offset,
+            symbol_names.len(),
+            0,
+            1,
+            0,
+        );
+        write_section(
+            4,
+            section_name(".symtab"),
+            2,
+            symtab_offset,
+            symtab_size,
+            3,
+            8,
+            24,
+        );
+    }
+    bytes[names_offset..strtab_offset].copy_from_slice(section_names);
+    bytes[strtab_offset..symtab_offset].copy_from_slice(&symbol_names);
+    let symbol_entry = symtab_offset + 24;
+    put_u32(&mut bytes, symbol_entry, symbol_name);
+    bytes[symbol_entry + 4] = 0x10;
+    bytes
+}
+
 fn quote(path: &Path) -> String {
     format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
 }
@@ -102,6 +197,24 @@ fn manifest(invocation: &str, linker: &str, strip: &str, emulation: Option<&str>
     format!(
         "{{\"schema\":\"aros-collector-tools-v1\",\"family\":\"gnu\",\"invocation\":\"{invocation}\",\"linker\":\"{linker}\",\"strip\":\"{strip}\"{emulation_field}}}"
     )
+}
+
+fn configured_gnu_driver(directory: &Path, fixture: &Path, log: &Path) -> PathBuf {
+    let driver = copy_driver(directory, "collect-aros");
+    make_executable(&directory.join("ld"), &logger_script(log, Some(fixture)));
+    make_executable(&directory.join("strip"), &logger_script(log, None));
+    fs::write(
+        directory.join("aros-collector-tools.json"),
+        gnu_manifest_with_driver_emulation(
+            "collect-aros",
+            "ld",
+            "strip",
+            "riscvelf_aros",
+            "elf32lriscv",
+        ),
+    )
+    .unwrap();
+    driver
 }
 
 fn gnu_manifest_with_driver_emulation(
@@ -714,4 +827,144 @@ fn llvm_manifest_and_legacy_alias_never_infer_gnu_default_output() {
             b"previous good output"
         );
     }
+}
+
+#[test]
+fn gnu_driver_links_a_library_free_input_without_an_sdk_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = directory.path().join("fixture.o");
+    let log = directory.path().join("tools.log");
+    fs::write(&fixture, elf64_fixture()).unwrap();
+    let driver = configured_gnu_driver(directory.path(), &fixture, &log);
+    let sysroot = directory.path().join("absent-sdk");
+    let sysroot_option = format!("--sysroot={}", sysroot.display());
+    let output_path = directory.path().join("conftest");
+    let output_argument = output_path.to_str().unwrap();
+
+    let result = run_args(
+        &driver,
+        directory.path(),
+        &[
+            sysroot_option.as_str(),
+            "-melf32lriscv",
+            "-o",
+            output_argument,
+            "conftest.o",
+        ],
+        Some(directory.path()),
+    );
+
+    assert!(
+        result.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!sysroot.exists());
+    assert!(output_path.is_file());
+    let invocations = fs::read_to_string(log).unwrap();
+    assert_eq!(
+        invocations
+            .lines()
+            .filter(|line| line.starts_with("TOOL="))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn gnu_driver_reports_missing_collector_extra_without_requiring_an_empty_sysroot_lib() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = directory.path().join("fixture.o");
+    let log = directory.path().join("tools.log");
+    fs::write(
+        &fixture,
+        elf64_fixture_with_undefined_global("pthread_mutex_lock"),
+    )
+    .unwrap();
+    let driver = configured_gnu_driver(directory.path(), &fixture, &log);
+    let sysroot = directory.path().join("sdk");
+    let sysroot_option = format!("--sysroot={}", sysroot.display());
+    let output_path = directory.path().join("output.o");
+    let output_argument = output_path.to_str().unwrap();
+
+    let result = run_args(
+        &driver,
+        directory.path(),
+        &[
+            sysroot_option.as_str(),
+            "-melf32lriscv",
+            "-o",
+            output_argument,
+            "input.o",
+        ],
+        Some(directory.path()),
+    );
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("AC0502"), "{stderr}");
+    assert!(
+        stderr.contains("collector-required sysroot input is missing"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&sysroot.join("lib/libpthread.a").display().to_string()),
+        "{stderr}"
+    );
+    assert!(!output_path.exists());
+    let invocations = fs::read_to_string(log).unwrap();
+    assert_eq!(
+        invocations
+            .lines()
+            .filter(|line| line.starts_with("TOOL="))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn gnu_driver_leaves_explicit_missing_libraries_for_the_linker_to_reject() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = directory.path().join("fixture.o");
+    let log = directory.path().join("tools.log");
+    fs::write(&fixture, elf64_fixture()).unwrap();
+    let driver = configured_gnu_driver(directory.path(), &fixture, &log);
+    let mut linker = logger_script(&log, Some(&fixture));
+    linker.push_str(
+        "for arg do\n  [ \"$arg\" = \"-lmissing\" ] && { echo 'ld: cannot find -lmissing' >&2; exit 1; }\ndone\n",
+    );
+    make_executable(&directory.path().join("ld"), &linker);
+    let sysroot = directory.path().join("absent-sdk");
+    let sysroot_option = format!("--sysroot={}", sysroot.display());
+    let output_path = directory.path().join("output.o");
+    let output_argument = output_path.to_str().unwrap();
+
+    let result = run_args(
+        &driver,
+        directory.path(),
+        &[
+            sysroot_option.as_str(),
+            "-melf32lriscv",
+            "-o",
+            output_argument,
+            "-lmissing",
+            "input.o",
+        ],
+        Some(directory.path()),
+    );
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("AC0301"), "{stderr}");
+    assert!(!stderr.contains("AC0102"), "{stderr}");
+    let invocations = fs::read_to_string(log).unwrap();
+    assert!(invocations.lines().any(|line| line == "ARG=-lmissing"));
+    assert_eq!(
+        invocations
+            .lines()
+            .filter(|line| line.starts_with("TOOL="))
+            .count(),
+        1
+    );
 }

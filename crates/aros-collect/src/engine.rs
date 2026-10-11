@@ -772,17 +772,9 @@ fn validate_sysroot(request: &EngineRequest) -> Result<()> {
         if !root.is_absolute() {
             bail!("--sysroot must be absolute, got {}", root.display());
         }
-        let library_dir = root.join(if request.name == "collect-aros32" {
-            "lib32"
-        } else {
-            "lib"
-        });
-        if !library_dir.is_dir() {
-            bail!(
-                "AROS sysroot library directory is missing: {}",
-                library_dir.display()
-            );
-        }
+        // Compiler drivers can suppress default libraries without forwarding
+        // those driver flags here. Validate collector-added files only when a
+        // discovered requirement actually needs one.
     }
     Ok(())
 }
@@ -1741,15 +1733,10 @@ mod tests {
     }
 
     #[test]
-    fn collect_aros32_requires_the_multilib_sysroot_directory() {
+    fn sysroot_validation_does_not_require_a_library_directory() {
         let directory = tempfile::tempdir().unwrap();
-        fs::create_dir(directory.path().join("lib32")).unwrap();
-        let args = strings(&[
-            "--sysroot",
-            directory.path().to_str().unwrap(),
-            "-o",
-            "output.o",
-        ]);
+        let sysroot = directory.path().join("absent-sdk");
+        let args = strings(&["--sysroot", sysroot.to_str().unwrap(), "-o", "output.o"]);
         let multilib = parse(
             "collect-aros32".into(),
             "ld.lld".into(),
@@ -1767,21 +1754,46 @@ mod tests {
             args,
         )
         .unwrap();
-        assert!(validate_sysroot(&native).is_err());
+        assert!(validate_sysroot(&native).is_ok());
     }
 
     #[test]
-    fn a_library_free_compiler_probe_does_not_require_a_sysroot() {
+    fn a_library_free_compiler_probe_accepts_a_sysroot_without_sdk_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let sysroot = directory.path().join("absent-sdk");
         let request = parse(
             "collect-aros".into(),
             "ld.lld".into(),
             "llvm-strip".into(),
             None,
-            strings(&["-Llib", "probe.o", "-o", "conftest"]),
+            strings(&[
+                "--sysroot",
+                sysroot.to_str().unwrap(),
+                "-Llib",
+                "probe.o",
+                "-o",
+                "conftest",
+            ]),
         )
         .unwrap();
 
-        assert!(request.sysroot.is_none());
+        assert_eq!(request.sysroot.as_deref(), Some(sysroot.as_path()));
+        assert!(validate_sysroot(&request).is_ok());
+    }
+
+    #[test]
+    fn sysroot_validation_still_rejects_relative_roots() {
+        let request = parse(
+            "collect-aros".into(),
+            "ld.lld".into(),
+            "llvm-strip".into(),
+            None,
+            strings(&["--sysroot", "relative/sysroot", "-o", "output.o"]),
+        )
+        .unwrap();
+
+        let error = validate_sysroot(&request).unwrap_err();
+        assert!(format!("{error:#}").contains("--sysroot must be absolute"));
     }
 
     #[test]
@@ -1797,6 +1809,29 @@ mod tests {
 
         let error = require_sysroot_library(&request, "libpthread.a").unwrap_err();
         assert!(format!("{error:#}").contains("pass an absolute AROS Developer sysroot"));
+    }
+
+    #[test]
+    fn a_discovered_target_input_still_requires_a_regular_file_in_the_multilib_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let sysroot = directory.path().join("sysroot");
+        fs::create_dir(&sysroot).unwrap();
+        let request = parse(
+            "collect-aros32".into(),
+            "ld.lld".into(),
+            "llvm-strip".into(),
+            None,
+            strings(&["--sysroot", sysroot.to_str().unwrap(), "-o", "output.o"]),
+        )
+        .unwrap();
+
+        let error = require_sysroot_library(&request, "libpthread.a").unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("collector-required sysroot input is missing"),
+            "{message}"
+        );
+        assert!(message.contains("sysroot/lib32/libpthread.a"), "{message}");
     }
 
     #[cfg(unix)]
