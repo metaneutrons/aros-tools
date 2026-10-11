@@ -472,16 +472,16 @@ function(aros_genmodule_header_stamp)
     set(_genmodule_commands)
     if(GHS_LAYOUT STREQUAL "Full" OR GHS_LAYOUT STREQUAL "PrivateOnly")
         list(APPEND _genmodule_commands
-            COMMAND "${AROS_HOST_GENMODULE}" -c "${_config_real}"
+            COMMAND "${AROS_HOST_GENMODULE}" -c "${_config_rel}"
                 -d "${_private_include}" writeincludes "${GHS_MODULE}" "${GHS_MODTYPE}"
-            COMMAND "${AROS_HOST_GENMODULE}" -c "${_config_real}"
+            COMMAND "${AROS_HOST_GENMODULE}" -c "${_config_rel}"
                 -d "${_private_include}" writelibdefs "${GHS_MODULE}" "${GHS_MODTYPE}")
     endif()
     if(GHS_LAYOUT STREQUAL "Full" OR GHS_LAYOUT STREQUAL "PublicOnly")
         list(APPEND _genmodule_commands
-            COMMAND "${AROS_HOST_GENMODULE}" -c "${_config_real}"
+            COMMAND "${AROS_HOST_GENMODULE}" -c "${_config_rel}"
                 -d "${_geninc_root}" writeincludes "${GHS_MODULE}" "${GHS_MODTYPE}"
-            COMMAND "${AROS_HOST_GENMODULE}" -c "${_config_real}"
+            COMMAND "${AROS_HOST_GENMODULE}" -c "${_config_rel}"
                 -d "${_sdk_root}" writeincludes "${GHS_MODULE}" "${GHS_MODTYPE}")
     endif()
 
@@ -491,6 +491,7 @@ function(aros_genmodule_header_stamp)
         COMMAND "${CMAKE_COMMAND}" -E make_directory ${_mkdir_dirs}
         ${_genmodule_commands}
         COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"
+        WORKING_DIRECTORY "${_source_real}"
         DEPENDS "${AROS_HOST_GENMODULE}" "${_config_real}"
         COMMENT "Generating public headers for ${GHS_MODULE} (${GHS_NAME})"
         VERBATIM)
