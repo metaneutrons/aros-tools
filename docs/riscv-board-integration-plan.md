@@ -350,3 +350,19 @@ remaining source-level joins and their implementation order. It does not grant
 release admission or claim that local tests satisfy remote qualification.
 This local plan revision still requires the normal checked PR review; no PR
 acceptance or milestone closure is claimed here.
+
+### 2026-10-11: Shared compiler and SDK release
+
+Maintainer direction assigns SDK building and management to `aros-tools` and
+publishes compiler and SDK artifacts together in one `aros-toolchains` release.
+Do not introduce an `aros-sdks` repository or a second publication pipeline.
+Each SDK remains a source-owned, target/ABI-specific Developer sysroot, not a
+host compiler payload or one universal SDK for all architectures.
+
+The enclosing release version identifies the complete distribution. SDK product
+versions remain independent metadata, as specified by the
+[SDK artifact contract](sdk-artifact-contract-v2.md). This decision does not
+select the first public SDK version or admit local artifacts to publication.
+Complete generation, package, index, authenticated evidence, qualification and
+consumer verification remain required. ABI descriptor equality and successful
+linking do not establish binary compatibility with a Vanilla AROS runtime.

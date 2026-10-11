@@ -24,9 +24,12 @@ checkout or of the generated SDK payload.
 
 The caller must select the identity document and its raw SHA-256 independently.
 Packaging does not derive a version from the installed compiler or manufacture
-a released source identity from an uncommitted tree. The first public SDK
-version and repository/channel selection remain release-integration decisions;
-local package success does not make them published.
+a released source identity from an uncommitted tree. `aros-tools` builds and
+manages SDKs; `aros-toolchains` distributes SDK and compiler artifacts together
+in one release. No separate SDK repository is required. SDK product versions
+remain independent of the enclosing release and compiler versions. The first
+public SDK product version still requires explicit selection; local package
+success does not make it published.
 
 ## Read-only source binding
 
