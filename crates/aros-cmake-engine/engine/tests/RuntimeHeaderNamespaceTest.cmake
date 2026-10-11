@@ -61,6 +61,26 @@ set(_build "${_root}/build")
 set(_fixture "${CMAKE_CURRENT_LIST_DIR}/runtime-header-namespace")
 file(MAKE_DIRECTORY "${_root}")
 
+set(_fixture_engine "${_engine}")
+if(DEFINED AROS_TEST_EXPECT_FAILURE AND
+   (AROS_TEST_EXPECT_FAILURE STREQUAL "IMPLICIT_PRIVATE_ANGLE" OR
+    AROS_TEST_EXPECT_FAILURE STREQUAL "IMPLICIT_MODULE_ANGLE_OLD_POLICY"))
+    # Reintroduce only the historical implicit -I roots in an isolated engine
+    # copy. QUOTE_DIRS and the rest of the implementation stay unchanged.
+    set(_fixture_engine "${_root}/old-policy-engine")
+    file(COPY "${_engine}/" DESTINATION "${_fixture_engine}")
+    file(READ "${_fixture_engine}/AROS.cmake" _engine_source)
+    string(REPLACE
+        [=[set(DIRS ${ARCH_DIRS} ${GENERIC_DIRS})]=]
+        [=[set(DIRS ${GEN_DIRS} ${ARCH_DIRS} ${GENERIC_DIRS} ${FALLBACK_DIRS})]=]
+        _counterprobe_source "${_engine_source}")
+    if(_counterprobe_source STREQUAL _engine_source)
+        message(FATAL_ERROR
+            "could not restore exactly the old implicit DIRS policy in copied engine")
+    endif()
+    file(WRITE "${_fixture_engine}/AROS.cmake" "${_counterprobe_source}")
+endif()
+
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -G Ninja
         "-DCMAKE_MAKE_PROGRAM=${_ninja}"
@@ -69,8 +89,7 @@ execute_process(
         "-DCMAKE_SYSROOT=${_build}/SDK"
         -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
         "-DTEST_AROS_TOOLCHAIN=${AROS_TEST_TOOLCHAIN}"
-        "-DTEST_ENGINE_DIR=${_engine}"
-        "-DTEST_SOURCE_ROOT=${_fixture}/source"
+        "-DTEST_ENGINE_DIR=${_fixture_engine}"
         -S "${_fixture}" -B "${_build}"
     TIMEOUT 180
     RESULT_VARIABLE _configure_result
@@ -110,21 +129,71 @@ if(DEFINED AROS_TEST_EXPECT_FAILURE AND
         "counterprobe log: ${_root}/counterprobe.log")
     return()
 elseif(DEFINED AROS_TEST_EXPECT_FAILURE AND
+       AROS_TEST_EXPECT_FAILURE STREQUAL "IMPLICIT_PRIVATE_ANGLE")
+    if(NOT AROS_TEST_TOOLCHAIN STREQUAL "gnu")
+        message(FATAL_ERROR "implicit private angle counterprobe requires gnu mode")
+    endif()
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" --build "${_build}" --target default-c
+        TIMEOUT 180
+        RESULT_VARIABLE _build_result
+        OUTPUT_VARIABLE _build_stdout
+        ERROR_VARIABLE _build_stderr)
+    set(_build_log "${_build_stdout}${_build_stderr}")
+    if(_build_result EQUAL 0 OR
+       NOT _build_log MATCHES "implicit private angle namespace mismatch")
+        file(WRITE "${_root}/counterprobe.log" "${_build_log}")
+        message(FATAL_ERROR
+            "restored implicit -I roots did not fail at the private angle assertion\n"
+            "${_build_log}\nBuild tree and counterprobe log retained at ${_root}")
+    endif()
+    file(REMOVE_RECURSE "${_root}")
+    message(STATUS
+        "prior implicit -I policy rejected: generated/module private name shadowed "
+        "the SDK angle namespace; build tree removed after verification")
+    return()
+elseif(DEFINED AROS_TEST_EXPECT_FAILURE AND
+       AROS_TEST_EXPECT_FAILURE STREQUAL "IMPLICIT_MODULE_ANGLE_OLD_POLICY")
+    if(NOT AROS_TEST_TOOLCHAIN STREQUAL "llvm")
+        message(FATAL_ERROR "old implicit-DIRS module counterprobe requires llvm mode")
+    endif()
+elseif(DEFINED AROS_TEST_EXPECT_FAILURE AND
        NOT AROS_TEST_EXPECT_FAILURE STREQUAL "")
     message(FATAL_ERROR
         "unsupported namespace counterprobe: ${AROS_TEST_EXPECT_FAILURE}; "
         "build tree retained at ${_root}")
 endif()
 
-foreach(_target IN ITEMS default-c default-cxx noposixc-c noposixc-cxx
-        explicit-posixc-c explicit-posixc-cxx)
+foreach(_target IN ITEMS implicit-module-angle-c implicit-module-angle-cpp
+        default-c default-cxx noposixc-c noposixc-cxx explicit-posixc-c
+        explicit-posixc-cxx explicit-module-angle-c explicit-module-angle-cpp)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" --build "${_build}" --target "${_target}"
         TIMEOUT 180
         RESULT_VARIABLE _build_result
         OUTPUT_VARIABLE _build_stdout
         ERROR_VARIABLE _build_stderr)
-    if(NOT _build_result EQUAL 0)
+    if(_target MATCHES "^implicit-module-angle-")
+        set(_build_log "${_build_stdout}${_build_stderr}")
+        if(AROS_TEST_EXPECT_FAILURE STREQUAL "IMPLICIT_MODULE_ANGLE_OLD_POLICY")
+            file(REMOVE_RECURSE "${_root}")
+            if(_build_result EQUAL 0)
+                message(FATAL_ERROR
+                    "restored implicit -I roots let the module-only angle header compile")
+            endif()
+            message(FATAL_ERROR
+                "restored implicit -I counterprobe did not compile module_order.h; "
+                "the old module-root leak was not reproduced")
+        endif()
+        if(_build_result EQUAL 0 OR NOT _build_log MATCHES
+           "module_order[.]h.*(file not found|No such file or directory)")
+            file(WRITE "${_root}/failure-${_target}.log" "${_build_log}")
+            message(FATAL_ERROR
+                "${AROS_TEST_TOOLCHAIN} implicit module target ${_target} did not "
+                "fail specifically for missing module_order.h\n${_build_log}\n"
+                "Build tree and failure log retained at ${_root}")
+        endif()
+    elseif(NOT _build_result EQUAL 0)
         file(WRITE "${_root}/failure-${_target}.log"
             "${_build_stdout}${_build_stderr}")
         message(FATAL_ERROR

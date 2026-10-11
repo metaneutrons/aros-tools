@@ -1,9 +1,9 @@
 name: Release qualification
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  # Release Please dispatches the exact annotated tag once. A tag push is not
+  # a second producer; explicit dispatch also supports read-only rehearsals
+  # and operator-approved recovery under the existing immutable identity gates.
   workflow_dispatch:
 
 permissions:

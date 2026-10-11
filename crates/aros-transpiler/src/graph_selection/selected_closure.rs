@@ -777,6 +777,21 @@ impl DependencyGraph {
             }
         }
         self.native_selected_client_archives = Some(selected_clients);
+        // A selected source-owned %build_linklib with the default target
+        // compiler/libdir installs its declared libname in the Developer SDK.
+        // Publication cannot depend on a discovered in-tree -l consumer: an
+        // external application may be the first consumer of the archive.
+        // Keep host, private and companion-ISA outputs in their proven lanes;
+        // the engine's archive ownership check rejects publication collisions.
+        for target in self.targets.values_mut() {
+            if target.module_type == ModuleType::LinkLib
+                && target.canonical_linklib_eligible
+                && !target.variant_32bit
+                && target.linklib_output_dir.is_none()
+            {
+                target.canonical_linklib_output = true;
+            }
+        }
         Ok(())
     }
 }

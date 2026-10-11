@@ -313,7 +313,9 @@ if name == "cmake" and (root / "fail-engine").exists():
         for name in ("linux-x86_64", "linux-aarch64", "macos-aarch64"):
             self.assertIn('"name": "' + name + '"', planner)
         self.assertNotIn("macos-15-intel", planner)
-        self.assertIn("metaneutrons/aros-toolchains#27", planner)
+        self.assertIn('".release-please-manifest.json" in changed_paths', planner)
+        self.assertIn("BEFORE_SHA: ${{ github.event.before }}", workflow)
+        self.assertIn('git diff --name-only --no-renames "$BEFORE_SHA" "$PUSH_SHA"', workflow)
         self.assertIn("documentation-only pull request", planner)
         self.assertIn("pull request changes executable or unclassified inputs", planner)
         for event, gate in (("==", "source-test"), ("!=", "test")):
@@ -336,7 +338,54 @@ if name == "cmake" and (root / "fail-engine").exists():
         trigger = workflow.split("permissions:", 1)[0]
         self.assertNotIn("pull_request:", trigger)
         self.assertIn("workflow_dispatch:", trigger)
-        self.assertIn("tags:", trigger)
+        self.assertNotIn("push:", trigger)
+        self.assertNotIn("tags:", trigger)
+
+    def test_release_start_waits_for_green_main_workflows(self):
+        workflow = (ROOT / ".github/workflows/release-please.yml").read_text()
+        trigger = workflow.split("permissions:", 1)[0]
+        self.assertIn("workflow_run:\n    workflows: [Workspace CI, CodeQL]\n", trigger)
+        self.assertIn("types: [completed]\n    branches: [main]", trigger)
+        self.assertIn(
+            "if: github.ref == 'refs/heads/main' && github.event_name != 'workflow_run'",
+            workflow,
+        )
+        self.assertIn(
+            "if: github.ref == 'refs/heads/main' && github.event_name != 'push'",
+            workflow,
+        )
+        admission = workflow.split("  release-admission:\n", 1)[1].split(
+            "\n  release-start:\n", 1
+        )[0]
+        start = workflow.split("  release-start:\n", 1)[1]
+        self.assertIn(
+            "environment: release\n    permissions:\n      contents: read\n      pull-requests: read\n      actions: read",
+            admission,
+        )
+        self.assertIn("ready: ${{ steps.admission.outputs.ready }}", admission)
+        self.assertIn("candidate: ${{ steps.admission.outputs.candidate }}", admission)
+        self.assertIn("GOVERNANCE_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}", admission)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", admission)
+        self.assertIn("ref: main\n          persist-credentials: false", admission)
+        self.assertIn("trap cleanup EXIT", admission)
+        self.assertIn("trap 'exit 130' HUP INT TERM", admission)
+        self.assertIn("python3 scripts/release/release-automation.py admit", admission)
+        self.assertIn(
+            "--output \"$RUNNER_TEMP/release-admission.json\" --github-output \"$GITHUB_OUTPUT\"",
+            admission,
+        )
+        self.assertIn("needs: release-admission", start)
+        self.assertIn("needs.release-admission.outputs.ready == 'true'", start)
+        self.assertIn("environment: release-please", start)
+        self.assertIn("contents: write\n      pull-requests: write\n      actions: write", start)
+        self.assertIn("ADMISSION_JSON: ${{ needs.release-admission.outputs.candidate }}", start)
+        self.assertIn("python3 scripts/release/release-automation.py recheck", start)
+        self.assertIn("python3 scripts/release/release-automation.py start", start)
+        self.assertNotIn("python3 scripts/release/release-automation.py admit", start)
+        self.assertNotIn("secrets.", start)
+        self.assertIn("RP_TAG: ${{ steps.candidate.outputs.tag_name }}", start)
+        self.assertIn("RP_SHA: ${{ steps.candidate.outputs.sha }}", start)
+        self.assertIn("RP_ID: ${{ steps.candidate.outputs.id }}", start)
 
     def test_release_boolean_fields_accept_the_valid_false_value(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()

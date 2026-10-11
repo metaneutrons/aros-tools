@@ -1,11 +1,14 @@
 # Releasing aros-tools
 
-Releases have two deliberately separate control planes: Release Please owns the
-SemVer/changelog pull request, while an immutable annotated tag starts the
-credential-free qualification and protected publication pipeline. Release
-Please never creates a tag or GitHub Release for this repository.
+Release Please prepares the SemVer/changelog pull request. After the reviewed
+PR is merged, a read-only admission job waits for successful Workspace CI and
+CodeQL runs on that exact protected-main commit. A separate, gated write job
+rechecks admission, asks Release Please for the private draft, creates one
+annotated tag on the admitted source commit, and dispatches qualification once.
+The qualification workflow has no tag-push trigger; it rechecks the annotated
+tag, its timestamp, and its exact source identity before publication.
 
-## 1. Prepare the release pull request
+## 1. Review and merge the release pull request
 
 The SHA-pinned Release Please workflow runs on `main`. Review its pull request
 like any other change. Before merge, require:
@@ -17,28 +20,82 @@ like any other change. Before merge, require:
 - the complete workspace, Rustdoc, dependency and documentation gates; and
 - an explicit source-contract update if the toolchain producer changed.
 
-Merging this pull request authorizes no publication. Never hand-edit a version
-to bypass it.
+Merging the reviewed release pull request is the human promotion decision. The
+automation proceeds only after Workspace CI and CodeQL both complete
+successfully for the same protected-main merge commit. Never hand-edit a version
+or create a production tag manually.
 
-## 2. Create the immutable candidate tag
+Main pushes that change `.release-please-manifest.json` run the complete
+three-host Workspace CI matrix. Ordinary main checkpoints stay Linux-only;
+they cannot satisfy release admission. This keeps the admission evidence on the
+exact release merge without expanding every routine integration checkpoint.
 
-Start from a clean, freshly fetched `origin/main`. Select the exact reviewed
-release-PR merge commit and verify that it remains reachable from the protected
-default branch. It will normally be the current tip, but later unrelated main
-commits do not invalidate an otherwise unchanged release commit. Create an
-annotated `vX.Y.Z` tag whose version matches the workspace and Release Please
-manifest, then push only that tag.
+## 2. Automated admission and candidate tag
+
+The read-only `release-admission` job runs on protected `main` after either
+Workspace CI or CodeQL completes. It admits only the exact merged
+Release-Please-authored PR, its four version/changelog files, the pending label,
+and successful Workspace CI and CodeQL runs for that SHA. It requires the
+workspace, manifest, and lockfile versions to agree, and refuses an existing
+tag or release. A newer main commit makes the event stale; it cannot authorize
+the older candidate.
+
+Admission also requires an active `refs/tags/v*` ruleset forbidding updates and
+deletions, with no exclusions and an explicitly visible empty bypass list. The
+existing `RELEASE_ADMIN_READ_TOKEN` is used only by this admission job for
+read-only ruleset API requests. The `release` environment must allow protected
+`main` for admission and the `v*` tag pattern for qualification; its secret
+list is unchanged. The token is not part of the Release Please App permissions
+or the writer job. The repository cannot establish the protected environment
+secret's effective API scope from workflow source; admission must fail closed
+if the credential cannot inspect ruleset metadata, including the explicit
+empty bypass list. An omitted bypass list is unknown, not proof that no bypass
+exists. The read-only job exercises that permission on ordinary qualified
+main checkpoints too, before any release merge is needed. The job emits a
+short-lived receipt containing the candidate identity
+and a ruleset policy digest and check time, but no credential.
+
+The separate `release-start` job runs only when admission reports ready. It has
+the narrow Contents, Pull requests, and Actions write permissions, receives no
+repository secret, and checks out protected `main`. Before invoking Release
+Please, it validates the receipt's freshness (at most 15 minutes) and rechecks
+the candidate and visible ruleset policy with its job token. A ruleset mismatch
+or an unverified admission fails closed; missing bypass metadata in the public
+recheck is not independently interpreted as an empty list: the writer relies
+on the fresh receipt for the authenticated bypass check and compares the public
+policy digest. No write request uses the governance credential. Release Please
+then creates only the admitted private draft. The
+adapter compares its tag, source SHA, release ID, and version with the saved
+admission, repeats admission after draft creation, verifies that the draft is
+fresh and empty, canonicalizes its title and notes, then creates the annotated
+tag and dispatches `Release qualification` once. The tag must point directly to
+the admitted commit. Qualification independently checks the remote tag object,
+tagger timestamp, version, changelog, protected-main reachability, and live
+immutable tag ruleset, including the explicit empty bypass list, before
+publication.
+
+Release Please remains authoritative for candidate selection and SemVer. Its
+`force-tag-creation` option creates lightweight refs, which lack the tagger
+timestamp required by this repository's provenance contract. Therefore
+`draft: true` and `force-tag-creation: false` are required, and the adapter is
+the narrow exception that creates the annotated tag from Release Please's exact
+outputs. There is no independent versioning path or manual production-tag
+path.
 
 The repository must already have an active tag ruleset covering
 `refs/tags/v*` with both update and deletion forbidden. Qualification checks
 the live ruleset as well as the tag object; branch protection alone is not a
 release-tag immutability control.
 
-Never retarget, delete or reuse a release tag. If qualification exposes a
-source defect, fix it through a new pull request and choose a new SemVer. If the
-payload is valid but publication infrastructure failed, rerun the workflow for
-the exact unchanged tag. That is the only resume path: it must byte-verify the
-existing release and public channel state before continuing.
+Never retarget, delete, or reuse a release tag. The release-start producer does
+not retry after a draft, tag, or dispatch has been consumed or partially
+created. Inspect that state before deciding the next action. If qualification
+exposes a source defect, fix it through a new pull request and choose a new
+SemVer. For an infrastructure failure after the annotated tag exists, an
+operator may explicitly dispatch `Release qualification` at that exact tag;
+the workflow must byte-verify the existing release and public channel state
+before continuing. Do not rerun release-start or issue tag commands as a
+recovery shortcut.
 
 ## 3. Qualification
 
@@ -138,15 +195,18 @@ verification. No destination repository helper runs with a write PAT present.
 Every shell step that materializes a private key removes its temporary
 credential files before another step can run.
 
-The deliberate creation and push of the immutable annotated release tag is the
-single human promotion gate. Homebrew adds no redundant self-review ceremony:
+Merging the reviewed Release Please pull request is the single human promotion
+gate. The release-start workflow creates the immutable annotated tag only after
+the exact main commit passes both required workflows and admission checks.
+Homebrew adds no redundant self-review ceremony:
 the protected `Formula qualification` check must pass on every maintained
 release host (Linux x86-64, Linux ARM64 and macOS Apple silicon), the
 publication job remeasures the exact final head and revalidates both repositories,
 then merges only that recorded SHA through GitHub's `match-head-commit`
-precondition. Do not push a follow-up commit or merge the PR manually. If the
-job stops, rerun only the unchanged release tag: recovery must reuse the same
-version branch, pull request and byte-identical head.
+precondition. Do not push a follow-up commit or merge the PR manually. If
+qualification or publication stops after tag creation, use an explicit dispatch
+at the unchanged tag only after reviewing the recorded state. Recovery must
+reuse the same version branch, pull request, and byte-identical head.
 
 Before stable exposure, a credential-free gate examines GitHub, signed APT
 (including by-hash), Homebrew and AUR. A newer public version rejects the run;
@@ -156,9 +216,11 @@ update stable APT, Homebrew or AUR channels.
 
 ## 5. Recovery and rollback
 
-Rerunning the exact tag workflow accepts an existing draft or immutable final
-release only when every remote asset is byte-identical to the candidate
-inventory and the tag still peels to the same protected commit. Existing
+Explicitly dispatching qualification at the exact tag accepts an existing
+draft or immutable final release only when every remote asset is byte-identical
+to the candidate inventory and the tag still peels to the same protected
+commit. The release-start producer never retries after a tag or draft is
+consumed; do not invoke it again to recover. Existing
 keyless Sigstore bundles are copied only after their certificate identity and
 subject verify and the freshly reproduced subject is byte-identical. A missing
 bundle in an immutable release is fatal; it is never regenerated or replaced.
@@ -185,9 +247,9 @@ exact archive run and recover there; rerunning the unchanged tools tag can
 request a new archive run and must reverify all public bytes before continuing.
 Do not delete or overwrite successful immutable release assets.
 
-The initial untagged 0.1.0 PR was superseded before publication. Release Please
-prepared a fresh 0.1.1 candidate including later fixes. A merged but untagged
-candidate can be explicitly retired by removing its `autorelease: pending`
-label with an audit comment, then dispatching Release Please again. This does
-not mark the version published, mutate a tag, hand-edit a version, or bypass
-qualification of the new release PR.
+The initial untagged 0.1.0 PR was superseded before publication. Its pending
+label was retired with an audit comment, and Release Please prepared a fresh
+0.1.1 candidate including later fixes. Retiring a pending label does not mark a
+version published, create or mutate a tag, or bypass review and qualification
+for a later release PR. The release-start admission refuses a retired
+candidate.

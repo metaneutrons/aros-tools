@@ -237,6 +237,35 @@ function(_configure_archive_probe _mode _expectation _expected_pattern)
     endif()
 endfunction()
 
+# An explicit source linklibname owns the primary output, not a copy made
+# after linking the module spelling. Classic compares the two names ignoring
+# case before emitting the additional spelling; Ninja must have exactly one
+# producer for case-only variants on both case-sensitive and Apple filesystems.
+foreach(_kind distinct case-only)
+    _configure_archive_probe("explicit-name-${_kind}" accept "")
+    set(_probe_build "${_root}/archive-probes/explicit-name-${_kind}")
+    file(READ "${_probe_build}/build.ninja" _name_ninja)
+    if(_kind STREQUAL "distinct")
+        foreach(_expected libarchive-probe-explicit.a libarchive-probe-explicit_rel.a
+                libtiff.a libtiff_rel.a)
+            string(FIND "${_name_ninja}" "${_expected}" _output_index)
+            if(_output_index EQUAL -1)
+                message(FATAL_ERROR "explicit-name probe lost required output ${_expected}")
+            endif()
+        endforeach()
+    else()
+        foreach(_expected libTIFF.a libTIFF_rel.a)
+            string(FIND "${_name_ninja}" "${_expected}" _output_index)
+            if(_output_index EQUAL -1)
+                message(FATAL_ERROR "case-only name probe lost primary output ${_expected}")
+            endif()
+        endforeach()
+        if(_name_ninja MATCHES "libtiff(_rel)?\\.a")
+            message(FATAL_ERROR "case-only name probe emitted an extra module archive")
+        endif()
+    endif()
+endforeach()
+
 # Every suppression spelling requires a source-native runtime declaration and
 # cannot be used for genmodule-only declarations. Test the all-archives switch
 # and both partial switches against both invalid contexts.
@@ -249,7 +278,7 @@ endforeach()
 
 # Canonical implementation archives and generated client archive spellings
 # share one configure-time ownership ledger. Exercise primary, relative and
-# LINKLIB_NAME archive collisions in both declaration orders.
+# explicit LINKLIB_NAME primary-output collisions in both declaration orders.
 foreach(_collision primary relative alias alias-relative)
     foreach(_order client-first implementation-first)
         if(_collision STREQUAL "primary")

@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  workflow_run:
+    workflows: [Workspace CI, CodeQL]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
@@ -15,7 +19,7 @@ concurrency:
 jobs:
   release-pr:
     name: Prepare version and changelog PR
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'workflow_run'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: release-please
@@ -32,7 +36,7 @@ jobs:
           toolchain=$(scripts/release/read-rust-toolchain.sh)
           rustup toolchain install "$toolchain" --profile minimal
           rustup show active-toolchain
-      - name: Require PR-only Release Please policy
+      - name: Require the Release Please version contract
         shell: bash
         run: |
           set -euo pipefail
@@ -182,3 +186,86 @@ jobs:
           done
           echo '::error::Release PR head did not stabilize during identity validation'
           exit 1
+
+  release-admission:
+    name: Read qualified release governance
+    if: github.ref == 'refs/heads/main' && github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      ready: ${{ steps.admission.outputs.ready }}
+      candidate: ${{ steps.admission.outputs.candidate }}
+    steps:
+      # workflow_run can be privileged: never check out its supplied head or
+      # download its artifacts. Only reviewed protected-main code executes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Admit only the exact green main release-PR merge
+        id: admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOVERNANCE_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          cleanup() { unset GOVERNANCE_TOKEN GH_TOKEN; }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
+          python3 scripts/release/release-automation.py admit \
+            --output "$RUNNER_TEMP/release-admission.json" --github-output "$GITHUB_OUTPUT"
+
+  release-start:
+    name: Start the qualified Release Please candidate
+    needs: release-admission
+    if: github.ref == 'refs/heads/main' && github.event_name != 'push' && needs.release-admission.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release-please
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Restore and recheck the credential-free admission receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ADMISSION_JSON: ${{ needs.release-admission.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/release-automation.py recheck \
+            --output "$RUNNER_TEMP/release-admission.json"
+      - name: Let Release Please create only the admitted private draft
+        id: candidate
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: main
+          skip-github-pull-request: true
+          skip-github-release: false
+          # Pending means channel-qualified, not merely draft-created. The
+          # existing finalizer alone clears it after public convergence.
+          skip-labeling: true
+      - name: Annotate the admitted tag and dispatch exactly one qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RP_CREATED: ${{ steps.candidate.outputs.release_created }}
+          RP_TAG: ${{ steps.candidate.outputs.tag_name }}
+          RP_SHA: ${{ steps.candidate.outputs.sha }}
+          RP_ID: ${{ steps.candidate.outputs.id }}
+          RP_VERSION: ${{ steps.candidate.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/release-automation.py start \
+            --admission "$RUNNER_TEMP/release-admission.json"
