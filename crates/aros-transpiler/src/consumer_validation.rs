@@ -6,8 +6,9 @@
 
 use crate::cli_args::Args;
 use crate::native_selection::{load_native_selection, LoadedNativeSelection};
-use aros_common::{native_consumer_contract::NativeConsumerContract, ArosError, Result};
+use aros_common::{ArosError, Result};
 use aros_transpiler::{dirs::DirVars, TargetContext};
+use serde_json::{json, Value};
 use std::path::Path;
 
 const MAKE_CONFIG_PATH: &str = "config/make.cfg.in";
@@ -26,18 +27,19 @@ pub fn execute(args: &Args) -> Result<()> {
         mesa_version: args.mesa_version.clone(),
         ..TargetContext::default()
     };
-    let Some(LoadedNativeSelection::Consumer(loaded)) =
-        load_native_selection(args, Some(&context))?
-    else {
+    let Some(loaded) = load_native_selection(args, Some(&context))? else {
         return Err(invalid("an explicit consumer selection is required"));
     };
+    if matches!(&loaded, LoadedNativeSelection::Build(_)) {
+        return Err(invalid("an explicit consumer selection is required"));
+    }
+    let invocation = loaded.invocation();
     // Resolve actual-host substitutions now, rather than accepting a document
     // which cannot represent the host used by the two graph passes.
-    loaded
-        .contract
-        .make_variables_for_host(aros_common::target::native_host_key().unwrap_or(""))?;
+    let host = aros_common::target::native_host_key().unwrap_or("");
+    loaded.make_variables_for_host(host)?;
     let mut exec_smp = None;
-    for binding in loaded.contract.generated_make_templates.values() {
+    for binding in invocation.generated_make_templates.values() {
         let Some(value) = binding.substitutions.get("@ENABLE_EXECSMP@") else {
             continue;
         };
@@ -60,36 +62,75 @@ pub fn execute(args: &Args) -> Result<()> {
         .ok_or_else(|| invalid("source root is not UTF-8"))?;
     let source_path = Path::new(source);
     let (sdk_include_relative, sdk_root_dependencies) =
-        sdk_include_relative(source_path, &loaded.contract)?;
-    reject_sdk_root_overrides(&loaded.contract, &sdk_root_dependencies)?;
-    let contract_path = loaded
-        .path
+        sdk_include_relative(source_path, invocation.inputs)?;
+    reject_sdk_root_overrides(
+        invocation.make_variables,
+        invocation.host_make_variables,
+        &sdk_root_dependencies,
+    )?;
+    let contract_path = match &loaded {
+        LoadedNativeSelection::Consumer(loaded) => &loaded.path,
+        LoadedNativeSelection::SdkConsumer(loaded) => &loaded.path,
+        LoadedNativeSelection::Build(_) => unreachable!("build selection rejected above"),
+    };
+    let contract_path = contract_path
         .to_str()
         .ok_or_else(|| invalid("contract path is not UTF-8"))?;
-    let document = serde_json::json!({
-        "schema": "aros-native-consumer-validation-v1",
-        "qualification": "source-binding-not-graph-or-build-proof",
-        "source_dir": source,
-        "contract_path": contract_path,
-        "contract_sha256": loaded.sha256,
-        "profile": loaded.contract.profile,
-        "abi": loaded.contract.abi,
-        "sdk_include_relative": sdk_include_relative,
-        "exec_smp": exec_smp.unwrap_or(false),
-        "input_paths": loaded.contract.inputs.iter().map(|input| &input.path).collect::<Vec<_>>()
-    });
+    let document = validation_document(
+        &loaded,
+        source,
+        contract_path,
+        &sdk_include_relative,
+        exec_smp.unwrap_or(false),
+    )?;
     aros_common::outputln!("{document}");
     Ok(())
 }
 
+/// Construct the stable JSON boundary for either consumer contract family.
+/// The generic descriptor changes only the schema name and `abi`/`target` key.
+pub fn validation_document(
+    selection: &LoadedNativeSelection,
+    source: &str,
+    contract_path: &str,
+    sdk_include_relative: &str,
+    exec_smp: bool,
+) -> Result<Value> {
+    let invocation = selection.invocation();
+    let mut document = json!({
+        "qualification": "source-binding-not-graph-or-build-proof",
+        "source_dir": source,
+        "contract_path": contract_path,
+        "contract_sha256": selection.sha256(),
+        "profile": invocation.profile,
+        "sdk_include_relative": sdk_include_relative,
+        "exec_smp": exec_smp,
+        "input_paths": invocation.inputs.iter().map(|input| &input.path).collect::<Vec<_>>()
+    });
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| invalid("validation document is not a JSON object"))?;
+    match selection {
+        LoadedNativeSelection::Consumer(loaded) => {
+            object.insert("schema".into(), json!("aros-native-consumer-validation-v1"));
+            object.insert("abi".into(), json!(loaded.contract.abi));
+        }
+        LoadedNativeSelection::SdkConsumer(loaded) => {
+            object.insert("schema".into(), json!("aros-sdk-consumer-validation-v1"));
+            object.insert("target".into(), json!(loaded.contract.target));
+        }
+        LoadedNativeSelection::Build(_) => {
+            return Err(invalid("an explicit consumer selection is required"));
+        }
+    }
+    Ok(document)
+}
+
 fn sdk_include_relative(
     source: &Path,
-    contract: &NativeConsumerContract,
+    inputs: &[aros_common::native_build_contract::NativeBuildInput],
 ) -> Result<(String, std::collections::BTreeSet<String>)> {
-    let mut sealed_inputs = contract
-        .inputs
-        .iter()
-        .filter(|input| input.path == MAKE_CONFIG_PATH);
+    let mut sealed_inputs = inputs.iter().filter(|input| input.path == MAKE_CONFIG_PATH);
     let config_input = sealed_inputs
         .next()
         .ok_or_else(|| invalid("consumer contract must seal config/make.cfg.in"))?;
@@ -173,12 +214,15 @@ fn build_relative_path(value: &str, variable: &str) -> Result<String> {
 }
 
 fn reject_sdk_root_overrides(
-    contract: &NativeConsumerContract,
+    make_variables: &std::collections::BTreeMap<String, String>,
+    host_make_variables: &std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, String>,
+    >,
     source_dependencies: &std::collections::BTreeSet<String>,
 ) -> Result<()> {
-    let shared = contract.make_variables.keys();
-    let hosts = contract
-        .host_make_variables
+    let shared = make_variables.keys();
+    let hosts = host_make_variables
         .values()
         .flat_map(|variables| variables.keys());
     if let Some(name) = shared

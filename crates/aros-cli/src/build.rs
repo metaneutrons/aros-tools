@@ -953,6 +953,7 @@ mod tests {
             bootstrap_abi: None,
             native_build_contract: None,
             native_consumer_contract: None,
+            sdk_consumer_contract: None,
         };
         let compiler = json!({
             "family": "gnu", "gcc_version": "16.2.0", "binutils_version": "2.47",

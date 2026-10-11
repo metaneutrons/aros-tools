@@ -158,6 +158,36 @@ fn executes_consumer_v2_with_six_compatibility_phases_and_four_native_sdk_links(
 }
 
 #[test]
+fn generic_sdk_contract_is_rejected_before_any_compatibility_phase_output() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut fixture = gnu_native_sdk_fixture(temporary.path(), NativeSdkBindingMode::Valid);
+    let path = fixture
+        .request
+        .preparation
+        .source_root
+        .join("aros-targets.toml");
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("native_consumer_contract", "sdk_consumer_contract");
+    fs::write(path, text).unwrap();
+    refresh_source_digest(&mut fixture.request);
+    let before = super::retained_tests::snapshot_tree(temporary.path());
+    let error = execute_native_compatibility_with_readback(
+        &fixture.request,
+        &fixture.profiles,
+        &CancellationToken::default(),
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("does not yet support a generic SDK consumer contract"));
+    assert_eq!(
+        super::retained_tests::snapshot_tree(temporary.path()),
+        before
+    );
+}
+
+#[test]
 fn native_sdk_requires_an_explicit_epoch_before_any_phase_output() {
     let temporary = tempfile::tempdir().unwrap();
     let mut fixture = gnu_native_sdk_fixture(temporary.path(), NativeSdkBindingMode::Valid);

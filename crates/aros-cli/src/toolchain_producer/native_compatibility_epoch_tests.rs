@@ -89,13 +89,34 @@ fn source_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 #[test]
-fn explicit_epoch_accepts_zero_and_portable_maximum_without_source_reads() {
+fn explicit_epoch_accepts_zero_and_portable_maximum_for_supported_contracts() {
     let source = tempfile::tempdir().unwrap();
+    let (selected, _) = write_fixture(true, true);
     for epoch in [
         Some(0),
         Some(aros_common::sdk_manifest::SDK_MAX_SOURCE_DATE_EPOCH),
     ] {
-        super::preflight_consumer_epoch(source.path(), Some("unknown"), epoch).unwrap();
+        super::preflight_consumer_epoch(source.path(), None, epoch).unwrap();
+        super::preflight_consumer_epoch(selected.path(), Some("example-sdk"), epoch).unwrap();
+    }
+}
+
+#[test]
+fn generic_sdk_contract_is_rejected_even_with_an_explicit_epoch_without_mutation() {
+    let (source, text) = write_fixture(false, false);
+    let text = text.replace(
+        "[targets.transpiler]",
+        "sdk_consumer_contract='sdk-consumer.json'\n[targets.transpiler]",
+    );
+    fs::write(source.path().join("aros-targets.toml"), text).unwrap();
+    let before = source_snapshot(source.path());
+    for epoch in [None, Some(0), Some(946_684_800)] {
+        let error =
+            super::preflight_consumer_epoch(source.path(), Some("example-sdk"), epoch).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not yet support a generic SDK consumer contract"));
+        assert_eq!(source_snapshot(source.path()), before);
     }
 }
 
