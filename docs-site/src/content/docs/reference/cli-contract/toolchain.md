@@ -229,6 +229,10 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer verify-package` | forbidden_prefixes | --forbidden-prefix | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | input_dir | --input-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | package_format | --package-format | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
+| `aros toolchain producer verify-package` | measurement | --package-measurement | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer verify-package` | measurement_sha256 | --package-measurement-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer verify-package` | executor_contract_sha256 | --executor-contract-sha256 | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer verify-package` | executor_binary_sha256 | --executor-binary-sha256 | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer verify-qualification` | directory | --directory | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-qualification` | release_id | --release-id | — | required | 1 |  |  | — |  |
