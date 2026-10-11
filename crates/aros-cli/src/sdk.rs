@@ -158,7 +158,7 @@ pub struct ExtractArgs {
 pub struct SbomArgs {
     #[command(flatten)]
     verification: VerifyArgs,
-    /// Absent absolute <archive>.spdx.json file outside the SDK package directory
+    /// Absent absolute `<archive>.spdx.json` file outside the SDK package directory
     #[arg(long, value_name = "FILE")]
     output: PathBuf,
 }
