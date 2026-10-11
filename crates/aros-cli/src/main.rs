@@ -44,6 +44,9 @@ mod image_prepare;
 mod observability;
 mod repo;
 mod sdk;
+#[cfg(unix)]
+mod sdk_acquisition;
+mod sdk_managed;
 mod source;
 mod toolchain;
 mod toolchain_build;
@@ -148,7 +151,7 @@ enum Commands {
         command: ToolchainCommands,
     },
 
-    /// Package and verify source-produced Developer SDKs locally
+    /// Package, acquire and manage target/ABI-specific Developer SDKs
     Sdk {
         #[command(subcommand)]
         command: sdk::SdkCommand,

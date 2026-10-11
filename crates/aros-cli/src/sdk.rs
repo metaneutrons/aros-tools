@@ -1,4 +1,4 @@
-//! Explicit local SDK artifact stages. No download, release or store selection.
+//! SDK artifact stages and explicit lock-selected managed operations.
 
 use aros_common::sdk_manifest::{SdkIdentity, SDK_MAX_METADATA_BYTES};
 use aros_common::{measure_regular_file_digest_bounded, open_regular_file_nofollow, Sha256Digest};
@@ -8,14 +8,24 @@ use std::io::Read;
 use std::path::PathBuf;
 
 #[derive(Subcommand)]
-/// Local artifact stages for a separately identified Developer SDK.
+/// Local artifact stages and management for a separately identified SDK.
 pub enum SdkCommand {
     /// Package one source-produced SDK without modifying it or publishing a release
     Package(PackageArgs),
     /// Verify a complete local SDK package against explicit identity and digests
-    Verify(VerifyArgs),
+    VerifyPackage(VerifyArgs),
     /// Verify and extract one SDK into an absent directory; not managed installation
     Extract(ExtractArgs),
+    /// Acquire and completely verify locked SDK bytes without installing them
+    Download(crate::sdk_managed::DownloadArgs),
+    /// Install or fully verify reuse of one exact lock-selected SDK
+    Install(crate::sdk_managed::InstallArgs),
+    /// List bounded store metadata without hashing or executing SDK payloads
+    List(crate::sdk_managed::ListArgs),
+    /// Fully verify the exact installed SDK selected by a release lock
+    Verify(crate::sdk_managed::InstalledArgs),
+    /// Print the fully verified installed SDK path for application build tools
+    Path(crate::sdk_managed::InstalledArgs),
 }
 
 impl SdkCommand {
@@ -23,8 +33,13 @@ impl SdkCommand {
     pub const fn diagnostic_mode(&self) -> &'static str {
         match self {
             Self::Package(_) => "sdk.package",
-            Self::Verify(_) => "sdk.verify",
+            Self::VerifyPackage(_) => "sdk.verify-package",
             Self::Extract(_) => "sdk.extract",
+            Self::Download(_) => "sdk.download",
+            Self::Install(_) => "sdk.install",
+            Self::List(_) => "sdk.list",
+            Self::Verify(_) => "sdk.verify",
+            Self::Path(_) => "sdk.path",
         }
     }
 }
@@ -128,8 +143,20 @@ fn verification(args: &VerifyArgs) -> Result<aros_toolchain::sdk_package::SdkVer
 }
 
 #[cfg(unix)]
-/// Execute one local SDK artifact stage without source discovery or publication.
-pub fn run(command: SdkCommand) -> Result<()> {
+/// Execute one SDK operation without source discovery or release publication.
+pub async fn run(command: SdkCommand) -> Result<()> {
+    match command {
+        SdkCommand::Download(args) => crate::sdk_managed::download(args).await,
+        SdkCommand::Install(args) => crate::sdk_managed::install(args).await,
+        SdkCommand::List(args) => crate::sdk_managed::list(args),
+        SdkCommand::Verify(args) => crate::sdk_managed::verify(args, false),
+        SdkCommand::Path(args) => crate::sdk_managed::verify(args, true),
+        local => run_local(local),
+    }
+}
+
+#[cfg(unix)]
+fn run_local(command: SdkCommand) -> Result<()> {
     use aros_toolchain::sdk_package;
     let operation = command.diagnostic_mode();
     let result = match command {
@@ -149,7 +176,7 @@ pub fn run(command: SdkCommand) -> Result<()> {
                 "archive_sha256":output.archive_sha256,"archive_size":output.archive_size,
                 "tree_sha256":args.selection.tree_sha256})
         }
-        SdkCommand::Verify(args) => {
+        SdkCommand::VerifyPackage(args) => {
             let verified =
                 sdk_package::verify(&verification(&args)?).map_err(|error| native_error(&error))?;
             selected_identity(&args.selection)?;
@@ -167,6 +194,9 @@ pub fn run(command: SdkCommand) -> Result<()> {
             serde_json::json!({"identity":verified.manifest.identity,"output_root":args.output_root,
                 "archive_sha256":verified.archive_sha256,"archive_size":verified.archive_size,
                 "tree_sha256":verified.manifest.tree_sha256})
+        }
+        _ => {
+            miette::bail!("managed SDK command reached the local package boundary");
         }
     };
     aros_common::outputln!(
@@ -188,6 +218,6 @@ fn native_error(error: &aros_toolchain::ContractError) -> miette::Report {
 
 #[cfg(not(unix))]
 /// Refuse unsupported local SDK execution rather than approximating Unix policy.
-pub fn run(_command: SdkCommand) -> Result<()> {
+pub async fn run(_command: SdkCommand) -> Result<()> {
     miette::bail!("local SDK package stages require a supported Unix host")
 }

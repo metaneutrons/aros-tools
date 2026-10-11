@@ -203,7 +203,7 @@ fn repository_policy_is_explicit_for_each_command_class() {
 
 #[test]
 fn sdk_local_stages_require_exact_selections_and_have_global_diagnostics() {
-    for leaf in ["package", "verify", "extract"] {
+    for leaf in ["package", "verify-package", "extract"] {
         assert_eq!(
             parse_error(&["aros", "sdk", leaf]),
             ErrorKind::MissingRequiredArgument
@@ -254,6 +254,62 @@ fn sdk_local_stages_require_exact_selections_and_have_global_diagnostics() {
             context.mode.as_deref(),
             Some(format!("sdk.{leaf}").as_str())
         );
+    }
+}
+
+#[test]
+fn sdk_managed_commands_keep_selection_and_acquisition_boundaries_explicit() {
+    for leaf in ["download", "install", "verify", "path"] {
+        assert_eq!(
+            parse_error(&["aros", "sdk", leaf]),
+            ErrorKind::MissingRequiredArgument
+        );
+        let command = Cli::try_parse_from([
+            "aros",
+            "sdk",
+            leaf,
+            "--release-lock",
+            "/tmp/sdk-lock.json",
+            "--lock-sha256",
+            &"1".repeat(64),
+        ])
+        .unwrap()
+        .command;
+        assert_eq!(
+            command.repository_requirement(),
+            RepositoryRequirement::Global
+        );
+        let (_, context) = command_boundary(&command);
+        assert_eq!(
+            context.mode.as_deref(),
+            Some(format!("sdk.{leaf}").as_str())
+        );
+    }
+    let command = Cli::try_parse_from(["aros", "sdk", "list"])
+        .unwrap()
+        .command;
+    assert_eq!(
+        command.repository_requirement(),
+        RepositoryRequirement::Global
+    );
+    for forbidden in ["--offline", "--cache"] {
+        let mut args = vec![
+            "aros",
+            "sdk",
+            "install",
+            "--release-lock",
+            "/tmp/lock.json",
+            "--lock-sha256",
+            "--archive",
+            "/tmp/archive.tar.xz",
+            forbidden,
+        ];
+        let digest = "1".repeat(64);
+        args.insert(6, &digest);
+        if forbidden == "--cache" {
+            args.push("/tmp/cache");
+        }
+        assert_eq!(parse_error(&args), ErrorKind::ArgumentConflict);
     }
 }
 

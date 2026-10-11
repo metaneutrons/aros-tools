@@ -78,7 +78,7 @@ isolation from a hostile concurrent filesystem writer.
 
 ## CLI and assurance
 
-`aros sdk package`, `aros sdk verify` and `aros sdk extract` are explicit local
+`aros sdk package`, `aros sdk verify-package` and `aros sdk extract` are explicit local
 stages, usable outside an AROS checkout. Their required selectors are shown by
 the generated CLI reference. JSON results state
 `local-byte-consistency-not-release-admission`.
@@ -138,8 +138,23 @@ verification is a separate operation. An absent store stays absent; a symlinked
 store is reported as unsafe and is not followed. There is no global active SDK,
 automatic removal or project selection in this API.
 
-These are library contracts, not a claim of a complete public CLI or published
-SDK. Download, CLI installation/list/verification, project-bound selection,
+`aros sdk download` acquires the exact locked manifest/archive into a dedicated
+lock-digest cache namespace and verifies the complete archive. `--offline`
+uses existing verified bytes only; poisoned cache entries are not replaced.
+`aros sdk install` uses the same retained private snapshots or one explicitly
+selected local archive, then installs or strictly verifies reuse. The local
+archive selector conflicts with cache/transport options, so no argument is
+silently ignored. SDK lock files are bounded, independently hash-selected and
+remeasured before/after the operation.
+
+`aros sdk list` exposes bounded metadata-only observation; `aros sdk verify`
+checks the complete selected installation. `aros sdk path` verifies before
+printing an application-build input root. The default store is `AROS_HOME/sdks`;
+the default dedicated archive-cache parent is the AROS archive cache's `sdk-v2`
+directory. Neither root is created by read-only observation. SDK input paths
+never override `AROS_SDK_INCLUDE_DIR`, which is an AROS source-build output.
+
+This is not a claim of a published SDK. Project-bound selection,
 source-input SBOM/signatures/attestations, a published SDK index/consumer lock
 and release/consumer qualification remain required distribution work. The
 three local files are not an SDK release inventory and do not expand or
