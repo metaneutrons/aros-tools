@@ -133,6 +133,23 @@ Synthetic positive and tampering tests do not qualify a real compiler. The
 generation owner must still connect these links to the generated SDK and an
 independently authenticated portable export.
 
+`compatibility::bind_llvm_sdk_generated_root` validates the retained CMake
+consumer binding against the exact committed source and a fresh response from
+the measured transpiler. The source validator derives the SDK include/root path
+from sealed source configuration; Rust does not assume a conventional directory.
+The opaque result retains the exact binding bytes and complete SDK tree and
+rejects changed selection/content on readback. It does not prove that a build
+completed or that the SDK is complete.
+
+`compatibility::execute_llvm_sdk_build_links` runs the four ordinary links only
+against that source-selected build SDK, never a separately supplied candidate.
+Proof outputs must be outside the entire CMake build tree. One elapsed budget
+covers source binding, links and final helper revalidation; filesystem I/O and
+existing bounded Git/source audits are not preempted. Expiry prevents a
+successful result; it is not a hard return-time guarantee. The generation owner
+still needs the six-phase execution and independently authenticated portable
+job export before package admission.
+
 `aros sdk build` explicitly rejects this generic schema before compatibility
 preparation until the family-specific link and evidence adapters are implemented.
 

@@ -37,6 +37,7 @@ mod host_tools;
 mod llvm_sdk_application;
 mod llvm_sdk_application_plan;
 mod llvm_sdk_driver;
+mod llvm_sdk_generated_root;
 mod llvm_sdk_link_paths;
 mod llvm_sdk_links;
 mod native_sdk_links;
@@ -81,6 +82,10 @@ pub use llvm_sdk_application_plan::{
 pub use llvm_sdk_driver::{
     inspect_llvm_sdk_drivers, LlvmSdkDriverBinding, LlvmSdkDriverQueryIdentity,
     LlvmSdkDriverRequest, LlvmSdkDriverRole, LlvmSdkDriverRoleIdentity,
+};
+pub use llvm_sdk_generated_root::{
+    bind_llvm_sdk_generated_root, execute_llvm_sdk_build_links, CompletedLlvmSdkBuildLinks,
+    LlvmSdkGeneratedRoot, LlvmSdkGeneratedRootRequest,
 };
 pub use llvm_sdk_links::{execute_llvm_sdk_links, CompletedLlvmSdkLinks, LlvmSdkLinkRequest};
 pub use native_sdk_links::{
