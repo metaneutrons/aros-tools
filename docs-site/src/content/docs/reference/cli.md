@@ -125,6 +125,10 @@ SDK identity is target/ABI-specific, not build-host-specific. Local packaging,
 package verification and extraction require independent identity/tree digests
 and an absolute `--forbidden-prefix` to scan for build-path leakage.
 
+Compiler and SDK artifacts share the `aros-toolchains` release model; SDK
+product versions remain separate. This is not a claim of a published SDK or
+Vanilla runtime ABI compatibility.
+
 `verify-source` requires `--identity FILE --identity-sha256 SHA256`,
 `--source-dir DIR`, `--materialized-source-dir DIR` and `--source-preset NAME`.
 The original must be clean with initialized submodules. The projection must
