@@ -46,6 +46,7 @@ pub mod pins;
 pub mod process;
 pub mod publication;
 pub mod sdk_manifest;
+pub mod sdk_release_lock;
 pub mod target;
 pub mod text;
 pub mod toolchain;
