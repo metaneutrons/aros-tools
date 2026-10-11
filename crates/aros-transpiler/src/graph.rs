@@ -516,7 +516,7 @@ mod linking;
 mod meta;
 #[path = "graph_selection.rs"]
 mod selection;
-pub(crate) use selection::endpoint as native_endpoint;
+pub use selection::endpoint as native_endpoint;
 
 pub use audit::NativeGraphAudit;
 

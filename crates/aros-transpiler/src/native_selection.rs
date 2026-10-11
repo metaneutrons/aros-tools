@@ -10,6 +10,14 @@ use aros_transpiler::{DependencyGraph, TargetContext};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+/// Bind a parsed metadata owner to the selected source configuration. Keep an
+/// unresolved spelling visible; it cannot match a contract's literal owner.
+pub fn selected_meta_owner(raw: &str, context: Option<&TargetContext>) -> String {
+    context
+        .and_then(|context| aros_transpiler::graph::native_endpoint(raw, context).ok())
+        .unwrap_or_else(|| raw.to_owned())
+}
+
 #[cfg(test)]
 #[path = "native_consumer_selection_tests.rs"]
 mod native_consumer_selection_tests;

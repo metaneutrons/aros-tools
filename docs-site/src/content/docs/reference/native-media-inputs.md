@@ -200,8 +200,10 @@ The transpiler selects it explicitly with `--native-consumer-profile` and can
 bind its exact bytes with `--native-consumer-contract-sha256`. This mode cannot
 be combined with the full-build `--native-profile` selection. Both use the same
 strict dependency closure and source-owner checks; missing required endpoints,
-selected capability errors and unknown/global errors remain fatal. Contract
-files are limited to 1 MiB, inputs to 16 MiB each, and symlink or hardlinked
+selected capability errors and unknown/global errors remain fatal.
+Optional edges use a literal selected owner and its exact source selector
+expression; owner selectors resolve from the same native context.
+Contract files are limited to 1 MiB, inputs to 16 MiB each, and symlink or hardlinked
 input aliases are rejected. Native invocation sidecars identify the contract
 kind; they are scope evidence, not build or release evidence.
 

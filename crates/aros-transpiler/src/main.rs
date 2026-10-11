@@ -33,6 +33,7 @@ use error_mapping::{diagnostics_error, error_to_diagnostics, source_location};
 use native_selection::{
     append_unscoped_diagnostics, bind_architecture_effects, load_native_selection,
     native_build_exclusion, native_selection_input_error, reverify_native_owner_projection,
+    selected_meta_owner,
 };
 use publication::Publication;
 use reports::{render_source_inventory_manifest, resolved_publication_path, write_report};
@@ -523,7 +524,10 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                     for rule in &parsed.explicit_meta_rules {
                         for dependency in &rule.dependencies {
                             meta_edge_sources
-                                .entry((rule.name.clone(), dependency.clone()))
+                                .entry((
+                                    selected_meta_owner(&rule.name, target.as_ref()),
+                                    dependency.clone(),
+                                ))
                                 .or_default()
                                 .insert(relative.to_string());
                         }
@@ -550,7 +554,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                             }));
                         }
                         if !parsed.explicit_meta_rules.iter().any(|rule| {
-                            rule.name == declaration.target
+                            selected_meta_owner(&rule.name, target.as_ref()) == declaration.target
                                 && rule.dependencies.contains(&declaration.dependency)
                         }) {
                             return Err(native_selection_input_error(ArosError::Configuration {
