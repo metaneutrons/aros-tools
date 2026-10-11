@@ -47,6 +47,7 @@ pub use environment_plan::{
 };
 #[cfg(test)]
 pub(crate) use execution::fixture_riscv_elf;
+pub(crate) use execution::readback_generated_sdk_root;
 #[cfg(test)]
 pub(crate) use execution::receipt_readback_tests;
 pub use execution::{

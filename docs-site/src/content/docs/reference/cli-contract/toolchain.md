@@ -63,12 +63,8 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer compatibility` | build_environment | `--build-environment` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | forbidden_prefixes | `--forbidden-prefix` | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | package_dir | `--package-dir` | — | required | 1 |  |  | — |  |
-| `aros toolchain producer compatibility` | package_format | `--package-format` | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
 | `aros toolchain producer compatibility` | first_root | `--first-root` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | second_root | `--second-root` | — | required | 1 |  |  | — |  |
-| `aros toolchain producer compatibility` | source_dir | `--source-dir` | — | required | 1 |  |  | — |  |
-| `aros toolchain producer compatibility` | source_preset | `--source-preset` | — | optional | 1 |  |  | — |  |
-| `aros toolchain producer compatibility` | consumer_source_date_epoch | `--consumer-source-date-epoch` | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | engine_work_dir | `--engine-work-dir` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | helpers_dir | `--helpers-dir` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | cmake_program | `--cmake-program` | — | required | 1 |  |  | — |  |
@@ -87,9 +83,13 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer compatibility` | cxx_fixture | `--cxx-fixture` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | standalone_output_dir | `--standalone-output-dir` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | reports_dir | `--reports-dir` | — | required | 1 |  |  | — |  |
-| `aros toolchain producer compatibility` | evidence_dir | `--evidence-dir` | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | jobs | `--jobs` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | timeout_seconds | `--timeout-seconds` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer compatibility` | package_format | `--package-format` | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
+| `aros toolchain producer compatibility` | source_dir | `--source-dir` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer compatibility` | source_preset | `--source-preset` | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer compatibility` | consumer_source_date_epoch | `--consumer-source-date-epoch` | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer compatibility` | evidence_dir | `--evidence-dir` | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | format | `--format` | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer compatibility-host-tools` | host | `--host` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer environment` | host | `--host` | — | required | 1 |  |  | — |  |

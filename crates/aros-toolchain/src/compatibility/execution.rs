@@ -484,6 +484,31 @@ fn native_sdk_request(
     }))
 }
 
+/// Preserve one validation path for retained phases, links and SDK selection.
+///
+/// # Errors
+/// Rejects changed retained evidence or a missing ordinary SDK proof.
+pub fn readback_generated_sdk_root(
+    request: &NativeCompatibilityRequest,
+    profiles: &crate::profiles::Profiles,
+    expected: &NativeCompatibilityReport,
+) -> Result<PathBuf, ContractError> {
+    let retained = readback_retained_native_compatibility(request, profiles)?;
+    if retained.receipt_sha256 != expected.receipt.sha256 {
+        return Err(ContractError::compatibility(
+            "generated SDK compatibility receipt changed",
+        ));
+    }
+    let inputs = validate_inputs(request)?;
+    let sdk_request = native_sdk_request(request, &inputs)?.ok_or_else(|| {
+        ContractError::compatibility("SDK generation requires ordinary source-v2 links")
+    })?;
+    let sdk_report = expected.native_sdk.as_ref().ok_or_else(|| {
+        ContractError::compatibility("SDK generation lost its ordinary link report")
+    })?;
+    super::native_sdk_links::readback_generated_root(&sdk_request, sdk_report)
+}
+
 fn write_compatibility_receipt(
     reports_root: &Path,
     probes: &CompatibilityProbeSet,

@@ -1125,7 +1125,7 @@ pub(crate) fn spdx_bytes(
     }))
 }
 
-fn rfc3339(seconds: u64) -> Result<String, ContractError> {
+pub(crate) fn rfc3339(seconds: u64) -> Result<String, ContractError> {
     let seconds = i64::try_from(seconds).map_err(|_| {
         ContractError::package("source date epoch is outside the supported timestamp range")
     })?;

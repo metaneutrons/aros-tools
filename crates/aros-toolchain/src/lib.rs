@@ -76,9 +76,15 @@ pub mod repackage;
 #[cfg(unix)]
 pub mod repackage_v2;
 #[cfg(unix)]
+pub mod sdk_generation;
+#[cfg(unix)]
 pub mod sdk_package;
 #[cfg(unix)]
 pub mod sdk_project;
+#[cfg(unix)]
+pub mod sdk_release_selection;
+#[cfg(unix)]
+pub mod sdk_sbom;
 #[cfg(unix)]
 pub mod sdk_source;
 #[cfg(unix)]

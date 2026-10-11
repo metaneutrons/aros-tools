@@ -2,7 +2,7 @@
 //! Actual local SDK CLI stages, without a checkout or compiler execution.
 
 use aros_common::sdk_manifest::{SdkAbiValue, SdkIdentity, SdkSourceIdentity, SdkTarget};
-use aros_common::{sha256_bytes, toolchain_tree_inventory_excluding};
+use aros_common::{sha256_bytes, toolchain_tree_inventory_excluding, Sha256Digest};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -62,6 +62,15 @@ impl Fixture {
     }
 
     fn command(&self, leaf: &str) -> Command {
+        self.command_with_selection(leaf, &self.identity_sha256, &self.tree_sha256)
+    }
+
+    fn command_with_selection(
+        &self,
+        leaf: &str,
+        identity_sha256: &str,
+        tree_sha256: &str,
+    ) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
         command
             .current_dir(&self.root)
@@ -69,9 +78,9 @@ impl Fixture {
             .arg("--identity")
             .arg(&self.identity)
             .arg("--identity-sha256")
-            .arg(&self.identity_sha256)
+            .arg(identity_sha256)
             .arg("--tree-sha256")
-            .arg(&self.tree_sha256)
+            .arg(tree_sha256)
             .arg("--forbidden-prefix")
             .arg(self.root.join("never-used-build-root"));
         command
@@ -103,6 +112,63 @@ impl Fixture {
             );
         command
     }
+
+    fn sdk_asset_name(&self) -> String {
+        let identity: SdkIdentity =
+            serde_json::from_slice(&fs::read(&self.identity).unwrap()).unwrap();
+        identity.asset_name().unwrap()
+    }
+
+    fn sbom_command(
+        &self,
+        package: &Path,
+        output: &Path,
+        identity_sha256: &str,
+        tree_sha256: &str,
+        archive_sha256: &str,
+        archive_size: u64,
+    ) -> Command {
+        let mut command = self.command_with_selection("sbom", identity_sha256, tree_sha256);
+        command
+            .arg("--package-dir")
+            .arg(package)
+            .arg("--archive-sha256")
+            .arg(archive_sha256)
+            .arg("--archive-size")
+            .arg(archive_size.to_string())
+            .arg("--output")
+            .arg(output);
+        command
+    }
+
+    fn selected_sbom_command(&self, package: &Path, output: &Path, result: &Value) -> Command {
+        self.sbom_command(
+            package,
+            output,
+            &self.identity_sha256,
+            &self.tree_sha256,
+            result["result"]["archive_sha256"].as_str().unwrap(),
+            result["result"]["archive_size"].as_u64().unwrap(),
+        )
+    }
+
+    fn sdk_verification_request(
+        &self,
+        package: &Path,
+        result: &Value,
+    ) -> aros_toolchain::sdk_package::SdkVerificationRequest {
+        aros_toolchain::sdk_package::SdkVerificationRequest {
+            package_dir: package.to_path_buf(),
+            identity: serde_json::from_slice(&fs::read(&self.identity).unwrap()).unwrap(),
+            expected_tree_sha256: Sha256Digest::parse(&self.tree_sha256).unwrap(),
+            expected_archive_sha256: Sha256Digest::parse(
+                result["result"]["archive_sha256"].as_str().unwrap(),
+            )
+            .unwrap(),
+            expected_archive_size: result["result"]["archive_size"].as_u64().unwrap(),
+            forbidden_prefixes: vec![self.root.join("never-used-build-root")],
+        }
+    }
 }
 
 fn success(output: &Output) -> Value {
@@ -118,6 +184,31 @@ fn success(output: &Output) -> Value {
         "local-byte-consistency-not-release-admission"
     );
     result
+}
+
+fn assert_rejected(output: &Output, expected_reason: &str) {
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "failed command emitted a result");
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(diagnostic["schema"], "aros-tool-diagnostics-v1");
+    assert_eq!(diagnostic["diagnostics"][0]["severity"], "error");
+    let message = diagnostic["diagnostics"][0]["message"]
+        .as_str()
+        .expect("JSON diagnostic message");
+    assert!(
+        message.contains(expected_reason),
+        "expected failure containing {expected_reason:?}, got {message:?}"
+    );
+}
+
+fn assert_rejected_without_sbom(output: &Output, expected_reason: &str, sbom: &Path) {
+    assert_rejected(output, expected_reason);
+    assert!(!sbom.exists(), "rejected command created an SPDX output");
+}
+
+fn different_digest(digest: &str) -> String {
+    let first = if digest.starts_with('0') { '1' } else { '0' };
+    format!("{first}{}", &digest[1..])
 }
 
 #[test]
@@ -235,6 +326,314 @@ fn sdk_cli_rejects_wrong_archive_selections_before_extraction() {
         assert!(!command.output().unwrap().status.success());
         assert!(!absent.exists());
     }
+}
+
+fn assert_exact_sdk_package_members(package: &Path, asset: &str) {
+    let names = fs::read_dir(package)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        names,
+        std::collections::BTreeSet::from([
+            asset.to_owned(),
+            format!("{asset}.manifest.json"),
+            format!("{asset}.sha256"),
+        ])
+    );
+}
+
+#[test]
+fn sdk_sbom_cli_is_deterministic_and_keeps_metadata_out_of_the_package() {
+    let fixture = Fixture::new();
+    let package = fixture.root.join("package");
+    let packaged = success(&fixture.package(&package));
+    let asset = fixture.sdk_asset_name();
+    assert_exact_sdk_package_members(&package, &asset);
+
+    let expected = aros_toolchain::sdk_sbom::build_measured_sdk_sbom(
+        &fixture.sdk_verification_request(&package, &packaged),
+    )
+    .unwrap();
+    let output_name = format!("{asset}.spdx.json");
+    let first_stage = fixture.root.join("sbom-stage-a");
+    let second_stage = fixture.root.join("sbom-stage-b");
+    fs::create_dir(&first_stage).unwrap();
+    fs::create_dir(&second_stage).unwrap();
+    let first_path = first_stage.join(&output_name);
+    let second_path = second_stage.join(&output_name);
+
+    let first = success(
+        &fixture
+            .selected_sbom_command(&package, &first_path, &packaged)
+            .output()
+            .unwrap(),
+    );
+    let second = success(
+        &fixture
+            .selected_sbom_command(&package, &second_path, &packaged)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(fs::read(&first_path).unwrap(), expected);
+    assert_eq!(fs::read(&second_path).unwrap(), expected);
+    assert_eq!(
+        fs::read(&first_path).unwrap(),
+        fs::read(&second_path).unwrap()
+    );
+    for (result, path) in [(&first, &first_path), (&second, &second_path)] {
+        assert_eq!(result["result"]["output"], path.to_str().unwrap());
+        assert_eq!(
+            result["result"]["sha256"],
+            sha256_bytes(&expected).to_string()
+        );
+        assert_eq!(result["result"]["size"], expected.len() as u64);
+    }
+    assert_exact_sdk_package_members(&package, &asset);
+    success(
+        &fixture
+            .readback("verify-package", &package, &packaged)
+            .output()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn sdk_sbom_cli_rejects_bad_selections_without_creating_output() {
+    let fixture = Fixture::new();
+    let package = fixture.root.join("package");
+    let packaged = success(&fixture.package(&package));
+    let asset = fixture.sdk_asset_name();
+    let output_name = format!("{asset}.spdx.json");
+    let archive_sha256 = packaged["result"]["archive_sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let archive_size = packaged["result"]["archive_size"].as_u64().unwrap();
+    let wrong_archive_sha256 = different_digest(&archive_sha256);
+    let wrong_tree_sha256 = different_digest(&fixture.tree_sha256);
+
+    let bad_identity_output = fixture.root.join("bad-identity").join(&output_name);
+    fs::create_dir(bad_identity_output.parent().unwrap()).unwrap();
+    let selected_identity_bytes = fs::read(&fixture.identity).unwrap();
+    fs::write(&fixture.identity, b"{}\n").unwrap();
+    let bad_identity = fixture
+        .sbom_command(
+            &package,
+            &bad_identity_output,
+            &fixture.identity_sha256,
+            &fixture.tree_sha256,
+            &archive_sha256,
+            archive_size,
+        )
+        .output()
+        .unwrap();
+    fs::write(&fixture.identity, &selected_identity_bytes).unwrap();
+    assert_rejected_without_sbom(
+        &bad_identity,
+        "SDK identity document differs from its independently selected SHA-256",
+        &bad_identity_output,
+    );
+
+    let bad_archive_output = fixture.root.join("bad-archive").join(&output_name);
+    fs::create_dir(bad_archive_output.parent().unwrap()).unwrap();
+    let bad_archive = fixture
+        .sbom_command(
+            &package,
+            &bad_archive_output,
+            &fixture.identity_sha256,
+            &fixture.tree_sha256,
+            &wrong_archive_sha256,
+            archive_size,
+        )
+        .output()
+        .unwrap();
+    assert_rejected_without_sbom(
+        &bad_archive,
+        "SDK archive differs from its independently selected hash or size",
+        &bad_archive_output,
+    );
+
+    let bad_tree_output = fixture.root.join("bad-tree").join(&output_name);
+    fs::create_dir(bad_tree_output.parent().unwrap()).unwrap();
+    let bad_tree = fixture
+        .sbom_command(
+            &package,
+            &bad_tree_output,
+            &fixture.identity_sha256,
+            &wrong_tree_sha256,
+            &archive_sha256,
+            archive_size,
+        )
+        .output()
+        .unwrap();
+    assert_rejected_without_sbom(
+        &bad_tree,
+        "SDK manifest tree digest differs from the selected tree digest",
+        &bad_tree_output,
+    );
+
+    let archive_path = package.join(&asset);
+    let original_archive = fs::read(&archive_path).unwrap();
+    fs::write(&archive_path, b"corrupt archive\n").unwrap();
+    let corrupt_archive_output = fixture.root.join("corrupt-archive").join(&output_name);
+    fs::create_dir(corrupt_archive_output.parent().unwrap()).unwrap();
+    let corrupt_archive = fixture
+        .sbom_command(
+            &package,
+            &corrupt_archive_output,
+            &fixture.identity_sha256,
+            &fixture.tree_sha256,
+            &archive_sha256,
+            archive_size,
+        )
+        .output()
+        .unwrap();
+    assert_rejected_without_sbom(
+        &corrupt_archive,
+        "SDK archive differs from its independently selected hash or size",
+        &corrupt_archive_output,
+    );
+    fs::write(&archive_path, original_archive).unwrap();
+
+    let missing_package = fixture.root.join("missing-package");
+    let missing_output = fixture
+        .root
+        .join("missing-package-output")
+        .join(&output_name);
+    fs::create_dir(missing_output.parent().unwrap()).unwrap();
+    let missing_package_output = fixture
+        .sbom_command(
+            &missing_package,
+            &missing_output,
+            &fixture.identity_sha256,
+            &fixture.tree_sha256,
+            &archive_sha256,
+            archive_size,
+        )
+        .output()
+        .unwrap();
+    assert_rejected_without_sbom(
+        &missing_package_output,
+        "SDK directory is inaccessible",
+        &missing_output,
+    );
+}
+
+#[test]
+fn sdk_sbom_cli_preserves_occupied_outputs_and_rejects_unsafe_paths() {
+    let fixture = Fixture::new();
+    let package = fixture.root.join("package");
+    let packaged = success(&fixture.package(&package));
+    let asset = fixture.sdk_asset_name();
+    let output_name = format!("{asset}.spdx.json");
+    let archive_sha256 = packaged["result"]["archive_sha256"].as_str().unwrap();
+    let archive_size = packaged["result"]["archive_size"].as_u64().unwrap();
+
+    let regular_output = fixture.root.join("regular-stage").join(&output_name);
+    fs::create_dir(regular_output.parent().unwrap()).unwrap();
+    fs::write(&regular_output, b"regular sentinel\n").unwrap();
+    let regular_rejection = fixture
+        .sbom_command(
+            &package,
+            &regular_output,
+            &fixture.identity_sha256,
+            &fixture.tree_sha256,
+            archive_sha256,
+            archive_size,
+        )
+        .output()
+        .unwrap();
+    assert_rejected(
+        &regular_rejection,
+        "SDK SPDX output already exists or is unavailable",
+    );
+    assert_eq!(fs::read(&regular_output).unwrap(), b"regular sentinel\n");
+
+    let symlink_target = fixture.root.join("symlink-sentinel");
+    fs::write(&symlink_target, b"symlink sentinel\n").unwrap();
+    let symlink_output = fixture.root.join("symlink-stage").join(&output_name);
+    fs::create_dir(symlink_output.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&symlink_target, &symlink_output).unwrap();
+    let symlink_rejection = fixture
+        .sbom_command(
+            &package,
+            &symlink_output,
+            &fixture.identity_sha256,
+            &fixture.tree_sha256,
+            archive_sha256,
+            archive_size,
+        )
+        .output()
+        .unwrap();
+    assert_rejected(
+        &symlink_rejection,
+        "SDK SPDX output already exists or is unavailable",
+    );
+    assert!(fs::symlink_metadata(&symlink_output)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_link(&symlink_output).unwrap(), symlink_target);
+    assert_eq!(fs::read(&symlink_target).unwrap(), b"symlink sentinel\n");
+
+    let relative_output = PathBuf::from(&output_name);
+    let relative_rejection = fixture
+        .sbom_command(
+            &package,
+            &relative_output,
+            &fixture.identity_sha256,
+            &fixture.tree_sha256,
+            archive_sha256,
+            archive_size,
+        )
+        .output()
+        .unwrap();
+    assert_rejected_without_sbom(
+        &relative_rejection,
+        "SDK SPDX output must be an absolute <archive>.spdx.json path",
+        &fixture.root.join(&output_name),
+    );
+    assert!(!fixture.root.join(&output_name).exists());
+
+    let misnamed_output = fixture.root.join("misnamed.spdx.json");
+    let misnamed_rejection = fixture
+        .sbom_command(
+            &package,
+            &misnamed_output,
+            &fixture.identity_sha256,
+            &fixture.tree_sha256,
+            archive_sha256,
+            archive_size,
+        )
+        .output()
+        .unwrap();
+    assert_rejected_without_sbom(
+        &misnamed_rejection,
+        "SDK SPDX output must be an absolute <archive>.spdx.json path",
+        &misnamed_output,
+    );
+    assert!(!misnamed_output.exists());
+
+    let package_output = package.join(&output_name);
+    let package_rejection = fixture
+        .sbom_command(
+            &package,
+            &package_output,
+            &fixture.identity_sha256,
+            &fixture.tree_sha256,
+            archive_sha256,
+            archive_size,
+        )
+        .output()
+        .unwrap();
+    assert_rejected_without_sbom(
+        &package_rejection,
+        "SDK SPDX output must be outside the SDK package",
+        &package_output,
+    );
+    assert!(!package_output.exists());
+    assert_exact_sdk_package_members(&package, &asset);
 }
 
 fn release_fixture(

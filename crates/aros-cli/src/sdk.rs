@@ -7,6 +7,12 @@ use miette::{IntoDiagnostic, Result};
 use std::io::Read;
 use std::path::PathBuf;
 
+use crate::toolchain_producer::native_compatibility;
+
+#[cfg(unix)]
+#[path = "sdk_spdx_output.rs"]
+mod spdx_output;
+
 const SDK_SELECTION_HELP: &str = "Select either `--release-lock FILE --lock-sha256 SHA256` or `--project-lock FILE`. A project lock is explicit local application configuration, not publisher authentication.";
 
 #[derive(Subcommand)]
@@ -14,10 +20,14 @@ const SDK_SELECTION_HELP: &str = "Select either `--release-lock FILE --lock-sha2
 pub enum SdkCommand {
     /// Bind SDK identity to an audited committed source projection without building
     VerifySource(SourceArgs),
+    /// Verify a source-owned SDK, generate it with native compatibility and package it
+    Build(Box<BuildArgs>),
     /// Package one source-produced SDK without modifying it or publishing a release
     Package(PackageArgs),
     /// Verify a complete local SDK package against explicit identity and digests
     VerifyPackage(VerifyArgs),
+    /// Write deterministic SPDX metadata for a verified SDK into a separate stage
+    Sbom(SbomArgs),
     /// Verify and extract one SDK into an absent directory; not managed installation
     Extract(ExtractArgs),
     /// Acquire and completely verify locked SDK bytes without installing them
@@ -43,8 +53,10 @@ impl SdkCommand {
     pub const fn diagnostic_mode(&self) -> &'static str {
         match self {
             Self::VerifySource(_) => "sdk.verify-source",
+            Self::Build(_) => "sdk.build",
             Self::Package(_) => "sdk.package",
             Self::VerifyPackage(_) => "sdk.verify-package",
+            Self::Sbom(_) => "sdk.sbom",
             Self::Extract(_) => "sdk.extract",
             Self::Download(_) => "sdk.download",
             Self::Install(_) => "sdk.install",
@@ -74,6 +86,15 @@ pub struct SourceArgs {
     /// Exact source-owned profile with a sealed v2 native SDK consumer contract
     #[arg(long, value_name = "NAME")]
     source_preset: String,
+}
+
+#[derive(Args)]
+/// Complete local SDK generation and packaging from a verified source binding.
+pub struct BuildArgs {
+    #[command(flatten)]
+    source: SourceArgs,
+    #[command(flatten)]
+    native: native_compatibility::SdkBuildArgs,
 }
 
 #[derive(Args)]
@@ -132,6 +153,16 @@ pub struct ExtractArgs {
     output_root: PathBuf,
 }
 
+#[derive(Args)]
+/// Verified package selection and one supplemental distribution metadata file.
+pub struct SbomArgs {
+    #[command(flatten)]
+    verification: VerifyArgs,
+    /// Absent absolute <archive>.spdx.json file outside the SDK package directory
+    #[arg(long, value_name = "FILE")]
+    output: PathBuf,
+}
+
 fn parse_positive_bytes(value: &str) -> std::result::Result<u64, String> {
     value
         .parse::<u64>()
@@ -181,7 +212,8 @@ fn verification(args: &VerifyArgs) -> Result<aros_toolchain::sdk_package::SdkVer
 /// Execute one SDK operation without source discovery or release publication.
 pub async fn run(command: SdkCommand) -> Result<()> {
     match command {
-        SdkCommand::VerifySource(args) => verify_source(args),
+        SdkCommand::VerifySource(args) => verify_source(&args),
+        SdkCommand::Build(args) => build(*args).await,
         SdkCommand::Download(args) => crate::sdk_managed::download(args).await,
         SdkCommand::Install(args) => crate::sdk_managed::install(args).await,
         SdkCommand::List(args) => crate::sdk_managed::list(args),
@@ -193,20 +225,8 @@ pub async fn run(command: SdkCommand) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn verify_source(args: SourceArgs) -> Result<()> {
-    let identity = read_selected_identity(&args.identity, &args.identity_sha256)?;
-    let verified = aros_toolchain::sdk_source::verify_sdk_source(
-        &aros_toolchain::sdk_source::SdkSourceVerificationRequest {
-            source_root: args.source_dir,
-            materialized_source_root: args.materialized_source_dir,
-            source_preset: args.source_preset,
-            identity,
-        },
-    ).map_err(|error| {
-        let mut diagnostic = error.diagnostics().diagnostics[0].clone();
-        diagnostic.hint = Some("select the exact clean original checkout, its engine-free materialization and sealed source SDK contract; source verification is read-only and does not repair or execute inputs".into());
-        crate::observability::native_diagnostic(diagnostic)
-    })?;
+fn verify_source(args: &SourceArgs) -> Result<()> {
+    let verified = verify_source_selection(args)?;
     read_selected_identity(&args.identity, &args.identity_sha256)?;
     aros_common::outputln!(
         "{}",
@@ -218,6 +238,42 @@ fn verify_source(args: SourceArgs) -> Result<()> {
         })
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn verify_source_selection(
+    args: &SourceArgs,
+) -> Result<aros_toolchain::sdk_source::VerifiedSdkSource> {
+    let identity = read_selected_identity(&args.identity, &args.identity_sha256)?;
+    let verified = aros_toolchain::sdk_source::verify_sdk_source(
+        &aros_toolchain::sdk_source::SdkSourceVerificationRequest {
+            source_root: args.source_dir.clone(),
+            materialized_source_root: args.materialized_source_dir.clone(),
+            source_preset: args.source_preset.clone(),
+            identity,
+        },
+    ).map_err(|error| {
+        let mut diagnostic = error.diagnostics().diagnostics[0].clone();
+        diagnostic.hint = Some("select the exact clean original checkout, its engine-free materialization and sealed source SDK contract; source verification is read-only and does not repair or execute inputs".into());
+        crate::observability::native_diagnostic(diagnostic)
+    })?;
+    Ok(verified)
+}
+
+#[cfg(unix)]
+async fn build(args: BuildArgs) -> Result<()> {
+    // Establish the SDK identity/source binding before the compatibility path can
+    // materialize any private roots or invoke source-owned programs.
+    let source = verify_source_selection(&args.source)?;
+    read_selected_identity(&args.source.identity, &args.source.identity_sha256)?;
+    let original_source_dir = args.source.source_dir.clone();
+    let identity_path = args.source.identity.clone();
+    native_compatibility::build_sdk(source, original_source_dir, identity_path, args.native).await
+}
+
+#[cfg(not(unix))]
+async fn build(_args: BuildArgs) -> Result<()> {
+    miette::bail!("local SDK generation requires a supported Unix host")
 }
 
 #[cfg(unix)]
@@ -260,6 +316,7 @@ fn run_local(command: SdkCommand) -> Result<()> {
                 "archive_sha256":verified.archive_sha256,"archive_size":verified.archive_size,
                 "tree_sha256":verified.manifest.tree_sha256})
         }
+        SdkCommand::Sbom(args) => write_sbom(&args)?,
         _ => {
             miette::bail!("managed SDK command reached the local package boundary");
         }
@@ -275,6 +332,57 @@ fn run_local(command: SdkCommand) -> Result<()> {
 }
 
 #[cfg(unix)]
+fn write_sbom(args: &SbomArgs) -> Result<serde_json::Value> {
+    let request = verification(&args.verification)?;
+    let name = format!(
+        "{}.spdx.json",
+        request
+            .identity
+            .asset_name()
+            .map_err(|error| miette::miette!("{error}"))?
+    );
+    if !args.output.is_absolute()
+        || args.output.file_name().and_then(|n| n.to_str()) != Some(name.as_str())
+    {
+        miette::bail!("SDK SPDX output must be an absolute <archive>.spdx.json path");
+    }
+    let parent = args
+        .output
+        .parent()
+        .ok_or_else(|| miette::miette!("SDK SPDX output has no parent"))?
+        .canonicalize()
+        .into_diagnostic()?;
+    let package_dir = request
+        .package_dir
+        .canonicalize()
+        .map_err(|error| miette::miette!("SDK directory is inaccessible: {error}"))?;
+    if !parent.is_dir() || parent.starts_with(package_dir) {
+        miette::bail!("SDK SPDX output must be outside the SDK package in an existing directory");
+    }
+    let destination = spdx_output::Destination::prepare(&parent, &name).into_diagnostic()?;
+    let output = destination.path();
+    let bytes = aros_toolchain::sdk_sbom::build_measured_sdk_sbom(&request)
+        .map_err(|error| native_error(&error))?;
+    selected_identity(&args.verification.selection)?;
+    let digest = aros_common::sha256_bytes(&bytes);
+    destination.write(&bytes).map_err(|error| {
+        miette::miette!("SDK SPDX output already exists or is unavailable: {error}")
+    })?;
+    let (_, measured) = measure_regular_file_digest_bounded(output, SDK_MAX_METADATA_BYTES as u64)
+        .into_diagnostic()?;
+    if measured.digest != digest
+        || measured.size != bytes.len() as u64
+        || aros_toolchain::sdk_sbom::build_measured_sdk_sbom(&request)
+            .map_err(|error| native_error(&error))?
+            != bytes
+    {
+        miette::bail!("SDK package or SPDX output changed during generation; output retained");
+    }
+    selected_identity(&args.verification.selection)?;
+    Ok(serde_json::json!({"output":output,"sha256":digest,"size":measured.size}))
+}
+
+#[cfg(unix)]
 fn native_error(error: &aros_toolchain::ContractError) -> miette::Report {
     let mut diagnostic = error.diagnostics().diagnostics[0].clone();
     diagnostic.hint = Some("inspect the named SDK input and independent selection; packaging never changes the candidate or reuses an output, and an extraction root is retained if failure occurs after its creation".into());
@@ -285,4 +393,45 @@ fn native_error(error: &aros_toolchain::ContractError) -> miette::Report {
 /// Refuse unsupported local SDK execution rather than approximating Unix policy.
 pub async fn run(_command: SdkCommand) -> Result<()> {
     miette::bail!("local SDK package stages require a supported Unix host")
+}
+
+#[cfg(test)]
+mod build_tests {
+    use clap::CommandFactory as _;
+
+    #[test]
+    fn sdk_build_reuses_source_binding_without_redundant_generation_selectors() {
+        let root = crate::Cli::command();
+        let command = root
+            .find_subcommand("sdk")
+            .unwrap()
+            .find_subcommand("build")
+            .unwrap();
+        let ids = command
+            .get_arguments()
+            .map(|argument| argument.get_id().as_str())
+            .collect::<Vec<_>>();
+
+        for required in [
+            "identity",
+            "identity_sha256",
+            "source_dir",
+            "materialized_source_dir",
+            "source_preset",
+            "preset",
+            "generation_record",
+            "output_dir",
+            "sdk_forbidden_prefixes",
+            "forbidden_prefixes",
+        ] {
+            assert!(ids.contains(&required), "missing --{required}");
+        }
+        for prohibited in [
+            "candidate_root",
+            "tree_sha256",
+            "consumer_source_date_epoch",
+        ] {
+            assert!(!ids.contains(&prohibited), "unexpected --{prohibited}");
+        }
+    }
 }

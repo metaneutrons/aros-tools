@@ -31,6 +31,16 @@ const LANE_SCHEMA: &str = "aros-toolchain-index-lanes-v1";
 struct LaneInputs {
     schema: String,
     lanes: BTreeMap<String, LaneInput>,
+    #[serde(default)]
+    sdks: BTreeMap<String, SdkLaneInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SdkLaneInput {
+    tree_sha256: String,
+    archive_sha256: String,
+    archive_size: u64,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +101,30 @@ pub(super) fn run(args: IndexArgs) -> miette::Result<()> {
         required_paths.insert(asset, lane.required_paths);
     }
     let inputs = ReleaseInputs::load(&args.directory).map_err(|error| native_error(&error))?;
+    if lanes.sdks.len() != inputs.sdks().len()
+        || !lanes.sdks.keys().map(String::as_str).eq(inputs
+            .sdks()
+            .iter()
+            .map(aros_toolchain::release_inputs::BoundSdk::id))
+    {
+        return Err(miette::miette!(
+            "family-v2 independent SDK lanes must exactly cover the selected SDK products"
+        ));
+    }
+    let mut sdk_packages = BTreeMap::new();
+    for (lane, selected) in lanes.sdks.values().zip(inputs.sdks()) {
+        sdk_packages.insert(
+            selected.id().to_owned(),
+            aros_toolchain::sdk_package::SdkVerificationRequest {
+                package_dir: args.directory.clone(),
+                identity: selected.identity().clone(),
+                expected_tree_sha256: sdk_digest(&lane.tree_sha256)?,
+                expected_archive_sha256: sdk_digest(&lane.archive_sha256)?,
+                expected_archive_size: lane.archive_size,
+                forbidden_prefixes: Vec::new(),
+            },
+        );
+    }
 
     let (index, index_sha256, manifest, checksums) = match args.stage {
         IndexStageArg::PreAttestation => {
@@ -101,6 +135,7 @@ pub(super) fn run(args: IndexArgs) -> miette::Result<()> {
                 base_url: args.base_url.clone(),
                 build_environments,
                 required_paths,
+                sdk_packages,
                 forbidden_prefixes: args.forbidden_prefixes,
             };
             let written =
@@ -110,6 +145,7 @@ pub(super) fn run(args: IndexArgs) -> miette::Result<()> {
                 inputs: measured.inputs,
                 index: written.index().clone(),
                 build_environments: measured.build_environments,
+                sdk_packages: measured.sdk_packages,
                 forbidden_prefixes: measured.forbidden_prefixes,
             };
             // A later write failure retains the index for diagnosis; these are
@@ -148,6 +184,7 @@ pub(super) fn run(args: IndexArgs) -> miette::Result<()> {
                 directory: args.directory.clone(),
                 inputs,
                 index: index.clone(),
+                sdk_packages,
                 build_environments,
                 forbidden_prefixes: args.forbidden_prefixes,
             };
@@ -199,6 +236,7 @@ pub(super) fn run(args: IndexArgs) -> miette::Result<()> {
         "subject_count": manifest.members().len(),
         "inventory_count": index.expected_inventory().len(),
         "lane_count": index.artifacts().len(),
+        "sdk_count": index.sdks().len(),
     });
     if let Some(checksums) = checksums {
         let provenance = checksums
@@ -326,7 +364,27 @@ fn parse_lanes(bytes: &[u8]) -> miette::Result<LaneInputs> {
             "family-v2 lane input schema or lane set is invalid"
         ));
     }
+    for sdk in lanes.sdks.values() {
+        sdk_digest(&sdk.tree_sha256)?;
+        sdk_digest(&sdk.archive_sha256)?;
+        if sdk.archive_size == 0 || sdk.archive_size > 4 * 1024 * 1024 * 1024 {
+            return Err(miette::miette!(
+                "family-v2 SDK archive size is outside its bounded contract"
+            ));
+        }
+    }
     Ok(lanes)
+}
+
+fn sdk_digest(value: &str) -> miette::Result<Sha256Digest> {
+    let parsed = Sha256Digest::parse(value)
+        .map_err(|_| miette::miette!("family-v2 SDK digest must be nonzero lowercase SHA-256"))?;
+    if parsed.as_str() != value || value.bytes().all(|byte| byte == b'0') {
+        return Err(miette::miette!(
+            "family-v2 SDK digest must be nonzero lowercase SHA-256"
+        ));
+    }
+    Ok(parsed)
 }
 
 struct UniqueJson(Value);
@@ -387,6 +445,51 @@ impl<'de> Deserialize<'de> for UniqueJson {
 #[cfg(test)]
 mod tests {
     use super::parse_lanes;
+
+    #[test]
+    fn sdk_lane_projection_is_closed_and_bounds_independent_archive_selection() {
+        let valid = serde_json::json!({
+            "schema": "aros-toolchain-index-lanes-v1",
+            "lanes": {"fixture.tar.xz": {"build_environment": {}, "required_paths": ["fixture"]}},
+            "sdks": {"riscv32-aros-ilp32f": {
+                "tree_sha256": "a".repeat(64),
+                "archive_sha256": "b".repeat(64),
+                "archive_size": 4_u64 * 1024 * 1024 * 1024
+            }}
+        });
+        let parsed = parse_lanes(&serde_json::to_vec(&valid).unwrap()).unwrap();
+        assert_eq!(parsed.sdks.len(), 1);
+        assert_eq!(
+            parsed.sdks["riscv32-aros-ilp32f"].archive_size,
+            4 * 1024 * 1024 * 1024
+        );
+        for (field, value) in [
+            ("archive_size", serde_json::json!(0)),
+            (
+                "archive_size",
+                serde_json::json!(4_u64 * 1024 * 1024 * 1024 + 1),
+            ),
+            ("tree_sha256", serde_json::json!("0".repeat(64))),
+            ("archive_sha256", serde_json::json!("B".repeat(64))),
+            ("archive_sha256", serde_json::json!("bad")),
+            ("unknown", serde_json::json!(true)),
+        ] {
+            let mut corrupt = valid.clone();
+            corrupt["sdks"]["riscv32-aros-ilp32f"][field] = value;
+            assert!(
+                parse_lanes(&serde_json::to_vec(&corrupt).unwrap()).is_err(),
+                "{field}"
+            );
+        }
+        let encoded = serde_json::to_string(&valid).unwrap();
+        let duplicate = encoded.replacen(
+            "\"archive_size\":",
+            "\"archive_size\":1,\"archive_size\":",
+            1,
+        );
+        assert_ne!(duplicate, encoded);
+        assert!(parse_lanes(duplicate.as_bytes()).is_err());
+    }
 
     #[test]
     fn closed_lane_projection_preserves_independent_environment_values() {

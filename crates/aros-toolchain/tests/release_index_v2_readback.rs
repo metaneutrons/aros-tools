@@ -6,7 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+#[cfg(unix)]
+use aros_common::sdk_manifest::SdkIdentity;
+#[cfg(unix)]
+use aros_common::sdk_release_lock::{SdkArtifactDigest, SdkReleaseLock, SDK_RELEASE_LOCK_SCHEMA};
 use aros_common::{sha256_bytes, ArosCompilerIdentity, DiagnosticCode};
+#[cfg(unix)]
+use aros_common::{toolchain_tree_inventory_excluding, Sha256Digest};
 #[cfg(unix)]
 use aros_toolchain::release_attestation_manifest_v2::{
     verify_attestation_manifest_v2, write_attestation_manifest_v2, AttestationManifestStageV2,
@@ -28,6 +34,11 @@ use aros_toolchain::{
     release_inputs::{ReleaseInputs, ACTIVE_HOSTS},
     source_lock::SourceLock,
 };
+#[cfg(unix)]
+use aros_toolchain::{
+    sdk_package::{self, SdkPackageRequest, SdkVerificationRequest},
+    sdk_sbom::build_measured_sdk_sbom,
+};
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 
@@ -38,6 +49,11 @@ const TOOLS_COMMIT: &str = "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4";
 const PRODUCER_TREE: &str = "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5";
 const TOOLS_TREE: &str = "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6";
 const RELEASE_ID: &str = "release-2026.10";
+#[cfg(unix)]
+const SDK_RELEASE_ID: &str = "v2.0.0";
+#[cfg(unix)]
+const SDK_RELEASE_BASE_URL: &str = "https://example.invalid/aros/releases/v2.0.0";
+const RELEASE_BASE_URL: &str = "https://example.invalid/aros/releases/2026.10";
 const PRIVATE_MARKER: &str = "synthetic-private-readback-marker";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +83,10 @@ struct Fixture {
     index: NativeReleaseIndexV2,
     index_value: Value,
     build_environments: BTreeMap<String, Map<String, Value>>,
+    #[cfg(unix)]
+    sdk_packages: BTreeMap<String, SdkVerificationRequest>,
+    release_id: String,
+    base_url: String,
 }
 
 impl Fixture {
@@ -82,6 +102,55 @@ impl Fixture {
         (collection, documents): (Value, BTreeMap<String, Vec<u8>>),
         expected_lanes: usize,
         expected_inventory: usize,
+    ) -> Self {
+        Self::build_at_release(
+            (collection, documents),
+            expected_lanes,
+            expected_inventory,
+            RELEASE_ID,
+            RELEASE_BASE_URL,
+        )
+    }
+
+    #[cfg(unix)]
+    fn build_sdk() -> Self {
+        Self::build_at_release(
+            sdk_input_documents(),
+            9,
+            53,
+            SDK_RELEASE_ID,
+            SDK_RELEASE_BASE_URL,
+        )
+    }
+
+    #[cfg(unix)]
+    fn build_sdk_pair() -> Self {
+        let (mut collection, mut documents) = sdk_input_documents();
+        let mut identity: Value =
+            serde_json::from_slice(&documents["core-sdk-identity.json"]).unwrap();
+        identity["sdk_id"] = json!("secondary-sdk");
+        identity["version"] = json!("0.1.0");
+        let bytes = serde_json::to_vec(&identity).unwrap();
+        documents.insert("secondary-sdk-identity.json".to_owned(), bytes.clone());
+        let mut selection = collection["sdks"][0].clone();
+        selection["id"] = json!("secondary-sdk");
+        selection["identity"] = document_reference("secondary-sdk-identity.json", &bytes);
+        collection["sdks"].as_array_mut().unwrap().push(selection);
+        Self::build_at_release(
+            (collection, documents),
+            9,
+            58,
+            SDK_RELEASE_ID,
+            SDK_RELEASE_BASE_URL,
+        )
+    }
+
+    fn build_at_release(
+        (collection, documents): (Value, BTreeMap<String, Vec<u8>>),
+        expected_lanes: usize,
+        expected_inventory: usize,
+        release_id: &str,
+        base_url: &str,
     ) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         // The read-back boundary rejects symlink ancestors. On macOS this
@@ -158,7 +227,7 @@ impl Fixture {
                             group.id(),
                             profile.name()
                         )),
-                        release_id: RELEASE_ID.to_owned(),
+                        release_id: release_id.to_owned(),
                         host: (*host).to_owned(),
                         recipe: group.recipe().clone(),
                         source_lock: group.source_lock().clone(),
@@ -206,15 +275,27 @@ impl Fixture {
         artifacts.sort_by(|left, right| left["asset"].as_str().cmp(&right["asset"].as_str()));
         assert_eq!(artifacts.len(), expected_lanes);
 
+        #[cfg(unix)]
+        let (sdk_packages, sdk_locks) =
+            build_sdk_fixture_packages(&root, &release_dir, &inputs, release_id, base_url);
+
         let index_value = json!({
             "schema": 2,
-            "release_id": RELEASE_ID,
-            "base_url": "https://example.invalid/aros/releases/2026.10",
+            "release_id": release_id,
+            "base_url": base_url,
             "inputs_sha256": sha256_bytes(&collection_bytes),
             "producer_commit": PRODUCER_COMMIT,
             "tools_commit": TOOLS_COMMIT,
             "artifacts": artifacts
         });
+        #[cfg(unix)]
+        let index_value = {
+            let mut value = index_value;
+            if !sdk_locks.is_empty() {
+                value["sdks"] = json!(sdk_locks);
+            }
+            value
+        };
         let index =
             NativeReleaseIndexV2::parse(&serde_json::to_vec(&index_value).unwrap(), &inputs)
                 .unwrap();
@@ -240,15 +321,31 @@ impl Fixture {
             index,
             index_value,
             build_environments,
+            #[cfg(unix)]
+            sdk_packages,
+            release_id: release_id.to_owned(),
+            base_url: base_url.to_owned(),
         }
     }
 
     fn request(&self, directory: PathBuf) -> IndexedPackageReadbackRequestV2 {
+        #[cfg(unix)]
+        let sdk_packages = self
+            .sdk_packages
+            .iter()
+            .map(|(id, package)| {
+                let mut package = package.clone();
+                package.package_dir.clone_from(&directory);
+                (id.clone(), package)
+            })
+            .collect();
         IndexedPackageReadbackRequestV2 {
             directory,
             inputs: self.inputs.clone(),
             index: self.index.clone(),
             build_environments: self.build_environments.clone(),
+            #[cfg(unix)]
+            sdk_packages,
             forbidden_prefixes: Vec::new(),
         }
     }
@@ -293,6 +390,16 @@ impl Fixture {
     }
 
     fn measured_index_request(&self, directory: PathBuf) -> MeasuredReleaseIndexRequestV2 {
+        #[cfg(unix)]
+        let sdk_packages = self
+            .sdk_packages
+            .iter()
+            .map(|(id, package)| {
+                let mut package = package.clone();
+                package.package_dir.clone_from(&directory);
+                (id.clone(), package)
+            })
+            .collect();
         let required_paths = self
             .index
             .artifacts()
@@ -307,10 +414,12 @@ impl Fixture {
         MeasuredReleaseIndexRequestV2 {
             directory,
             inputs: self.inputs.clone(),
-            release_id: RELEASE_ID.to_owned(),
-            base_url: "https://example.invalid/aros/releases/2026.10".to_owned(),
+            release_id: self.release_id.clone(),
+            base_url: self.base_url.clone(),
             build_environments: self.build_environments.clone(),
             required_paths,
+            #[cfg(unix)]
+            sdk_packages,
             forbidden_prefixes: Vec::new(),
         }
     }
@@ -506,6 +615,137 @@ fn input_documents() -> (Value, BTreeMap<String, Vec<u8>>) {
         }),
         documents,
     )
+}
+
+#[cfg(unix)]
+fn sdk_input_documents() -> (Value, BTreeMap<String, Vec<u8>>) {
+    let (mut collection, mut documents) = input_documents();
+    let identity = json!({
+        "sdk_id": "core-sdk",
+        "version": "1.2.3",
+        "target": {
+            "target_triple": "i686-aros",
+            "abi": {
+                "data_model": "ilp32",
+                "pointer_width": 32
+            }
+        },
+        "source": {
+            "commit": "9".repeat(40),
+            "git_tree": "8".repeat(40),
+            "content_sha256": "a".repeat(64),
+            "contract_sha256": "b".repeat(64)
+        },
+        "source_date_epoch": 946_684_800
+    });
+    let identity_bytes = serde_json::to_vec(&identity).unwrap();
+    documents.insert("core-sdk-identity.json".to_owned(), identity_bytes.clone());
+    collection["sdks"] = json!([{
+        "id": "core-sdk",
+        "identity": document_reference("core-sdk-identity.json", &identity_bytes),
+        "source_preset": "aros-core",
+        "compiler_profiles": [
+            {"group_id": "gnu-riscv", "profile": "rv32-aros"},
+            {"group_id": "llvm-pc", "profile": "pc-x86_64"}
+        ]
+    }]);
+    (collection, documents)
+}
+
+#[cfg(unix)]
+fn sdk_candidate(root: &Path, name: &str) -> PathBuf {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let candidate = root.join(name);
+    fs::create_dir(&candidate).unwrap();
+    fs::create_dir(candidate.join("bin")).unwrap();
+    fs::create_dir(candidate.join("include")).unwrap();
+    let executable = candidate.join("bin/aros");
+    fs::write(&executable, b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(candidate.join("include/aros.h"), b"#define AROS_SDK 1\n").unwrap();
+    fs::write(
+        candidate.join("toolchain-manifest.json"),
+        b"source metadata /tmp/aros-sdk-fixture-private-prefix\n",
+    )
+    .unwrap();
+    symlink("bin/aros", candidate.join("aros")).unwrap();
+    candidate
+}
+
+#[cfg(unix)]
+fn build_sdk_fixture_packages(
+    root: &Path,
+    release_dir: &Path,
+    inputs: &ReleaseInputs,
+    release_id: &str,
+    base_url: &str,
+) -> (
+    BTreeMap<String, SdkVerificationRequest>,
+    Vec<SdkReleaseLock>,
+) {
+    let mut requests = BTreeMap::new();
+    let mut locks = Vec::new();
+    for sdk in inputs.sdks() {
+        let identity: SdkIdentity = serde_json::from_slice(sdk.identity_bytes()).unwrap();
+        let candidate = sdk_candidate(root, &format!("sdk-candidate-{}", sdk.id()));
+        let (tree_sha256, _) =
+            toolchain_tree_inventory_excluding(&candidate, &["sdk-manifest.json"]).unwrap();
+        let tree_sha256 = Sha256Digest::parse(&tree_sha256).unwrap();
+        let package_dir = root.join(format!("sdk-package-{}", sdk.id()));
+        let package_request = SdkPackageRequest {
+            candidate_root: candidate,
+            output_dir: package_dir.clone(),
+            identity: identity.clone(),
+            expected_tree_sha256: tree_sha256.clone(),
+            forbidden_prefixes: vec![PathBuf::from("/tmp/aros-sdk-private-build-root")],
+        };
+        let output = sdk_package::package(&package_request).unwrap();
+        let standalone_request = SdkVerificationRequest {
+            package_dir: package_dir.clone(),
+            identity: identity.clone(),
+            expected_tree_sha256: tree_sha256.clone(),
+            expected_archive_sha256: output.archive_sha256.clone(),
+            expected_archive_size: output.archive_size,
+            forbidden_prefixes: package_request.forbidden_prefixes.clone(),
+        };
+        let asset = identity.asset_name().unwrap();
+        let archive_bytes = fs::read(&output.archive).unwrap();
+        let manifest_bytes = fs::read(&output.manifest).unwrap();
+        let manifest_sha256 = sha256_bytes(&manifest_bytes);
+        for (source, name) in [
+            (&output.archive, asset.clone()),
+            (&output.manifest, format!("{asset}.manifest.json")),
+            (&output.checksum, format!("{asset}.sha256")),
+        ] {
+            fs::copy(source, release_dir.join(name)).unwrap();
+        }
+        let sbom = build_measured_sdk_sbom(&standalone_request).unwrap();
+        fs::write(release_dir.join(format!("{asset}.spdx.json")), sbom).unwrap();
+        let shared_request = SdkVerificationRequest {
+            package_dir: release_dir.to_path_buf(),
+            ..standalone_request
+        };
+        let lock = SdkReleaseLock {
+            schema: SDK_RELEASE_LOCK_SCHEMA.to_owned(),
+            release_tag: release_id.to_owned(),
+            base_url: base_url.to_owned(),
+            identity,
+            tree_sha256,
+            archive: SdkArtifactDigest {
+                sha256: output.archive_sha256,
+                size: u64::try_from(archive_bytes.len()).unwrap(),
+            },
+            manifest: SdkArtifactDigest {
+                sha256: manifest_sha256,
+                size: u64::try_from(manifest_bytes.len()).unwrap(),
+            },
+        };
+        lock.validate().unwrap();
+        requests.insert(sdk.id().to_owned(), shared_request);
+        locks.push(lock);
+    }
+    (requests, locks)
 }
 
 fn target_scope_input_documents() -> (Value, BTreeMap<String, Vec<u8>>) {
@@ -783,6 +1023,8 @@ fn assert_rejected_without_mutation(
     private_marker: Option<&str>,
 ) {
     let before = snapshot(&request.directory);
+    let metadata_before = metadata_snapshot(&request.directory);
+    let directory_modified_before = fs::metadata(&request.directory).unwrap().modified().ok();
     let error = readback_indexed_packages(request).unwrap_err();
     assert_eq!(
         error.diagnostics().diagnostics[0].code,
@@ -800,6 +1042,11 @@ fn assert_rejected_without_mutation(
         );
     }
     assert_eq!(snapshot(&request.directory), before);
+    assert_eq!(metadata_snapshot(&request.directory), metadata_before);
+    assert_eq!(
+        fs::metadata(&request.directory).unwrap().modified().ok(),
+        directory_modified_before
+    );
 }
 
 fn assert_checksums_rejected_without_mutation(
@@ -3125,4 +3372,398 @@ fn attestation_manifest_v2_target_scope_has_twelve_verified_lanes_and_exact_stag
             .unwrap();
     assert_eq!(final_subjects.members().len(), 58);
     assert_eq!(final_subjects.sha256(), subjects.sha256());
+}
+
+#[cfg(unix)]
+fn sdk_release_member_names(fixture: &Fixture) -> Vec<String> {
+    let sdk = &fixture.inputs.sdks()[0];
+    let asset = sdk.identity().asset_name().unwrap();
+    vec![
+        sdk.identity_reference().file().to_owned(),
+        asset.clone(),
+        format!("{asset}.manifest.json"),
+        format!("{asset}.sha256"),
+        format!("{asset}.spdx.json"),
+    ]
+}
+
+#[cfg(unix)]
+fn assert_sdk_names_in_members<'a>(expected: &[String], members: impl Iterator<Item = &'a str>) {
+    let actual = members.collect::<BTreeSet<_>>();
+    for name in expected {
+        assert!(
+            actual.contains(name.as_str()),
+            "complete measured release members omitted SDK file {name}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn measured_shared_sdk_is_one_host_independent_package_in_index_readback_checksums_and_subjects() {
+    let fixture = Fixture::build_sdk();
+    let sdk_names = sdk_release_member_names(&fixture);
+    assert_eq!(fixture.index.artifacts().len(), 9);
+    assert_eq!(fixture.index.sdks().len(), 1);
+    assert_eq!(fixture.inputs.sdks().len(), 1);
+    assert_eq!(fixture.index.expected_inventory().len(), 53);
+    assert_eq!(sdk_names.len(), 5);
+    assert_ne!(
+        fixture.index.release_id(),
+        fixture.inputs.sdks()[0].identity().version.as_str()
+    );
+    assert_eq!(
+        fixture
+            .index
+            .expected_inventory()
+            .iter()
+            .filter(|name| {
+                sdk_names
+                    .iter()
+                    .any(|sdk_name| sdk_name.as_str() == name.as_str())
+            })
+            .count(),
+        sdk_names.len(),
+        "each selected SDK member must appear exactly once in the flat inventory"
+    );
+    let final_release_before = snapshot(&fixture.release_dir);
+    let final_metadata_before = metadata_snapshot(&fixture.release_dir);
+    let final_directory_modified_before =
+        fs::metadata(&fixture.release_dir).unwrap().modified().ok();
+    let final_checksum_readback =
+        verify_final_checksums_v2(&fixture.release_dir, &fixture.index).unwrap();
+    assert_sdk_names_in_members(
+        &sdk_names,
+        final_checksum_readback
+            .members()
+            .iter()
+            .map(aros_toolchain::release_checksums_v2::FinalChecksumMemberV2::name),
+    );
+    assert_eq!(snapshot(&fixture.release_dir), final_release_before);
+    assert_eq!(
+        metadata_snapshot(&fixture.release_dir),
+        final_metadata_before
+    );
+    assert_eq!(
+        fs::metadata(&fixture.release_dir).unwrap().modified().ok(),
+        final_directory_modified_before
+    );
+
+    let directory = fixture.copy_preindex_stage("shared-sdk-measurement");
+    let measured_request = fixture.measured_index_request(directory.clone());
+    let before = snapshot(&directory);
+    let metadata_before = metadata_snapshot(&directory);
+    let directory_modified_before = fs::metadata(&directory).unwrap().modified().ok();
+    let measured = build_measured_index_v2(&measured_request).unwrap();
+    assert_eq!(measured.sdks().len(), 1);
+    assert_eq!(
+        measured.to_json_bytes().unwrap(),
+        fixture.index.to_json_bytes().unwrap(),
+        "SDK locks must be measured from the exact shared package files"
+    );
+    assert_eq!(snapshot(&directory), before);
+    assert_eq!(metadata_snapshot(&directory), metadata_before);
+    assert_eq!(
+        fs::metadata(&directory).unwrap().modified().ok(),
+        directory_modified_before
+    );
+
+    let written = write_measured_index_v2(&measured_request).unwrap();
+    assert_eq!(written.index(), &fixture.index);
+    let request = fixture.request(directory.clone());
+    let attestation_path = fixture.root.join("shared-sdk-subjects.sha256");
+    let subjects = write_attestation_manifest_v2(&request, &attestation_path).unwrap();
+    assert_sdk_names_in_members(
+        &sdk_names,
+        subjects
+            .members()
+            .iter()
+            .map(aros_toolchain::release_checksums_v2::FinalChecksumMemberV2::name),
+    );
+    assert_eq!(subjects.members().len(), 51);
+
+    fs::copy(
+        fixture
+            .release_dir
+            .join("toolchain-provenance.sigstore.json"),
+        directory.join("toolchain-provenance.sigstore.json"),
+    )
+    .unwrap();
+    let checksums = write_final_checksums_v2(&request).unwrap();
+    assert_eq!(checksums.readback().members().len(), 52);
+    assert_sdk_names_in_members(
+        &sdk_names,
+        checksums
+            .readback()
+            .members()
+            .iter()
+            .map(aros_toolchain::release_checksums_v2::FinalChecksumMemberV2::name),
+    );
+    let release_before_readback = snapshot(&directory);
+    let metadata_before_readback = metadata_snapshot(&directory);
+    let directory_modified_before_readback = fs::metadata(&directory).unwrap().modified().ok();
+    let complete = readback_indexed_packages(&request).unwrap();
+    assert_eq!(complete.packages().len(), 9);
+    assert_eq!(complete.sdk_packages().len(), 1);
+    assert_eq!(complete.sdk_packages()[0].lock(), &fixture.index.sdks()[0]);
+    assert_eq!(
+        complete.sdk_packages()[0].package().archive_sha256,
+        fixture.index.sdks()[0].archive.sha256
+    );
+    assert_eq!(
+        complete.sdk_packages()[0].package().archive_size,
+        fixture.index.sdks()[0].archive.size
+    );
+    assert_eq!(snapshot(&directory), release_before_readback);
+    assert_eq!(metadata_snapshot(&directory), metadata_before_readback);
+    assert_eq!(
+        fs::metadata(&directory).unwrap().modified().ok(),
+        directory_modified_before_readback
+    );
+    assert_eq!(release_inventory_names(&directory).len(), 53);
+}
+
+#[test]
+#[cfg(unix)]
+fn distinct_sdk_products_keep_sorted_independent_measurements_and_reject_swapped_selections() {
+    let fixture = Fixture::build_sdk_pair();
+    let directory = fixture.copy_preindex_stage("two-sdk-products");
+    let measured = fixture.measured_index_request(directory.clone());
+    let written = write_measured_index_v2(&measured).unwrap();
+    assert_eq!(written.index().sdks(), fixture.index.sdks());
+    assert_eq!(written.index().artifacts().len(), 9);
+    assert_eq!(written.index().sdks().len(), 2);
+    assert_eq!(written.index().sdks()[0].identity.sdk_id, "core-sdk");
+    assert_eq!(written.index().sdks()[1].identity.sdk_id, "secondary-sdk");
+    assert_ne!(
+        written.index().sdks()[0].archive.sha256,
+        written.index().sdks()[1].archive.sha256
+    );
+    let request = fixture.request(directory.clone());
+    let subjects =
+        write_attestation_manifest_v2(&request, &fixture.root.join("two-sdk-subjects")).unwrap();
+    assert_eq!(subjects.members().len(), 56);
+    for sdk in fixture.inputs.sdks() {
+        let asset = sdk.identity().asset_name().unwrap();
+        assert_sdk_names_in_members(
+            &[
+                sdk.identity_reference().file().to_owned(),
+                asset.clone(),
+                format!("{asset}.manifest.json"),
+                format!("{asset}.sha256"),
+                format!("{asset}.spdx.json"),
+            ],
+            subjects
+                .members()
+                .iter()
+                .map(aros_toolchain::release_checksums_v2::FinalChecksumMemberV2::name),
+        );
+    }
+    fs::copy(
+        fixture
+            .release_dir
+            .join("toolchain-provenance.sigstore.json"),
+        directory.join("toolchain-provenance.sigstore.json"),
+    )
+    .unwrap();
+    let checksums = write_final_checksums_v2(&request).unwrap();
+    assert_eq!(checksums.readback().members().len(), 57);
+    let readback = readback_indexed_packages(&request).unwrap();
+    assert_eq!(readback.sdk_packages().len(), 2);
+    assert!(readback
+        .sdk_packages()
+        .iter()
+        .map(aros_toolchain::release_index_v2_readback::IndexedSdkPackageV2::lock)
+        .eq(fixture.index.sdks()));
+
+    let mut swapped = request;
+    let first = swapped.sdk_packages["core-sdk"].clone();
+    let second = swapped.sdk_packages["secondary-sdk"].clone();
+    swapped.sdk_packages.insert("core-sdk".to_owned(), second);
+    swapped
+        .sdk_packages
+        .insert("secondary-sdk".to_owned(), first);
+    assert_rejected_without_mutation(&swapped, None);
+    let fresh_stage = fixture.copy_preindex_stage("two-sdk-swapped-measurements");
+    let mut swapped_measurement = fixture.measured_index_request(fresh_stage);
+    assert!(build_measured_index_v2(&swapped_measurement).is_ok());
+    let first = swapped_measurement.sdk_packages["core-sdk"].clone();
+    let second = swapped_measurement.sdk_packages["secondary-sdk"].clone();
+    swapped_measurement
+        .sdk_packages
+        .insert("core-sdk".to_owned(), second);
+    swapped_measurement
+        .sdk_packages
+        .insert("secondary-sdk".to_owned(), first);
+    assert_measured_index_rejected_without_mutation(&swapped_measurement, None);
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_sdk_request_maps_bind_each_exact_selected_product_and_independent_bytes() {
+    type SdkMutation = (&'static str, fn(&mut SdkVerificationRequest));
+
+    let fixture = Fixture::build_sdk();
+    let stage = fixture.copy_preindex_stage("shared-sdk-request-counterprobes");
+    let base = fixture.measured_index_request(stage);
+
+    let mut missing = base.clone();
+    missing.sdk_packages.remove("core-sdk");
+    assert_measured_index_rejected_without_mutation(&missing, None);
+
+    let mut extra = base.clone();
+    let package = extra.sdk_packages["core-sdk"].clone();
+    extra
+        .sdk_packages
+        .insert("unselected-sdk".to_owned(), package);
+    assert_measured_index_rejected_without_mutation(&extra, None);
+
+    let mut wrong_key = base;
+    let package = wrong_key.sdk_packages.remove("core-sdk").unwrap();
+    wrong_key
+        .sdk_packages
+        .insert("wrong-product-id".to_owned(), package);
+    assert_measured_index_rejected_without_mutation(&wrong_key, None);
+
+    for case in ["missing", "extra", "wrong-key"] {
+        let directory = fixture.copy_release(&format!("sdk-map-{case}"));
+        let mut request = fixture.request(directory);
+        match case {
+            "missing" => {
+                request.sdk_packages.remove("core-sdk");
+            }
+            "extra" => {
+                let package = request.sdk_packages["core-sdk"].clone();
+                request
+                    .sdk_packages
+                    .insert("unselected-sdk".to_owned(), package);
+            }
+            "wrong-key" => {
+                let package = request.sdk_packages.remove("core-sdk").unwrap();
+                request
+                    .sdk_packages
+                    .insert("wrong-product-id".to_owned(), package);
+            }
+            _ => unreachable!(),
+        }
+        assert_rejected_without_mutation(&request, None);
+    }
+
+    let mutations: [SdkMutation; 7] = [
+        ("identity", |request| {
+            request.identity.version = "1.2.4".to_owned();
+        }),
+        ("archive-hash", |request| {
+            request.expected_archive_sha256 =
+                sha256_bytes(b"wrong independently selected SDK archive");
+        }),
+        ("tree-hash", |request| {
+            request.expected_tree_sha256 = sha256_bytes(b"wrong independently selected SDK tree");
+        }),
+        ("archive-size", |request| {
+            request.expected_archive_size += 1;
+        }),
+        ("forbidden-prefix", |request| {
+            request.forbidden_prefixes =
+                vec![PathBuf::from("/tmp/aros-sdk-fixture-private-prefix")];
+        }),
+        ("directory", |request| {
+            request.package_dir = PathBuf::from("/definitely/not/the/shared/release");
+        }),
+        ("identity-source", |request| {
+            request.identity.source.commit = "7".repeat(40);
+        }),
+    ];
+    for (case, mutate) in mutations {
+        let directory = fixture.copy_release(&format!("sdk-selection-{case}"));
+        let mut request = fixture.request(directory);
+        mutate(request.sdk_packages.get_mut("core-sdk").unwrap());
+        assert_rejected_without_mutation(&request, None);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_sdk_readback_rejects_changed_identity_and_each_package_document() {
+    let fixture = Fixture::build_sdk();
+    let sdk_names = sdk_release_member_names(&fixture);
+
+    for (case, name) in [
+        ("identity-document", sdk_names[0].as_str()),
+        ("archive", sdk_names[1].as_str()),
+        ("manifest", sdk_names[2].as_str()),
+        ("sidecar", sdk_names[3].as_str()),
+        ("spdx", sdk_names[4].as_str()),
+    ] {
+        let directory = fixture.copy_release(&format!("sdk-bytes-{case}"));
+        let path = directory.join(name);
+        let mut bytes = fs::read(&path).unwrap();
+        if case == "archive" {
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+        } else {
+            bytes.extend_from_slice(PRIVATE_MARKER.as_bytes());
+        }
+        fs::write(path, bytes).unwrap();
+        assert_rejected_without_mutation(&fixture.request(directory), Some(PRIVATE_MARKER));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn rehashed_final_checksums_do_not_replace_sdk_archive_or_manifest_lock_binding() {
+    let fixture = Fixture::build_sdk();
+    let sdk_names = sdk_release_member_names(&fixture);
+    for (case, name) in [
+        ("archive", sdk_names[1].as_str()),
+        ("manifest", sdk_names[2].as_str()),
+    ] {
+        let directory = fixture.copy_release(&format!("sdk-rehashed-{case}"));
+        let path = directory.join(name);
+        let mut bytes = fs::read(&path).unwrap();
+        if case == "archive" {
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+        } else {
+            bytes.extend_from_slice(b"rehashed but no longer selected\n");
+        }
+        fs::write(path, bytes).unwrap();
+        let fresh_members = fixture_checksum_members(&directory);
+        write_fixture_checksums(&directory, &fresh_members);
+        assert_checksums_rejected_without_mutation(&directory, &fixture.index, None);
+        assert_rejected_without_mutation(&fixture.request(directory), None);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_sdk_selected_documents_reject_symlink_and_hardlink_members() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::build_sdk();
+    let sdk_names = sdk_release_member_names(&fixture);
+    for name in &sdk_names {
+        let directory = fixture.copy_release(&format!("sdk-symlink-{name}"));
+        let path = directory.join(name);
+        let outside = fixture
+            .root
+            .join(format!("outside-symlink-{}", name.replace('/', "_")));
+        fs::copy(&path, &outside).unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink(&outside, &path).unwrap();
+        assert_rejected_without_mutation(&fixture.request(directory), None);
+    }
+    // The archive, manifest and sidecar are the exact three SDK package
+    // members, whose verifier requires each file to have a single link.
+    for name in &sdk_names[1..4] {
+        let directory = fixture.copy_release(&format!("sdk-hardlink-{name}"));
+        let path = directory.join(name);
+        let outside = fixture
+            .root
+            .join(format!("outside-hardlink-{}", name.replace('/', "_")));
+        fs::copy(&path, &outside).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::hard_link(&outside, &path).unwrap();
+        assert_rejected_without_mutation(&fixture.request(directory), None);
+    }
 }

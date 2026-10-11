@@ -2409,3 +2409,6 @@ fn executable(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
+
+#[path = "sdk_generation_tests.rs"]
+mod sdk_generation_tests;

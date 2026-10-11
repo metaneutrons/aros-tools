@@ -63,5 +63,10 @@ retry requires a fresh stage. The caller must own a quiescent stage.
 
 This API does not authenticate the provenance bundle, execute compilers or
 admit publication. The explicit family-v2 final index CLI stage uses this writer.
+SDK-selected indexes add every SDK identity, archive, manifest, SHA sidecar and
+SPDX member to the same checksum/attestation inventory. SDK archives have a
+4-GiB streaming limit and metadata a 16-MiB limit; measured archive and manifest
+digests/sizes must match their indexed locks, even under newly generated
+checksums. Package readback independently verifies payload and SPDX validity.
 Protected workflow integration, A/B, compatibility, relocation,
 signature/provenance and independent release-download gates remain required.

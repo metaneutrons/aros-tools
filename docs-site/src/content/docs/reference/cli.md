@@ -111,8 +111,10 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | Command | Effect and boundary |
 | --- | --- |
 | `aros sdk verify-source` | Bind an independently selected SDK identity to its clean committed checkout, engine-free projection and sealed source ABI contract; no build or writes |
+| `aros sdk build` | Verify source, generate and link its SDK, package that generation and optionally export complete local execution evidence |
 | `aros sdk package` | Package a source-produced Developer tree against an explicit source/ABI identity and inventory digest; local only |
 | `aros sdk verify-package` | Read back all local package members and payload bytes against independent archive, tree and identity selections |
+| `aros sdk sbom` | Verify one local SDK package and write deterministic SPDX metadata to an absent file outside that package; no release admission |
 | `aros sdk extract` | Verify then extract into one absent directory and recheck the payload; not managed installation |
 | `aros sdk download` | Acquire the exact lock-selected archive and manifest, then verify the complete payload without installation |
 | `aros sdk install` | Install or fully verify reuse of one lock-selected SDK in the content-addressed store |
@@ -125,6 +127,10 @@ SDK identity is target/ABI-specific, not build-host-specific. Local packaging,
 package verification and extraction require independent identity/tree digests
 and an absolute `--forbidden-prefix` to scan for build-path leakage.
 
+Compiler and SDK artifacts share the `aros-toolchains` release model; SDK
+product versions remain separate. This is not a claim of a published SDK or
+Vanilla runtime ABI compatibility.
+
 `verify-source` requires `--identity FILE --identity-sha256 SHA256`,
 `--source-dir DIR`, `--materialized-source-dir DIR` and `--source-preset NAME`.
 The original must be clean with initialized submodules. The projection must
@@ -134,6 +140,19 @@ target triple and all ABI facts must match the source's sealed v2 declaration.
 This command does not generate an SDK, prove execution or authorize packaging
 or publication. Its JSON assurance is
 `local-source-binding-not-execution-or-release-admission`.
+
+`build` uses the same source/identity selectors plus explicit compiler-package,
+native execution and output inputs. Its generation epoch comes from the verified
+SDK identity; there is no separate `--consumer-source-date-epoch`, candidate-root
+or SDK tree-digest selector. Generation currently requires a family-v2 GNU
+compiler matching the source preset's compiler profile.
+`--generation-record FILE`, `--output-dir DIR` and
+repeatable `--sdk-forbidden-prefix DIR` are required. The record and package
+destinations must be absent and disjoint from source and execution inputs.
+The six compatibility phases and four ordinary original/relocated C/C++ links
+must pass before packaging. Source changes or stale retained evidence fail.
+The command does not sign, publish or authenticate execution; its assurance is
+`local-generation-binding-not-release-admission`.
 
 External SDK selection requires `--release-lock FILE --lock-sha256 SHA256`. Commands do
 not discover a latest release or trust a downloaded lock as its own authority.
@@ -191,6 +210,12 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer verify-release-evidence` | Read back every family-v2 A/B package and compatibility lane against independent selections; byte consistency only, not authenticated execution |
 | `aros toolchain producer verify-qualification` | Bind complete family-v2 qualification claims to all measured release evidence; byte consistency only, not signature or execution authentication |
 | `aros toolchain producer verify-recovery` | Reacquire complete family-v2 qualification and check recovery observations; read-only, no authentication or recovery execution |
+
+For an SDK-selected `family-v2` index, `--lane-inputs` must also provide a
+complete `sdks` map with each product's independent tree/archive SHA-256 and
+archive size. The index stages verify SDK packages and include their metadata
+in the shared checksum and attestation inventory. SDK publication remains
+unqualified until generation and owning-job provenance are authenticated.
 
 The local `package`, `verify-package` and `compatibility` commands accept the optional
 `--package-format legacy-v1|family-v2`. When omitted, LLVM keeps its historical

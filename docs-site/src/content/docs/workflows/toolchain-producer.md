@@ -24,6 +24,14 @@ and an inventory-bound executable layout. These are local development paths,
 not a published RISC-V compiler, native board-build qualification or boot claim.
 The examples below retain the existing PC/LLVM selection.
 
+The unreleased V2 release-input collection can explicitly select a
+host-independent SDK identity and its required compiler profiles. Its source,
+target/ABI and product version stay separate from compiler and host identities.
+This selection alone does not enable SDK publication: qualification rejects
+SDK-bearing inputs until the complete shared evidence and owning-job pipeline
+is implemented. See the [SDK commands](/aros-tools/reference/cli-contract/sdk/)
+for current local generation and management options.
+
 - A clean AROS source checkout, an `aros-toolchains` producer checkout, and an
   `aros-tools` checkout at the commits selected by the producer declaration.
 - The `aros` executable built from that selected tools checkout.
@@ -289,6 +297,14 @@ a changed or omitted epoch rejects new evidence. Historical receipts retain
 their original environment. Standalone collector commands stay PATH-only.
 Use this same epoch for the SDK package identity. The range is zero through
 8,589,934,591 seconds, matching the portable SDK tar timestamp contract.
+
+After SDK packaging, `aros sdk sbom` writes the supplemental
+`<archive>.spdx.json` into a separate distribution directory. Pass the exact
+identity, tree and archive selections used for package verification and an
+absent absolute `--output` path. The three-member SDK package remains unchanged;
+the shared release inventory owns the supplemental metadata. This local step
+does not authenticate the producing job or admit a release.
+
 If the source contract declares host file generators, `--ports-cache-dir` must
 also contain their raw input files. Each declaration supplies the exact filename,
 size and SHA-256. The adapter verifies them before configuration and supplies
