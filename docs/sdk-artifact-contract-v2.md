@@ -1,0 +1,95 @@
+# Developer SDK artifact contract v2
+
+Related initiative: [declarative boards and RISC-V integration](riscv-board-integration-plan.md).
+
+## Identity and ownership
+
+An SDK is one source-produced Developer sysroot for one target/ABI. It is not
+a host compiler archive, a board firmware image, or a universal SDK for every
+target. The selected AROS source owns its headers, libraries and ABI facts;
+`aros-tools` packages and verifies those bytes. Compiler family, compiler
+release and build host remain separate identities.
+
+`SdkIdentity` records a portable SDK ID, an independent canonical SemVer
+version, a source-selected target triple and scalar ABI facts, exact source
+commit/Git tree/content digest, the source-owned SDK contract digest and a
+source-date epoch. No board enum, host selector or executable extension is
+introduced. ABI map keys are unique; map order does not change its canonical
+digest. Changing a source fact changes that descriptor digest. Validation
+checks representation and consistency, not that the chosen ABI is implemented.
+
+The caller must select the identity document and its raw SHA-256 independently.
+Packaging does not derive a version from the installed compiler or manufacture
+a released source identity from an uncommitted tree. The first public SDK
+version and repository/channel selection remain release-integration decisions;
+local package success does not make them published.
+
+## Complete local package
+
+The archive name is `aros-sdk-<sdk-id>-<version>.tar.xz`; there is no host
+suffix. A complete local set contains exactly:
+
+- the deterministic archive;
+- `<archive>.manifest.json`, byte-identical to the embedded manifest;
+- `<archive>.sha256`, selecting the archive filename and measured digest.
+
+The archive begins with `sdk/`. Its `sdk-manifest.json` uses schema
+`aros-sdk-manifest-v2`, the exact identity, canonical tree digest and complete
+sorted payload inventory. Only this embedded manifest is excluded from the
+payload digest. Every other input is preserved, including a file named
+`toolchain-manifest.json`. An existing SDK manifest in the candidate is rejected
+rather than removed or silently adopted.
+
+The SDK shares the normalized inventory-entry and JSON-line digest primitive
+with compiler packages, not their host/profile manifest. Files use modes 0644
+or 0755, directories 0755, internal symbolic links 0777. Links must resolve
+inside the payload to declared entries or its root; dangling/cyclic links,
+case-folding aliases, special objects and archive hardlinks are rejected.
+Source hardlinks are not accepted as independent package inputs.
+
+Limits are 100,000 payload entries, 2 GiB of regular payload bytes, 128 path
+components and 16 MiB of metadata. Inventory acquisition and file hashing are
+bounded; the parser also has bounded XZ memory and stream budgets. Tar metadata
+uses root ownership, the selected epoch and global lexical ordering. Long names
+use the same deterministic PAX encoding as compiler archives.
+
+## Writer and read-back
+
+The candidate is read-only. The writer requires an independently selected tree
+digest, acquires a no-follow bounded snapshot, copies it into private staging,
+rechecks the complete inventory and scans selected absolute build prefixes.
+It creates the entire package under an existing real output parent and makes
+the final absent directory visible with no-clobber publication only after
+successful package read-back. Source inputs are revalidated before commit.
+It never adopts an existing output or deletes an unrelated directory.
+
+Verification requires an independently selected identity, tree digest, archive
+digest and archive byte size. A sidecar alone is not a trusted selection.
+It checks the exact local member set, closed bounded metadata, identical
+embedded/external manifest bytes, every decoded payload member and hash,
+normalized metadata, link containment and the stream terminator. It rechecks
+package bytes before returning. Extraction repeats verified stream parsing
+into one fresh root, then inventories the materialized payload. A failed
+extraction retains its root for diagnosis; it is never adopted as success.
+
+These operations assume a quiescent owned workspace. Descriptor-bound
+acquisition and before/after checks detect ordinary mutation; they do not claim
+isolation from a hostile concurrent filesystem writer.
+
+## CLI and assurance
+
+`aros sdk package`, `aros sdk verify` and `aros sdk extract` are explicit local
+stages, usable outside an AROS checkout. Their required selectors are shown by
+the generated CLI reference. JSON results state
+`local-byte-consistency-not-release-admission`.
+
+This boundary does not authenticate the producer, prove that a compiler ran,
+establish cross-host SDK reproducibility, substitute for C/C++ relocated-link
+qualification, or grant publication authority. The native SDK link receipt
+remains separate evidence; an inventory assertion is not SDK archive bytes.
+
+SDK source-input SBOM/signatures/attestations, a published SDK index/consumer
+lock, download/install/list/verify/selection lifecycle and release/consumer
+qualification remain required distribution work. The three local files are
+not an SDK release inventory and do not expand or replace the compiler release
+asset contract.
