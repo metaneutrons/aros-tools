@@ -109,7 +109,25 @@ This planner requires explicit unsigned `pointer_width` (32 or 64),
 with no value bit outside the mask) in the source target's ABI map. Its ELF
 check uses those facts, AROS OSABI/ABI-version marking and the collector symbol;
 there is no CPU-to-machine table. Optional `float_abi` selects exactly one
-driver flag. These structural checks do not establish full ABI compatibility,
+driver flag. Optional `compiler_arch`, `compiler_cpu` and `compiler_fpu` text
+facts select `-march`, `-mcpu` and `-mfpu`; each is a bounded ASCII token, not a
+board name inferred by the tools. Architecture and CPU selections are explicit
+alternatives: declaring both is rejected rather than depending on flag order.
+The SDK build and all original/relocated application commands must use those
+same source-owned selections. ARM selections require an explicit float ABI.
+
+ELF32 ARM selections additionally require explicit unsigned `arm_cpu_arch`,
+`arm_cpu_profile`, `arm_fp_arch`, `arm_simd_arch` and `arm_vfp_args` facts.
+Optional `arm_arm_isa` and `arm_thumb_isa` facts select further checks.
+These keys refer to standardized aeabi file-attribute tags, not a CPU capability
+table. The reader compares each selected value with the produced
+`.ARM.attributes` bytes, rejects ambiguous scopes and unknown mandatory tags,
+and uses standardized omitted-zero defaults only without `Tag_nodefaults`.
+Identical ELF flags cannot substitute for these measurements. ARM attribute
+facts are rejected for non-ARM selections, and the VFP argument convention must
+agree with the declared float ABI.
+
+These structural checks do not establish full ABI compatibility,
 C++ initialization, SDK completeness or which invocation produced an ELF.
 The additive `compatibility::execute_llvm_sdk_links` API executes that four-link
 selection through the shared supervised runner. It copies the complete SDK,

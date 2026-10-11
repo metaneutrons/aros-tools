@@ -54,6 +54,27 @@ fn target64() -> SdkTarget {
     )
 }
 
+fn with_compiler_facts(
+    mut target: SdkTarget,
+    cpu_fact: Option<SdkAbiValue>,
+    floating_point_fact: Option<SdkAbiValue>,
+) -> SdkTarget {
+    for (key, value) in [
+        ("compiler_cpu", cpu_fact),
+        ("compiler_fpu", floating_point_fact),
+    ] {
+        if let Some(value) = value {
+            target.abi.insert(key.to_owned(), value);
+        }
+    }
+    target
+}
+
+fn with_compiler_arch(mut target: SdkTarget, architecture: SdkAbiValue) -> SdkTarget {
+    target.abi.insert("compiler_arch".to_owned(), architecture);
+    target
+}
+
 fn probe(source: &str, libraries: &[&str]) -> NativeSdkLinkProbe {
     NativeSdkLinkProbe {
         source: source.to_owned(),
@@ -82,6 +103,174 @@ fn elf_fixture(pointer_width: u64, machine: u16, flags: u32, symbol: &str) -> Ve
     let flags_offset = if pointer_width == 32 { 36 } else { 48 };
     bytes[flags_offset..flags_offset + 4].copy_from_slice(&flags.to_le_bytes());
     bytes
+}
+
+fn arm_target() -> SdkTarget {
+    let mut target = target_with_facts(
+        "arm-unknown-aros",
+        Some(unsigned(32)),
+        Some(unsigned(40)),
+        Some(unsigned(0xff00_0000)),
+        Some(unsigned(0x0500_0000)),
+        Some(SdkAbiValue::Text("hard".into())),
+    );
+    for (name, value) in [
+        ("arm_cpu_arch", 10),
+        ("arm_cpu_profile", 65),
+        ("arm_fp_arch", 5),
+        ("arm_simd_arch", 2),
+        ("arm_vfp_args", 1),
+        ("arm_arm_isa", 1),
+        ("arm_thumb_isa", 2),
+    ] {
+        target.abi.insert(name.into(), unsigned(value));
+    }
+    target
+}
+
+// Add an independently encoded aeabi section to the ordinary collector fixture.
+// No CPU name or object flag determines the attribute bytes.
+fn arm_elf(attributes: &[(u8, u8)]) -> Vec<u8> {
+    let mut bytes = elf_fixture(32, 40, 0x0500_0000, REQUIRED_COLLECTOR_SYMBOL);
+    let prior_headers = bytes[52..172].to_vec();
+    let old_names_offset = u32::from_le_bytes(bytes[108..112].try_into().unwrap()) as usize;
+    let old_names_size = u32::from_le_bytes(bytes[112..116].try_into().unwrap()) as usize;
+    let mut names = bytes[old_names_offset..old_names_offset + old_names_size].to_vec();
+    let attribute_name = names.len() as u32;
+    names.extend_from_slice(b".ARM.attributes\0");
+    let names_offset = bytes.len() as u32;
+    bytes.extend_from_slice(&names);
+    let attribute_offset = bytes.len() as u32;
+    let mut file = vec![1];
+    file.extend_from_slice(&(5 + 2 * attributes.len() as u32).to_le_bytes());
+    for (tag, value) in attributes {
+        file.extend_from_slice(&[*tag, *value]);
+    }
+    let mut encoded = vec![b'A'];
+    encoded.extend_from_slice(&(10 + file.len() as u32).to_le_bytes());
+    encoded.extend_from_slice(b"aeabi\0");
+    encoded.extend_from_slice(&file);
+    bytes.extend_from_slice(&encoded);
+    let headers_offset = bytes.len() as u32;
+    let mut headers = prior_headers;
+    headers[56..60].copy_from_slice(&names_offset.to_le_bytes());
+    headers[60..64].copy_from_slice(&(names.len() as u32).to_le_bytes());
+    let mut section = [0_u8; 40];
+    section[..4].copy_from_slice(&attribute_name.to_le_bytes());
+    section[4..8].copy_from_slice(&elf::arm::SHT_ATTRIBUTES.to_le_bytes());
+    section[16..20].copy_from_slice(&attribute_offset.to_le_bytes());
+    section[20..24].copy_from_slice(&(encoded.len() as u32).to_le_bytes());
+    section[32..36].copy_from_slice(&1_u32.to_le_bytes());
+    headers.extend_from_slice(&section);
+    bytes.extend_from_slice(&headers);
+    bytes[32..36].copy_from_slice(&headers_offset.to_le_bytes());
+    bytes[48..50].copy_from_slice(&4_u16.to_le_bytes());
+    bytes[50..52].copy_from_slice(&1_u16.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn arm_attributes_are_measured_instead_of_inferred_from_identical_elf_flags() {
+    let target = arm_target();
+    let values = [(6, 10), (7, 65), (8, 1), (9, 2), (10, 5), (12, 2), (28, 1)];
+    let valid = arm_elf(&values);
+    validate_target(&target).unwrap();
+    verify_application_elf(&valid, &target).unwrap();
+    for index in 0..values.len() {
+        let mut wrong = values;
+        wrong[index].1 = 0;
+        let changed = arm_elf(&wrong);
+        assert_eq!(&changed[36..40], &valid[36..40]);
+        assert_rejection(
+            verify_application_elf(&changed, &target),
+            "LLVM SDK application ARM attributes differ from the source target",
+        );
+    }
+    assert_rejection(
+        verify_application_elf(
+            &elf_fixture(32, 40, 0x0500_0000, REQUIRED_COLLECTOR_SYMBOL),
+            &target,
+        ),
+        "LLVM SDK application ARM attributes are absent or invalid",
+    );
+}
+
+#[test]
+fn arm_target_facts_are_explicit_typed_and_cannot_leak_to_other_machines() {
+    let target = arm_target();
+    for name in [
+        "arm_cpu_arch",
+        "arm_cpu_profile",
+        "arm_fp_arch",
+        "arm_simd_arch",
+        "arm_vfp_args",
+    ] {
+        let mut missing = target.clone();
+        missing.abi.remove(name);
+        assert_rejection(
+            validate_target(&missing),
+            &format!("SDK target is missing required unsigned ABI fact {name}"),
+        );
+        for value in [SdkAbiValue::Text("1".into()), SdkAbiValue::Boolean(true)] {
+            let mut wrong = target.clone();
+            wrong.abi.insert(name.into(), value);
+            assert_rejection(
+                validate_target(&wrong),
+                &format!("SDK target ABI fact {name} must be an unsigned integer"),
+            );
+        }
+    }
+    let mut wrong = target.clone();
+    wrong.abi.insert("arm_future_unknown".into(), unsigned(1));
+    assert_rejection(
+        validate_target(&wrong),
+        "SDK target declares an unsupported ARM attribute fact",
+    );
+    wrong = target.clone();
+    wrong.abi.insert("pointer_width".into(), unsigned(64));
+    assert_rejection(
+        validate_target(&wrong),
+        "ARM SDK attribute facts require ELF32",
+    );
+    wrong = target.clone();
+    wrong.abi.remove("float_abi");
+    assert_rejection(
+        validate_target(&wrong),
+        "ARM SDK requires an explicit float ABI",
+    );
+    for value in [0, 2, 4] {
+        wrong = target.clone();
+        wrong.abi.insert("arm_vfp_args".into(), unsigned(value));
+        assert_rejection(
+            validate_target(&wrong),
+            "ARM VFP argument convention contradicts the selected float ABI",
+        );
+    }
+    wrong = target64();
+    wrong.abi.insert("arm_cpu_arch".into(), unsigned(10));
+    assert_rejection(
+        validate_target(&wrong),
+        "non-ARM SDK cannot declare ARM attribute facts",
+    );
+}
+
+#[test]
+fn arm_soft_float_uses_only_standardized_omitted_zero_attributes() {
+    let mut target = arm_target();
+    target
+        .abi
+        .insert("float_abi".into(), SdkAbiValue::Text("soft".into()));
+    for name in ["arm_fp_arch", "arm_simd_arch", "arm_vfp_args"] {
+        target.abi.insert(name.into(), unsigned(0));
+    }
+    let valid = arm_elf(&[(6, 10), (7, 65), (8, 1), (9, 2)]);
+    verify_application_elf(&valid, &target).unwrap();
+    let mut undefined = vec![(6, 10), (7, 65), (8, 1), (9, 2)];
+    undefined.push((64, 0));
+    assert_rejection(
+        verify_application_elf(&arm_elf(&undefined), &target),
+        "LLVM SDK application ARM attributes are absent or invalid",
+    );
 }
 
 #[test]
@@ -193,7 +382,274 @@ fn c_commands_do_not_infer_float_mode_or_cpp_mode() {
         .arguments
         .contains(&"-Wl,-Map=/proof/original-c.map,--cref,--trace".into()));
     assert!(command.arguments.contains(&"/proof/original-c.elf".into()));
+    assert_eq!(
+        command.arguments,
+        [
+            "--target=futurecpu-vendor-aros",
+            "--sysroot=/selected/sdk",
+            "-O2",
+            "-fno-common",
+            "-g0",
+            "/source/app.c",
+            "-Wl,-Map=/proof/original-c.map,--cref,--trace",
+            "-o",
+            "/proof/original-c.elf",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    );
     validate_target(&target64()).unwrap();
+}
+
+#[test]
+fn compiler_cpu_and_fpu_facts_apply_for_generic_targets_and_both_languages() {
+    let mut target = with_compiler_facts(
+        target64(),
+        Some(SdkAbiValue::Text("future-cpu+rev2".into())),
+        Some(SdkAbiValue::Text("future-fpu.v4".into())),
+    );
+    target
+        .abi
+        .insert("float_abi".into(), SdkAbiValue::Text("hard".into()));
+    validate_target(&target).unwrap();
+
+    for (language, label, driver, fixture, source) in [
+        (
+            "c",
+            "original",
+            "/prefix/bin/clang",
+            "/source/app.c",
+            "app.c",
+        ),
+        (
+            "cxx",
+            "relocated",
+            "/prefix/bin/clang++",
+            "/source/app.cpp",
+            "app.cpp",
+        ),
+    ] {
+        let command = application_command(
+            Path::new(driver),
+            Path::new(fixture),
+            &probe(source, &[]),
+            &target,
+            Path::new("/selected/sdk"),
+            Path::new("/proof"),
+            (language, label),
+        )
+        .unwrap();
+        let float_index = command
+            .arguments
+            .iter()
+            .position(|argument| argument == "-mfloat-abi=hard")
+            .unwrap();
+        let cpu_index = command
+            .arguments
+            .iter()
+            .position(|argument| argument == "-mcpu=future-cpu+rev2")
+            .unwrap();
+        let fpu_index = command
+            .arguments
+            .iter()
+            .position(|argument| argument == "-mfpu=future-fpu.v4")
+            .unwrap();
+        assert!(float_index < cpu_index && cpu_index < fpu_index);
+        if language == "cxx" {
+            let standard_index = command
+                .arguments
+                .iter()
+                .position(|argument| argument == "-std=c++17")
+                .unwrap();
+            assert!(fpu_index < standard_index);
+        }
+        assert!(command.arguments.contains(&format!(
+            "-Wl,-Map=/proof/{label}-{language}.map,--cref,--trace"
+        )));
+    }
+}
+
+#[test]
+fn compiler_cpu_and_fpu_facts_are_independent_and_optional() {
+    let command = |target: &SdkTarget| {
+        application_command(
+            Path::new("/prefix/bin/clang"),
+            Path::new("/source/app.c"),
+            &probe("app.c", &[]),
+            target,
+            Path::new("/selected/sdk"),
+            Path::new("/proof"),
+            ("c", "original"),
+        )
+        .unwrap()
+    };
+
+    let cpu_only = command(&with_compiler_facts(
+        target64(),
+        Some(SdkAbiValue::Text("future-cpu".into())),
+        None,
+    ));
+    assert!(cpu_only.arguments.contains(&"-mcpu=future-cpu".into()));
+    assert!(!cpu_only
+        .arguments
+        .iter()
+        .any(|argument| argument.starts_with("-mfpu=")));
+
+    let fpu_only = command(&with_compiler_facts(
+        target64(),
+        None,
+        Some(SdkAbiValue::Text("future-fpu".into())),
+    ));
+    assert!(!fpu_only
+        .arguments
+        .iter()
+        .any(|argument| argument.starts_with("-mcpu=")));
+    assert!(fpu_only.arguments.contains(&"-mfpu=future-fpu".into()));
+}
+
+#[test]
+fn compiler_arch_fact_applies_to_c_and_cxx_for_original_and_relocated_sources() {
+    let mut target = with_compiler_arch(target64(), SdkAbiValue::Text("armv7-a+fp".to_owned()));
+    target
+        .abi
+        .insert("float_abi".into(), SdkAbiValue::Text("hard".into()));
+    target.abi.insert(
+        "compiler_fpu".into(),
+        SdkAbiValue::Text("future-fpu.v4".into()),
+    );
+    validate_target(&target).unwrap();
+
+    for (language, label, driver, fixture, source) in [
+        (
+            "c",
+            "original",
+            "/prefix/bin/clang",
+            "/source/app.c",
+            "app.c",
+        ),
+        (
+            "c",
+            "relocated",
+            "/prefix/bin/clang",
+            "/source/relocated/app.c",
+            "app.c",
+        ),
+        (
+            "cxx",
+            "original",
+            "/prefix/bin/clang++",
+            "/source/app.cpp",
+            "app.cpp",
+        ),
+        (
+            "cxx",
+            "relocated",
+            "/prefix/bin/clang++",
+            "/source/relocated/app.cpp",
+            "app.cpp",
+        ),
+    ] {
+        let command = application_command(
+            Path::new(driver),
+            Path::new(fixture),
+            &probe(source, &[]),
+            &target,
+            Path::new("/selected/sdk"),
+            Path::new("/proof"),
+            (language, label),
+        )
+        .unwrap();
+        assert_eq!(
+            command
+                .arguments
+                .iter()
+                .filter(|argument| argument.starts_with("-march="))
+                .count(),
+            1
+        );
+        assert!(command.arguments.contains(&"-march=armv7-a+fp".into()));
+        assert!(!command
+            .arguments
+            .iter()
+            .any(|argument| argument.starts_with("-mcpu=")));
+        let float_index = command
+            .arguments
+            .iter()
+            .position(|argument| argument == "-mfloat-abi=hard")
+            .unwrap();
+        let arch_index = command
+            .arguments
+            .iter()
+            .position(|argument| argument == "-march=armv7-a+fp")
+            .unwrap();
+        let fpu_index = command
+            .arguments
+            .iter()
+            .position(|argument| argument == "-mfpu=future-fpu.v4")
+            .unwrap();
+        assert!(float_index < arch_index && arch_index < fpu_index);
+        if language == "cxx" {
+            let standard_index = command
+                .arguments
+                .iter()
+                .position(|argument| argument == "-std=c++17")
+                .unwrap();
+            assert!(fpu_index < standard_index);
+        }
+        assert!(command.arguments.contains(&format!(
+            "-Wl,-Map=/proof/{label}-{language}.map,--cref,--trace"
+        )));
+    }
+}
+
+#[test]
+fn compiler_arch_is_optional_bounded_and_exclusive_with_compiler_cpu() {
+    for value in [SdkAbiValue::Boolean(false), unsigned(1)] {
+        let target = with_compiler_arch(target64(), value);
+        assert_rejection(
+            validate_target(&target),
+            "SDK target compiler_arch must be text",
+        );
+    }
+
+    for value in [
+        String::new(),
+        "_arch".into(),
+        ".arch".into(),
+        "+arch".into(),
+        "-arch".into(),
+        "arm arch".into(),
+        "arch=armv7".into(),
+        "/armv7".into(),
+        "@arch.rsp".into(),
+        "arm\\arch".into(),
+        "arm\narch".into(),
+        "armç".into(),
+        "x".repeat(MAX_COMPILER_OPTION_BYTES + 1),
+    ] {
+        let target = with_compiler_arch(target64(), SdkAbiValue::Text(value));
+        assert_rejection(
+            validate_target(&target),
+            "SDK target compiler_arch must be 1..=64 ASCII characters, start with a letter or digit, and contain only letters, digits, _, ., + or -",
+        );
+    }
+
+    let maximum_length = with_compiler_arch(
+        target64(),
+        SdkAbiValue::Text("x".repeat(MAX_COMPILER_OPTION_BYTES)),
+    );
+    validate_target(&maximum_length).unwrap();
+
+    let with_arch = with_compiler_arch(target64(), SdkAbiValue::Text("armv7-a+fp".to_owned()));
+    let with_both = with_compiler_facts(
+        with_arch,
+        Some(SdkAbiValue::Text("cortex-a7".to_owned())),
+        None,
+    );
+    assert_rejection(
+        validate_target(&with_both),
+        "SDK target compiler_arch and compiler_cpu are mutually exclusive",
+    );
 }
 
 #[test]
@@ -323,6 +779,52 @@ fn validates_optional_float_fact_and_exact_aros_triple_without_cpu_allowlist() {
         "LLVM SDK source target descriptor is invalid",
     );
     validate_target(&target64()).unwrap();
+}
+
+#[test]
+fn validates_compiler_cpu_and_fpu_fact_types_bounds_and_portable_tokens() {
+    for name in ["compiler_cpu", "compiler_fpu"] {
+        for value in [SdkAbiValue::Boolean(false), unsigned(1)] {
+            let mut target = target64();
+            target.abi.insert(name.into(), value);
+            assert_rejection(
+                validate_target(&target),
+                &format!("SDK target {name} must be text"),
+            );
+        }
+
+        for value in [
+            String::new(),
+            "_cpu".into(),
+            ".cpu".into(),
+            "+cpu".into(),
+            "-cpu".into(),
+            "cpu name".into(),
+            "cpu=name".into(),
+            "/cpu".into(),
+            "@cpu.rsp".into(),
+            "cpu\\name".into(),
+            "cpu\nname".into(),
+            "cṕu".into(),
+            "x".repeat(MAX_COMPILER_OPTION_BYTES + 1),
+        ] {
+            let mut target = target64();
+            target.abi.insert(name.into(), SdkAbiValue::Text(value));
+            assert_rejection(
+                validate_target(&target),
+                &format!("SDK target {name} must be 1..=64 ASCII characters, start with a letter or digit, and contain only letters, digits, _, ., + or -"),
+            );
+        }
+    }
+
+    for name in ["compiler_cpu", "compiler_fpu"] {
+        let mut target = target64();
+        target.abi.insert(
+            name.into(),
+            SdkAbiValue::Text("x".repeat(MAX_COMPILER_OPTION_BYTES)),
+        );
+        validate_target(&target).unwrap();
+    }
 }
 
 #[test]
