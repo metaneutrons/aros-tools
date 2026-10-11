@@ -16,6 +16,7 @@ use aros_toolchain::cargo_vendor::{
     select_vendor_generation, select_vendor_lifecycle_object, verify_vendor_generation,
     CargoVendorEnvironment, CargoVendorRequest,
 };
+use aros_toolchain::ContractError;
 use serde_json::json;
 
 const PACKAGE_CHECKSUM: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -395,6 +396,104 @@ impl VendorGenerationFixture {
             &["commit", "-qm", "test: change Cargo manifest"],
         );
     }
+
+    fn replace_workspace_minimum(&self, minimum: &str) {
+        self.replace_manifest(&format!(
+            "[workspace.package]\nrust-version = {minimum:?}\n\n[package]\nname = \"fixture-tools\"\nversion = \"0.0.0\"\nedition = \"2021\"\n"
+        ));
+    }
+
+    fn record_cargo_invocations(&self, marker: &Path) {
+        write_executable(
+            &self.cargo,
+            &format!("#!/bin/sh\n/bin/touch {}\nexit 99\n", shell_quote(marker)),
+        );
+    }
+}
+
+#[test]
+fn accepts_workspace_rust_minimum_equal_to_the_producer_pin() {
+    let fixture = VendorGenerationFixture::new();
+    fixture.replace_workspace_minimum("1.96.1");
+
+    let selection = select_vendor_generation(&fixture.request()).unwrap();
+
+    assert_eq!(selection.rust_channel, "1.96.1");
+}
+
+#[test]
+fn accepts_two_component_workspace_rust_minimum_below_the_producer_pin() {
+    let fixture = VendorGenerationFixture::new();
+    fixture.replace_workspace_minimum("1.96");
+
+    let selection = select_vendor_generation(&fixture.request()).unwrap();
+
+    assert_eq!(selection.rust_channel, "1.96.1");
+}
+
+#[test]
+fn rejects_workspace_rust_minimum_above_the_pin_before_cargo_or_cache_mutation() {
+    let fixture = VendorGenerationFixture::new();
+    fixture.replace_workspace_minimum("1.97");
+    let marker = fixture.cache.join("cargo-invoked");
+    fixture.record_cargo_invocations(&marker);
+    let cache_before = cache_entry_paths(&fixture.cache);
+
+    let error = select_vendor_generation(&fixture.request()).unwrap_err();
+
+    assert_ax0401_message(&error, "1.96.1", "1.97");
+    assert!(
+        !marker.exists(),
+        "Cargo was invoked during rejected selection"
+    );
+    assert_eq!(cache_entry_paths(&fixture.cache), cache_before);
+}
+
+#[test]
+fn rejects_malformed_workspace_rust_minimum_before_cargo_or_cache_mutation() {
+    let fixture = VendorGenerationFixture::new();
+    fixture.replace_workspace_minimum("1.99.x");
+    let marker = fixture.cache.join("cargo-invoked");
+    fixture.record_cargo_invocations(&marker);
+    let cache_before = cache_entry_paths(&fixture.cache);
+
+    let error = select_vendor_generation(&fixture.request()).unwrap_err();
+
+    assert_ax0401_message(&error, "1.96.1", "1.99.x");
+    assert!(
+        error.to_string().contains("malformed"),
+        "diagnostic does not identify the malformed minimum: {error}"
+    );
+    assert!(
+        !marker.exists(),
+        "Cargo was invoked during rejected selection"
+    );
+    assert_eq!(cache_entry_paths(&fixture.cache), cache_before);
+}
+
+fn assert_ax0401_message(error: &ContractError, pin: &str, minimum: &str) {
+    assert_eq!(
+        error.diagnostics().diagnostics[0].code.to_string(),
+        "AX0401"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(pin),
+        "diagnostic omits selected pin: {message}"
+    );
+    assert!(
+        message.contains(minimum),
+        "diagnostic omits required minimum: {message}"
+    );
+}
+
+fn cache_entry_paths(root: &Path) -> Vec<PathBuf> {
+    let mut entries = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
 }
 
 fn fixture_cargo_script(prologue: &str, configuration_suffix: &str, populate: bool) -> String {
