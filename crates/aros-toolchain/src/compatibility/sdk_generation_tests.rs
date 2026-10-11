@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use aros_common::sdk_manifest::{SdkAbiValue, SdkIdentity, SdkSourceIdentity, SdkTarget};
-use aros_common::{sha256_bytes, CancellationToken};
-use serde_json::Value;
+use aros_common::{sha256_bytes, ArosCompilerIdentity, ArosToolchainManifest, CancellationToken};
+use serde_json::{json, Value};
 
 use super::{
     amend_cmake_to_build_native_sdk, gnu_native_sdk_fixture, native_consumer_binding, shell_quote,
@@ -20,7 +20,7 @@ use crate::compatibility::NativeCompatibilityInputClaims;
 use crate::compatibility_source::{
     materialize_engine_free_source, CommittedSourceIdentity, EngineFreeSourceRequest,
 };
-use crate::recipe::GitObjectId;
+use crate::recipe::{GitObjectId, Recipe};
 use crate::sdk_generation::{self, SdkGenerationRequest};
 use crate::sdk_package::{self, SdkVerificationRequest};
 use crate::sdk_source::{verify_sdk_source, SdkSourceVerificationRequest};
@@ -32,6 +32,7 @@ struct GenerationFixture {
     _temporary: tempfile::TempDir,
     compatibility_fixture: Fixture,
     request: SdkGenerationRequest,
+    execution_root: PathBuf,
     original_source_root: PathBuf,
     materialized_source_root: PathBuf,
     package_output: PathBuf,
@@ -272,6 +273,386 @@ fn generate_with_export_completion_rejects_input_record_and_sdk_mutations() {
         );
         assert!(!fixture.package_output.exists());
     }
+}
+
+#[test]
+fn downloaded_gnu_generation_readback_is_rootless_and_rejects_closed_record_and_artifact_mutations()
+{
+    let mut fixture = generation_fixture(NativeSdkBindingMode::Valid, 0);
+    let source_lock = include_bytes!("../../tests/fixtures/gnu-source-lock-v3.json").to_vec();
+    let profile_bytes = super::gnu_profiles(
+        fixture
+            .request
+            .compatibility
+            .upstream_source_commit
+            .as_str(),
+    );
+    align_package_source_with_release_profiles(&mut fixture, &source_lock, &profile_bytes);
+    let inputs =
+        release_inputs_for_generation(&fixture.request, "gnu-rv32", &source_lock, &profile_bytes);
+    let (completed, execution) =
+        sdk_generation::generate_with_export(&fixture.request, &CancellationToken::default())
+            .expect("source-bound GNU generation should produce real package and portable bytes");
+    let record_bytes = fs::read(completed.record_path()).unwrap();
+    let record_sha256 = sha256_bytes(&record_bytes);
+    let record: Value = serde_json::from_slice(&record_bytes).unwrap();
+
+    let packaged = sdk_generation::package_generated(&completed, &fixture.package_output, &[])
+        .expect("generated GNU SDK should package before rootless readback");
+    let downloads = tempfile::tempdir().unwrap();
+    let downloaded_package = downloads.path().join("package");
+    copy_flat_files(&packaged.output_dir, &downloaded_package);
+    let package = SdkVerificationRequest {
+        package_dir: downloaded_package.canonicalize().unwrap(),
+        identity: completed.identity().clone(),
+        expected_tree_sha256: completed.tree_sha256().clone(),
+        expected_archive_sha256: packaged.archive_sha256.clone(),
+        expected_archive_size: packaged.archive_size,
+        forbidden_prefixes: Vec::new(),
+    };
+
+    let evidence_files = execution
+        .evidence()
+        .files()
+        .map(|(name, bytes)| (name.to_owned(), bytes.to_vec()))
+        .collect::<BTreeMap<_, _>>();
+    let downloaded_evidence = downloads.path().join("compatibility");
+    write_flat_files(&downloaded_evidence, &evidence_files);
+    let compiler = fixture
+        .request
+        .compatibility
+        .relocation
+        .first
+        .verified
+        .manifest
+        .compiler
+        .as_ref()
+        .expect("fixture package must retain its compiler identity");
+    let package_expectation = crate::compatibility::NativeCompatibilityExpectedPackage {
+        manifest: &fixture
+            .request
+            .compatibility
+            .relocation
+            .first
+            .verified
+            .manifest,
+        archive_sha256: &fixture
+            .request
+            .compatibility
+            .relocation
+            .first
+            .verified
+            .archive_sha256,
+        archive_size: fixture
+            .request
+            .compatibility
+            .relocation
+            .first
+            .verified
+            .archive_size,
+        compiler,
+        source_commit: fixture
+            .request
+            .compatibility
+            .package_source_commit
+            .as_ref()
+            .unwrap(),
+        host: &fixture.request.compatibility.host,
+    };
+    let expected = execution
+        .inputs()
+        .expectations(
+            package_expectation,
+            &fixture.request.profiles,
+            &fixture.request.compatibility.profile,
+            true,
+        )
+        .unwrap();
+    let compatibility = crate::compatibility::PortableNativeCompatibilityRequest {
+        directory: downloaded_evidence.canonicalize().unwrap(),
+        manifest_sha256: execution.evidence().manifest_sha256().clone(),
+        expected,
+    };
+    let readback = ReadbackSelection {
+        inputs: &inputs,
+        record_bytes: &record_bytes,
+        record_sha256: &record_sha256,
+        package: &package,
+        compatibility: &compatibility,
+        sdk_id: "example-sdk",
+        compiler_group_id: "gnu-rv32",
+    };
+    let package_before = snapshot_flat_files(&package.package_dir);
+    let evidence_before = snapshot_flat_files(&compatibility.directory);
+    let moved_execution_root = fixture
+        .execution_root
+        .parent()
+        .unwrap()
+        .join("moved-execution");
+    fs::rename(&fixture.execution_root, &moved_execution_root).unwrap();
+    assert!(!fixture.execution_root.exists());
+
+    let baseline = read_generation(&readback)
+        .expect("downloaded GNU package and portable proof should join without original roots");
+    assert_eq!(baseline.record_sha256(), &record_sha256);
+    assert_eq!(baseline.package().archive_sha256, packaged.archive_sha256);
+    assert_eq!(
+        baseline.compatibility_receipt_sha256(),
+        &execution.report().receipt.sha256
+    );
+    assert_eq!(
+        baseline.sdk_link_receipt_sha256(),
+        &execution
+            .report()
+            .native_sdk
+            .as_ref()
+            .unwrap()
+            .receipt_sha256
+    );
+    assert_eq!(snapshot_flat_files(&package.package_dir), package_before);
+    assert_eq!(
+        snapshot_flat_files(&compatibility.directory),
+        evidence_before
+    );
+
+    let mut stale_record = record_bytes.clone();
+    stale_record.push(b' ');
+    assert_generation_rejected(
+        ReadbackSelection {
+            record_bytes: &stale_record,
+            ..readback
+        },
+        "differs from its selected raw digest",
+    );
+
+    let mut changed_identity = record.clone();
+    changed_identity["identity"]["sdk_id"] = json!("substituted-sdk");
+    assert_rehashed_record_rejected(
+        readback,
+        &changed_identity,
+        "record differs from its independent source/environment selection",
+    );
+    for (field, value, reason) in [
+        (
+            "source_profile",
+            json!("substituted-preset"),
+            "record differs from its independent source/environment selection",
+        ),
+        (
+            "environment_sha256",
+            json!(sha256_bytes(b"substituted environment").to_string()),
+            "record differs from its independent source/environment selection",
+        ),
+        (
+            "compatibility_receipt_sha256",
+            json!(sha256_bytes(b"substituted aggregate receipt").to_string()),
+            "record differs from its complete compatibility receipt",
+        ),
+        (
+            "sdk_link_receipt_sha256",
+            json!(sha256_bytes(b"substituted SDK links receipt").to_string()),
+            "record differs from its complete SDK link inventory",
+        ),
+        (
+            "sdk_inventory_sha256",
+            json!(sha256_bytes(b"substituted inventory").to_string()),
+            "record differs from the actual measured SDK package inventory",
+        ),
+    ] {
+        let mut altered = record.clone();
+        altered[field] = value;
+        assert_rehashed_record_rejected(readback, &altered, reason);
+    }
+    let mut changed_count = record.clone();
+    changed_count["sdk_entries"] = json!(record["sdk_entries"].as_u64().unwrap() + 1);
+    assert_rehashed_record_rejected(
+        readback,
+        &changed_count,
+        "record differs from the actual measured SDK package inventory",
+    );
+
+    let mut unknown = record.clone();
+    unknown["unknown"] = json!(true);
+    assert_rehashed_record_rejected(readback, &unknown, "not closed GNU JSON");
+    let canonical_record = crate::canonical::bytes(&record).unwrap();
+    let duplicate_record = String::from_utf8(canonical_record)
+        .unwrap()
+        .replacen(
+            "\"schema\":",
+            "\"schema\":\"aros-sdk-generation-record-v1\",\"schema\":",
+            1,
+        )
+        .into_bytes();
+    let duplicate_record_sha256 = sha256_bytes(&duplicate_record);
+    assert_generation_rejected(
+        ReadbackSelection {
+            record_bytes: &duplicate_record,
+            record_sha256: &duplicate_record_sha256,
+            ..readback
+        },
+        "not closed GNU JSON",
+    );
+    let noncanonical_record = serde_json::to_vec(&record).unwrap();
+    let noncanonical_record_sha256 = sha256_bytes(&noncanonical_record);
+    assert_generation_rejected(
+        ReadbackSelection {
+            record_bytes: &noncanonical_record,
+            record_sha256: &noncanonical_record_sha256,
+            ..readback
+        },
+        "not canonical JSON",
+    );
+    let mut wrong_family = record;
+    wrong_family["schema"] = json!("aros-llvm-sdk-generation-record-v1");
+    assert_rehashed_record_rejected(
+        readback,
+        &wrong_family,
+        "schema or assurance differs from selected GNU policy",
+    );
+
+    assert_generation_rejected(
+        ReadbackSelection {
+            sdk_id: "missing-sdk",
+            ..readback
+        },
+        "no independently selected product",
+    );
+    assert_generation_rejected(
+        ReadbackSelection {
+            compiler_group_id: "missing-group",
+            ..readback
+        },
+        "no independently selected compiler group",
+    );
+    assert_generation_rejected(
+        ReadbackSelection {
+            sdk_id: "other-sdk",
+            ..readback
+        },
+        "source or package differs from its independently selected identity",
+    );
+    let wrong_profile = fixture.request.profiles.select("rv32-alternate").unwrap();
+    let wrong_profile_compatibility = crate::compatibility::PortableNativeCompatibilityRequest {
+        expected: crate::compatibility::NativeCompatibilityReceiptExpectations {
+            profile: wrong_profile,
+            ..compatibility.expected.clone()
+        },
+        ..compatibility.clone()
+    };
+    assert_generation_rejected(
+        ReadbackSelection {
+            compatibility: &wrong_profile_compatibility,
+            ..readback
+        },
+        "compiler selection differs from its independent release inputs",
+    );
+
+    for field in [
+        "recipe_sha256",
+        "source_lock_sha256",
+        "profiles_sha256",
+        "source_commit",
+        "producer_commit",
+        "tools_commit",
+        "source_date_epoch",
+    ] {
+        let mut manifest = fixture
+            .request
+            .compatibility
+            .relocation
+            .first
+            .verified
+            .manifest
+            .clone();
+        match field {
+            "recipe_sha256" => manifest.recipe_sha256 = sha256_bytes(b"other recipe").to_string(),
+            "source_lock_sha256" => {
+                manifest.source_lock_sha256 = sha256_bytes(b"other source lock").to_string();
+            }
+            "profiles_sha256" => {
+                manifest.profiles_sha256 = sha256_bytes(b"other profiles").to_string();
+            }
+            "source_commit" => manifest.source_commit = "e".repeat(40),
+            "producer_commit" => manifest.producer_commit = "f".repeat(40),
+            "tools_commit" => manifest.tools_commit = "a".repeat(40),
+            "source_date_epoch" => manifest.source_date_epoch += 1,
+            _ => unreachable!(),
+        }
+        manifest.validate().unwrap();
+        assert_manifest_selection_rejected(
+            readback,
+            &manifest,
+            "compiler selection differs from its independent release inputs",
+        );
+    }
+
+    let alternate_compiler = match compiler {
+        ArosCompilerIdentity::Gnu { target, .. } => ArosCompilerIdentity::Gnu {
+            gcc_version: "16.3.0".into(),
+            binutils_version: "2.47".into(),
+            target: target.clone(),
+        },
+        ArosCompilerIdentity::Llvm { .. } => unreachable!("GNU fixture selects GNU compiler"),
+    };
+    assert_compiler_selection_rejected(
+        readback,
+        &alternate_compiler,
+        "compiler selection differs from its independent release inputs",
+    );
+
+    let changed_upstream_tree = GitObjectId::try_from("e".repeat(40)).unwrap();
+    let changed_tree_compatibility = crate::compatibility::PortableNativeCompatibilityRequest {
+        expected: crate::compatibility::NativeCompatibilityReceiptExpectations {
+            upstream_source_tree: &changed_upstream_tree,
+            ..compatibility.expected.clone()
+        },
+        ..compatibility.clone()
+    };
+    assert_generation_rejected(
+        ReadbackSelection {
+            compatibility: &changed_tree_compatibility,
+            ..readback
+        },
+        "compiler selection differs from its independent release inputs",
+    );
+
+    let tampered_downloads = tempfile::tempdir().unwrap();
+    let tampered_package_dir = tampered_downloads.path().join("package");
+    copy_flat_files(&package.package_dir, &tampered_package_dir);
+    let archive_name = fs::read_dir(&tampered_package_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .find(|name| name.ends_with(".tar.xz"))
+        .unwrap();
+    append_byte(&tampered_package_dir.join(archive_name));
+    let tampered_package = SdkVerificationRequest {
+        package_dir: tampered_package_dir.canonicalize().unwrap(),
+        ..package.clone()
+    };
+    assert_generation_rejected(
+        ReadbackSelection {
+            package: &tampered_package,
+            ..readback
+        },
+        "archive differs from its independently selected hash or size",
+    );
+
+    let mut missing_evidence_files = evidence_files.clone();
+    missing_evidence_files.remove("sdk-original-c.elf").unwrap();
+    assert_portable_inventory_mutation_rejected(
+        readback,
+        &missing_evidence_files,
+        (downloads.path(), "missing-evidence"),
+        "directory differs from its exact inventory",
+    );
+    let mut extra_evidence_files = evidence_files;
+    extra_evidence_files.insert("unexpected-evidence.bin".into(), b"extra".to_vec());
+    assert_portable_inventory_mutation_rejected(
+        readback,
+        &extra_evidence_files,
+        (downloads.path(), "extra-evidence"),
+        "directory differs from its exact inventory",
+    );
 }
 
 #[test]
@@ -548,10 +929,339 @@ fn generation_fixture(mode: NativeSdkBindingMode, source_epoch: u64) -> Generati
         _temporary: temporary,
         compatibility_fixture,
         request,
+        execution_root: fixture_root,
         original_source_root,
         materialized_source_root: materialized.root,
         package_output,
     }
+}
+
+fn align_package_source_with_release_profiles(
+    fixture: &mut GenerationFixture,
+    source_lock: &[u8],
+    profiles: &[u8],
+) {
+    // ReleaseInputs binds the recipe source commit to the exact profiles
+    // upstream commit. Keep the fixture's profile bytes and source tree intact
+    // while selecting that same commit in its synthetic compiler packages.
+    let source_commit = fixture
+        .request
+        .compatibility
+        .upstream_source_commit
+        .as_str()
+        .to_owned();
+    fixture.request.compatibility.package_source_commit =
+        Some(GitObjectId::try_from(source_commit.clone()).unwrap());
+    let recipe_bytes = generation_recipe_bytes(&fixture.request, source_lock, profiles);
+    let recipe = Recipe::parse(&recipe_bytes).unwrap();
+    for package_root in [
+        &fixture.request.compatibility.relocation.first.root,
+        &fixture.request.compatibility.relocation.second.root,
+    ] {
+        let manifest_path = package_root.join(aros_common::AROS_TOOLCHAIN_MANIFEST_FILE);
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["source_commit"] = json!(source_commit.clone());
+        manifest["recipe_sha256"] = json!(recipe.sha256().to_string());
+        manifest["source_lock_sha256"] = json!(sha256_bytes(source_lock).to_string());
+        manifest["profiles_sha256"] = json!(sha256_bytes(profiles).to_string());
+        manifest["producer_commit"] = json!(recipe.producer().0.as_str());
+        manifest["tools_commit"] = json!(recipe.tools().0.as_str());
+        manifest["source_date_epoch"] = json!(recipe.source_date_epoch());
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+    let first =
+        super::refresh_gnu_package_manifest(&fixture.request.compatibility.relocation.first.root);
+    let second =
+        super::refresh_gnu_package_manifest(&fixture.request.compatibility.relocation.second.root);
+    assert_eq!(first, second);
+    fixture
+        .request
+        .compatibility
+        .relocation
+        .first
+        .verified
+        .manifest = first;
+    fixture
+        .request
+        .compatibility
+        .relocation
+        .second
+        .verified
+        .manifest = second;
+}
+
+fn release_inputs_for_generation(
+    request: &SdkGenerationRequest,
+    group_id: &str,
+    source_lock: &[u8],
+    profiles: &[u8],
+) -> crate::release_inputs::ReleaseInputs {
+    let profile_matrix = crate::profiles::Profiles::parse(profiles).unwrap();
+    let package_commit = request
+        .compatibility
+        .package_source_commit
+        .as_ref()
+        .expect("fixture selects a package source commit");
+    assert_eq!(profile_matrix.upstream_commit(), package_commit);
+    let recipe_bytes = generation_recipe_bytes(request, source_lock, profiles);
+    let mut documents = BTreeMap::from([
+        ("recipe.json".to_owned(), recipe_bytes),
+        ("source-lock.json".to_owned(), source_lock.to_vec()),
+        ("profiles.json".to_owned(), profiles.to_vec()),
+    ]);
+    let identity = request.source.identity();
+    let mut alternate_identity = identity.clone();
+    alternate_identity.sdk_id = "other-sdk".into();
+    for (filename, identity) in [
+        ("sdk-identity.json", identity),
+        ("other-sdk-identity.json", &alternate_identity),
+    ] {
+        documents.insert(
+            filename.to_owned(),
+            crate::canonical::bytes(&serde_json::to_value(identity).unwrap()).unwrap(),
+        );
+    }
+    let document_ref = |filename: &str| {
+        json!({
+            "file": filename,
+            "sha256": sha256_bytes(documents.get(filename).unwrap()).to_string(),
+        })
+    };
+    let compiler_profiles = json!([{
+        "group_id": group_id,
+        "profile": request.compatibility.profile.name(),
+    }]);
+    let collection = crate::canonical::bytes(&json!({
+        "schema": "aros-toolchain-release-inputs-v2",
+        "producer_commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "tools_commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "hosts": crate::release_inputs::ACTIVE_HOSTS,
+        "groups": [{
+            "id": group_id,
+            "recipe": document_ref("recipe.json"),
+            "source_lock": document_ref("source-lock.json"),
+            "profiles": document_ref("profiles.json"),
+        }],
+        "sdks": [
+            {
+                "id": identity.sdk_id,
+                "identity": document_ref("sdk-identity.json"),
+                "source_preset": request.source.source_profile().name,
+                "compiler_profiles": compiler_profiles,
+            },
+            {
+                "id": alternate_identity.sdk_id,
+                "identity": document_ref("other-sdk-identity.json"),
+                "source_preset": request.source.source_profile().name,
+                "compiler_profiles": compiler_profiles,
+            },
+        ],
+    }))
+    .unwrap();
+    crate::release_inputs::ReleaseInputs::parse(&collection, &documents).unwrap()
+}
+
+fn generation_recipe_bytes(
+    request: &SdkGenerationRequest,
+    source_lock: &[u8],
+    profiles: &[u8],
+) -> Vec<u8> {
+    let package_commit = request
+        .compatibility
+        .package_source_commit
+        .as_ref()
+        .expect("fixture selects a package source commit");
+    let profile_matrix = crate::profiles::Profiles::parse(profiles).unwrap();
+    assert_eq!(profile_matrix.upstream_commit(), package_commit);
+    let source_tree = git_text(
+        &request.compatibility.upstream_source_root,
+        &["rev-parse", "HEAD:"],
+    );
+    let mut recipe = json!({
+        "schema": "aros-toolchain-recipe-v2",
+        "source_commit": package_commit.as_str(),
+        "source_tree": source_tree,
+        "producer_commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "producer_tree": "4444444444444444444444444444444444444444",
+        "tools_commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "tools_tree": "6666666666666666666666666666666666666666",
+        "source_date_epoch": 1_u64,
+        "source_lock_sha256": sha256_bytes(source_lock).to_string(),
+        "profiles_sha256": sha256_bytes(profiles).to_string(),
+        "patches": []
+    });
+    recipe["recipe_sha256"] =
+        json!(sha256_bytes(&crate::canonical::bytes(&recipe).unwrap()).to_string());
+    crate::canonical::bytes(&recipe).unwrap()
+}
+
+#[derive(Clone, Copy)]
+struct ReadbackSelection<'a> {
+    inputs: &'a crate::release_inputs::ReleaseInputs,
+    record_bytes: &'a [u8],
+    record_sha256: &'a aros_common::Sha256Digest,
+    package: &'a SdkVerificationRequest,
+    compatibility: &'a crate::compatibility::PortableNativeCompatibilityRequest<'a>,
+    sdk_id: &'a str,
+    compiler_group_id: &'a str,
+}
+
+fn read_generation(
+    selection: &ReadbackSelection<'_>,
+) -> Result<crate::sdk_generation::SdkGenerationReadback, crate::ContractError> {
+    sdk_generation::readback_generation(&crate::sdk_generation::SdkGenerationReadbackRequest {
+        inputs: selection.inputs,
+        sdk_id: selection.sdk_id,
+        compiler_group_id: selection.compiler_group_id,
+        record_bytes: selection.record_bytes,
+        record_sha256: selection.record_sha256,
+        package: selection.package,
+        compatibility: selection.compatibility,
+    })
+}
+
+fn assert_generation_rejected(selection: ReadbackSelection<'_>, expected_reason: &str) {
+    let package_before = snapshot_flat_files(&selection.package.package_dir);
+    let evidence_before = snapshot_flat_files(&selection.compatibility.directory);
+    let error =
+        read_generation(&selection).expect_err("mutated generation inputs must be rejected");
+    assert!(
+        error.to_string().contains(expected_reason),
+        "expected rejection containing {expected_reason:?}, got {error}"
+    );
+    assert_eq!(
+        snapshot_flat_files(&selection.package.package_dir),
+        package_before
+    );
+    assert_eq!(
+        snapshot_flat_files(&selection.compatibility.directory),
+        evidence_before
+    );
+}
+
+fn assert_rehashed_record_rejected(
+    selection: ReadbackSelection<'_>,
+    record: &Value,
+    expected_reason: &str,
+) {
+    let bytes = crate::canonical::bytes(record).unwrap();
+    let digest = sha256_bytes(&bytes);
+    assert_generation_rejected(
+        ReadbackSelection {
+            record_bytes: &bytes,
+            record_sha256: &digest,
+            ..selection
+        },
+        expected_reason,
+    );
+}
+
+fn assert_manifest_selection_rejected(
+    selection: ReadbackSelection<'_>,
+    manifest: &ArosToolchainManifest,
+    expected_reason: &str,
+) {
+    let compiler = selection.compatibility.expected.package.compiler;
+    let altered_compatibility =
+        with_package_expectation(selection.compatibility, manifest, compiler);
+    assert_generation_rejected(
+        ReadbackSelection {
+            compatibility: &altered_compatibility,
+            ..selection
+        },
+        expected_reason,
+    );
+}
+
+fn assert_compiler_selection_rejected(
+    selection: ReadbackSelection<'_>,
+    compiler: &ArosCompilerIdentity,
+    expected_reason: &str,
+) {
+    let mut manifest = selection.compatibility.expected.package.manifest.clone();
+    manifest.compiler = Some(compiler.clone());
+    manifest.validate().unwrap();
+    let altered_compatibility =
+        with_package_expectation(selection.compatibility, &manifest, compiler);
+    assert_generation_rejected(
+        ReadbackSelection {
+            compatibility: &altered_compatibility,
+            ..selection
+        },
+        expected_reason,
+    );
+}
+
+fn with_package_expectation<'input: 'value, 'value>(
+    compatibility: &crate::compatibility::PortableNativeCompatibilityRequest<'input>,
+    manifest: &'value ArosToolchainManifest,
+    compiler: &'value ArosCompilerIdentity,
+) -> crate::compatibility::PortableNativeCompatibilityRequest<'value> {
+    crate::compatibility::PortableNativeCompatibilityRequest {
+        expected: crate::compatibility::NativeCompatibilityReceiptExpectations {
+            package: crate::compatibility::NativeCompatibilityExpectedPackage {
+                manifest,
+                compiler,
+                ..compatibility.expected.package.clone()
+            },
+            ..compatibility.expected.clone()
+        },
+        ..compatibility.clone()
+    }
+}
+
+fn assert_portable_inventory_mutation_rejected(
+    selection: ReadbackSelection<'_>,
+    files: &BTreeMap<String, Vec<u8>>,
+    destination: (&Path, &str),
+    expected_reason: &str,
+) {
+    let (downloads_root, directory_name) = destination;
+    let directory = downloads_root.join(directory_name);
+    write_flat_files(&directory, files);
+    let altered_compatibility = crate::compatibility::PortableNativeCompatibilityRequest {
+        directory: directory.canonicalize().unwrap(),
+        ..selection.compatibility.clone()
+    };
+    assert_generation_rejected(
+        ReadbackSelection {
+            compatibility: &altered_compatibility,
+            ..selection
+        },
+        expected_reason,
+    );
+}
+
+fn copy_flat_files(source: &Path, destination: &Path) {
+    fs::create_dir(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        assert!(entry.file_type().unwrap().is_file());
+        fs::copy(entry.path(), destination.join(entry.file_name())).unwrap();
+    }
+}
+
+fn write_flat_files(destination: &Path, files: &BTreeMap<String, Vec<u8>>) {
+    fs::create_dir(destination).unwrap();
+    for (name, bytes) in files {
+        assert_eq!(Path::new(name).file_name().unwrap(), name.as_str());
+        fs::write(destination.join(name), bytes).unwrap();
+    }
+}
+
+fn snapshot_flat_files(directory: &Path) -> BTreeMap<String, Vec<u8>> {
+    fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_file());
+            (
+                entry.file_name().into_string().unwrap(),
+                fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect()
 }
 
 fn commit_source(root: &Path) -> CommittedSourceIdentity {

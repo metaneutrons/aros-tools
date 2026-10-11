@@ -245,6 +245,11 @@ tree/archive digests and archive sizes. Identities come from release inputs.
 The result retains measured SDK packages, not generation or origin proof.
 It does not qualify a release or authenticate jobs.
 
+The unreleased library also checks downloaded SDK generation records against
+selected inputs, measured packages and complete compatibility/link evidence,
+without opening old runner roots. Original job authentication and the complete
+compiler/SDK qualification matrix are still required before publication.
+
 A local file hash is not authenticated execution provenance. Hashing an
 untrusted result does not make it trusted; a release workflow must separately
 verify its run/artifact origin. These options do not establish independent A/B

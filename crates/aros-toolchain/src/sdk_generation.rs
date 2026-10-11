@@ -26,6 +26,9 @@ use crate::sdk_package::{self, SdkPackageOutput, SdkPackageRequest, SdkVerificat
 use crate::sdk_source::VerifiedSdkSource;
 use crate::{canonical, inspection, ContractError};
 
+mod readback;
+pub use readback::{readback_generation, SdkGenerationReadback, SdkGenerationReadbackRequest};
+
 /// Independent selection for executing and recording one source-owned SDK.
 #[derive(Debug, Clone)]
 pub struct SdkGenerationRequest {
