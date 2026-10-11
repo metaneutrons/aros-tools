@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use aros_common::sdk_manifest::SdkIdentity;
 use aros_common::{sha256_bytes, DiagnosticCode};
 use aros_toolchain::{canonical, release_inputs::ReleaseInputs, ContractError};
 use serde_json::{json, Value};
@@ -238,6 +239,10 @@ fn parse_error(fixture: &Fixture) -> ContractError {
     ReleaseInputs::parse(&collection_bytes(fixture), &fixture.documents).unwrap_err()
 }
 
+fn assert_parse_rejected(fixture: &Fixture) {
+    assert!(ReleaseInputs::parse(&collection_bytes(fixture), &fixture.documents).is_err());
+}
+
 fn assert_code(error: &ContractError, expected: DiagnosticCode) {
     assert_eq!(error.diagnostics().diagnostics[0].code, expected);
 }
@@ -303,6 +308,95 @@ fn mutate_source_lock(fixture: &mut Fixture, group_id: &str, mutation: impl FnOn
     mutate_recipe(fixture, group_id, |recipe| {
         recipe["source_lock_sha256"] = json!(lock_digest);
     });
+}
+
+fn sdk_identity_value(sdk_id: &str) -> Value {
+    json!({
+        "sdk_id": sdk_id,
+        "version": "1.2.3",
+        "target": {
+            "target_triple": "i686-aros",
+            "abi": {
+                "data_model": "ilp32",
+                "pointer_width": 32
+            }
+        },
+        "source": {
+            "commit": "9".repeat(40),
+            "git_tree": "8".repeat(40),
+            "content_sha256": "a".repeat(64),
+            "contract_sha256": "b".repeat(64)
+        },
+        "source_date_epoch": 946_684_800
+    })
+}
+
+fn add_sdk(
+    fixture: &mut Fixture,
+    id: &str,
+    identity_file: &str,
+    source_preset: &str,
+    compiler_profiles: Value,
+) -> Value {
+    let identity = serde_json::to_vec(&sdk_identity_value(id)).unwrap();
+    fixture
+        .documents
+        .insert(identity_file.to_owned(), identity.clone());
+    let mut selection = json!({
+        "id": id,
+        "identity": reference(identity_file, &identity),
+        "source_preset": source_preset
+    });
+    selection
+        .as_object_mut()
+        .unwrap()
+        .insert("compiler_profiles".to_owned(), compiler_profiles);
+    selection
+}
+
+fn sdk_fixture() -> Fixture {
+    let mut fixture = fixture();
+    let sdk = add_sdk(
+        &mut fixture,
+        "core-sdk",
+        "core-sdk-identity.json",
+        "aros-core",
+        json!([
+            {"group_id": "gnu-riscv", "profile": "rv32-aros"},
+            {"group_id": "llvm-pc", "profile": "pc-x86_64"}
+        ]),
+    );
+    fixture.collection["sdks"] = json!([sdk]);
+    fixture
+}
+
+fn sdk_identity_file(fixture: &Fixture, index: usize) -> String {
+    fixture.collection["sdks"][index]["identity"]["file"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn replace_sdk_identity_bytes(fixture: &mut Fixture, index: usize, bytes: Vec<u8>) {
+    let file = sdk_identity_file(fixture, index);
+    let digest = sha256_bytes(&bytes);
+    fixture.documents.insert(file, bytes);
+    fixture.collection["sdks"][index]["identity"]["sha256"] = json!(digest);
+}
+
+fn mutate_sdk_identity(fixture: &mut Fixture, index: usize, mutation: impl FnOnce(&mut Value)) {
+    let file = sdk_identity_file(fixture, index);
+    let mut identity: Value = serde_json::from_slice(&fixture.documents[&file]).unwrap();
+    mutation(&mut identity);
+    replace_sdk_identity_bytes(fixture, index, serde_json::to_vec(&identity).unwrap());
+}
+
+fn rename_sdk_identity_file(fixture: &mut Fixture, index: usize, new_file: &str) {
+    let old_file = sdk_identity_file(fixture, index);
+    let bytes = fixture.documents.remove(&old_file).unwrap();
+    fixture.documents.insert(new_file.to_owned(), bytes.clone());
+    fixture.collection["sdks"][index]["identity"]["file"] = json!(new_file);
+    fixture.collection["sdks"][index]["identity"]["sha256"] = json!(sha256_bytes(&bytes));
 }
 
 #[test]
@@ -683,4 +777,511 @@ fn rejects_noncanonical_reference_digests_and_git_object_ids() {
     let error = parse_error(&bad_commit);
     assert_code(&error, DiagnosticCode::ProducerContract);
     assert!(!error.to_string().contains(uppercase_commit.as_str()));
+}
+
+#[test]
+fn optionally_binds_closed_sdk_identity_bytes_without_changing_compiler_lanes() {
+    let compiler_only = fixture();
+    let compiler_inputs =
+        ReleaseInputs::parse(&collection_bytes(&compiler_only), &compiler_only.documents).unwrap();
+    assert!(compiler_inputs.sdks().is_empty());
+    assert_eq!(compiler_inputs.expected_lanes().len(), 9);
+
+    let fixture = sdk_fixture();
+    let identity_file = sdk_identity_file(&fixture, 0);
+    let identity_bytes = fixture.documents[&identity_file].as_slice();
+    let expected_identity: SdkIdentity = serde_json::from_slice(identity_bytes).unwrap();
+    let inputs = ReleaseInputs::parse(&collection_bytes(&fixture), &fixture.documents).unwrap();
+
+    assert_eq!(inputs.sdks().len(), 1);
+    assert_eq!(
+        inputs.expected_lanes().len(),
+        compiler_inputs.expected_lanes().len()
+    );
+    let sdk = &inputs.sdks()[0];
+    assert_eq!(sdk.id(), "core-sdk");
+    assert_eq!(sdk.identity_reference().file(), "core-sdk-identity.json");
+    assert_eq!(
+        sdk.identity_reference().sha256(),
+        &sha256_bytes(identity_bytes)
+    );
+    assert_eq!(sdk.identity(), &expected_identity);
+    assert_eq!(sdk.identity_bytes(), identity_bytes);
+    assert_eq!(sdk.source_preset(), "aros-core");
+    assert_eq!(sdk.compiler_profiles().len(), 2);
+    assert_eq!(
+        (
+            sdk.compiler_profiles()[0].group_id(),
+            sdk.compiler_profiles()[0].profile()
+        ),
+        ("gnu-riscv", "rv32-aros")
+    );
+    assert_eq!(
+        (
+            sdk.compiler_profiles()[1].group_id(),
+            sdk.compiler_profiles()[1].profile()
+        ),
+        ("llvm-pc", "pc-x86_64")
+    );
+
+    let gnu = inputs
+        .groups()
+        .iter()
+        .find(|group| group.id() == "gnu-riscv")
+        .unwrap();
+    let rv32 = gnu
+        .profiles()
+        .entries()
+        .iter()
+        .find(|profile| profile.name() == "rv32-aros")
+        .unwrap();
+    assert_ne!(sdk.identity().version, gnu.source_lock().version());
+    assert_ne!(
+        sdk.identity().source.commit,
+        gnu.recipe().source().0.as_str()
+    );
+    assert_ne!(sdk.identity().target.target_triple, rv32.target_triple());
+}
+
+#[test]
+fn sdk_identity_documents_must_be_exactly_selected_and_raw_hash_bound() {
+    let mut missing = sdk_fixture();
+    let identity_file = sdk_identity_file(&missing, 0);
+    missing.documents.remove(&identity_file);
+    assert!(parse_error(&missing)
+        .to_string()
+        .contains("exactly the referenced filenames"));
+
+    let mut extra = sdk_fixture();
+    extra
+        .documents
+        .insert("unselected-identity.json".into(), b"{}".to_vec());
+    assert!(parse_error(&extra)
+        .to_string()
+        .contains("exactly the referenced filenames"));
+
+    let mut changed = sdk_fixture();
+    let identity_file = sdk_identity_file(&changed, 0);
+    changed
+        .documents
+        .get_mut(&identity_file)
+        .unwrap()
+        .push(b' ');
+    let error = parse_error(&changed);
+    assert_code(&error, DiagnosticCode::ProducerIdentity);
+    assert_message(&error, "do not match their declared SHA-256");
+
+    let mut unselected = sdk_fixture();
+    unselected.collection["sdks"][0]["id"] = json!("different-sdk");
+    assert_parse_rejected(&unselected);
+}
+
+#[test]
+fn sdk_ids_and_identity_filenames_are_safe_unique_and_case_distinct() {
+    let mut unsafe_id = sdk_fixture();
+    unsafe_id.collection["sdks"][0]["id"] = json!("Core-SDK");
+    assert_parse_rejected(&unsafe_id);
+
+    let mut duplicate_id = fixture();
+    let first = add_sdk(
+        &mut duplicate_id,
+        "core-sdk",
+        "core-sdk-identity-a.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    let second = add_sdk(
+        &mut duplicate_id,
+        "core-sdk",
+        "core-sdk-identity-b.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    duplicate_id.collection["sdks"] = json!([first, second]);
+    assert_parse_rejected(&duplicate_id);
+
+    let mut unsorted_ids = fixture();
+    let later = add_sdk(
+        &mut unsorted_ids,
+        "sdk-z",
+        "sdk-z-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    let earlier = add_sdk(
+        &mut unsorted_ids,
+        "sdk-a",
+        "sdk-a-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    unsorted_ids.collection["sdks"] = json!([later, earlier]);
+    assert_parse_rejected(&unsorted_ids);
+
+    let mut unsafe_file = sdk_fixture();
+    rename_sdk_identity_file(&mut unsafe_file, 0, "../identity.json");
+    assert_parse_rejected(&unsafe_file);
+
+    let mut duplicate_file = sdk_fixture();
+    rename_sdk_identity_file(&mut duplicate_file, 0, "gnu-riscv-recipe.json");
+    assert_parse_rejected(&duplicate_file);
+
+    let mut case_collision = sdk_fixture();
+    rename_sdk_identity_file(&mut case_collision, 0, "Gnu-riscv-recipe.json");
+    assert_parse_rejected(&case_collision);
+
+    let mut duplicate_sdk_file = fixture();
+    let first = add_sdk(
+        &mut duplicate_sdk_file,
+        "core-sdk",
+        "shared-sdk-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    let second = add_sdk(
+        &mut duplicate_sdk_file,
+        "other-sdk",
+        "shared-sdk-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    duplicate_sdk_file.collection["sdks"] = json!([first, second]);
+    assert_parse_rejected(&duplicate_sdk_file);
+}
+
+#[test]
+fn sdk_selection_fields_are_closed_and_sdk_identity_is_semantically_valid() {
+    let mut unknown_selection = sdk_fixture();
+    unknown_selection.collection["sdks"][0]["private-field-marker"] = json!("private-value-marker");
+    let error = parse_error(&unknown_selection);
+    assert_code(&error, DiagnosticCode::ProducerContract);
+    assert!(!error.to_string().contains("private-field-marker"));
+    assert!(!error.to_string().contains("private-value-marker"));
+
+    let mut unknown_identity = sdk_fixture();
+    let identity_file = sdk_identity_file(&unknown_identity, 0);
+    let mut identity: Value =
+        serde_json::from_slice(&unknown_identity.documents[&identity_file]).unwrap();
+    identity["untrusted-field-marker"] = json!("secret-value-marker");
+    replace_sdk_identity_bytes(
+        &mut unknown_identity,
+        0,
+        serde_json::to_vec(&identity).unwrap(),
+    );
+    let error = parse_error(&unknown_identity);
+    assert_code(&error, DiagnosticCode::ProducerContract);
+    assert!(!error.to_string().contains("untrusted-field-marker"));
+    assert!(!error.to_string().contains("secret-value-marker"));
+
+    let mut duplicate_identity_key = sdk_fixture();
+    let identity_file = sdk_identity_file(&duplicate_identity_key, 0);
+    let identity =
+        String::from_utf8(duplicate_identity_key.documents[&identity_file].clone()).unwrap();
+    let duplicate = identity.replacen(
+        "\"sdk_id\":\"core-sdk\"",
+        "\"sdk_id\":\"core-sdk\",\"sdk_id\":\"core-sdk\"",
+        1,
+    );
+    assert_ne!(duplicate, identity);
+    replace_sdk_identity_bytes(&mut duplicate_identity_key, 0, duplicate.into_bytes());
+    assert_code(
+        &parse_error(&duplicate_identity_key),
+        DiagnosticCode::ProducerContract,
+    );
+
+    let duplicate_selection_key = sdk_fixture();
+    let collection = String::from_utf8(collection_bytes(&duplicate_selection_key)).unwrap();
+    let duplicate = collection.replacen(
+        "\"id\":\"core-sdk\"",
+        "\"id\":\"core-sdk\",\"id\":\"core-sdk\"",
+        1,
+    );
+    assert_ne!(duplicate, collection);
+    assert_code(
+        &ReleaseInputs::parse(duplicate.as_bytes(), &duplicate_selection_key.documents)
+            .unwrap_err(),
+        DiagnosticCode::ProducerContract,
+    );
+
+    let mut invalid_identity = sdk_fixture();
+    let identity_file = sdk_identity_file(&invalid_identity, 0);
+    let mut identity: Value =
+        serde_json::from_slice(&invalid_identity.documents[&identity_file]).unwrap();
+    identity["version"] = json!("not-semver");
+    replace_sdk_identity_bytes(
+        &mut invalid_identity,
+        0,
+        serde_json::to_vec(&identity).unwrap(),
+    );
+    assert_parse_rejected(&invalid_identity);
+
+    let mut invalid_source_preset = sdk_fixture();
+    invalid_source_preset.collection["sdks"][0]["source_preset"] = json!("../unsafe");
+    assert_parse_rejected(&invalid_source_preset);
+}
+
+#[test]
+fn sdk_compiler_profile_mappings_must_reference_sorted_unique_bound_profiles() {
+    let mut unknown_group = sdk_fixture();
+    unknown_group.collection["sdks"][0]["compiler_profiles"][0]["group_id"] =
+        json!("missing-group");
+    assert_parse_rejected(&unknown_group);
+
+    let mut unknown_profile = sdk_fixture();
+    unknown_profile.collection["sdks"][0]["compiler_profiles"][0]["profile"] =
+        json!("missing-profile");
+    assert_parse_rejected(&unknown_profile);
+
+    let mut unsorted = sdk_fixture();
+    unsorted.collection["sdks"][0]["compiler_profiles"] = json!([
+        {"group_id": "llvm-pc", "profile": "pc-x86_64"},
+        {"group_id": "gnu-riscv", "profile": "rv32-aros"}
+    ]);
+    assert_parse_rejected(&unsorted);
+
+    let mut duplicate = sdk_fixture();
+    duplicate.collection["sdks"][0]["compiler_profiles"] = json!([
+        {"group_id": "gnu-riscv", "profile": "rv32-aros"},
+        {"group_id": "gnu-riscv", "profile": "rv32-aros"}
+    ]);
+    assert_parse_rejected(&duplicate);
+}
+
+#[test]
+fn bounds_the_number_of_sdk_selections() {
+    let mut fixture = fixture();
+    let mut sdks = Vec::new();
+    for index in 0..33 {
+        let id = format!("sdk-{index:02}");
+        let identity_file = format!("{id}-identity.json");
+        sdks.push(add_sdk(
+            &mut fixture,
+            &id,
+            &identity_file,
+            "aros-core",
+            json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+        ));
+    }
+    fixture.collection["sdks"] = Value::Array(sdks);
+    assert_parse_rejected(&fixture);
+}
+
+#[test]
+fn rejects_distinct_sdk_products_that_derive_the_same_archive_name() {
+    let mut fixture = fixture();
+    let first = add_sdk(
+        &mut fixture,
+        "a",
+        "a-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    let second = add_sdk(
+        &mut fixture,
+        "a-1.0.0",
+        "a-versioned-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    fixture.collection["sdks"] = json!([first, second]);
+    mutate_sdk_identity(&mut fixture, 0, |identity| {
+        identity["version"] = json!("1.0.0-1.0.0");
+    });
+    mutate_sdk_identity(&mut fixture, 1, |identity| {
+        identity["version"] = json!("1.0.0");
+    });
+
+    let error = parse_error(&fixture);
+    assert_code(&error, DiagnosticCode::ProducerIdentity);
+    assert_message(
+        &error,
+        "SDK selections derive colliding canonical asset names",
+    );
+}
+
+#[test]
+fn rejects_empty_or_excessive_sdk_compiler_profile_references_before_binding() {
+    let mut empty = sdk_fixture();
+    empty.collection["sdks"][0]["compiler_profiles"] = json!([]);
+    let error = parse_error(&empty);
+    assert_code(&error, DiagnosticCode::ProducerContract);
+    assert_message(&error, "requires 1..64 explicit compiler profiles");
+
+    let mut excessive = sdk_fixture();
+    excessive.collection["sdks"][0]["compiler_profiles"] = Value::Array(vec![
+        json!({"group_id": "unbound-group", "profile": "unbound-profile"});
+        65
+    ]);
+    let error = parse_error(&excessive);
+    assert_code(&error, DiagnosticCode::ProducerContract);
+    assert_message(&error, "requires 1..64 explicit compiler profiles");
+}
+
+#[test]
+fn rejects_contradictory_source_identities_for_repeated_sdk_commits() {
+    let mut different_trees = fixture();
+    let first = add_sdk(
+        &mut different_trees,
+        "core-sdk",
+        "core-sdk-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    let second = add_sdk(
+        &mut different_trees,
+        "other-sdk",
+        "other-sdk-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    different_trees.collection["sdks"] = json!([first, second]);
+    mutate_sdk_identity(&mut different_trees, 0, |identity| {
+        identity["source"]["commit"] = json!("6".repeat(40));
+        identity["source"]["git_tree"] = json!("7".repeat(40));
+    });
+    mutate_sdk_identity(&mut different_trees, 1, |identity| {
+        identity["source"]["commit"] = json!("6".repeat(40));
+        identity["source"]["git_tree"] = json!("8".repeat(40));
+    });
+    let error = parse_error(&different_trees);
+    assert_code(&error, DiagnosticCode::ProducerIdentity);
+    assert_message(&error, "SDK source Git tree contradicts another selection");
+
+    let mut different_contents = fixture();
+    let first = add_sdk(
+        &mut different_contents,
+        "core-sdk",
+        "core-sdk-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    let second = add_sdk(
+        &mut different_contents,
+        "other-sdk",
+        "other-sdk-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    different_contents.collection["sdks"] = json!([first, second]);
+    mutate_sdk_identity(&mut different_contents, 0, |identity| {
+        identity["source"]["commit"] = json!("6".repeat(40));
+        identity["source"]["git_tree"] = json!("7".repeat(40));
+        identity["source"]["content_sha256"] = json!("a".repeat(64));
+    });
+    mutate_sdk_identity(&mut different_contents, 1, |identity| {
+        identity["source"]["commit"] = json!("6".repeat(40));
+        identity["source"]["git_tree"] = json!("7".repeat(40));
+        identity["source"]["content_sha256"] = json!("c".repeat(64));
+    });
+    let error = parse_error(&different_contents);
+    assert_code(&error, DiagnosticCode::ProducerIdentity);
+    assert_message(&error, "SDK source content contradicts another selection");
+}
+
+#[test]
+fn binds_one_projection_for_the_same_sdk_git_tree_across_distinct_commits() {
+    let mut fixture = fixture();
+    let first = add_sdk(
+        &mut fixture,
+        "core-sdk",
+        "core-sdk-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    let second = add_sdk(
+        &mut fixture,
+        "other-sdk",
+        "other-sdk-identity.json",
+        "aros-core",
+        json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+    );
+    fixture.collection["sdks"] = json!([first, second]);
+    mutate_sdk_identity(&mut fixture, 1, |identity| {
+        identity["source"]["commit"] = json!("6".repeat(40));
+    });
+    // Different commits may legitimately select the same immutable tree.
+    let valid = ReleaseInputs::parse(&collection_bytes(&fixture), &fixture.documents).unwrap();
+    assert_eq!(valid.sdks().len(), 2);
+    assert_ne!(
+        valid.sdks()[0].identity().source.commit,
+        valid.sdks()[1].identity().source.commit
+    );
+    assert_eq!(
+        valid.sdks()[0].identity().source.git_tree,
+        valid.sdks()[1].identity().source.git_tree
+    );
+    mutate_sdk_identity(&mut fixture, 1, |identity| {
+        identity["source"]["content_sha256"] = json!("c".repeat(64));
+    });
+    let error = parse_error(&fixture);
+    assert_code(&error, DiagnosticCode::ProducerIdentity);
+    assert_message(
+        &error,
+        "SDK source content contradicts another selection of the same Git tree",
+    );
+}
+
+#[test]
+fn rejects_an_sdk_tree_that_contradicts_a_bound_compiler_recipe_for_the_same_commit() {
+    let mut fixture = sdk_fixture();
+    mutate_sdk_identity(&mut fixture, 0, |identity| {
+        identity["source"]["commit"] = json!(GNU_SOURCE_COMMIT);
+        identity["source"]["git_tree"] = json!("9".repeat(40));
+    });
+
+    let error = parse_error(&fixture);
+    assert_code(&error, DiagnosticCode::ProducerIdentity);
+    assert_message(&error, "SDK source Git tree contradicts another selection");
+}
+
+#[test]
+fn sdk_selection_ids_preserve_the_shared_sdk_product_id_grammar() {
+    for id in ["sdk_v2", "sdk.v2+abi", &"a".repeat(96)] {
+        let mut fixture = fixture();
+        let sdk = add_sdk(
+            &mut fixture,
+            id,
+            "sdk-identity.json",
+            "aros-core",
+            json!([{"group_id": "gnu-riscv", "profile": "rv32-aros"}]),
+        );
+        fixture.collection["sdks"] = json!([sdk]);
+        let inputs = ReleaseInputs::parse(&collection_bytes(&fixture), &fixture.documents).unwrap();
+        assert_eq!(inputs.sdks()[0].id(), id);
+    }
+}
+
+#[test]
+fn sdk_selections_cannot_fall_back_to_compiler_only_release_index_admission() {
+    let fixture = sdk_fixture();
+    let inputs = ReleaseInputs::parse(&collection_bytes(&fixture), &fixture.documents).unwrap();
+    let error =
+        aros_toolchain::release_index_v2::NativeReleaseIndexV2::parse(b"{}", &inputs).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("complete shared SDK index and readback support"));
+}
+
+#[test]
+fn filesystem_loading_binds_the_selected_sdk_identity_document() {
+    let fixture = sdk_fixture();
+    let temporary = tempfile::tempdir().unwrap();
+    // macOS exposes its temporary directory through /var, a symlink. The
+    // production loader intentionally admits only real absolute ancestors.
+    let root = temporary.path().canonicalize().unwrap();
+    std::fs::write(
+        root.join("toolchain-release-inputs-v2.json"),
+        collection_bytes(&fixture),
+    )
+    .unwrap();
+    for (name, bytes) in &fixture.documents {
+        std::fs::write(root.join(name), bytes).unwrap();
+    }
+    let inputs = ReleaseInputs::load(&root).unwrap();
+    assert_eq!(
+        inputs.sdks()[0].identity_bytes(),
+        fixture.documents["core-sdk-identity.json"]
+    );
+    std::fs::write(root.join("core-sdk-identity.json"), b"{}").unwrap();
+    assert!(ReleaseInputs::load(&root).is_err());
 }

@@ -102,6 +102,11 @@ impl NativeReleaseIndexV2 {
                 "release index v2 exceeds the configured metadata limit",
             ));
         }
+        if !inputs.sdks().is_empty() {
+            return Err(index_error(
+                "SDK-bearing release inputs require complete shared SDK index and readback support",
+            ));
+        }
         let record: Record = serde_json::from_slice(input).map_err(|error| {
             index_error(format!(
                 "release index v2 is not a closed JSON document at line {}, column {}",
@@ -446,6 +451,14 @@ pub(crate) fn expected_inventory_for_assets<'a>(
     inputs: &ReleaseInputs,
     assets: impl Iterator<Item = &'a str>,
 ) -> Result<BTreeSet<String>, ContractError> {
+    // Until the SDK package/readback/evidence stages are wired into the same
+    // index, accepting their selections must never produce a compiler-only
+    // release which silently drops the requested SDK distribution.
+    if !inputs.sdks().is_empty() {
+        return Err(index_error(
+            "SDK-bearing release inputs require complete shared SDK index and readback support",
+        ));
+    }
     let mut exact_names = BTreeSet::new();
     let mut folded_names = BTreeSet::new();
     for name in SUPPORT_FILES {

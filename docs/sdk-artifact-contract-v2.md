@@ -169,6 +169,25 @@ remains separate evidence; an inventory assertion is not SDK archive bytes.
 
 ## Consumer release lock
 
+### Shared release-input selection
+
+The unreleased `aros-toolchain-release-inputs-v2` collection may explicitly
+select host-independent SDKs in `sdks`. Each sorted unique selection binds an
+exact identity-document filename/hash, source preset and sorted compiler
+group/profile references. Its ID must equal the bound SDK product ID, not an
+alias. The referenced identity is closed and validated;
+its source, target/ABI and independent product version are not inferred from
+the compiler recipe. Every referenced document is required, hash-checked and
+remeasured during filesystem loading. Missing, extra, changed, ambiguous or
+unbound selections fail. SDKs do not multiply the compiler host matrix.
+
+An absent SDK list preserves compiler-only input behavior. This input slice
+does not yet admit SDK publication: index construction explicitly rejects
+SDK-bearing inputs until complete SDK package/readback, inventory, checksum,
+attestation and authenticated qualification are joined to the same V2 index.
+There is no compiler-only fallback which silently omits selected SDKs. A
+selected ABI descriptor or compiler profile is not proof of binary compatibility.
+
 `aros-sdk-lock-v2` selects an exact release tag, canonical credential-free
 HTTPS base URL, SDK identity, payload tree digest, archive SHA-256/size and
 manifest SHA-256/size. Its release version may differ from the SDK version:

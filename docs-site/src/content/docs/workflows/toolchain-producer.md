@@ -24,6 +24,14 @@ and an inventory-bound executable layout. These are local development paths,
 not a published RISC-V compiler, native board-build qualification or boot claim.
 The examples below retain the existing PC/LLVM selection.
 
+The unreleased V2 release-input collection can explicitly select a
+host-independent SDK identity and its required compiler profiles. Its source,
+target/ABI and product version stay separate from compiler and host identities.
+This selection alone does not enable SDK publication: the release index rejects
+SDK-bearing inputs until the complete shared package/evidence pipeline is
+implemented. See the [SDK commands](/aros-tools/reference/cli-contract/sdk/)
+for current local generation and management options.
+
 - A clean AROS source checkout, an `aros-toolchains` producer checkout, and an
   `aros-tools` checkout at the commits selected by the producer declaration.
 - The `aros` executable built from that selected tools checkout.
