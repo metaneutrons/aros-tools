@@ -120,6 +120,22 @@ pub fn plan_llvm_sdk_application_links(
     request: &LlvmSdkApplicationPlanRequest,
     cancellation: &CancellationToken,
 ) -> Result<LlvmSdkApplicationPlan, ContractError> {
+    plan_selected(request, cancellation, false)
+}
+
+/// Reconstruct commands for an existing proof without adopting its commands.
+pub(super) fn readback_plan(
+    request: &LlvmSdkApplicationPlanRequest,
+    cancellation: &CancellationToken,
+) -> Result<LlvmSdkApplicationPlan, ContractError> {
+    plan_selected(request, cancellation, true)
+}
+
+fn plan_selected(
+    request: &LlvmSdkApplicationPlanRequest,
+    cancellation: &CancellationToken,
+    retained: bool,
+) -> Result<LlvmSdkApplicationPlan, ContractError> {
     let loaded = bound_contract(request, cancellation)?;
     let source_root = request.source.materialized_source_root();
     let target = &request.source.identity().target;
@@ -130,7 +146,7 @@ pub fn plan_llvm_sdk_application_links(
             "LLVM SDK application roots must be distinct and non-overlapping",
         ));
     }
-    let output = output_root(&request.output_root)?;
+    let output = selected_output(&request.output_root, retained)?;
     for input in [
         source_root,
         request.source.original_source_root(),
@@ -187,7 +203,7 @@ pub fn plan_llvm_sdk_application_links(
     if snapshot(&original)? != original_snapshot || snapshot(&relocated)? != relocated_snapshot {
         return Err(error("LLVM SDK application trees changed during planning"));
     }
-    output_root(&output)?;
+    selected_output(&output, retained)?;
     Ok(LlvmSdkApplicationPlan {
         request: LlvmSdkApplicationPlanRequest {
             source: request.source.clone(),
@@ -200,6 +216,28 @@ pub fn plan_llvm_sdk_application_links(
         relocated_snapshot,
         commands,
     })
+}
+
+fn selected_output(path: &Path, retained: bool) -> Result<PathBuf, ContractError> {
+    if !retained {
+        return output_root(path);
+    }
+    if !path.is_absolute()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+        || checked_directory(path, "retained LLVM SDK application output")? != path
+    {
+        return Err(error(
+            "retained LLVM SDK application output is not canonical",
+        ));
+    }
+    open_directory(path)
+        .map_err(|_| error("retained LLVM SDK application output is not a real directory"))?;
+    Ok(path.to_owned())
 }
 
 fn bound_contract(

@@ -1560,3 +1560,198 @@ fn llvm_link_readback_rejects_changed_receipt_sdk_and_extra_members() {
         assert_eq!(snapshot(&selection.output_root), before);
     }
 }
+
+#[test]
+fn independent_llvm_link_readback_reconstructs_selection_without_relinking_or_writes() {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::{execute_llvm_sdk_links, readback_llvm_sdk_links};
+    let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
+    let mut selection = llvm_link_selection(&fixture, "success");
+    let marker = instrument_application_links(&fixture, &mut selection);
+    let completed = execute_llvm_sdk_links(&selection, &CancellationToken::default()).unwrap();
+    let digest = completed.receipt_sha256().clone();
+    assert_eq!(fs::read(&marker).unwrap(), b"xxxx");
+    drop(completed);
+    let before = snapshot(fixture.temporary.path());
+    let retained = readback_llvm_sdk_links(&selection, &digest, &CancellationToken::default())
+        .expect("independent retained readback must recover the exact source-selected proof");
+    retained.revalidate(&CancellationToken::default()).unwrap();
+    assert_eq!(retained.receipt_sha256(), &digest);
+    assert_eq!(snapshot(fixture.temporary.path()), before);
+    assert_eq!(fs::read(marker).unwrap(), b"xxxx");
+}
+
+fn instrument_application_links(
+    fixture: &Fixture,
+    selection: &mut aros_toolchain::compatibility::LlvmSdkLinkRequest,
+) -> PathBuf {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::{inspect_llvm_sdk_drivers, LlvmSdkDriverRequest};
+    let marker = fixture.temporary.path().join("application-invocations.log");
+    let path = selection.drivers.clang_path();
+    let script = fs::read_to_string(path).unwrap();
+    let script = script.replace(
+        "[ \"$PATH\" = /nonexistent ]",
+        &format!(
+            "printf x >> '{}'\n[ \"$PATH\" = /nonexistent ]",
+            marker.display()
+        ),
+    );
+    fs::write(path, script).unwrap();
+    selection.drivers = inspect_llvm_sdk_drivers(
+        &LlvmSdkDriverRequest {
+            compiler_root: path.parent().unwrap().parent().unwrap().to_path_buf(),
+            compiler: selection.drivers.compiler().clone(),
+            target: selection.drivers.target().clone(),
+            timeout: std::time::Duration::from_secs(2),
+        },
+        &CancellationToken::default(),
+    )
+    .unwrap();
+    marker
+}
+
+#[test]
+fn independent_llvm_link_readback_rejects_changed_closed_evidence_without_repair() {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::{execute_llvm_sdk_links, readback_llvm_sdk_links};
+    for mutation in [
+        "digest",
+        "receipt",
+        "log",
+        "elf",
+        "map",
+        "inventory",
+        "relocation",
+        "extra",
+        "source",
+    ] {
+        let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
+        let selection = llvm_link_selection(&fixture, "success");
+        let completed = execute_llvm_sdk_links(&selection, &CancellationToken::default()).unwrap();
+        let mut digest = completed.receipt_sha256().clone();
+        let path = match mutation {
+            "digest" => {
+                digest = sha256_bytes(b"another owning execution");
+                None
+            }
+            "receipt" => Some(completed.receipt_path()),
+            "log" => Some(
+                selection
+                    .output_root
+                    .join("links/reports/standalone-c.1.stdout.log"),
+            ),
+            "elf" => Some(selection.output_root.join("links/original-c.elf")),
+            "map" => Some(selection.output_root.join("links/relocated-c.map")),
+            "inventory" => Some(selection.output_root.join("sdk-inventory.json")),
+            "relocation" => Some(selection.output_root.join("relocated-sdk/libclient.a")),
+            "extra" => Some(selection.output_root.join("extra.txt")),
+            "source" => Some(fixture.materialized_source_root.join("probe.c")),
+            _ => unreachable!(),
+        };
+        if let Some(path) = path {
+            fs::write(path, b"modified retained evidence\n").unwrap();
+        }
+        drop(completed);
+        let before = snapshot(fixture.temporary.path());
+        let message =
+            match readback_llvm_sdk_links(&selection, &digest, &CancellationToken::default()) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("accepted {mutation}"),
+            };
+        let expected = match mutation {
+            "digest" | "receipt" => "differs from its independent digest",
+            "log" => "logs disagree with their phase report",
+            "elf" => "ELF",
+            "map" => "receipt differs from independent readback",
+            "inventory" => "retained inventory changed",
+            "relocation" => "source and relocation differ in bytes or modes",
+            "extra" => "missing or extra retained members",
+            "source" => "SDK source consumer contract is not sealed",
+            _ => unreachable!(),
+        };
+        assert!(
+            message.contains(expected),
+            "{mutation} did not reach its evidence gate: {message}"
+        );
+        assert_eq!(
+            snapshot(fixture.temporary.path()),
+            before,
+            "readback repaired {mutation}"
+        );
+    }
+}
+
+#[test]
+fn independent_llvm_build_link_readback_binds_both_owning_digests() {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::{
+        execute_llvm_sdk_build_links, readback_llvm_sdk_build_links,
+    };
+    let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
+    let (request, drivers, output) = llvm_generated_selection(&fixture, |_| {});
+    let completed =
+        execute_llvm_sdk_build_links(&request, &drivers, &output, &CancellationToken::default())
+            .unwrap();
+    let binding = completed.binding_sha256();
+    let receipt = completed.links().receipt_sha256().clone();
+    drop(completed);
+    let before = snapshot(fixture.temporary.path());
+    let recovered = readback_llvm_sdk_build_links(
+        &request,
+        &drivers,
+        &output,
+        &binding,
+        &receipt,
+        &CancellationToken::default(),
+    )
+    .unwrap();
+    assert_eq!(recovered.binding_sha256(), binding);
+    assert_eq!(recovered.links().receipt_sha256(), &receipt);
+    for (expected_binding, expected_receipt) in [
+        (sha256_bytes(b"different binding"), receipt),
+        (binding, sha256_bytes(b"different receipt")),
+    ] {
+        assert!(readback_llvm_sdk_build_links(
+            &request,
+            &drivers,
+            &output,
+            &expected_binding,
+            &expected_receipt,
+            &CancellationToken::default()
+        )
+        .is_err());
+    }
+    assert_eq!(snapshot(fixture.temporary.path()), before);
+}
+
+#[test]
+fn independent_llvm_link_readback_rejects_absent_aliased_cancelled_and_zero_budget_roots() {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::{execute_llvm_sdk_links, readback_llvm_sdk_links};
+    let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
+    let selection = llvm_link_selection(&fixture, "success");
+    let before = snapshot(fixture.temporary.path());
+    assert!(readback_llvm_sdk_links(
+        &selection,
+        &sha256_bytes(b"missing"),
+        &CancellationToken::default()
+    )
+    .is_err());
+    assert_eq!(snapshot(fixture.temporary.path()), before);
+    let completed = execute_llvm_sdk_links(&selection, &CancellationToken::default()).unwrap();
+    let digest = completed.receipt_sha256();
+    let alias = fixture.temporary.path().join("proof-alias");
+    std::os::unix::fs::symlink(&selection.output_root, &alias).unwrap();
+    let before = snapshot(fixture.temporary.path());
+    let mut aliased = selection.clone();
+    aliased.output_root = alias;
+    assert!(readback_llvm_sdk_links(&aliased, digest, &CancellationToken::default()).is_err());
+    let mut expired = selection.clone();
+    expired.timeout = std::time::Duration::ZERO;
+    assert!(readback_llvm_sdk_links(&expired, digest, &CancellationToken::default()).is_err());
+    let cancelled = CancellationToken::default();
+    cancelled.cancel();
+    assert!(readback_llvm_sdk_links(&selection, digest, &cancelled).is_err());
+    assert_eq!(snapshot(fixture.temporary.path()), before);
+}

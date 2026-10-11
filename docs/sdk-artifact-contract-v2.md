@@ -133,6 +133,14 @@ Synthetic positive and tampering tests do not qualify a real compiler. The
 generation owner must still connect these links to the generated SDK and an
 independently authenticated portable export.
 
+`compatibility::readback_llvm_sdk_links` reconstructs an existing local proof
+from independent source/compiler selections and the execution owner's expected
+receipt digest. It remeasures both SDK trees and derives the commands from the
+sealed probes; it never links applications again, copies an SDK, creates output
+or repairs evidence. Read-only source audits and measured driver queries still
+run. Missing, extra or altered receipt, inventory, report, log, map and ELF
+members fail; the prior in-memory completed handle is not required.
+
 `compatibility::bind_llvm_sdk_generated_root` validates the retained CMake
 consumer binding against the exact committed source and a fresh response from
 the measured transpiler. The source validator derives the SDK include/root path
@@ -143,6 +151,9 @@ completed or that the SDK is complete.
 
 `compatibility::execute_llvm_sdk_build_links` runs the four ordinary links only
 against that source-selected build SDK, never a separately supplied candidate.
+`compatibility::readback_llvm_sdk_build_links` joins retained links to the same
+source/CMake selection and independently expected binding and receipt digests.
+Neither local reader is rootless portable evidence or remote-job authentication.
 Proof outputs must be outside the entire CMake build tree. One elapsed budget
 covers source binding, links and final helper revalidation; filesystem I/O and
 existing bounded Git/source audits are not preempted. Expiry prevents a

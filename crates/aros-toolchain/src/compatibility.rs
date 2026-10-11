@@ -84,10 +84,12 @@ pub use llvm_sdk_driver::{
     LlvmSdkDriverRequest, LlvmSdkDriverRole, LlvmSdkDriverRoleIdentity,
 };
 pub use llvm_sdk_generated_root::{
-    bind_llvm_sdk_generated_root, execute_llvm_sdk_build_links, CompletedLlvmSdkBuildLinks,
-    LlvmSdkGeneratedRoot, LlvmSdkGeneratedRootRequest,
+    bind_llvm_sdk_generated_root, execute_llvm_sdk_build_links, readback_llvm_sdk_build_links,
+    CompletedLlvmSdkBuildLinks, LlvmSdkGeneratedRoot, LlvmSdkGeneratedRootRequest,
 };
-pub use llvm_sdk_links::{execute_llvm_sdk_links, CompletedLlvmSdkLinks, LlvmSdkLinkRequest};
+pub use llvm_sdk_links::{
+    execute_llvm_sdk_links, readback_llvm_sdk_links, CompletedLlvmSdkLinks, LlvmSdkLinkRequest,
+};
 pub use native_sdk_links::{
     execute_native_sdk_links, readback_native_sdk_links, NativeSdkLinkReport, NativeSdkLinkRequest,
 };

@@ -150,7 +150,8 @@ are rejected by `build` before preparation until their execution adapters exist.
 Generation currently requires a family-v2 GNU
 compiler matching the source preset's compiler profile.
 LLVM library validation supports original/relocated C/C++ links and
-source-selected CMake SDK roots. LLVM SDK generation through `build` remains
+source-selected CMake SDK roots, with independent retained readback.
+LLVM SDK generation through `build` remains
 unsupported; local link validation is not CI or release qualification.
 `--generation-record FILE`, `--output-dir DIR` and
 repeatable `--sdk-forbidden-prefix DIR` are required. The record and package

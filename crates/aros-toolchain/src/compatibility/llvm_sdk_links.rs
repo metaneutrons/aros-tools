@@ -40,6 +40,10 @@ const PROOF_LIMITS: TreeTraversalLimits = TreeTraversalLimits {
     max_regular_file_bytes: 3 * 1024 * 1024 * 1024,
 };
 
+#[path = "llvm_sdk_links_readback.rs"]
+mod readback;
+pub use readback::readback_llvm_sdk_links;
+
 /// Independently selected local inputs; no publication authority is conveyed.
 #[derive(Debug, Clone)]
 pub struct LlvmSdkLinkRequest {

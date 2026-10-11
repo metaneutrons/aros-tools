@@ -21,8 +21,8 @@ use serde::Deserialize;
 
 use super::{
     checked_directory, execute_llvm_sdk_links, llvm_sdk_application, read_regular_bounded,
-    validate_preparation, CompatibilityPreparation, CompletedLlvmSdkLinks, LlvmSdkDriverBinding,
-    LlvmSdkLinkRequest,
+    readback_llvm_sdk_links, validate_preparation, CompatibilityPreparation, CompletedLlvmSdkLinks,
+    LlvmSdkDriverBinding, LlvmSdkLinkRequest,
 };
 use crate::sdk_source::VerifiedSdkSource;
 use crate::{canonical, ContractError};
@@ -114,6 +114,12 @@ impl CompletedLlvmSdkBuildLinks {
     #[must_use]
     pub fn sdk_root(&self) -> &Path {
         self.generated.sdk_root()
+    }
+
+    /// Exact CMake/source binding retained by the owning execution.
+    #[must_use]
+    pub fn binding_sha256(&self) -> Sha256Digest {
+        self.generated.binding_sha256()
     }
 
     /// Reaudit both the owning build binding and the complete four-link closure.
@@ -234,6 +240,53 @@ pub fn execute_llvm_sdk_build_links(
             output_root,
             timeout: remaining(started, request.timeout, cancellation)?,
         },
+        cancellation,
+    )?;
+    generated.revalidate_with_timeout(
+        remaining(started, request.timeout, cancellation)?,
+        cancellation,
+    )?;
+    remaining(started, request.timeout, cancellation)?;
+    Ok(CompletedLlvmSdkBuildLinks { generated, links })
+}
+
+/// Read retained links against the independently selected source/CMake build.
+///
+/// Both expected digests must be retained by the execution owner, not selected
+/// from the evidence being audited. Source/driver queries and audits run, but
+/// no SDK build, application link, copy, repair or output write occurs. The
+/// single elapsed budget prevents returning success after expiration; existing
+/// bounded source audits and filesystem I/O are not preempted.
+///
+/// # Errors
+/// Rejects changed source/build/binding/SDK/evidence, unsafe overlap or an
+/// expired/cancelled budget. This does not authenticate a remote CI execution.
+pub fn readback_llvm_sdk_build_links(
+    request: &LlvmSdkGeneratedRootRequest,
+    drivers: &LlvmSdkDriverBinding,
+    output_root: &Path,
+    expected_binding_sha256: &Sha256Digest,
+    expected_receipt_sha256: &Sha256Digest,
+    cancellation: &CancellationToken,
+) -> Result<CompletedLlvmSdkBuildLinks, ContractError> {
+    let started = Instant::now();
+    let generated = bind_llvm_sdk_generated_root(request, cancellation)?;
+    if generated.binding_sha256() != *expected_binding_sha256 {
+        return Err(error(
+            "retained LLVM SDK build binding differs from its independent digest",
+        ));
+    }
+    let output_root = disjoint_output(output_root, &generated.request.cmake_build_root)?;
+    let links = readback_llvm_sdk_links(
+        &LlvmSdkLinkRequest {
+            source: request.source.clone(),
+            drivers: drivers.clone(),
+            preparation: request.preparation.clone(),
+            sdk_root: generated.sdk_root.clone(),
+            output_root,
+            timeout: remaining(started, request.timeout, cancellation)?,
+        },
+        expected_receipt_sha256,
         cancellation,
     )?;
     generated.revalidate_with_timeout(
