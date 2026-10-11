@@ -68,6 +68,10 @@ const DOCUMENTED_AROS_EXAMPLE_PAGES: &[(&str, &str)] = &[
         "source_cli.rs::source_commands_have_one_canonical_surface_without_aliases",
     ),
     (
+        "workflows/sdks.md",
+        "sdk_package_cli.rs::sdk_managed_cli_acquires_installs_lists_verifies_and_prints_application_sdk_path; sdk_package_cli.rs::sdk_project_cli_previews_applies_reuses_and_reads_a_portable_application_lock; sdk_package_cli.rs::sdk_project_cli_restores_a_fresh_checkout_from_verified_offline_cache",
+    ),
+    (
         "workflows/toolchain-producer.md",
         "toolchain_plan_cli.rs::native_plan_binds_its_declared_contract_without_mutation; public_cli_semantics.rs::source_cache_product_plan_keeps_unpinned_measurements_explicit",
     ),
@@ -481,7 +485,10 @@ fn published_aros_examples_parse_and_have_a_semantic_fixture_owner() {
             // Documentation names the caller's independently reviewed digest;
             // --help checks syntax, never executes the example or trusts a pin.
             for argument in &mut invocation {
-                if argument == "REVIEWED_SHA256" {
+                if matches!(
+                    argument.as_str(),
+                    "REVIEWED_SHA256" | "PREVIEW_TOKEN_SHA256"
+                ) {
                     *argument = "0".repeat(64);
                 }
             }

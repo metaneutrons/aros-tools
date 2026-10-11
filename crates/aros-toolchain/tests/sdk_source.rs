@@ -495,11 +495,15 @@ fn generic_sdk_contract_binds_four_target_selections_without_executing_them() {
             verified.consumer_contract_schema(),
             "aros-sdk-consumer-contract-v1"
         );
-        let unsupported =
-            aros_toolchain::sdk_generation::validate_source_executor(&verified).unwrap_err();
-        assert!(unsupported
-            .to_string()
-            .contains("does not yet support the selected generic source contract"));
+        if family == "llvm" {
+            aros_toolchain::sdk_generation::validate_source_executor(&verified).unwrap();
+        } else {
+            let unsupported =
+                aros_toolchain::sdk_generation::validate_source_executor(&verified).unwrap_err();
+            assert!(unsupported
+                .to_string()
+                .contains("source contract and compiler family"));
+        }
         verified.revalidate().unwrap();
         assert_eq!(snapshot(&fixture.source_root), source_before);
         assert_eq!(

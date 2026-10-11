@@ -17,7 +17,7 @@ use aros_common::{
     measure_tree_content_cas_bounded, run_output_with_input_and_control, sha256_bytes,
     CancellationToken, Sha256Digest, TreeContentCas, TreeTraversalLimits,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
     checked_directory, execute_llvm_sdk_links, llvm_sdk_application, read_regular_bounded,
@@ -324,19 +324,46 @@ fn disjoint_output(path: &Path, build: &Path) -> Result<PathBuf, ContractError> 
     Ok(output)
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ConsumerBinding {
-    schema: String,
-    qualification: String,
-    source_dir: String,
-    contract_path: String,
-    contract_sha256: Sha256Digest,
-    profile: String,
-    target: SdkTarget,
-    exec_smp: bool,
-    input_paths: Vec<String>,
-    sdk_include_relative: String,
+pub(super) struct ConsumerBinding {
+    pub(super) schema: String,
+    pub(super) qualification: String,
+    pub(super) source_dir: String,
+    pub(super) contract_path: String,
+    pub(super) contract_sha256: Sha256Digest,
+    pub(super) profile: String,
+    pub(super) target: SdkTarget,
+    pub(super) exec_smp: bool,
+    pub(super) input_paths: Vec<String>,
+    pub(super) sdk_include_relative: String,
+}
+
+/// Select the source-derived binding before CMake creates any output.
+/// This probes only the measured read-only source validator. The selected
+/// relative SDK path is lexical policy, not proof that SDK bytes exist.
+pub(super) fn selected_binding(
+    request: &LlvmSdkGeneratedRootRequest,
+    cancellation: &CancellationToken,
+) -> Result<ConsumerBinding, ContractError> {
+    let started = Instant::now();
+    remaining(started, request.timeout, cancellation)?;
+    let loaded = bound_source(request)?;
+    let binding = current_binding(
+        request,
+        &loaded,
+        remaining(started, request.timeout, cancellation)?,
+        cancellation,
+    )?;
+    validate_response(&binding, request, &loaded)?;
+    validate_include_relative(&binding.sdk_include_relative)?;
+    if bound_source(request)? != loaded {
+        return Err(error(
+            "LLVM SDK source changed during pre-execution selection",
+        ));
+    }
+    remaining(started, request.timeout, cancellation)?;
+    Ok(binding)
 }
 
 fn bound_source(
@@ -514,6 +541,20 @@ fn current_binding(
 }
 
 fn resolve_sdk_root(build: &Path, include: &str) -> Result<PathBuf, ContractError> {
+    let parent = validate_include_relative(include)?;
+    let root = checked_directory(&build.join(parent), "source-selected LLVM SDK")?;
+    if !root.starts_with(build)
+        || root == build
+        || root != build.join(parent)
+        || checked_directory(&root.join("include"), "source-selected LLVM SDK headers")?
+            != root.join("include")
+    {
+        return Err(error("LLVM SDK root or headers escape the selected build"));
+    }
+    Ok(root)
+}
+
+fn validate_include_relative(include: &str) -> Result<&Path, ContractError> {
     if include.is_empty()
         || include.len() > 4096
         || include.split('/').any(|part| {
@@ -534,16 +575,7 @@ fn resolve_sdk_root(build: &Path, include: &str) -> Result<PathBuf, ContractErro
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(|| error("LLVM SDK source root is absent"))?;
-    let root = checked_directory(&build.join(parent), "source-selected LLVM SDK")?;
-    if !root.starts_with(build)
-        || root == build
-        || root != build.join(parent)
-        || checked_directory(&root.join("include"), "source-selected LLVM SDK headers")?
-            != root.join("include")
-    {
-        return Err(error("LLVM SDK root or headers escape the selected build"));
-    }
-    Ok(root)
+    Ok(parent)
 }
 
 fn measure_sdk(root: &Path) -> Result<TreeContentCas, ContractError> {

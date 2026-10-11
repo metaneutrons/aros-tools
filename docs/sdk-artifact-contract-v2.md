@@ -159,11 +159,39 @@ Proof outputs must be outside the entire CMake build tree. One elapsed budget
 covers source binding, links and final helper revalidation; filesystem I/O and
 existing bounded Git/source audits are not preempted. Expiry prevents a
 successful result; it is not a hard return-time guarantee. The generation owner
-still needs the six-phase execution and independently authenticated portable
-job export before package admission.
+still needs independently authenticated portable job export before package
+admission.
 
-`aros sdk build` explicitly rejects this generic schema before compatibility
-preparation until the family-specific link and evidence adapters are implemented.
+`compatibility::execute_native_compatibility` accepts an explicit verified
+generic LLVM SDK source selection for family-v2 packages. It requires the exact
+projected source, compiler target/profile and SDK epoch before creating outputs,
+including the source preset's explicit compiler-profile mapping. All execution
+outputs must be disjoint from both the committed and projected source trees.
+It configures from the source's selectors and scalar bootstrap ABI, builds only
+the declared SDK roots, then runs the six compatibility phases and four ordinary
+C/C++ links. Its local v6 receipt binds the complete SDK identity, source/CMake
+binding, link receipt and inventory digests. Legacy LLVM v2/v4 and GNU v3/v5
+receipts keep their original shape. The retained/portable owning-job adapter
+selects the generic SDK identity, source-validator response, sealed probes and
+measured compiler roles before execution. Its closed LLVM namespace retains
+22 files: the CMake binding, independently measured compiler inventory, link
+receipt, SDK inventory, four ELF outputs, four maps, two reports and eight logs.
+Rootless readback reconstructs the exact ordinary commands, resolves traced
+inputs against the selected inventories and checks byte-identical relocation
+without opening the original runner paths. The v6 aggregate joins the resulting
+proof to the independently selected SDK product/source/ABI identity.
+
+The SDK inventory is a claim about payload bytes, not proof of an SDK archive.
+The local receipt's full retained-tree digest cannot be reconstructed from this
+subset because the relocated SDK payload is not exported. Neither that field
+nor a matching hash authenticates the external job or admits a release. Owning
+origin, complete generated payload and package admission remain separate gates.
+Input-claim readers require an explicit generic LLVM SDK identity; the legacy
+GNU/no-SDK reader rejects such claims instead of silently dropping the policy.
+
+`aros sdk build` uses this generic schema only with a family-v2 LLVM compiler
+matching the sealed source profile. A native-consumer-v2 contract selects GNU;
+mixed source schemas and compiler families are rejected before preparation.
 
 The identity's epoch is explicit selection, not proof that generation consumed
 it. Source verification alone cannot qualify or publish an SDK.
@@ -174,8 +202,9 @@ it. Source verification alone cannot qualify or publish an SDK.
 selected native compatibility request and recipe-bound compiler profiles. It
 requires the exact projected source, preset, content digest and explicit SDK
 epoch before execution. The compiler package's source identity remains separate
-from the SDK source identity. A family-v2 GNU compiler and source-v2 ordinary
-SDK links are mandatory.
+from the SDK source identity. Native-consumer-v2 generation uses a family-v2 GNU
+compiler; generic SDK-consumer-v1 generation uses a family-v2 LLVM compiler.
+Both require ordinary original/relocated SDK application links.
 
 The adapter runs all six compatibility phases and four original/relocated
 ordinary C/C++ links, then reads back their complete retained evidence. It
@@ -183,8 +212,10 @@ derives the generated SDK root from the validated CMake source binding, never
 from a caller-supplied candidate path. An absent record outside the protected
 source and execution roots binds the SDK identity, source profile, generation
 environment, compatibility/link receipt digests and complete SDK inventory.
-The record uses `aros-sdk-generation-record-v1`; its schema version is independent
-of the SDK artifact version.
+GNU retains `aros-sdk-generation-record-v1`. LLVM uses the separate
+`aros-llvm-sdk-generation-record-v1` and additionally binds the source-derived
+CMake SDK binding digest. Record schema versions are independent of SDK product
+versions. Local generation and packaging do not qualify the release matrix.
 
 Only successful execution returns an opaque `CompletedSdkGeneration`.
 `package_generated` accepts that value, an absent output and forbidden prefixes;
@@ -199,8 +230,10 @@ This orchestration boundary has assurance
 source selection before preparing execution roots, derives the epoch from its
 identity, and runs generation and packaging in one process. It accepts no
 independent candidate or SDK tree digest. The current generation executor
-requires a family-v2 GNU compiler matching the source preset's compiler profile;
-unsupported families fail before preparation. The separate local CLI stages below
+requires a family-v2 compiler matching the source preset's compiler profile and
+family: GNU uses the native consumer contract, LLVM the generic SDK consumer
+contract. Unsupported or mismatched selections fail before preparation.
+The separate local CLI stages below
 retain their byte-consistency claims. Public producer integration, authenticated
 owning-job evidence, release index and full release qualification remain required;
 neither this record nor its self-hash grants publication rights.

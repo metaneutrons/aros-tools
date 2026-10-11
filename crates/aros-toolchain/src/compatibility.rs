@@ -40,6 +40,7 @@ mod llvm_sdk_driver;
 mod llvm_sdk_generated_root;
 mod llvm_sdk_link_paths;
 mod llvm_sdk_links;
+mod llvm_sdk_portable;
 mod native_sdk_links;
 mod native_sdk_portable;
 mod native_sdk_relocation;
@@ -60,12 +61,12 @@ pub use execution::{
     execute_native_compatibility, execute_native_compatibility_with_export,
     execute_native_compatibility_with_readback, export_retained_native_compatibility,
     readback_native_compatibility_receipt, readback_portable_native_compatibility,
-    readback_retained_native_compatibility, NativeCompatibilityCommandLogs,
-    NativeCompatibilityExecutionExport, NativeCompatibilityExpectedPackage,
-    NativeCompatibilityExpectedPortSource, NativeCompatibilityInputClaims,
-    NativeCompatibilityReceiptExpectations, NativeCompatibilityReceiptReadback,
-    NativeCompatibilityReceiptReadbackRequest, NativeCompatibilityReport,
-    NativeCompatibilityRequest, PortableNativeCompatibilityExport,
+    readback_retained_native_compatibility, LlvmSdkCompatibilityReport,
+    NativeCompatibilityCommandLogs, NativeCompatibilityExecutionExport,
+    NativeCompatibilityExpectedPackage, NativeCompatibilityExpectedPortSource,
+    NativeCompatibilityInputClaims, NativeCompatibilityReceiptExpectations,
+    NativeCompatibilityReceiptReadback, NativeCompatibilityReceiptReadbackRequest,
+    NativeCompatibilityReport, NativeCompatibilityRequest, PortableNativeCompatibilityExport,
     PortableNativeCompatibilityReadback, PortableNativeCompatibilityRequest, StandaloneFixtures,
     PORTABLE_NATIVE_COMPATIBILITY_MANIFEST,
 };
@@ -90,6 +91,7 @@ pub use llvm_sdk_generated_root::{
 pub use llvm_sdk_links::{
     execute_llvm_sdk_links, readback_llvm_sdk_links, CompletedLlvmSdkLinks, LlvmSdkLinkRequest,
 };
+pub use llvm_sdk_portable::{LlvmSdkLinkSelection, LlvmSdkPortableProof};
 pub use native_sdk_links::{
     execute_native_sdk_links, readback_native_sdk_links, NativeSdkLinkReport, NativeSdkLinkRequest,
 };

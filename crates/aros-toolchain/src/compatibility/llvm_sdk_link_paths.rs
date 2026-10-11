@@ -144,11 +144,11 @@ pub(super) fn validate_link_paths(
     Ok(())
 }
 
-struct TraceInput<'a> {
-    path: &'a str,
+pub(super) struct TraceInput<'a> {
+    pub(super) path: &'a str,
 }
 
-fn parse_trace_input(line: &str) -> Result<TraceInput<'_>, ContractError> {
+pub(super) fn parse_trace_input(line: &str) -> Result<TraceInput<'_>, ContractError> {
     if line.trim() != line || line.chars().any(char::is_control) || line.contains([',', '\\', ':'])
     {
         return Err(error(
@@ -184,7 +184,7 @@ fn parse_trace_input(line: &str) -> Result<TraceInput<'_>, ContractError> {
     Ok(TraceInput { path: path_text })
 }
 
-fn validate_absolute_raw_path(path: &str) -> Result<(), ContractError> {
+pub(super) fn validate_absolute_raw_path(path: &str) -> Result<(), ContractError> {
     let candidate = Path::new(path);
     if !candidate.is_absolute()
         || path.contains("//")
@@ -280,7 +280,9 @@ fn validate_driver_temporary(
     }
 }
 
-fn selected_archive_names(libraries: &[String]) -> Result<BTreeSet<String>, ContractError> {
+pub(super) fn selected_archive_names(
+    libraries: &[String],
+) -> Result<BTreeSet<String>, ContractError> {
     if libraries.len() > MAX_SELECTED_LIBRARIES {
         return Err(error("LLVM SDK library selection exceeds its item bound"));
     }

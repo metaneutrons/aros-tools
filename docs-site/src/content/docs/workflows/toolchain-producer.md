@@ -42,9 +42,10 @@ their version and selected triple; this is not package authentication or SDK
 link qualification. The library executes four normal C/C++ links from sealed
 probes against original and relocated SDK trees and rechecks their retained
 outputs. A CMake binding selects the SDK path from source configuration.
-These APIs do not yet enable generic `aros sdk build` or release admission;
-LLVM SDK generation and authenticated portable evidence remain separate gates.
-GNU/RV32 local SDK generation retains its native-consumer-v2 path.
+`aros sdk build` selects the source-owned LLVM SDK contract or GNU native
+consumer contract matching the family-v2 compiler. It generates and packages
+the SDK and can export portable compatibility evidence. Owning-job
+authentication and complete release qualification remain separate gates.
 
 - A clean AROS source checkout, an `aros-toolchains` producer checkout, and an
   `aros-tools` checkout at the commits selected by the producer declaration.

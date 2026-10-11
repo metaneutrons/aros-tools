@@ -856,7 +856,7 @@ fn validate_receipt_shapes(
     Ok(())
 }
 
-struct BoundedInventory(Vec<ArosToolchainManifestEntry>);
+pub(super) struct BoundedInventory(pub(super) Vec<ArosToolchainManifestEntry>);
 
 impl<'de> Deserialize<'de> for BoundedInventory {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -1041,8 +1041,15 @@ fn validate_trace_and_map<B: AsRef<[u8]>>(
     Ok(())
 }
 
-fn validate_inventory(
+pub(super) fn validate_inventory(
     entries: &[ArosToolchainManifestEntry],
+) -> Result<BTreeMap<String, &ArosToolchainManifestEntry>, ContractError> {
+    validate_inventory_with_limit(entries, MAX_INVENTORY_FILE_BYTES)
+}
+
+pub(super) fn validate_inventory_with_limit(
+    entries: &[ArosToolchainManifestEntry],
+    maximum_file_bytes: u64,
 ) -> Result<BTreeMap<String, &ArosToolchainManifestEntry>, ContractError> {
     if entries.len() > MAX_INVENTORY_ENTRIES {
         return Err(error(
@@ -1092,7 +1099,7 @@ fn validate_inventory(
                 file_bytes = file_bytes
                     .checked_add(entry.size.unwrap_or_default())
                     .ok_or_else(|| error("portable SDK inventory file-byte count overflowed"))?;
-                if file_bytes > MAX_INVENTORY_FILE_BYTES {
+                if file_bytes > maximum_file_bytes {
                     return Err(error("portable SDK inventory exceeds its file-byte limit"));
                 }
             }
@@ -1142,7 +1149,7 @@ fn validate_inventory(
     Ok(index)
 }
 
-fn resolve_inventory_path(
+pub(super) fn resolve_inventory_path(
     relative: &str,
     index: &BTreeMap<String, &ArosToolchainManifestEntry>,
 ) -> Result<String, ContractError> {

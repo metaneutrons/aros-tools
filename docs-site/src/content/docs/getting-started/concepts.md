@@ -49,6 +49,18 @@ Released cross-toolchains are selected by the AROS checkout's
 `aros-toolchains.lock.toml`. An explicitly supplied local AROS-built prefix
 is also supported, but does not acquire release provenance by passing a probe.
 
+## Compiler or application SDK?
+
+The compiler produces target binaries. The SDK supplies the matching AROS
+headers and libraries for application development; a compiler installation
+alone is not a complete SDK.
+
+An SDK belongs to one target and ABI, not to the computer building the
+application. Its product version is independent of the compiler and tools
+versions. Compiler and SDK artifacts share the `aros-toolchains` release
+repository, but are selected separately. See [SDK workflows](/aros-tools/workflows/sdks/)
+for installation, project selection and source-bound generation.
+
 ## Generated output and source updates
 
 The CMake engine is embedded in the tools and materialized under
