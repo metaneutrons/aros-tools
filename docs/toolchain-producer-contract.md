@@ -196,6 +196,12 @@ An omitted checksum or the source template's empty/ASCII-whitespace-only
 declaration must match the single lock-selected filename and SHA-256 exactly;
 repeated checksum options are rejected even when their values are empty.
 This does not permit unverified inputs or source-owned direct network calls.
+Cargo vendor selection first checks the exact tools manifest's declared
+`workspace.package.rust-version` against the explicit producer Rust pin.
+An older pin or malformed minimum fails with `AX0401` before Cargo invocation
+or vendor-cache population, and before native configure/compiler execution.
+No ambient toolchain fallback or MSRV override is allowed. This check covers
+the declared workspace minimum, not every dependency's independent MSRV.
 The selected Rust vendor tree must match the exact external closure of the
 tools snapshot's `Cargo.lock`, including registry package checksums. A private
 host-Python environment records its interpreter and every lock-verified package
