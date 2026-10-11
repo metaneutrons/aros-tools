@@ -2,7 +2,7 @@
 
 #![cfg(unix)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -16,6 +16,7 @@ use super::{
     amend_cmake_to_build_native_sdk, gnu_native_sdk_fixture, native_consumer_binding, shell_quote,
     Fixture, NativeCompatibilityRequest, NativeSdkBindingMode, NATIVE_CONSUMER_CONTRACT_FILE,
 };
+use crate::compatibility::NativeCompatibilityInputClaims;
 use crate::compatibility_source::{
     materialize_engine_free_source, CommittedSourceIdentity, EngineFreeSourceRequest,
 };
@@ -124,6 +125,153 @@ fn generates_and_packages_the_exact_six_phase_four_link_sdk_with_epoch_zero() {
     assert!(packaged.archive.is_file());
     assert!(packaged.manifest.is_file());
     assert!(packaged.checksum.is_file());
+}
+
+#[test]
+fn generate_with_export_returns_the_exact_sdk_portable_closure_for_its_record() {
+    let fixture = generation_fixture(NativeSdkBindingMode::Valid, 0);
+    let (completed, execution) =
+        sdk_generation::generate_with_export(&fixture.request, &CancellationToken::default())
+            .expect("verified GNU source should return generation and portable evidence");
+
+    let report = execution.report();
+    let native_sdk = report
+        .native_sdk
+        .as_ref()
+        .expect("SDK generation must execute all four ordinary links");
+    assert_eq!(report.probes.reports.len(), 6);
+    assert_eq!(
+        execution.evidence().receipt_sha256(),
+        &report.receipt.sha256
+    );
+    completed.revalidate().unwrap();
+
+    let input_claims = NativeCompatibilityInputClaims::parse(
+        execution.inputs().bytes(),
+        execution.inputs().sha256(),
+    )
+    .unwrap();
+    let input_document: Value = serde_json::from_slice(input_claims.bytes()).unwrap();
+    assert_eq!(
+        input_document["schema"],
+        "aros-toolchain-compatibility-inputs-v2"
+    );
+    assert!(input_document["native_sdk"].is_object());
+    assert_eq!(
+        input_document["sdk_source_tree_sha256"],
+        completed.identity().source.content_sha256.to_string()
+    );
+
+    let evidence_files: BTreeMap<&str, &[u8]> =
+        execution.evidence().files().collect::<BTreeMap<_, _>>();
+    let sdk_names = evidence_files
+        .keys()
+        .filter(|name| name.starts_with("sdk-"))
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut expected_sdk_names = BTreeSet::from([
+        "sdk-aros-native-consumer-binding.json".to_owned(),
+        "sdk-native-sdk-links.receipt.json".to_owned(),
+        "sdk-native-sdk-inventory.json".to_owned(),
+    ]);
+    for label in ["original", "relocated"] {
+        for language in ["c", "cxx"] {
+            expected_sdk_names.insert(format!("sdk-{label}-{language}.elf"));
+            expected_sdk_names.insert(format!("sdk-{label}-{language}.map"));
+        }
+    }
+    for language in ["c", "cxx"] {
+        expected_sdk_names.insert(format!("sdk-standalone-{language}.report.json"));
+        for command in [1, 2] {
+            for stream in ["stdout", "stderr"] {
+                expected_sdk_names
+                    .insert(format!("sdk-standalone-{language}.{command}.{stream}.log"));
+            }
+        }
+    }
+    assert_eq!(sdk_names, expected_sdk_names);
+    assert!(evidence_files.contains_key("compatibility-measurement.json"));
+    assert_eq!(
+        &sha256_bytes(evidence_files["native-compatibility.receipt.json"]),
+        execution.evidence().receipt_sha256()
+    );
+
+    let record_bytes = fs::read(completed.record_path()).unwrap();
+    assert_eq!(completed.record_sha256(), &sha256_bytes(&record_bytes));
+    let record: Value = serde_json::from_slice(&record_bytes).unwrap();
+    assert_eq!(
+        record["assurance"],
+        "local-generation-binding-not-release-admission"
+    );
+    assert_eq!(
+        record["compatibility_receipt_sha256"],
+        report.receipt.sha256.to_string()
+    );
+    assert_eq!(
+        record["sdk_link_receipt_sha256"],
+        sha256_bytes(evidence_files["sdk-native-sdk-links.receipt.json"]).to_string()
+    );
+    assert_eq!(
+        record["sdk_inventory_sha256"],
+        native_sdk.sdk_inventory_sha256.to_string()
+    );
+    assert_eq!(
+        record["sdk_entries"],
+        serde_json::json!(native_sdk.sdk_entries)
+    );
+    assert_eq!(completed.tree_sha256(), &native_sdk.sdk_inventory_sha256);
+
+    let packaged = sdk_generation::package_generated(&completed, &fixture.package_output, &[])
+        .expect("the exported execution's opaque completion remains packageable");
+    assert!(packaged.archive.is_file());
+}
+
+#[test]
+fn generate_with_export_completion_rejects_input_record_and_sdk_mutations() {
+    for mutation in [
+        RetainedMutation::Source,
+        RetainedMutation::Record,
+        RetainedMutation::Sdk,
+    ] {
+        let fixture = generation_fixture(NativeSdkBindingMode::Valid, 0);
+        let (completed, execution) =
+            sdk_generation::generate_with_export(&fixture.request, &CancellationToken::default())
+                .expect("baseline generation and export should complete once");
+        assert_eq!(execution.report().probes.reports.len(), 6);
+
+        let path = match mutation {
+            RetainedMutation::Source => fixture.materialized_source_root.join("native-sdk-probe.c"),
+            RetainedMutation::Record => completed.record_path().to_path_buf(),
+            RetainedMutation::Sdk => fixture
+                .compatibility_fixture
+                .request
+                .cmake_build_root
+                .join("SYS/Developer/lib/client.a"),
+            RetainedMutation::Map | RetainedMutation::Elf => unreachable!(),
+        };
+        append_byte(&path);
+        let error = completed
+            .revalidate()
+            .expect_err("returned completion must reject changed retained bytes");
+        assert!(
+            match mutation {
+                RetainedMutation::Source => {
+                    error.to_string().contains("source") || error.to_string().contains("contract")
+                }
+                RetainedMutation::Record => error
+                    .to_string()
+                    .contains("completed SDK generation record changed"),
+                RetainedMutation::Sdk => {
+                    error.to_string().contains("SDK")
+                        || error.to_string().contains("native")
+                        || error.to_string().contains("compatibility")
+                }
+                RetainedMutation::Map | RetainedMutation::Elf => unreachable!(),
+            },
+            "unexpected {mutation:?} mutation rejection: {error}"
+        );
+        assert!(!fixture.package_output.exists());
+    }
 }
 
 #[test]
@@ -306,8 +454,9 @@ fn refuses_an_occupied_record_without_running_or_overwriting_it() {
     let sentinel_path = fixture.request.record_path.join("operator-owned.txt");
     fs::write(&sentinel_path, sentinel).unwrap();
 
-    let error = sdk_generation::generate(&fixture.request, &CancellationToken::default())
-        .expect_err("an existing generation record must not be adopted");
+    let error =
+        sdk_generation::generate_with_export(&fixture.request, &CancellationToken::default())
+            .expect_err("an existing generation record must not be adopted or executed");
     assert!(error
         .to_string()
         .contains("SDK generation record must be absent"));

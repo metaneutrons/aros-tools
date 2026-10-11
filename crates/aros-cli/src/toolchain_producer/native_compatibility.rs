@@ -150,6 +150,10 @@ pub struct SdkBuildArgs {
     /// Build path prefixes forbidden from every SDK package member; repeatable
     #[arg(long = "sdk-forbidden-prefix", value_name = "DIR", required = true)]
     sdk_forbidden_prefixes: Vec<PathBuf>,
+    /// Absent absolute directory for complete inputs.json and evidence/;
+    /// local execution evidence only, not authenticated release admission
+    #[arg(long, value_name = "DIR")]
+    evidence_dir: Option<PathBuf>,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -321,8 +325,17 @@ pub async fn build_sdk(
                 result.package.archive_sha256,
                 result.package.archive_size,
             );
+            if let Some(export) = &result.export {
+                aros_common::outputln!(
+                    "Local evidence: {}\nInputs SHA-256: {}\nEvidence manifest SHA-256: {}",
+                    export.directory.display(),
+                    export.inputs_sha256,
+                    export.manifest_sha256,
+                );
+            }
         }
-        ResultFormat::Json => print_json(&serde_json::json!({
+        ResultFormat::Json => {
+            let mut document = serde_json::json!({
             "schema": "aros-sdk-build-result-v1",
             "operation": "sdk.build",
             "assurance": "local-generation-binding-not-release-admission",
@@ -336,7 +349,16 @@ pub async fn build_sdk(
             "checksum": result.package.checksum,
             "archive_sha256": result.package.archive_sha256,
             "archive_size": result.package.archive_size,
-        }))?,
+            });
+            if let Some(export) = &result.export {
+                document["local_evidence"] = serde_json::json!({
+                    "directory": export.directory,
+                    "inputs_sha256": export.inputs_sha256,
+                    "manifest_sha256": export.manifest_sha256,
+                });
+            }
+            print_json(&document)?;
+        }
     }
     Ok(())
 }
@@ -348,6 +370,7 @@ struct SdkBuildResult {
     record_sha256: aros_common::Sha256Digest,
     tree_sha256: aros_common::Sha256Digest,
     package: aros_toolchain::sdk_package::SdkPackageOutput,
+    export: Option<PublishedCompatibilityExport>,
 }
 
 #[cfg(unix)]
@@ -370,6 +393,7 @@ fn execute_sdk_build(
         generation_record,
         output_dir,
         sdk_forbidden_prefixes,
+        evidence_dir,
         format: _,
     } = args;
     let source_preset = source.source_profile().name.clone();
@@ -391,16 +415,24 @@ fn execute_sdk_build(
             "SDK generation cancelled during compatibility preparation; prepared roots are retained"
         ));
     }
-    let completed = aros_toolchain::sdk_generation::generate(
-        &aros_toolchain::sdk_generation::SdkGenerationRequest {
-            source,
-            compatibility: compatibility_request,
-            profiles,
-            record_path: generation_record,
-        },
-        cancellation,
-    )
-    .map_err(|error| native_error(&error))?;
+    let request = aros_toolchain::sdk_generation::SdkGenerationRequest {
+        source,
+        compatibility: compatibility_request,
+        profiles,
+        record_path: generation_record,
+    };
+    let (completed, execution) = if evidence_dir.is_some() {
+        let (completed, execution) =
+            aros_toolchain::sdk_generation::generate_with_export(&request, cancellation)
+                .map_err(|error| native_error(&error))?;
+        (completed, Some(execution))
+    } else {
+        (
+            aros_toolchain::sdk_generation::generate(&request, cancellation)
+                .map_err(|error| native_error(&error))?,
+            None,
+        )
+    };
     if cancellation.is_cancelled() {
         return Err(miette::miette!(
             "SDK generation cancelled before packaging; the completed generation record and execution roots are retained"
@@ -417,12 +449,40 @@ fn execute_sdk_build(
             "SDK build cancelled while packaging; the package output may already be complete and is retained"
         ));
     }
+    completed
+        .revalidate()
+        .map_err(|error| native_error(&error))?;
+    if cancellation.is_cancelled() {
+        return Err(miette::miette!(
+            "SDK build cancelled before evidence publication; the package and generation roots are retained"
+        ));
+    }
+    let export = match (evidence_dir, execution) {
+        (Some(destination), Some(execution)) => {
+            Some(compatibility_export::publish(&destination, &execution)?)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(miette::miette!(
+                "SDK execution export selection is inconsistent"
+            ))
+        }
+    };
+    completed
+        .revalidate()
+        .map_err(|error| native_error(&error))?;
+    if cancellation.is_cancelled() {
+        return Err(miette::miette!(
+            "SDK build cancelled while publishing evidence; the package and any completed evidence export are retained"
+        ));
+    }
     Ok(SdkBuildResult {
         identity: completed.identity().clone(),
         record_path: completed.record_path().to_path_buf(),
         record_sha256: completed.record_sha256().clone(),
         tree_sha256: completed.tree_sha256().clone(),
         package,
+        export,
     })
 }
 
@@ -472,6 +532,9 @@ fn preflight_sdk_build_destinations(
 
     let mut record_protected = protected.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     record_protected.push(&args.output_dir);
+    if let Some(destination) = &args.evidence_dir {
+        record_protected.push(destination);
+    }
     preflight_sdk_destination(
         "generation record",
         &args.generation_record,
@@ -481,12 +544,26 @@ fn preflight_sdk_build_destinations(
 
     let mut package_protected = protected.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     package_protected.push(&args.generation_record);
+    if let Some(destination) = &args.evidence_dir {
+        package_protected.push(destination);
+    }
     preflight_sdk_destination(
         "package output",
         &args.output_dir,
         &package_protected,
         &args.sdk_forbidden_prefixes,
-    )
+    )?;
+    if let Some(destination) = &args.evidence_dir {
+        let mut evidence_protected = protected.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        evidence_protected.extend([args.generation_record.as_path(), args.output_dir.as_path()]);
+        preflight_sdk_destination(
+            "evidence output",
+            destination,
+            &evidence_protected,
+            &args.sdk_forbidden_prefixes,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

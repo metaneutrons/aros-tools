@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::compatibility::{
     derive_native_compatibility_environment_identity_with_epoch,
-    execute_native_compatibility_with_readback, readback_generated_sdk_root,
-    NativeCompatibilityReport, NativeCompatibilityRequest,
+    execute_native_compatibility_with_export, execute_native_compatibility_with_readback,
+    readback_generated_sdk_root, NativeCompatibilityExecutionExport, NativeCompatibilityReport,
+    NativeCompatibilityRequest,
 };
 use crate::profiles::Profiles;
 use crate::sdk_package::{self, SdkPackageOutput, SdkPackageRequest, SdkVerificationRequest};
@@ -125,15 +126,55 @@ pub fn generate(
     request: &SdkGenerationRequest,
     cancellation: &CancellationToken,
 ) -> Result<CompletedSdkGeneration, ContractError> {
-    validate_selection(request)?;
-    let mut request = request.clone();
-    request.record_path = selected_destination(&request, &request.record_path)?;
-    require_absent(&request.record_path)?;
+    let request = prepare_generation_request(request)?;
     let report = execute_native_compatibility_with_readback(
         &request.compatibility,
         &request.profiles,
         cancellation,
     )?;
+    finish_generation(request, report)
+}
+
+/// Execute one source-bound SDK generation and retain its portable compatibility bytes.
+///
+/// The returned export is the exact pre-execution input observation and portable
+/// report/evidence closure produced by the same native execution used for the
+/// completed generation. It is local consistency evidence only: this operation
+/// does not publish, sign, authenticate an external job, or admit a release.
+///
+/// # Errors
+/// Rejects the same source, compiler, root and record selections as [`generate`]
+/// and propagates execution or retained-evidence failures. Outputs from failed
+/// execution remain diagnostic evidence; no retry or publication occurs.
+pub fn generate_with_export(
+    request: &SdkGenerationRequest,
+    cancellation: &CancellationToken,
+) -> Result<(CompletedSdkGeneration, NativeCompatibilityExecutionExport), ContractError> {
+    let request = prepare_generation_request(request)?;
+    let execution = execute_native_compatibility_with_export(
+        &request.compatibility,
+        &request.profiles,
+        cancellation,
+    )?;
+    let report = execution.report().clone();
+    let completed = finish_generation(request, report)?;
+    Ok((completed, execution))
+}
+
+fn prepare_generation_request(
+    request: &SdkGenerationRequest,
+) -> Result<SdkGenerationRequest, ContractError> {
+    validate_selection(request)?;
+    let mut request = request.clone();
+    request.record_path = selected_destination(&request, &request.record_path)?;
+    require_absent(&request.record_path)?;
+    Ok(request)
+}
+
+fn finish_generation(
+    request: SdkGenerationRequest,
+    report: NativeCompatibilityReport,
+) -> Result<CompletedSdkGeneration, ContractError> {
     request.source.revalidate()?;
     let candidate_root =
         readback_generated_sdk_root(&request.compatibility, &request.profiles, &report)?;

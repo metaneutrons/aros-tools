@@ -46,6 +46,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros sdk build` | generation_record | `--generation-record` | — | required | 1 |  |  | — |  |
 | `aros sdk build` | output_dir | `--output-dir` | — | required | 1 |  |  | — |  |
 | `aros sdk build` | sdk_forbidden_prefixes | `--sdk-forbidden-prefix` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | evidence_dir | `--evidence-dir` | — | optional | 1 |  |  | — |  |
 | `aros sdk build` | format | `--format` | — | optional | 1 | human | human, json | — |  |
 | `aros sdk download` | release_lock | `--release-lock` | — | optional | 1 |  |  | — | project_lock |
 | `aros sdk download` | lock_sha256 | `--lock-sha256` | — | optional | 1 |  |  | — | project_lock |

@@ -90,6 +90,19 @@ retain their byte-consistency claims. Public producer integration, authenticated
 owning-job evidence, release index and full release qualification remain required;
 neither this record nor its self-hash grants publication rights.
 
+`sdk_generation::generate_with_export` executes the same generation once and
+returns its opaque completion together with the existing native compatibility
+export. Input claims are measured before execution; the export includes all
+six phases and the complete original/relocated SDK link closure. It is not
+reconstructed from a generation record or a downloaded receipt.
+
+`aros sdk build --evidence-dir DIR` writes that local export after packaging and
+retained-evidence revalidation. The absent directory must be separate from the
+generation record, package output and every selected input/execution root. Its
+`inputs.json` and `evidence/` are published together without clobbering existing
+outputs. Failure retains diagnostic roots and any completed local package;
+neither a portable export nor its digests authenticate an external owning job.
+
 ## Complete local package
 
 The archive name is `aros-sdk-<sdk-id>-<version>.tar.xz`; there is no host

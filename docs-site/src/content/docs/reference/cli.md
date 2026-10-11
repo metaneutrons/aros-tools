@@ -111,7 +111,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | Command | Effect and boundary |
 | --- | --- |
 | `aros sdk verify-source` | Bind an independently selected SDK identity to its clean committed checkout, engine-free projection and sealed source ABI contract; no build or writes |
-| `aros sdk build` | Verify the selected source, generate and ordinarily link its SDK, then package only that completed generation; local only |
+| `aros sdk build` | Verify source, generate and link its SDK, package that generation and optionally export complete local execution evidence |
 | `aros sdk package` | Package a source-produced Developer tree against an explicit source/ABI identity and inventory digest; local only |
 | `aros sdk verify-package` | Read back all local package members and payload bytes against independent archive, tree and identity selections |
 | `aros sdk extract` | Verify then extract into one absent directory and recheck the payload; not managed installation |

@@ -607,3 +607,53 @@ fn sdk_build_cli_accepts_source_then_stops_at_occupied_output_preflight() {
     assert!(!fixture.native_tool_marker.exists());
     assert!(!fixture.root.join("sdk-generation.json").exists());
 }
+
+#[test]
+fn sdk_build_cli_rejects_occupied_evidence_before_preparation() {
+    let fixture = Fixture::new();
+    let evidence = fixture.root.join("sdk-evidence");
+    fs::create_dir(&evidence).unwrap();
+    fs::write(evidence.join("sentinel"), b"preserve existing evidence").unwrap();
+    let mut command = fixture.build_command(&fixture.identity_sha256);
+    command.arg("--evidence-dir").arg(&evidence);
+    let output = assert_rejected_without_writes(command, &fixture.root);
+    assert_json_diagnostic(
+        &output,
+        "SDK evidence output must be an absent absolute destination",
+    );
+    assert!(!fixture.native_tool_marker.exists());
+}
+
+#[test]
+fn sdk_build_cli_rejects_evidence_overlapping_selected_roots_or_other_outputs() {
+    for relative in [
+        "source/export",
+        "materialized/export",
+        "reports/export",
+        "sdk-package",
+        "sdk-generation.json",
+    ] {
+        let fixture = Fixture::new();
+        let mut command = fixture.build_command(&fixture.identity_sha256);
+        command
+            .arg("--evidence-dir")
+            .arg(fixture.root.join(relative));
+        let output = assert_rejected_without_writes(command, &fixture.root);
+        assert_json_diagnostic(&output, "must be an absent absolute destination");
+        assert!(!fixture.native_tool_marker.exists());
+    }
+}
+
+#[test]
+fn sdk_build_cli_accepts_disjoint_evidence_selection_without_creating_it_early() {
+    let fixture = Fixture::new();
+    let evidence = fixture.root.join("sdk-evidence");
+    let mut command = fixture.build_command(&fixture.identity_sha256);
+    command.arg("--evidence-dir").arg(&evidence);
+    let output = assert_rejected_without_writes(command, &fixture.root);
+    // Valid source and output selections proceed to the independently selected,
+    // deliberately absent compiler recipe. No native execution or export occurs.
+    assert_json_diagnostic(&output, "recipe");
+    assert!(!fixture.native_tool_marker.exists());
+    assert!(!evidence.exists());
+}
