@@ -496,6 +496,7 @@ fn verify_archive_tree(
 /// The caller owns outer-file hashing, size identity, and SDK-manifest checks;
 /// this function enforces the bounded tar structure and returns its embedded
 /// manifest plus portable payload inventory.
+#[cfg(test)]
 pub(crate) fn verify_payload_archive(
     input: File,
     contract: PayloadArchiveContract<'_>,
