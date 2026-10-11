@@ -106,6 +106,11 @@ pub fn inspect_native_source_policy(
         ));
     }
 
+    if profile.sdk_consumer_contract.is_some() {
+        return Err(ContractError::invalid(
+            "native source policy does not yet support a generic SDK consumer contract",
+        ));
+    }
     let mut committed_inputs = Vec::<(String, Vec<u8>)>::new();
     let (native_consumer, native_sdk_required) = if let Some(relative) =
         profile.native_consumer_contract.as_deref()
@@ -371,6 +376,38 @@ mod tests {
             "aros-native-consumer-contract-v2"
         );
         assert!(policy.native_sdk_required);
+    }
+
+    #[test]
+    fn generic_sdk_policy_is_rejected_instead_of_reporting_sdk_not_required() {
+        let mut fixture = Fixture::new(None);
+        let path = fixture.root.join(SOURCE_PROFILE_FILE);
+        let text = fs::read_to_string(&path).unwrap().replace(
+            "[targets.transpiler]",
+            "sdk_consumer_contract = 'contracts/sdk-consumer.json'\n[targets.transpiler]",
+        );
+        fs::write(path, text).unwrap();
+        fixture.recommit();
+        let before = fs::read(fixture.root.join(SOURCE_PROFILE_FILE)).unwrap();
+        let status_before = git(
+            &fixture.root,
+            &["status", "--porcelain", "--untracked-files=all"],
+        );
+        let error = inspect_native_source_policy(&fixture.request()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not yet support a generic SDK consumer contract"));
+        assert_eq!(
+            fs::read(fixture.root.join(SOURCE_PROFILE_FILE)).unwrap(),
+            before
+        );
+        assert_eq!(
+            git(
+                &fixture.root,
+                &["status", "--porcelain", "--untracked-files=all"]
+            ),
+            status_before
+        );
     }
 
     #[test]

@@ -135,7 +135,9 @@ Vanilla runtime ABI compatibility.
 The original must be clean with initialized submodules. The projection must
 match raw Git contents with only top-level `cmake/` omitted. Commit/tree bind
 the original; `content_sha256` binds that normalized projection. Contract digest,
-target triple and all ABI facts must match the source's sealed v2 declaration.
+target triple and all ABI facts must match the source's sealed declaration:
+GNU native-consumer-v2 or the generic SDK-consumer contract. The source preset
+must name exactly one of these; a failed declaration never triggers fallback.
 This command does not generate an SDK, prove execution or authorize packaging
 or publication. Its JSON assurance is
 `local-source-binding-not-execution-or-release-admission`.
@@ -143,7 +145,9 @@ or publication. Its JSON assurance is
 `build` uses the same source/identity selectors plus explicit compiler-package,
 native execution and output inputs. Its generation epoch comes from the verified
 SDK identity; there is no separate `--consumer-source-date-epoch`, candidate-root
-or SDK tree-digest selector. Generation currently requires a family-v2 GNU
+or SDK tree-digest selector. Generic SDK source contracts can be verified but
+are rejected by `build` before preparation until their execution adapters exist.
+Generation currently requires a family-v2 GNU
 compiler matching the source preset's compiler profile.
 `--generation-record FILE`, `--output-dir DIR` and
 repeatable `--sdk-forbidden-prefix DIR` are required. The record and package

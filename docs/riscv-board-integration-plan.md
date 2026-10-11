@@ -362,7 +362,9 @@ host compiler payload or one universal SDK for all architectures.
 The enclosing release version identifies the complete distribution. SDK product
 versions remain independent metadata, as specified by the
 [SDK artifact contract](sdk-artifact-contract-v2.md). This decision does not
-select the first public SDK version or admit local artifacts to publication.
+admit local artifacts to publication. The first four SDK products (pc-x86_64,
+arm-raspi, rpi-aarch64 and rv32-esp32p4) each start at independent product version
+`0.1.0` and must be distributed together in the shared release.
 Complete generation, package, index, authenticated evidence, qualification and
 consumer verification remain required. ABI descriptor equality and successful
 linking do not establish binary compatibility with a Vanilla AROS runtime.

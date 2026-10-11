@@ -443,7 +443,7 @@ fn consumer_rejects_hardlinked_and_oversized_inputs() {
     assert!(load(directory.path(), &profile, &aliased).is_err());
     fs::write(
         directory.path().join("policy.json"),
-        vec![b' '; MAX_INPUT_BYTES as usize + 1],
+        vec![b' '; crate::native_consumer_graph::MAX_INPUT_BYTES as usize + 1],
     )
     .unwrap();
     assert!(load(directory.path(), &profile, &document).is_err());

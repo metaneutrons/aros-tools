@@ -93,6 +93,7 @@ fn new_fixture() -> Fixture {
         }),
         native_build_contract: None,
         native_consumer_contract: None,
+        sdk_consumer_contract: None,
         toolchain_profile: None,
     };
     let inputs = INPUT_FILES

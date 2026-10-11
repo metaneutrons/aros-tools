@@ -280,6 +280,8 @@ pub async fn build_sdk(
     identity_path: PathBuf,
     args: SdkBuildArgs,
 ) -> miette::Result<()> {
+    aros_toolchain::sdk_generation::validate_source_executor(&source)
+        .map_err(|error| native_error(&error))?;
     preflight_sdk_build_destinations(&source, &original_source_dir, &identity_path, &args)?;
     let context = package_context(args.native.context.clone())?;
     preflight_sdk_compiler_selection(
@@ -628,9 +630,6 @@ fn preflight_consumer_epoch(
             "consumer source-date epoch exceeds the SDK portable tar timestamp range"
         ));
     }
-    if epoch.is_some() {
-        return Ok(());
-    }
     let Some(name) = source_preset else {
         return Ok(());
     };
@@ -647,6 +646,14 @@ fn preflight_consumer_epoch(
         .into_iter()
         .find(|profile| profile.name == name)
         .ok_or_else(|| miette::miette!("compatibility source preset is not declared"))?;
+    if profile.sdk_consumer_contract.is_some() {
+        return Err(miette::miette!(
+            "compatibility executor does not yet support a generic SDK consumer contract"
+        ));
+    }
+    if epoch.is_some() {
+        return Ok(());
+    }
     let Some(path) = &profile.native_consumer_contract else {
         return Ok(());
     };

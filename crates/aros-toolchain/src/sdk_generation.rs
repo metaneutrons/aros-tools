@@ -235,6 +235,23 @@ pub fn package_generated(
     Ok(output)
 }
 
+/// Require a source contract implemented by the current generation executor.
+///
+/// Source identity verification can understand a generic SDK contract without
+/// claiming its LLVM or GNU link adapter is implemented. Call this before any
+/// compatibility preparation or source program execution.
+///
+/// # Errors
+/// Rejects generic source contracts until their execution/evidence path exists.
+pub fn validate_source_executor(source: &VerifiedSdkSource) -> Result<(), ContractError> {
+    if source.consumer_contract_schema() != "aros-native-consumer-contract-v2" {
+        return Err(error(
+            "SDK generation executor does not yet support the selected generic source contract",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_selection(request: &SdkGenerationRequest) -> Result<(), ContractError> {
     let identity = request.source.identity();
     let native = &request.compatibility;
@@ -256,6 +273,7 @@ fn validate_selection(request: &SdkGenerationRequest) -> Result<(), ContractErro
             "SDK generation preset differs from its verified source profile",
         ));
     }
+    validate_source_executor(&request.source)?;
     let compiler = native.relocation.first.verified.manifest.compiler.as_ref();
     if compiler.is_none_or(|compiler| compiler.family() != "gnu") {
         return Err(error(

@@ -9,7 +9,6 @@ use aros_toolchain::compatibility_source::{
 };
 use aros_toolchain::recipe::GitObjectId;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -35,25 +34,52 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_generic_contract(false)
+    }
+
+    fn with_generic_contract(generic: bool) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().canonicalize().unwrap();
         let source_root = root.join("source");
         fs::create_dir(&source_root).unwrap();
         git(&source_root, &["init", "-q"]);
 
-        fs::write(source_root.join("aros-targets.toml"), PROFILE).unwrap();
+        let profile = if generic {
+            PROFILE
+                .replace("arch='riscv64'", "arch='x86_64'")
+                .replace("float_abi='lp64d'\n", "")
+                .replace("native_consumer_contract=", "sdk_consumer_contract=")
+                .replace("toolchain='gnu'", "toolchain='llvm'")
+        } else {
+            PROFILE.to_owned()
+        };
+        fs::write(source_root.join("aros-targets.toml"), &profile).unwrap();
         fs::write(source_root.join("policy.json"), POLICY).unwrap();
         fs::write(source_root.join("probe.c"), C_PROBE).unwrap();
         fs::write(source_root.join("probe.cpp"), CXX_PROBE).unwrap();
-        let abi = abi_value();
-        let contract = json!({
+        let abi = if generic {
+            json!({"source_cpu":"x86_64", "pointer_width":64, "use_mmu":true,
+                "flavour":"native", "platform_smp":true})
+        } else {
+            abi_value()
+        };
+        let target = SdkTarget {
+            target_triple: if generic {
+                "x86_64-unknown-aros"
+            } else {
+                "riscv64-aros"
+            }
+            .into(),
+            abi: serde_json::from_value(abi.clone()).unwrap(),
+        };
+        let mut contract = json!({
             "schema":"aros-native-consumer-contract-v2",
             "profile":PRESET,
             "source_baseline":"0123456789abcdef0123456789abcdef01234567",
             "roots":["includes","linklibs"],
             "metamake_projection":"policy.json",
             "inputs":[
-                {"path":"aros-targets.toml","sha256":sha256_bytes(PROFILE.as_bytes())},
+                {"path":"aros-targets.toml","sha256":sha256_bytes(profile.as_bytes())},
                 {"path":"policy.json","sha256":sha256_bytes(POLICY)},
                 {"path":"probe.c","sha256":sha256_bytes(C_PROBE)},
                 {"path":"probe.cpp","sha256":sha256_bytes(CXX_PROBE)}
@@ -64,6 +90,11 @@ impl Fixture {
                 "cxx":{"source":"probe.cpp","libraries":[]}
             }
         });
+        if generic {
+            contract["schema"] = json!("aros-sdk-consumer-contract-v1");
+            contract.as_object_mut().unwrap().remove("abi");
+            contract["target"] = serde_json::to_value(&target).unwrap();
+        }
         let contract_bytes = serde_json::to_vec(&contract).unwrap();
         fs::write(source_root.join("consumer.json"), &contract_bytes).unwrap();
 
@@ -99,14 +130,10 @@ impl Fixture {
         })
         .unwrap();
 
-        let abi: BTreeMap<String, SdkAbiValue> = serde_json::from_value(abi_value()).unwrap();
         let identity = SdkIdentity {
             sdk_id: "example-sdk".to_owned(),
             version: "1.0.0".to_owned(),
-            target: SdkTarget {
-                target_triple: "riscv64-aros".to_owned(),
-                abi,
-            },
+            target,
             source: SdkSourceIdentity {
                 commit: materialized.source_commit,
                 git_tree: materialized.source_tree,
@@ -445,6 +472,34 @@ fn sdk_verify_source_cli_binds_selected_identity_to_committed_source_and_abi() {
         before,
         "successful command changed fixture state"
     );
+}
+
+#[test]
+fn generic_sdk_source_cli_verifies_identity_but_build_rejects_before_preparation() {
+    let fixture = Fixture::with_generic_contract(true);
+    let before = snapshot(&fixture.root);
+    let output = fixture.command().output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["identity"],
+        serde_json::to_value(&fixture.identity).unwrap()
+    );
+    assert_eq!(snapshot(&fixture.root), before);
+
+    let unsupported = assert_rejected_without_writes(
+        fixture.build_command(&fixture.identity_sha256),
+        &fixture.root,
+    );
+    assert_json_diagnostic(
+        &unsupported,
+        "does not yet support the selected generic source contract",
+    );
+    assert!(!fixture.native_tool_marker.exists());
 }
 
 #[test]
