@@ -17,12 +17,41 @@ source-date epoch. No board enum, host selector or executable extension is
 introduced. ABI map keys are unique; map order does not change its canonical
 digest. Changing a source fact changes that descriptor digest. Validation
 checks representation and consistency, not that the chosen ABI is implemented.
+Commit and Git tree identify the complete original checkout. The content digest
+identifies its normalized raw-Git projection with top-level `cmake/` omitted,
+including initialized submodule material. It is not a digest of an arbitrary
+checkout or of the generated SDK payload.
 
 The caller must select the identity document and its raw SHA-256 independently.
 Packaging does not derive a version from the installed compiler or manufacture
 a released source identity from an uncommitted tree. The first public SDK
 version and repository/channel selection remain release-integration decisions;
 local package success does not make them published.
+
+## Read-only source binding
+
+`aros sdk verify-source` requires the independent identity document/hash pair,
+the clean original Git checkout, its existing engine-free projection and an
+explicit source preset. It recursively audits original worktree bytes and modes
+against raw committed Git material, including initialized submodules. The
+projection must contain exactly those normalized entries except top-level
+`cmake/`: missing/extra entries, empty extra directories, altered executable
+modes and link targets fail. Projected regular files must have exactly one link;
+content-identical hardlinks to another path are rejected. Bounded descriptor
+snapshots bracket verification; it never copies, repairs or executes source
+material.
+
+The selected profile must own a sealed v2 native consumer contract with ordinary
+C/C++ SDK link probes. Its exact digest, target triple and complete scalar ABI
+map must equal the SDK identity. No board enum or host identity is inferred.
+The library returns an opaque `VerifiedSdkSource` with read-only revalidation;
+CLI JSON states `local-source-binding-not-execution-or-release-admission`.
+
+The identity's epoch is explicit selection, not proof that generation consumed
+it. This source check does not yet join the native execution/link receipts with
+the package stage. That generation/package binding and the release matrix are
+separate remaining producer requirements; source verification alone cannot
+qualify or publish an SDK.
 
 ## Complete local package
 

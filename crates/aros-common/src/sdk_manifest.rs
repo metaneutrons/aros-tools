@@ -46,6 +46,8 @@ pub struct SdkTarget {
 pub struct SdkSourceIdentity {
     pub commit: String,
     pub git_tree: String,
+    /// Normalized raw-Git source projection with top-level `cmake/` omitted;
+    /// commit/tree above identify the complete original committed checkout.
     pub content_sha256: Sha256Digest,
     pub contract_sha256: Sha256Digest,
 }
