@@ -32,6 +32,41 @@ pub(super) struct TreeNodeSnapshot {
 }
 
 impl TreeContentCas {
+    /// Match one exact directory in this descriptor-measured snapshot.
+    /// This does not inspect current filesystem state or authenticate its origin.
+    #[must_use]
+    pub fn matches_directory(&self, relative: &str, mode: u32) -> bool {
+        self.matches_entry(relative, 2, mode, None)
+    }
+
+    /// Match one exact regular-file name, permission mode and content digest.
+    /// Missing entries, directories and symbolic links never match.
+    #[must_use]
+    pub fn matches_regular_file(&self, relative: &str, mode: u32, content: &Sha256Digest) -> bool {
+        self.matches_entry(relative, 1, mode, Some(content))
+    }
+
+    /// Match one exact symbolic-link name, permission mode and target-byte digest.
+    /// This does not establish that the target resolves inside the tree.
+    #[must_use]
+    pub fn matches_symbolic_link(&self, relative: &str, mode: u32, target: &Sha256Digest) -> bool {
+        self.matches_entry(relative, 3, mode, Some(target))
+    }
+
+    fn matches_entry(
+        &self,
+        relative: &str,
+        kind: u8,
+        mode: u32,
+        content: Option<&Sha256Digest>,
+    ) -> bool {
+        self.entries.get(relative.as_bytes()).is_some_and(|entry| {
+            entry.snapshot.kind == kind
+                && entry.snapshot.mode & 0o7777 == mode
+                && entry.content.as_ref() == content
+        })
+    }
+
     /// Whether this snapshot contains any symbolic links.
     #[must_use]
     pub fn has_symlinks(&self) -> bool {

@@ -29,6 +29,45 @@ fn prepared_tree_measures_regular_files_and_symlinks() {
 }
 
 #[test]
+fn snapshot_entry_predicates_require_exact_kind_mode_and_content() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // These predicates inspect raw descriptor snapshots. Filtered source-tree
+    // snapshots deliberately resolve link content and have different semantics.
+    let measure = |root: &Path| {
+        measure_tree_content_cas_bounded(root, TreeTraversalLimits::new(512, 1024 * 1024).unwrap())
+            .unwrap()
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let root = create_source_root(&temporary);
+    std::fs::create_dir(root.join("dir")).unwrap();
+    std::fs::set_permissions(root.join("dir"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(root.join("file"), b"content").unwrap();
+    std::fs::set_permissions(root.join("file"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    symlink("file", root.join("link")).unwrap();
+    let before = measure(&root);
+    assert!(before.matches_directory("dir", 0o755));
+    assert!(before.matches_regular_file("file", 0o644, &sha256_bytes(b"content")));
+    let link_mode = std::fs::symlink_metadata(root.join("link"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o7777;
+    assert!(before.matches_symbolic_link("link", link_mode, &sha256_bytes(b"file")));
+    assert!(!before.matches_symbolic_link("link", link_mode ^ 0o100, &sha256_bytes(b"file")));
+    assert!(!before.matches_directory("file", 0o644));
+    assert!(!before.matches_directory("dir", 0o700));
+    assert!(!before.matches_regular_file("file", 0o755, &sha256_bytes(b"content")));
+    assert!(!before.matches_regular_file("file", 0o644, &sha256_bytes(b"changed")));
+    assert!(!before.matches_regular_file("link", 0o777, &sha256_bytes(b"file")));
+    assert!(!before.matches_symbolic_link("link", link_mode, &sha256_bytes(b"other")));
+    assert!(!before.matches_directory("absent", 0o755));
+    assert_eq!(before, measure(&root));
+    std::fs::set_permissions(root.join("file"), std::fs::Permissions::from_mode(0o4644)).unwrap();
+    assert!(!measure(&root).matches_regular_file("file", 0o644, &sha256_bytes(b"content")));
+}
+
+#[test]
 fn prepared_tree_enforces_entry_byte_and_depth_limits() {
     let entry_temporary = tempfile::tempdir().unwrap();
     let entry_root = create_source_root(&entry_temporary);
