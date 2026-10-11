@@ -30,7 +30,7 @@ use crate::package_verify::{
 use crate::ContractError;
 
 const ARCHIVE_ROOT: &str = "sdk";
-const MAX_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub(crate) const MAX_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const SCAN_BUFFER_BYTES: usize = 128 * 1024;
 const MAX_FORBIDDEN_PREFIX_BYTES: usize = 4096;
 

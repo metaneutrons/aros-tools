@@ -167,6 +167,22 @@ establish cross-host SDK reproducibility, substitute for C/C++ relocated-link
 qualification, or grant publication authority. The native SDK link receipt
 remains separate evidence; an inventory assertion is not SDK archive bytes.
 
+## Supplemental SPDX metadata
+
+`sdk_sbom::build_measured_sdk_sbom` verifies the complete local package before
+and after rendering deterministic SPDX 2.3 bytes. It writes nothing and does
+not add a fourth member to that package. A shared release stage owns the
+supplemental `<archive>.spdx.json` document and its closed release inventory.
+
+The single SPDX package identifies the SDK product/version and the actual
+archive SHA-256, not the payload tree digest. Its timestamp is the selected
+source epoch; `sourceInfo` records the exact source, SDK contract, payload
+inventory and target descriptor identities. `filesAnalyzed` is false: no file
+analysis, third-party component discovery or license completeness is asserted.
+Licenses and copyright use `NOASSERTION`; the document data license is CC0-1.0.
+The SDK manifest remains the complete payload inventory. This metadata does
+not authenticate the generation job or grant release admission.
+
 ## Consumer release lock
 
 ### Shared release-input selection
