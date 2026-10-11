@@ -144,8 +144,9 @@ uses existing verified bytes only; poisoned cache entries are not replaced.
 `aros sdk install` uses the same retained private snapshots or one explicitly
 selected local archive, then installs or strictly verifies reuse. The local
 archive selector conflicts with cache/transport options, so no argument is
-silently ignored. SDK lock files are bounded, independently hash-selected and
-remeasured before/after the operation.
+silently ignored. SDK lock files are bounded and remeasured before/after the
+operation. External release locks require an independently selected raw hash;
+application project locks are explicit local configuration authority.
 
 `aros sdk list` exposes bounded metadata-only observation; `aros sdk verify`
 checks the complete selected installation. `aros sdk path` verifies before
@@ -178,13 +179,20 @@ locks and project destinations inside the SDK store are rejected, not repaired.
 If a failure occurs after publication, the project file is retained and the
 diagnostic reports the commit state; no rollback overwrites later user changes.
 
-`aros sdk verify --project-lock FILE` and `aros sdk path --project-lock FILE`
-read explicit local application configuration and verify the full installed
-payload. This is an alternative to the independently selected external
+Download, install, verify and path all accept `--project-lock FILE`. A fresh
+application checkout can therefore acquire and install its checked-in SDK
+selection without an existing installation or a second selector document.
+Download and install retain the same exact-byte verification and cache/store
+policies; neither operation rewrites the project lock or creates a selection
+guard. Offline misses leave absent roots absent. Local-archive installation
+still conflicts with cache/transport options.
+
+This is an alternative to the independently selected external
 `--release-lock FILE --lock-sha256 SHA256` pair, not an additional selector.
 The project lock is local configuration authority, not publisher
-authentication. These read-only operations create no absent state and
-remeasure the lock after verification. `path` returns an application input
+authentication. Verify/path create no absent state. All four operations
+remeasure the lock after their work; a late failure retains any published
+installation rather than rolling it back. `path` returns an application input
 directory; it never changes source-generation settings.
 
 This is not a claim of a published SDK. Source-input

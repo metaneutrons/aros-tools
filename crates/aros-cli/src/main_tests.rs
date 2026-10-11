@@ -322,7 +322,7 @@ fn sdk_project_selection_requires_preview_token_and_explicit_project_authority()
         "--lock-sha256",
         &digest,
     ];
-    for leaf in ["verify", "path"] {
+    for leaf in ["download", "install", "verify", "path"] {
         for selectors in [
             vec!["--release-lock", "/tmp/release.json"],
             vec!["--lock-sha256", &digest],
@@ -371,12 +371,6 @@ fn sdk_project_selection_requires_preview_token_and_explicit_project_authority()
         parse_error(&["aros", "sdk", "select", "--apply", "yes"]),
         ErrorKind::ValueValidation
     );
-    for leaf in ["download", "install"] {
-        assert_eq!(
-            parse_error(&["aros", "sdk", leaf, "--project-lock", "/tmp/app-sdk.json"]),
-            ErrorKind::UnknownArgument
-        );
-    }
 }
 
 #[test]
