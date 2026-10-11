@@ -52,7 +52,7 @@ pub fn rendered_cli_contract_index(command: &Command) -> String {
 #[must_use]
 pub fn rendered_cli_contract_section(command: &Command) -> String {
     let mut document = format!(
-        "---\ntitle: \"Generated CLI contract: {}\"\ndescription: Source-derived structural facts for the public aros {} command family.\n---\n\nThis page is generated from the \x60aros\x60 Clap command model. Global arguments are listed on the [contract index](/aros-tools/reference/cli-contract/). The \x60constraint\x60 column includes required exclusive groups.\n\n| Command | ID | Spelling | Position | Constraint | Arity | Default | Values | Environment | Conflicts |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "---\ntitle: \"Generated CLI contract: {}\"\ndescription: Source-derived structural facts for the public aros {} command family.\n---\n\nThis page is generated from the \x60aros\x60 Clap command model. Global arguments are listed on the [contract index](/aros-tools/reference/cli-contract/). The \x60constraint\x60 column includes required exclusive groups.\n\n| Command | ID | Spelling | Position | Constraint | Arity | Default | Values | Environment | Conflicts |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
         command.get_name(),
         command.get_name()
     );
@@ -116,6 +116,7 @@ fn argument_contract(command: &Command, argument: &Arg) -> String {
         (None, Some(long)) => format!("--{long}"),
         (None, None) => argument.get_id().to_string(),
     };
+    let spelling = markdown_code_span(&spelling);
     let conflicts = command
         .get_arg_conflicts_with(argument)
         .into_iter()
@@ -156,6 +157,33 @@ fn argument_contract(command: &Command, argument: &Arg) -> String {
     .map(table_cell)
     .collect::<Vec<_>>()
     .join(" | ")
+}
+
+/// Render exact CLI spelling as a Markdown code span, even when it contains
+/// backticks or leading and trailing spaces.
+fn markdown_code_span(value: &str) -> String {
+    let mut longest_backtick_run = 0;
+    let mut backtick_run = 0;
+    for character in value.chars() {
+        if character == '`' {
+            backtick_run += 1;
+            longest_backtick_run = longest_backtick_run.max(backtick_run);
+        } else {
+            backtick_run = 0;
+        }
+    }
+
+    let delimiter = "`".repeat(longest_backtick_run + 1);
+    let needs_padding = value.starts_with('`')
+        || value.ends_with('`')
+        || (value.starts_with(' ')
+            && value.ends_with(' ')
+            && value.chars().any(|character| character != ' '));
+    if needs_padding {
+        format!("{delimiter} {value} {delimiter}")
+    } else {
+        format!("{delimiter}{value}{delimiter}")
+    }
 }
 
 fn argument_constraint(command: &Command, argument: &Arg) -> String {
@@ -218,8 +246,35 @@ fn collect_command_contract(command: &Command, path: &[String], document: &mut S
 
 #[cfg(test)]
 mod tests {
-    use super::rendered_cli_contract_section;
-    use clap::Command;
+    use super::{markdown_code_span, rendered_cli_contract_index, rendered_cli_contract_section};
+    use clap::{Arg, Command};
+
+    fn table_cell_count(line: &str) -> usize {
+        let mut separator_count = 0_usize;
+        let mut escaped = false;
+        for character in line.chars() {
+            if character == '|' && !escaped {
+                separator_count += 1;
+            }
+            if character == '\\' {
+                escaped = !escaped;
+            } else {
+                escaped = false;
+            }
+        }
+        separator_count.saturating_sub(1)
+    }
+
+    fn assert_table_dimensions(rendered: &str, columns: usize, data_rows: usize) {
+        let table_lines = rendered
+            .lines()
+            .filter(|line| line.starts_with('|'))
+            .collect::<Vec<_>>();
+        assert_eq!(table_lines.len(), data_rows + 2);
+        for line in table_lines {
+            assert_eq!(table_cell_count(line), columns, "invalid table row: {line}");
+        }
+    }
 
     #[test]
     fn command_notes_preserve_declared_conditional_help_in_sorted_order() {
@@ -249,5 +304,35 @@ mod tests {
         let rendered = rendered_cli_contract_section(&command);
         assert!(!rendered.contains("Command notes"));
         assert!(!rendered.contains("Private"));
+    }
+
+    #[test]
+    fn global_and_section_tables_have_valid_column_counts_and_exact_spellings() {
+        let mut command = Command::new("toolchain")
+            .arg(Arg::new("global-flag").long("flag").global(true))
+            .subcommand(
+                Command::new("inspect")
+                    .arg(Arg::new("local-flag").long("local"))
+                    .arg(Arg::new("path").index(1)),
+            );
+        command.build();
+
+        let index = rendered_cli_contract_index(&command);
+        assert_table_dimensions(&index, 9, 1);
+        assert!(index.contains("| `--flag` |"));
+
+        let section = rendered_cli_contract_section(&command);
+        assert_table_dimensions(&section, 10, 2);
+        assert!(section.contains("| `--local` |"));
+        assert!(section.contains("| `path` |"));
+    }
+
+    #[test]
+    fn code_spans_choose_a_delimiter_that_preserves_embedded_backticks() {
+        assert_eq!(markdown_code_span("a`b"), "``a`b``");
+        assert_eq!(markdown_code_span("a``b`c"), "```a``b`c```");
+        assert_eq!(markdown_code_span("`value`"), "`` `value` ``");
+        assert_eq!(markdown_code_span("value`"), "`` value` ``");
+        assert_eq!(markdown_code_span("  value  "), "`   value   `");
     }
 }

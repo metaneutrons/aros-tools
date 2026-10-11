@@ -11,10 +11,10 @@ The `position` column is one-based for positional arguments and `—` for option
 
 | ID | Spelling | Position | Constraint | Arity | Default | Values | Environment | Conflicts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| diagnostic_format | --diagnostic-format | — | optional | 1 | human | human, json | AROS_DIAGNOSTIC_FORMAT |  |
-| log_level | --log-level | — | optional | 1 | off | off, error, warn, info, debug, trace | AROS_LOG_LEVEL |  |
-| log_format | --log-format | — | optional | 1 | human | human, jsonl | AROS_LOG_FORMAT |  |
-| log_file | --log-file | — | optional | 1 |  |  | AROS_LOG_FILE |  |
+| diagnostic_format | `--diagnostic-format` | — | optional | 1 | human | human, json | AROS_DIAGNOSTIC_FORMAT |  |
+| log_level | `--log-level` | — | optional | 1 | off | off, error, warn, info, debug, trace | AROS_LOG_LEVEL |  |
+| log_format | `--log-format` | — | optional | 1 | human | human, jsonl | AROS_LOG_FORMAT |  |
+| log_file | `--log-file` | — | optional | 1 |  |  | AROS_LOG_FILE |  |
 
 ## Command sections
 
