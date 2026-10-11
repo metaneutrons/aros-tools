@@ -89,6 +89,10 @@ pub(super) fn prepare_native_environments(
     // its compiler base name, producing impossible LLVM helper names. This
     // explicit recorded input is identical for execution and read-back.
     variables.insert("ac_cv_prog_cc_c23".into(), String::new());
+    // CMake and pristine upstream Make must both consume only the prepared
+    // lock-verified source closure. A cache miss is a failed qualification,
+    // never permission for the classic fetcher to download an unmeasured input.
+    variables.insert("AROS_FETCH_OFFLINE".into(), "1".into());
     validate_host_environment(&variables, host_tools, &required_host_tools)?;
     Ok(NativeCompatibilityEnvironments {
         sdk: CompatibilityEnvironment::SealedHostTools {
@@ -107,6 +111,7 @@ fn validate_host_environment(
     required_host_tools: &[&str],
 ) -> Result<(), ContractError> {
     let expected = BTreeSet::from([
+        "AROS_FETCH_OFFLINE",
         "ac_cv_prog_cc_c23",
         "PATH",
         "PYTHON",
@@ -121,6 +126,7 @@ fn validate_host_environment(
         .collect::<BTreeSet<_>>()
         != expected
         || environment.get("PATH").map(String::as_str) != Some(POISONED_PATH)
+        || environment.get("AROS_FETCH_OFFLINE").map(String::as_str) != Some("1")
         || environment
             .get("PYTHONDONTWRITEBYTECODE")
             .map(String::as_str)
