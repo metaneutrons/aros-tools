@@ -288,6 +288,11 @@ pub async fn build_sdk(
         context.source_lock.family(),
         context.profile.name(),
         source.source_profile().toolchain_profile(),
+        source
+            .source_profile()
+            .transpiler
+            .as_ref()
+            .map(|context| context.toolchain.as_str()),
     )?;
     let host_tools = parse_host_tools(&args.native.host_tools)?;
     let ports_lock_bytes = read_regular_input(&args.native.ports_lock, "compatibility ports lock")?;
@@ -399,6 +404,9 @@ fn execute_sdk_build(
         format: _,
     } = args;
     let source_preset = source.source_profile().name.clone();
+    let llvm_sdk_source = (source.consumer_contract_schema()
+        == aros_common::sdk_consumer_contract::SDK_CONSUMER_CONTRACT_SCHEMA)
+        .then(|| source.clone());
     let epoch = source.identity().source_date_epoch;
     let (compatibility_request, profiles) = prepare_native_request(
         context,
@@ -408,8 +416,9 @@ fn execute_sdk_build(
         aros_toolchain::package::PackageFormat::CompilerFamilyV2,
         NativeConsumerSelection {
             root: source.materialized_source_root().to_path_buf(),
-            preset: Some(source_preset),
+            preset: llvm_sdk_source.is_none().then_some(source_preset),
             epoch: Some(epoch),
+            llvm_sdk_source,
         },
     )?;
     if cancellation.is_cancelled() {
@@ -603,10 +612,15 @@ fn preflight_sdk_compiler_selection(
     family: aros_toolchain::source_lock::CompilerFamily,
     compiler_profile: &str,
     source_compiler_profile: &str,
+    source_family: Option<&str>,
 ) -> miette::Result<()> {
-    if family != aros_toolchain::source_lock::CompilerFamily::Gnu {
+    let selected_family = match family {
+        aros_toolchain::source_lock::CompilerFamily::Gnu => "gnu",
+        aros_toolchain::source_lock::CompilerFamily::Llvm => "llvm",
+    };
+    if source_family != Some(selected_family) {
         return Err(miette::miette!(
-            "SDK generation currently requires a compiler-family-v2 GNU package"
+            "SDK source selects a different compiler family"
         ));
     }
     if compiler_profile != source_compiler_profile {
@@ -759,6 +773,7 @@ fn execute_compatibility(
             root: source_root,
             preset: source_preset,
             epoch: consumer_source_date_epoch,
+            llvm_sdk_source: None,
         },
     )?;
     if let Some(destination) = evidence_dir {
@@ -794,6 +809,7 @@ struct NativeConsumerSelection {
     root: PathBuf,
     preset: Option<String>,
     epoch: Option<u64>,
+    llvm_sdk_source: Option<aros_toolchain::sdk_source::VerifiedSdkSource>,
 }
 
 fn prepare_native_request(
@@ -882,7 +898,7 @@ fn prepare_native_request(
     let request = NativeCompatibilityRequest {
         package_source_commit: Some(package_source_commit),
         source_preset: consumer.preset,
-        llvm_sdk_source: None,
+        llvm_sdk_source: consumer.llvm_sdk_source,
         consumer_source_date_epoch: consumer.epoch,
         host_generator_cache_root: Some(ports_cache_dir),
         preparation,

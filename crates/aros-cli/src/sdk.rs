@@ -76,7 +76,7 @@ pub struct SourceArgs {
     /// Existing engine-free source projection to compare against raw Git contents
     #[arg(long, value_name = "DIR")]
     materialized_source_dir: PathBuf,
-    /// Exact source-owned profile with a sealed v2 native SDK consumer contract
+    /// Exact source-owned profile with a sealed GNU native or LLVM SDK consumer contract
     #[arg(long, value_name = "NAME")]
     source_preset: String,
 }

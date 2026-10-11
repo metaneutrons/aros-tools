@@ -145,17 +145,17 @@ or publication. Its JSON assurance is
 `build` uses the same source/identity selectors plus explicit compiler-package,
 native execution and output inputs. Its generation epoch comes from the verified
 SDK identity; there is no separate `--consumer-source-date-epoch`, candidate-root
-or SDK tree-digest selector. Generic SDK source contracts can be verified but
-are rejected by `build` before preparation until their execution adapters exist.
-Generation currently requires a family-v2 GNU
-compiler matching the source preset's compiler profile.
+or SDK tree-digest selector. Generation requires a family-v2 compiler matching
+the source preset's compiler profile: GNU for a native-consumer-v2 contract,
+LLVM for a generic SDK-consumer-v1 contract. Mixed selections are rejected
+before compatibility preparation.
 LLVM library validation supports original/relocated C/C++ links and
 source-selected CMake SDK roots, with independent retained readback.
 Its opt-in six-phase SDK executor records source-bound v6 evidence and exports
 closed LLVM link proofs for rootless readback. These proofs check the selected
 commands and retained bytes; they do not authenticate CI jobs or SDK packages.
-LLVM SDK generation through `build` remains
-unsupported; local link validation is not CI or release qualification.
+LLVM generation records additionally bind the source-derived CMake SDK binding.
+Local generation and link validation are not CI or release qualification.
 `--generation-record FILE`, `--output-dir DIR` and
 repeatable `--sdk-forbidden-prefix DIR` are required. The record and package
 destinations must be absent and disjoint from source and execution inputs.

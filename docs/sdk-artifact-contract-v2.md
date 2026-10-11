@@ -188,8 +188,9 @@ origin, complete generated payload and package admission remain separate gates.
 Input-claim readers require an explicit generic LLVM SDK identity; the legacy
 GNU/no-SDK reader rejects such claims instead of silently dropping the policy.
 
-`aros sdk build` explicitly rejects this generic schema before compatibility
-preparation until the family-specific link and evidence adapters are implemented.
+`aros sdk build` uses this generic schema only with a family-v2 LLVM compiler
+matching the sealed source profile. A native-consumer-v2 contract selects GNU;
+mixed source schemas and compiler families are rejected before preparation.
 
 The identity's epoch is explicit selection, not proof that generation consumed
 it. Source verification alone cannot qualify or publish an SDK.
@@ -200,8 +201,9 @@ it. Source verification alone cannot qualify or publish an SDK.
 selected native compatibility request and recipe-bound compiler profiles. It
 requires the exact projected source, preset, content digest and explicit SDK
 epoch before execution. The compiler package's source identity remains separate
-from the SDK source identity. A family-v2 GNU compiler and source-v2 ordinary
-SDK links are mandatory.
+from the SDK source identity. Native-consumer-v2 generation uses a family-v2 GNU
+compiler; generic SDK-consumer-v1 generation uses a family-v2 LLVM compiler.
+Both require ordinary original/relocated SDK application links.
 
 The adapter runs all six compatibility phases and four original/relocated
 ordinary C/C++ links, then reads back their complete retained evidence. It
@@ -209,8 +211,10 @@ derives the generated SDK root from the validated CMake source binding, never
 from a caller-supplied candidate path. An absent record outside the protected
 source and execution roots binds the SDK identity, source profile, generation
 environment, compatibility/link receipt digests and complete SDK inventory.
-The record uses `aros-sdk-generation-record-v1`; its schema version is independent
-of the SDK artifact version.
+GNU retains `aros-sdk-generation-record-v1`. LLVM uses the separate
+`aros-llvm-sdk-generation-record-v1` and additionally binds the source-derived
+CMake SDK binding digest. Record schema versions are independent of SDK product
+versions. Local generation and packaging do not qualify the release matrix.
 
 Only successful execution returns an opaque `CompletedSdkGeneration`.
 `package_generated` accepts that value, an absent output and forbidden prefixes;

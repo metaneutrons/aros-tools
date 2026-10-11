@@ -121,16 +121,31 @@ fn generic_sdk_contract_is_rejected_even_with_an_explicit_epoch_without_mutation
 }
 
 #[test]
-fn sdk_compiler_selection_rejects_unsupported_family_and_profile_before_preparation() {
+fn sdk_compiler_selection_binds_both_supported_families_and_profile_before_preparation() {
     use aros_toolchain::source_lock::CompilerFamily;
 
-    super::preflight_sdk_compiler_selection(CompilerFamily::Gnu, "compiler", "compiler").unwrap();
-    let error =
-        super::preflight_sdk_compiler_selection(CompilerFamily::Llvm, "compiler", "compiler")
+    for (family, name) in [(CompilerFamily::Gnu, "gnu"), (CompilerFamily::Llvm, "llvm")] {
+        super::preflight_sdk_compiler_selection(family, "compiler", "compiler", Some(name))
+            .unwrap();
+        let other = if name == "gnu" { "llvm" } else { "gnu" };
+        for source_family in [None, Some(other)] {
+            let error = super::preflight_sdk_compiler_selection(
+                family,
+                "compiler",
+                "compiler",
+                source_family,
+            )
             .unwrap_err();
-    assert!(error.to_string().contains("GNU package"));
-    let error = super::preflight_sdk_compiler_selection(CompilerFamily::Gnu, "compiler", "other")
-        .unwrap_err();
+            assert!(error.to_string().contains("different compiler family"));
+        }
+    }
+    let error = super::preflight_sdk_compiler_selection(
+        CompilerFamily::Gnu,
+        "compiler",
+        "other",
+        Some("gnu"),
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("different compiler profile"));
 }
 

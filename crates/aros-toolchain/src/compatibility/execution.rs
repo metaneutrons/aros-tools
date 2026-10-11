@@ -537,6 +537,46 @@ pub fn readback_generated_sdk_root(
         ));
     }
     let inputs = validate_inputs(request)?;
+    if let Some(source) = &request.llvm_sdk_source {
+        llvm_sdk::select(request, &inputs.compiler)?;
+        let sdk_report = expected.llvm_sdk.as_ref().ok_or_else(|| {
+            ContractError::compatibility("SDK generation lost its LLVM link report")
+        })?;
+        if expected.native_sdk.is_some() || sdk_report.identity != *source.identity() {
+            return Err(ContractError::compatibility(
+                "SDK generation LLVM report differs from its verified source selection",
+            ));
+        }
+        let cancellation = CancellationToken::default();
+        let drivers = llvm_sdk::drivers(request, &inputs.compiler, &cancellation)?
+            .ok_or_else(|| ContractError::compatibility("SDK generation lost its LLVM drivers"))?;
+        let completed = super::readback_llvm_sdk_build_links(
+            &super::LlvmSdkGeneratedRootRequest {
+                source: source.clone(),
+                preparation: request.preparation.clone(),
+                cmake_build_root: request.cmake_build_root.clone(),
+                timeout: request.timeout,
+            },
+            &drivers,
+            &request.reports_root.join("llvm-sdk-links"),
+            &sdk_report.binding_sha256,
+            &sdk_report.receipt_sha256,
+            &cancellation,
+        )?;
+        if completed.links().sdk_inventory_sha256() != &sdk_report.sdk_inventory_sha256
+            || completed.links().sdk_entries() != sdk_report.sdk_entries
+        {
+            return Err(ContractError::compatibility(
+                "generated LLVM SDK inventory differs from its owning report",
+            ));
+        }
+        return Ok(completed.sdk_root().to_path_buf());
+    }
+    if expected.llvm_sdk.is_some() {
+        return Err(ContractError::compatibility(
+            "SDK generation has an LLVM report without a verified source selection",
+        ));
+    }
     let sdk_request = native_sdk_request(request, &inputs)?.ok_or_else(|| {
         ContractError::compatibility("SDK generation requires ordinary source-v2 links")
     })?;
@@ -1854,6 +1894,10 @@ mod llvm_sdk_portable_tests;
 #[cfg(test)]
 #[path = "execution_llvm_sdk_tests.rs"]
 mod llvm_sdk_tests;
+
+#[cfg(test)]
+#[path = "sdk_llvm_generation_tests.rs"]
+mod sdk_llvm_generation_tests;
 
 #[cfg(test)]
 #[path = "execution_receipt_readback_tests.rs"]

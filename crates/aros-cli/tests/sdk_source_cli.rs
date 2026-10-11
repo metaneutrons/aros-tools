@@ -475,7 +475,7 @@ fn sdk_verify_source_cli_binds_selected_identity_to_committed_source_and_abi() {
 }
 
 #[test]
-fn generic_sdk_source_cli_verifies_identity_but_build_rejects_before_preparation() {
+fn generic_sdk_source_cli_verifies_identity_but_missing_native_inputs_reject_before_preparation() {
     let fixture = Fixture::with_generic_contract(true);
     let before = snapshot(&fixture.root);
     let output = fixture.command().output().unwrap();
@@ -495,10 +495,7 @@ fn generic_sdk_source_cli_verifies_identity_but_build_rejects_before_preparation
         fixture.build_command(&fixture.identity_sha256),
         &fixture.root,
     );
-    assert_json_diagnostic(
-        &unsupported,
-        "does not yet support the selected generic source contract",
-    );
+    assert_json_diagnostic(&unsupported, "native producer recipe is unavailable");
     assert!(!fixture.native_tool_marker.exists());
 }
 
