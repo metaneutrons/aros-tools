@@ -396,6 +396,7 @@ impl Fixture {
                 .collect(),
             package: Some(package),
             native_sdk: None,
+            llvm_sdk: None,
         };
         document.validate().unwrap();
         self.receipt = crate::canonical::bytes(&serde_json::to_value(&document).unwrap()).unwrap();

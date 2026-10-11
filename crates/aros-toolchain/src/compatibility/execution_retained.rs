@@ -151,6 +151,11 @@ impl ExpectedRetainedEvidence {
         request: &NativeCompatibilityRequest,
         profiles: &Profiles,
     ) -> Result<Self, ContractError> {
+        if request.llvm_sdk_source.is_some() {
+            return Err(ContractError::compatibility(
+                "LLVM SDK retained/portable owning evidence is not yet integrated",
+            ));
+        }
         validate_profiles(request, profiles)?;
         super::super::validate_preparation(&request.preparation)?;
         let inputs = validate_inputs(request)?;

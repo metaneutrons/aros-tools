@@ -151,6 +151,8 @@ Generation currently requires a family-v2 GNU
 compiler matching the source preset's compiler profile.
 LLVM library validation supports original/relocated C/C++ links and
 source-selected CMake SDK roots, with independent retained readback.
+Its opt-in six-phase SDK executor records source-bound local v6 evidence;
+portable owning-job export is not yet supported.
 LLVM SDK generation through `build` remains
 unsupported; local link validation is not CI or release qualification.
 `--generation-record FILE`, `--output-dir DIR` and

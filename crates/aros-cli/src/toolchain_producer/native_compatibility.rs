@@ -882,6 +882,7 @@ fn prepare_native_request(
     let request = NativeCompatibilityRequest {
         package_source_commit: Some(package_source_commit),
         source_preset: consumer.preset,
+        llvm_sdk_source: None,
         consumer_source_date_epoch: consumer.epoch,
         host_generator_cache_root: Some(ports_cache_dir),
         preparation,

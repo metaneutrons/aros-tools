@@ -158,8 +158,21 @@ Proof outputs must be outside the entire CMake build tree. One elapsed budget
 covers source binding, links and final helper revalidation; filesystem I/O and
 existing bounded Git/source audits are not preempted. Expiry prevents a
 successful result; it is not a hard return-time guarantee. The generation owner
-still needs the six-phase execution and independently authenticated portable
-job export before package admission.
+still needs independently authenticated portable job export before package
+admission.
+
+`compatibility::execute_native_compatibility` accepts an explicit verified
+generic LLVM SDK source selection for family-v2 packages. It requires the exact
+projected source, compiler target/profile and SDK epoch before creating outputs,
+including the source preset's explicit compiler-profile mapping. All execution
+outputs must be disjoint from both the committed and projected source trees.
+It configures from the source's selectors and scalar bootstrap ABI, builds only
+the declared SDK roots, then runs the six compatibility phases and four ordinary
+C/C++ links. Its local v6 receipt binds the complete SDK identity, source/CMake
+binding, link receipt and inventory digests. Legacy LLVM v2/v4 and GNU v3/v5
+receipts keep their original shape. The retained/portable owning-job adapter
+rejects this new LLVM selection before execution until its complete evidence
+integration exists; no incomplete export is admitted.
 
 `aros sdk build` explicitly rejects this generic schema before compatibility
 preparation until the family-specific link and evidence adapters are implemented.

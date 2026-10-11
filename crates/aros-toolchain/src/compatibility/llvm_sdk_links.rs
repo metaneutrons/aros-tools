@@ -101,6 +101,12 @@ impl CompletedLlvmSdkLinks {
         &self.record.sdk_inventory_sha256
     }
 
+    /// Complete original/relocated SDK inventory entry count.
+    #[must_use]
+    pub const fn sdk_entries(&self) -> usize {
+        self.record.sdk_entries
+    }
+
     /// Recheck commands, source/compiler/SDK trees and retained evidence.
     ///
     /// No compiler is rerun and no output is repaired or adopted.

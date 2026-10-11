@@ -51,6 +51,7 @@ fn receipt_accepts_safe_nested_upstream_fetch_markers() {
         standalone_targets: BTreeMap::new(),
         package: None,
         native_sdk: None,
+        llvm_sdk: None,
     };
 
     let error = document.validate().unwrap_err();
@@ -387,6 +388,7 @@ pub(super) fn request(root: &Path) -> (NativeCompatibilityRequest, PathBuf, Path
             profile: profiles.select("pc-x86_64").unwrap().clone(),
             package_source_commit: None,
             source_preset: None,
+            llvm_sdk_source: None,
             consumer_source_date_epoch: None,
             host_generator_cache_root: None,
             cmake_program: cmake,

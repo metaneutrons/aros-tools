@@ -39,7 +39,13 @@ const COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-
 const GNU_COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v3";
 const GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v5";
 const LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v4";
+const LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA: &str =
+    "aros-toolchain-native-compatibility-receipt-v6";
 const COMPATIBILITY_RECEIPT_FILE: &str = "native-compatibility.receipt.json";
+
+#[path = "execution_llvm_sdk.rs"]
+mod llvm_sdk;
+pub use llvm_sdk::LlvmSdkCompatibilityReport;
 
 #[path = "execution_receipt_readback.rs"]
 mod receipt_readback;
@@ -101,6 +107,9 @@ pub struct NativeCompatibilityRequest {
     /// Explicit source-owned preset for GNU consumers, distinct from the
     /// compiler profile. LLVM's legacy adapter does not use this selector.
     pub source_preset: Option<String>,
+    /// Independently verified generic source SDK selection for LLVM family-v2.
+    /// Absence preserves the legacy LLVM path; never discovered by board name.
+    pub llvm_sdk_source: Option<crate::sdk_source::VerifiedSdkSource>,
     /// Explicit generation timestamp for the SDK/consumer source. Required for
     /// new source-v2 SDK executions; never inferred from the compiler package,
     /// wall clock or ambient environment. The recorded SDK environment digest
@@ -156,6 +165,9 @@ pub struct NativeCompatibilityReport {
     /// Ordinary source-v2 application links against the complete native SDK.
     /// This is separate from the six historical freestanding phases.
     pub native_sdk: Option<super::NativeSdkLinkReport>,
+    /// Complete local LLVM SDK build/link digests, separate from GNU evidence.
+    /// Portable owning-job export and release admission remain separate gates.
+    pub llvm_sdk: Option<LlvmSdkCompatibilityReport>,
     /// Durable aggregate receipt binding every phase report and standalone
     /// collector result without workstation-local paths.
     pub receipt: CompatibilityReceipt,
@@ -184,6 +196,8 @@ struct CompatibilityReceiptDocument {
     package: Option<CompatibilityReceiptPackage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_sdk: Option<CompatibilityReceiptSdk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    llvm_sdk: Option<LlvmSdkCompatibilityReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,9 +275,12 @@ struct CompatibilityReceiptArtifact {
 /// complete extracted trees before output creation and after the probes. The
 /// caller must exclusively own these
 /// roots while executing; these checks are not a filesystem snapshot or a
-/// lock against concurrent writers. GNU receipts use v3 and LLVM family-v2
-/// receipts use v4 to bind the canonical manifest identity. Neither grants
-/// signature authentication or release admission. Legacy LLVM v1 remains v2.
+/// lock against concurrent writers. GNU receipts use v3 (v5 with SDK links)
+/// and LLVM family-v2 receipts use v4 to bind the canonical manifest identity.
+/// Explicit generic LLVM SDK selection uses v6 and binds the source-derived
+/// CMake SDK inventory and four original/relocated application links. Local
+/// execution does not grant portable owning-job evidence, signature
+/// authentication or release admission. Legacy LLVM v1 remains v2.
 ///
 /// # Errors
 ///
@@ -300,6 +317,7 @@ pub fn execute_native_compatibility(
         &request.host,
         request.consumer_source_date_epoch,
     )?;
+    let llvm_drivers = llvm_sdk::drivers(request, &inputs.compiler, cancellation)?;
     let outputs = create_output_roots(request, &inputs)?;
     let cmake_source_cache = request
         .ports_sources
@@ -308,7 +326,17 @@ pub fn execute_native_compatibility(
     let poisoned_environment = environments.standalone;
     let helpers_root = helpers_root(&request.preparation)?;
     let mut cmake_commands = vec![cmake_command(request, &inputs, &outputs, &helpers_root)?];
-    if let Some(binding) = &inputs.native_consumer_contract {
+    if let Some(roots) = inputs
+        .sdk_consumer_contract
+        .as_ref()
+        .map(|binding| &binding.contract.roots)
+        .or_else(|| {
+            inputs
+                .native_consumer_contract
+                .as_ref()
+                .map(|binding| &binding.contract.roots)
+        })
+    {
         let mut arguments = vec![
             "--build".into(),
             utf8_path(&outputs.cmake_build, "native consumer CMake build root")?,
@@ -316,7 +344,7 @@ pub fn execute_native_compatibility(
             request.make_jobs.to_string(),
             "--target".into(),
         ];
-        arguments.extend(binding.contract.roots.iter().cloned());
+        arguments.extend(roots.iter().cloned());
         cmake_commands.push(CompatibilityCommand {
             program: inputs.cmake.clone(),
             arguments,
@@ -424,6 +452,11 @@ pub fn execute_native_compatibility(
     } else {
         None
     };
+    let completed_llvm_sdk = llvm_sdk::execute(request, llvm_drivers.as_ref(), cancellation)?;
+    let llvm_sdk = completed_llvm_sdk
+        .as_ref()
+        .map(|completed| llvm_sdk::report(request, completed))
+        .transpose()?;
     if package_binding_required(request) {
         // The SDK stage must not change either verified family-v2 prefix.
         // Legacy v1 execution retains its separate package/receipt contract.
@@ -433,16 +466,20 @@ pub fn execute_native_compatibility(
     let receipt = write_compatibility_receipt(
         &outputs.reports,
         &probes,
-        (&standalone, native_sdk.as_ref()),
+        (&standalone, native_sdk.as_ref(), llvm_sdk.as_ref()),
         &inputs.upstream_source_commit,
         &inputs.upstream_source_tree,
         &inputs.ports_sources,
         request,
     )?;
+    if let Some(completed) = &completed_llvm_sdk {
+        completed.revalidate(cancellation)?;
+    }
     Ok(NativeCompatibilityReport {
         probes,
         standalone,
         native_sdk,
+        llvm_sdk,
         receipt,
     })
 }
@@ -512,13 +549,17 @@ pub fn readback_generated_sdk_root(
 fn write_compatibility_receipt(
     reports_root: &Path,
     probes: &CompatibilityProbeSet,
-    verified_outputs: (&StandaloneOutputReport, Option<&super::NativeSdkLinkReport>),
+    verified_outputs: (
+        &StandaloneOutputReport,
+        Option<&super::NativeSdkLinkReport>,
+        Option<&LlvmSdkCompatibilityReport>,
+    ),
     upstream_source_commit: &GitObjectId,
     upstream_source_tree: &GitObjectId,
     ports_sources: &CompatibilityPortsSources,
     request: &NativeCompatibilityRequest,
 ) -> Result<CompatibilityReceipt, ContractError> {
-    let (standalone, native_sdk) = verified_outputs;
+    let (standalone, native_sdk, llvm_sdk) = verified_outputs;
     let mut persisted_reports = BTreeMap::new();
     let mut phase_reports = Vec::with_capacity(super::REQUIRED_PROBE_PHASES.len());
     for phase in super::REQUIRED_PROBE_PHASES {
@@ -596,7 +637,9 @@ fn write_compatibility_receipt(
         None
     };
     let document = CompatibilityReceiptDocument {
-        schema: if native_sdk.is_some() {
+        schema: if llvm_sdk.is_some() {
+            LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+        } else if native_sdk.is_some() {
             GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA
         } else if is_gnu {
             GNU_COMPATIBILITY_RECEIPT_SCHEMA
@@ -618,6 +661,7 @@ fn write_compatibility_receipt(
             inventory_sha256: proof.sdk_inventory_sha256.clone(),
             entries: proof.sdk_entries,
         }),
+        llvm_sdk: llvm_sdk.cloned(),
     };
     document.validate()?;
     let encoded = canonical::bytes(
@@ -671,7 +715,8 @@ impl CompatibilityReceiptDocument {
                 COMPATIBILITY_RECEIPT_SCHEMA => self.package.is_some(),
                 GNU_COMPATIBILITY_RECEIPT_SCHEMA
                 | GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA
-                | LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA => self.package.is_none(),
+                | LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA
+                | LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA => self.package.is_none(),
                 _ => true,
             }
         {
@@ -687,6 +732,21 @@ impl CompatibilityReceiptDocument {
         {
             return Err(ContractError::compatibility("native compatibility receipt lacks its mandatory ordinary SDK proof or mixes legacy schemas"));
         }
+        if (self.schema == LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA) != self.llvm_sdk.is_some()
+            || self.llvm_sdk.as_ref().is_some_and(|sdk| {
+                self.native_sdk.is_some()
+                    || !(1..=100_000).contains(&sdk.sdk_entries)
+                    || sdk.identity.validate().is_err()
+                    || self.package.as_ref().is_none_or(|package| {
+                        sdk.identity.target.target_triple != package.target_triple
+                            || sdk.identity.source.content_sha256 != package.source_tree_sha256
+                    })
+            })
+        {
+            return Err(ContractError::compatibility(
+                "LLVM SDK receipt lacks its complete source-bound proof or mixes compiler families",
+            ));
+        }
         if let Some(package) = &self.package {
             let valid_family = match (&package.compiler, self.schema.as_str()) {
                 (
@@ -696,14 +756,17 @@ impl CompatibilityReceiptDocument {
                     .source_preset
                     .as_deref()
                     .is_some_and(crate::profiles::identifier),
-                (ArosCompilerIdentity::Llvm { .. }, LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA) => {
-                    package.source_preset.is_none()
-                }
+                (
+                    ArosCompilerIdentity::Llvm { .. },
+                    LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA | LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA,
+                ) => package.source_preset.is_none(),
                 _ => false,
             };
             let mut expected_targets = BTreeSet::from([package.target_triple.as_str()]);
-            if self.schema == LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA
-                && package.target_profile == "pc-x86_64"
+            if matches!(
+                self.schema.as_str(),
+                LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA | LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+            ) && package.target_profile == "pc-x86_64"
             {
                 expected_targets.insert("i386-unknown-aros");
             }
@@ -848,6 +911,7 @@ struct Inputs {
     native_contract: Option<aros_common::native_build_contract::LoadedNativeBuildContract>,
     native_consumer_contract:
         Option<aros_common::native_consumer_contract::LoadedNativeConsumerContract>,
+    sdk_consumer_contract: Option<aros_common::sdk_consumer_contract::LoadedSdkConsumerContract>,
     host_generator_cache: Option<super::host_generator_inputs::HostGeneratorInputs>,
     cmake_toolchain_root: PathBuf,
     upstream_toolchain_root: PathBuf,
@@ -966,8 +1030,14 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
     } else {
         BTreeMap::new()
     };
+    let sdk_consumer_contract = llvm_sdk::select(request, &compiler)?;
     let source_profile = if matches!(compiler, ArosCompilerIdentity::Gnu { .. }) {
         Some(validate_gnu_source_profile(request)?)
+    } else if sdk_consumer_contract.is_some() {
+        request
+            .llvm_sdk_source
+            .as_ref()
+            .map(|source| source.source_profile().clone())
     } else {
         if request.source_preset.is_some() {
             return Err(ContractError::compatibility(
@@ -976,9 +1046,10 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
         }
         None
     };
-    if source_profile
-        .as_ref()
-        .is_some_and(|profile| profile.sdk_consumer_contract.is_some())
+    if matches!(compiler, ArosCompilerIdentity::Gnu { .. })
+        && source_profile
+            .as_ref()
+            .is_some_and(|profile| profile.sdk_consumer_contract.is_some())
     {
         return Err(ContractError::compatibility(
             "compatibility executor does not yet support a generic SDK consumer contract",
@@ -1019,7 +1090,7 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
     // compiler consumer. Compatibility qualification selects the consumer
     // contract explicitly when present and never falls back when that binding
     // fails validation.
-    let native_contract = if native_consumer_contract.is_some() {
+    let native_contract = if native_consumer_contract.is_some() || sdk_consumer_contract.is_some() {
         None
     } else {
         source_profile
@@ -1102,11 +1173,16 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
     }
     let cmake = checked_executable(&request.cmake_program)?;
     let ninja = checked_executable(&request.ninja_program)?;
-    let generators = native_consumer_contract.as_ref().map_or_else(
+    let generators = sdk_consumer_contract.as_ref().map_or_else(
         || {
-            native_contract.as_ref().map_or(&[][..], |binding| {
-                binding.contract.host_file_generators.as_slice()
-            })
+            native_consumer_contract.as_ref().map_or_else(
+                || {
+                    native_contract.as_ref().map_or(&[][..], |binding| {
+                        binding.contract.host_file_generators.as_slice()
+                    })
+                },
+                |binding| binding.contract.host_file_generators.as_slice(),
+            )
         },
         |binding| binding.contract.host_file_generators.as_slice(),
     );
@@ -1120,6 +1196,7 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
         source_profile,
         native_contract,
         native_consumer_contract,
+        sdk_consumer_contract,
         host_generator_cache,
         cmake_toolchain_root,
         upstream_toolchain_root,
@@ -1265,6 +1342,9 @@ fn create_output_roots(
     if let Some(host_inputs) = &inputs.host_generator_cache {
         protected.extend([host_inputs.cache_root(), host_inputs.root()]);
     }
+    if let Some(source) = &request.llvm_sdk_source {
+        protected.push(source.original_source_root());
+    }
     if roots.iter().any(|root| {
         protected
             .iter()
@@ -1385,10 +1465,10 @@ fn cmake_command(
     }
     if let Some(profile) = &inputs.source_profile {
         let context = profile.transpiler.as_ref().ok_or_else(|| {
-            ContractError::compatibility("GNU source preset lost its transpiler context")
+            ContractError::compatibility("source preset lost its transpiler context")
         })?;
         command.arguments.extend([
-            "-DAROS_TOOLCHAIN=gnu".into(),
+            format!("-DAROS_TOOLCHAIN={}", context.toolchain),
             format!("-DAROS_TARGET_PROFILE={}", profile.name),
             format!("-DAROS_CROSS_TOOLCHAIN_PROFILE={}", request.profile.name()),
             format!("-DAROS_TARGET_TRIPLE={}", request.profile.target_triple()),
@@ -1408,7 +1488,35 @@ fn cmake_command(
         command
             .arguments
             .push(format!("-DAROS_TARGET_BOOTLOADER={}", profile.bootloader()));
-        if let Some(binding) = &inputs.native_consumer_contract {
+        if let Some(binding) = &inputs.sdk_consumer_contract {
+            let abi = &binding.contract.target.abi;
+            let Some(aros_common::sdk_manifest::SdkAbiValue::Text(flavour)) = abi.get("flavour")
+            else {
+                return Err(ContractError::compatibility(
+                    "LLVM SDK source lost its ABI flavour",
+                ));
+            };
+            let platform_smp = match abi.get("platform_smp") {
+                Some(aros_common::sdk_manifest::SdkAbiValue::Boolean(value)) => *value,
+                _ => {
+                    return Err(ContractError::compatibility(
+                        "LLVM SDK source lost its ABI platform SMP fact",
+                    ))
+                }
+            };
+            command.arguments.extend([
+                format!(
+                    "-DAROS_NATIVE_CONSUMER_CONTRACT={}",
+                    utf8_path(&binding.path, "SDK consumer contract")?
+                ),
+                format!("-DAROS_NATIVE_CONSUMER_CONTRACT_SHA256={}", binding.sha256),
+                format!("-DAROS_ABI_FLAVOUR={flavour}"),
+                format!(
+                    "-DAROS_ABI_PLATFORM_SMP={}",
+                    if platform_smp { "ON" } else { "OFF" }
+                ),
+            ]);
+        } else if let Some(binding) = &inputs.native_consumer_contract {
             command.arguments.extend([
                 format!(
                     "-DAROS_NATIVE_CONSUMER_CONTRACT={}",
@@ -1739,6 +1847,10 @@ pub use tests::{fixture_elf32, fixture_elf64};
 #[cfg(test)]
 #[path = "execution_llvm_v2_tests.rs"]
 mod llvm_v2_tests;
+
+#[cfg(test)]
+#[path = "execution_llvm_sdk_tests.rs"]
+mod llvm_sdk_tests;
 
 #[cfg(test)]
 #[path = "execution_receipt_readback_tests.rs"]
