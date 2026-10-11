@@ -33,7 +33,7 @@ const DOCUMENTED_AROS_EXAMPLE_PAGES: &[(&str, &str)] = &[
     ),
     (
         "reference/cli.md",
-        "public_cli_semantics.rs, toolchain_plan_cli.rs, observability_cli.rs",
+        "public_cli_semantics.rs, toolchain_plan_cli.rs, observability_cli.rs, sdk_package_cli.rs",
     ),
     (
         "reference/native-media-inputs.md",

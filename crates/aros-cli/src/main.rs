@@ -43,6 +43,7 @@ mod image;
 mod image_prepare;
 mod observability;
 mod repo;
+mod sdk;
 mod source;
 mod toolchain;
 mod toolchain_build;
@@ -145,6 +146,12 @@ enum Commands {
     Toolchain {
         #[command(subcommand)]
         command: ToolchainCommands,
+    },
+
+    /// Package and verify source-produced Developer SDKs locally
+    Sdk {
+        #[command(subcommand)]
+        command: sdk::SdkCommand,
     },
 
     /// Manage locally configured physical development boards
@@ -836,6 +843,13 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             None,
             "check the reviewed profile, receipt and locked inputs, or inspect the artifact read-back failure",
         ),
+        Commands::Sdk { command } => (
+            DiagnosticCode::CliToolchain,
+            DiagnosticStage::ToolResolution,
+            command.diagnostic_mode(),
+            None,
+            "inspect the exact SDK identity, expected digests and retained output; never adopt a partial package",
+        ),
         Commands::Board { command } => match command {
             BoardCommand::Build { board, .. } => (
                 DiagnosticCode::CliBuild,
@@ -1476,6 +1490,62 @@ mod tests {
             requirement(&["aros", "source", "sync"]),
             RepositoryRequirement::Required
         );
+    }
+
+    #[test]
+    fn sdk_local_stages_require_exact_selections_and_have_global_diagnostics() {
+        for leaf in ["package", "verify", "extract"] {
+            assert_eq!(
+                parse_error(&["aros", "sdk", leaf]),
+                ErrorKind::MissingRequiredArgument
+            );
+            let mut arguments = vec![
+                "aros".to_owned(),
+                "sdk".to_owned(),
+                leaf.to_owned(),
+                "--identity".to_owned(),
+                "/tmp/identity.json".to_owned(),
+                "--identity-sha256".to_owned(),
+                "1".repeat(64),
+                "--tree-sha256".to_owned(),
+                "2".repeat(64),
+                "--forbidden-prefix".to_owned(),
+                "/tmp/build".to_owned(),
+            ];
+            if leaf == "package" {
+                arguments.extend(
+                    [
+                        "--candidate-root",
+                        "/tmp/sdk",
+                        "--output-dir",
+                        "/tmp/package",
+                    ]
+                    .map(str::to_owned),
+                );
+            } else {
+                arguments.extend([
+                    "--package-dir".to_owned(),
+                    "/tmp/package".to_owned(),
+                    "--archive-sha256".to_owned(),
+                    "3".repeat(64),
+                    "--archive-size".to_owned(),
+                    "1".to_owned(),
+                ]);
+                if leaf == "extract" {
+                    arguments.extend(["--output-root", "/tmp/extracted"].map(str::to_owned));
+                }
+            }
+            let command = Cli::try_parse_from(&arguments).unwrap().command;
+            assert_eq!(
+                command.repository_requirement(),
+                RepositoryRequirement::Global
+            );
+            let (_, context) = command_boundary(&command);
+            assert_eq!(
+                context.mode.as_deref(),
+                Some(format!("sdk.{leaf}").as_str())
+            );
+        }
     }
 
     #[test]

@@ -74,6 +74,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
         }
         Commands::Board { command } => board_command(command, repo_root).await,
         Commands::Image { command } => image::run(command).await,
+        Commands::Sdk { command } => crate::sdk::run(command),
         Commands::Source { command } => source_command(command, repo_root),
         Commands::Install { source_bin, prefix } => install_suite(source_bin, prefix),
         Commands::Build {

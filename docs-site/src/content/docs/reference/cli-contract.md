@@ -29,6 +29,7 @@ The `position` column is one-based for positional arguments and `—` for option
 - [`aros image`](/aros-tools/reference/cli-contract/image/)
 - [`aros info`](/aros-tools/reference/cli-contract/info/)
 - [`aros install`](/aros-tools/reference/cli-contract/install/)
+- [`aros sdk`](/aros-tools/reference/cli-contract/sdk/)
 - [`aros setup`](/aros-tools/reference/cli-contract/setup/)
 - [`aros source`](/aros-tools/reference/cli-contract/source/)
 - [`aros test`](/aros-tools/reference/cli-contract/test/)
