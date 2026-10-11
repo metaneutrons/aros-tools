@@ -27,9 +27,9 @@ Packaging does not derive a version from the installed compiler or manufacture
 a released source identity from an uncommitted tree. `aros-tools` builds and
 manages SDKs; `aros-toolchains` distributes SDK and compiler artifacts together
 in one release. No separate SDK repository is required. SDK product versions
-remain independent of the enclosing release and compiler versions. The first
-public SDK product version still requires explicit selection; local package
-success does not make it published.
+remain independent of the enclosing release and compiler versions. The four
+initial target products are selected at SDK version `0.1.0` and must be
+published together; local package success does not make them published.
 
 ## Read-only source binding
 
@@ -44,11 +44,55 @@ content-identical hardlinks to another path are rejected. Bounded descriptor
 snapshots bracket verification; it never copies, repairs or executes source
 material.
 
-The selected profile must own a sealed v2 native consumer contract with ordinary
-C/C++ SDK link probes. Its exact digest, target triple and complete scalar ABI
-map must equal the SDK identity. No board enum or host identity is inferred.
+The selected profile must explicitly name exactly one consumer contract:
+`native_consumer_contract` for the existing GNU native-consumer-v2 schema, or
+`sdk_consumer_contract` for `aros-sdk-consumer-contract-v1`. Both require sealed
+ordinary C/C++ SDK link probes. No fallback occurs after a declared contract
+fails validation. Its exact digest, target triple and complete scalar ABI map
+must equal the SDK identity. No board enum or host identity is inferred.
 The library returns an opaque `VerifiedSdkSource` with read-only revalidation;
 CLI JSON states `local-source-binding-not-execution-or-release-admission`.
+
+The generic SDK contract owns a `target` descriptor instead of a RISC-V kernel
+ABI. Its scalar `source_cpu`, `pointer_width` and `use_mmu` facts must agree
+with the source profile. A declared `float_abi` or bootstrap ABI is also bound
+exactly. The triple must select the source CPU and AROS. Additional scalar ABI
+facts remain in the full identity; they are not discarded or interpreted as
+executable extensions. Roots, source inputs, invocation policy and probe
+validation use the same sealed graph validator as the native consumer.
+Historical native-consumer-v1/v2 and native-build ABI validation stay unchanged.
+
+The generic source binding covers LLVM-shaped x86-64, ARM hard-float and
+AArch64 descriptors as well as GNU/RV32-shaped descriptors. The transpiler's
+existing `--native-consumer-profile` selector admits exactly one declared
+contract and repeats the sealed selection for inventory and graph export.
+Generic consumers retain literal source roots and cannot authorize core,
+package or boot-media builds. Pre-compiler JSON uses
+`aros-sdk-consumer-validation-v1` with `target`; legacy consumers keep
+`aros-native-consumer-validation-v1` with `abi`.
+
+The read-only `aros toolchain producer profile` command also accepts this
+generic contract when `--source-dir` and `--source-preset` are selected.
+It verifies the contract and every sealed input against
+the selected clean Git checkout and reports `native_sdk_required: true`.
+Ambiguous native/generic declarations and invalid generic contracts fail
+without falling back to a non-SDK policy. This projection is not execution,
+authenticated CI evidence or release admission.
+
+The owned CMake engine admits the generic response only for LLVM. Execution
+requires explicit source `flavour` and `platform_smp` facts in addition to CPU,
+pointer width and MMU selection. After compiler detection it checks both Clang
+driver target triples, pointer width and the selected ARM float ABI flags. A
+target/sysroot override, conflicting configuration flag or changed binding
+fails without publishing a current consumer binding. The source-derived
+Developer include root is shared by bootstrap and target producers.
+
+These graph and configured-compiler checks are not native SDK generation or
+ordinary application-link qualification. GNU/RV32 execution still uses its
+existing native-consumer-v2 contract; a generic GNU descriptor is not admitted
+by the LLVM CMake adapter.
+`aros sdk build` explicitly rejects this generic schema before compatibility
+preparation until the family-specific link and evidence adapters are implemented.
 
 The identity's epoch is explicit selection, not proof that generation consumed
 it. Source verification alone cannot qualify or publish an SDK.

@@ -4,6 +4,7 @@
 # measured binding and ABI; later graph passes repeat the exact selection.
 include_guard(GLOBAL)
 include("${CMAKE_CURRENT_LIST_DIR}/NativeBuildContract.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SdkConsumerTarget.cmake")
 
 function(_aros_native_consumer_fail reason)
     message(FATAL_ERROR "Native consumer contract: ${reason}")
@@ -23,13 +24,14 @@ function(aros_validate_native_consumer_contract)
     foreach(_required IN ITEMS AROS_NATIVE_CONSUMER_CONTRACT
             AROS_NATIVE_CONSUMER_CONTRACT_SHA256 AROS_SOURCE_DIR AROS_TARGET_PROFILE
             AROS_TARGET_CPU AROS_TARGET_PLATFORM AROS_TARGET_TRIPLE AROS_TOOLCHAIN
-            GCC_CONFIG_FLOAT_ABI AROS_ABI_FLAVOUR AROS_ABI_PLATFORM_SMP AROS_ENABLE_MMU)
+            AROS_ABI_FLAVOUR AROS_ABI_PLATFORM_SMP AROS_ENABLE_MMU)
         if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
             _aros_native_consumer_fail("${_required} must be provided")
         endif()
     endforeach()
     # Empty selectors are explicit values, not omitted command arguments.
-    foreach(_required IN ITEMS AROS_TARGET_FAMILY AROS_TARGET_VARIANT AROS_TARGET_CPU32)
+    foreach(_required IN ITEMS AROS_TARGET_FAMILY AROS_TARGET_VARIANT AROS_TARGET_CPU32
+            GCC_CONFIG_FLOAT_ABI)
         if(NOT DEFINED ${_required})
             _aros_native_consumer_fail("${_required} must be explicitly provided, possibly empty")
         endif()
@@ -38,9 +40,6 @@ function(aros_validate_native_consumer_contract)
         _aros_native_consumer_fail("build and consumer selections are mutually exclusive")
     endif()
     _aros_native_validate_sha256("${AROS_NATIVE_CONSUMER_CONTRACT_SHA256}" "consumer digest")
-    if(NOT AROS_TOOLCHAIN STREQUAL "gnu")
-        _aros_native_consumer_fail("requires the explicit GNU toolchain")
-    endif()
     if(NOT IS_ABSOLUTE "${AROS_NATIVE_CONSUMER_CONTRACT}")
         _aros_native_consumer_fail("contract path must be absolute")
     endif()
@@ -83,13 +82,26 @@ function(aros_validate_native_consumer_contract)
     if(_length GREATER 1048576)
         _aros_native_consumer_fail("validation response exceeds its closed limit")
     endif()
+    _aros_native_get_string(_schema "${_json}" "consumer response" schema)
+    if(_schema STREQUAL "aros-native-consumer-validation-v1")
+        if(NOT AROS_TOOLCHAIN STREQUAL "gnu")
+            _aros_native_consumer_fail("legacy consumer requires the explicit GNU toolchain")
+        endif()
+        set(_target_member abi)
+    elseif(_schema STREQUAL "aros-sdk-consumer-validation-v1")
+        if(NOT AROS_TOOLCHAIN STREQUAL "llvm")
+            _aros_native_consumer_fail("generic SDK compiler adapter requires the explicit LLVM toolchain")
+        endif()
+        set(_target_member target)
+    else()
+        _aros_native_consumer_fail("unsupported consumer validation schema")
+    endif()
     _aros_native_require_object_members("${_json}" "consumer response"
-        "schema;qualification;source_dir;contract_path;contract_sha256;profile;abi;exec_smp;input_paths;sdk_include_relative")
+        "schema;qualification;source_dir;contract_path;contract_sha256;profile;${_target_member};exec_smp;input_paths;sdk_include_relative")
     foreach(_name IN ITEMS schema qualification source_dir contract_path contract_sha256 profile sdk_include_relative)
         _aros_native_get_string(_${_name} "${_json}" "consumer response" "${_name}")
     endforeach()
-    if(NOT _schema STREQUAL "aros-native-consumer-validation-v1" OR
-       NOT _qualification STREQUAL "source-binding-not-graph-or-build-proof" OR
+    if(NOT _qualification STREQUAL "source-binding-not-graph-or-build-proof" OR
        NOT _source_dir STREQUAL _source OR NOT _contract_path STREQUAL _contract OR
        NOT _contract_sha256 STREQUAL AROS_NATIVE_CONSUMER_CONTRACT_SHA256 OR
        NOT _profile STREQUAL AROS_TARGET_PROFILE)
@@ -97,27 +109,31 @@ function(aros_validate_native_consumer_contract)
     endif()
     _aros_native_validate_source_path(_sdk_include_relative "${_sdk_include_relative}"
         "consumer SDK include root")
-    _aros_native_require_type("${_json}" "consumer response" abi OBJECT)
-    string(JSON _abi GET "${_json}" abi)
-    _aros_native_require_object_members("${_abi}" "consumer ABI"
-        "source_cpu;target_triple;isa;abi;code_model;flavour;platform_smp;use_mmu")
-    foreach(_name IN ITEMS source_cpu target_triple isa abi code_model flavour)
-        _aros_native_get_string(_abi_${_name} "${_abi}" "consumer ABI" "${_name}")
-        _aros_native_validate_token("${_abi_${_name}}" "consumer ABI ${_name}")
-    endforeach()
-    foreach(_name IN ITEMS platform_smp use_mmu)
-        _aros_native_require_type("${_abi}" "consumer ABI" "${_name}" BOOLEAN)
-        string(JSON _abi_${_name} GET "${_abi}" "${_name}")
-    endforeach()
+    if(_target_member STREQUAL "target")
+        _aros_validate_sdk_consumer_target("${_json}")
+    else()
+        _aros_native_require_type("${_json}" "consumer response" abi OBJECT)
+        string(JSON _abi GET "${_json}" abi)
+        _aros_native_require_object_members("${_abi}" "consumer ABI"
+            "source_cpu;target_triple;isa;abi;code_model;flavour;platform_smp;use_mmu")
+        foreach(_name IN ITEMS source_cpu target_triple isa abi code_model flavour)
+            _aros_native_get_string(_abi_${_name} "${_abi}" "consumer ABI" "${_name}")
+            _aros_native_validate_token("${_abi_${_name}}" "consumer ABI ${_name}")
+        endforeach()
+        foreach(_name IN ITEMS platform_smp use_mmu)
+            _aros_native_require_type("${_abi}" "consumer ABI" "${_name}" BOOLEAN)
+            string(JSON _abi_${_name} GET "${_abi}" "${_name}")
+        endforeach()
+        if(NOT _abi_source_cpu STREQUAL AROS_TARGET_CPU OR
+           NOT _abi_target_triple STREQUAL AROS_TARGET_TRIPLE OR
+           NOT _abi_abi STREQUAL GCC_CONFIG_FLOAT_ABI OR
+           NOT _abi_flavour STREQUAL AROS_ABI_FLAVOUR OR
+           NOT _abi_platform_smp STREQUAL _smp OR NOT _abi_use_mmu STREQUAL _mmu)
+            _aros_native_consumer_fail("source ABI differs from the requested configuration")
+        endif()
+    endif()
     _aros_native_require_type("${_json}" "consumer response" exec_smp BOOLEAN)
     string(JSON _exec_smp GET "${_json}" exec_smp)
-    if(NOT _abi_source_cpu STREQUAL AROS_TARGET_CPU OR
-       NOT _abi_target_triple STREQUAL AROS_TARGET_TRIPLE OR
-       NOT _abi_abi STREQUAL GCC_CONFIG_FLOAT_ABI OR
-       NOT _abi_flavour STREQUAL AROS_ABI_FLAVOUR OR
-       NOT _abi_platform_smp STREQUAL _smp OR NOT _abi_use_mmu STREQUAL _mmu)
-        _aros_native_consumer_fail("source ABI differs from the requested configuration")
-    endif()
     # The loader used a no-follow bounded read. Recheck the exact raw binding
     # after process return; neither identity locks nor compiler checks may use
     # an earlier response after this document changes.
@@ -163,6 +179,7 @@ function(aros_validate_native_consumer_contract)
     set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_PATH "${_contract}")
     set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_SHA256 "${_digest}")
     set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_PROFILE "${_profile}")
+    set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_SCHEMA "${_schema}")
     set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_ISA "${_abi_isa}")
     set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_ABI "${_abi_abi}")
     set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_CODE_MODEL "${_abi_code_model}")
@@ -249,7 +266,7 @@ endfunction()
 # One header root for bootstrap, source producers and target compilation.
 # Ordinary nonconsumer builds retain their historical internal SDK layout.
 # An explicitly selected compiler consumer must export the source-declared
-# headers beneath its Developer sysroot, where a normal GNU driver finds them.
+# headers beneath its Developer sysroot for the selected compiler driver.
 function(aros_resolve_sdk_include_root out_root)
     if(AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)
         _aros_native_consumer_current(_source _path _digest)
@@ -320,6 +337,11 @@ endfunction()
 
 function(aros_validate_native_consumer_compiler_target)
     _aros_native_consumer_current(_source _path _digest)
+    get_property(_schema GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_SCHEMA)
+    if(_schema STREQUAL "aros-sdk-consumer-validation-v1")
+        _aros_validate_sdk_consumer_compiler_target()
+        return()
+    endif()
     foreach(_selector IN ITEMS march:ISA mabi:ABI mcmodel:CODE_MODEL)
         string(REPLACE ":" ";" _parts "${_selector}")
         list(GET _parts 0 _flag)

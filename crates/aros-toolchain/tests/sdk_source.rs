@@ -141,12 +141,25 @@ fn write_consumer_contract(root: &Path, v2: bool) -> Vec<u8> {
 }
 
 fn create_fixture(v2: bool) -> Fixture {
+    create_source_fixture(
+        |root| write_consumer_contract(root, v2),
+        SdkTarget {
+            target_triple: "riscv64-aros".to_owned(),
+            abi: serde_json::from_value(abi_value()).unwrap(),
+        },
+    )
+}
+
+fn create_source_fixture(
+    write_contract: impl FnOnce(&Path) -> Vec<u8>,
+    target: SdkTarget,
+) -> Fixture {
     let temporary = tempfile::tempdir().unwrap();
     let source_root = temporary.path().join("source");
     fs::create_dir(&source_root).unwrap();
     git(&source_root, &["init", "-q"]);
 
-    let consumer_bytes = write_consumer_contract(&source_root, v2);
+    let consumer_bytes = write_contract(&source_root);
     fs::create_dir(source_root.join("cmake")).unwrap();
     fs::write(
         source_root.join("cmake/engine.cmake"),
@@ -173,14 +186,10 @@ fn create_fixture(v2: bool) -> Fixture {
     })
     .unwrap();
     let contract_digest = sha256_bytes(&consumer_bytes);
-    let abi: BTreeMap<String, SdkAbiValue> = serde_json::from_value(abi_value()).unwrap();
     let identity = SdkIdentity {
         sdk_id: "example-sdk".to_owned(),
         version: "1.0.0".to_owned(),
-        target: SdkTarget {
-            target_triple: "riscv64-aros".to_owned(),
-            abi,
-        },
+        target,
         source: SdkSourceIdentity {
             commit: materialized.source_commit.clone(),
             git_tree: materialized.source_tree.clone(),
@@ -199,6 +208,68 @@ fn create_fixture(v2: bool) -> Fixture {
         identity,
         consumer_bytes,
     }
+}
+
+fn create_generic_fixture(arch: &str, family: &str, float_abi: Option<&str>) -> Fixture {
+    let source_cpu = if arch == "riscv32" { "riscv" } else { arch };
+    let width = if matches!(arch, "arm" | "riscv32") {
+        32
+    } else {
+        64
+    };
+    let mut abi = BTreeMap::from([
+        ("source_cpu".into(), SdkAbiValue::Text(source_cpu.into())),
+        ("pointer_width".into(), SdkAbiValue::Unsigned(width)),
+        ("use_mmu".into(), SdkAbiValue::Boolean(true)),
+        ("flavour".into(), SdkAbiValue::Text("native".into())),
+        ("platform_smp".into(), SdkAbiValue::Boolean(true)),
+    ]);
+    if let Some(float) = float_abi {
+        abi.insert("float_abi".into(), SdkAbiValue::Text(float.into()));
+    }
+    let target = SdkTarget {
+        target_triple: format!("{source_cpu}-unknown-aros"),
+        abi,
+    };
+    let selected = target.clone();
+    create_source_fixture(
+        |root| {
+            let float =
+                float_abi.map_or_else(String::new, |float| format!("float_abi='{float}'\n"));
+            let profile = format!(
+                "[[targets]]\nname='example-sdk'\narch='{arch}'\nplatform='generic'\nbsp='example'\nsdk_consumer_contract='consumer.json'\n{float}[targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='{family}'\ncpu32=''\nuse_mmu=true\n[targets.bootstrap_abi]\nflavour='native'\nplatform_smp=true\n"
+            );
+            for (path, bytes) in [
+                ("aros-targets.toml", profile.as_bytes()),
+                ("policy.json", POLICY),
+                ("probe.c", C_PROBE),
+                ("probe.cpp", CXX_PROBE),
+            ] {
+                fs::write(root.join(path), bytes).unwrap();
+            }
+            let inputs: Vec<Value> = ["aros-targets.toml", "policy.json", "probe.c", "probe.cpp"]
+                .into_iter()
+                .map(|path| json!({"path": path, "sha256": sha256_bytes(&fs::read(root.join(path)).unwrap())}))
+                .collect();
+            let document = json!({
+                "schema": "aros-sdk-consumer-contract-v1",
+                "profile": "example-sdk",
+                "source_baseline": "0123456789abcdef0123456789abcdef01234567",
+                "roots": ["includes", "linklibs"],
+                "inputs": inputs,
+                "metamake_projection": "policy.json",
+                "target": selected,
+                "native_sdk_link_probes": {
+                    "c": {"source": "probe.c", "libraries": []},
+                    "cxx": {"source": "probe.cpp", "libraries": []},
+                },
+            });
+            let bytes = serde_json::to_vec(&document).unwrap();
+            fs::write(root.join("consumer.json"), &bytes).unwrap();
+            bytes
+        },
+        target,
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -312,6 +383,11 @@ fn binds_git_engine_free_cas_sealed_contract_abi_and_revalidates_read_only() {
     assert_eq!(verified.identity(), &fixture.identity);
     assert_eq!(verified.source_profile().name, "example-sdk");
     assert_eq!(
+        verified.consumer_contract_schema(),
+        "aros-native-consumer-contract-v2"
+    );
+    aros_toolchain::sdk_generation::validate_source_executor(&verified).unwrap();
+    assert_eq!(
         fixture.identity.source.commit,
         fixture.materialized.source_commit
     );
@@ -341,6 +417,95 @@ fn binds_git_engine_free_cas_sealed_contract_abi_and_revalidates_read_only() {
         projection_before
     );
     assert_eq!(top_level_entries(fixture.temporary.path()), siblings_before);
+}
+
+#[test]
+fn generic_sdk_contract_binds_four_target_selections_without_executing_them() {
+    for (arch, family, float) in [
+        ("x86_64", "llvm", None),
+        ("arm", "llvm", Some("hard")),
+        ("aarch64", "llvm", None),
+        ("riscv32", "gnu", Some("ilp32f")),
+    ] {
+        let fixture = create_generic_fixture(arch, family, float);
+        let source_before = snapshot(&fixture.source_root);
+        let projection_before = snapshot(&fixture.materialized_source_root);
+        let siblings_before = top_level_entries(fixture.temporary.path());
+        let verified =
+            verify_sdk_source(&request(&fixture, fixture.identity.clone(), "example-sdk")).unwrap();
+        assert_eq!(verified.identity().target, fixture.identity.target);
+        assert_eq!(
+            verified.consumer_contract_schema(),
+            "aros-sdk-consumer-contract-v1"
+        );
+        let unsupported =
+            aros_toolchain::sdk_generation::validate_source_executor(&verified).unwrap_err();
+        assert!(unsupported
+            .to_string()
+            .contains("does not yet support the selected generic source contract"));
+        verified.revalidate().unwrap();
+        assert_eq!(snapshot(&fixture.source_root), source_before);
+        assert_eq!(
+            snapshot(&fixture.materialized_source_root),
+            projection_before
+        );
+        assert_eq!(top_level_entries(fixture.temporary.path()), siblings_before);
+
+        let mut incompatible = fixture.identity.clone();
+        incompatible
+            .target
+            .abi
+            .insert("extra_fact".into(), SdkAbiValue::Boolean(true));
+        verify_rejects_without_writes(
+            &fixture,
+            &request(&fixture, incompatible, "example-sdk"),
+            "SDK target or ABI differs from its source contract",
+        );
+        let mut wrong_digest = fixture.identity.clone();
+        wrong_digest.source.contract_sha256 = sha256_bytes(b"unselected generic ABI bytes");
+        verify_rejects_without_writes(
+            &fixture,
+            &request(&fixture, wrong_digest, "example-sdk"),
+            "SDK source contract differs from its selected digest",
+        );
+    }
+}
+
+#[test]
+fn generic_sdk_source_binding_rejects_changed_sealed_input() {
+    let fixture = create_generic_fixture("arm", "llvm", Some("hard"));
+    let verified =
+        verify_sdk_source(&request(&fixture, fixture.identity.clone(), "example-sdk")).unwrap();
+    fs::write(
+        fixture.materialized_source_root.join("probe.c"),
+        b"/* changed sealed C probe */\n",
+    )
+    .unwrap();
+    assert!(verified.revalidate().is_err());
+    verify_rejects_without_writes(
+        &fixture,
+        &request(&fixture, fixture.identity.clone(), "example-sdk"),
+        "SDK source consumer contract is not sealed to its profile and inputs",
+    );
+}
+
+#[test]
+fn sdk_source_binding_rejects_ambiguous_contract_paths_without_fallback() {
+    let fixture = create_generic_fixture("x86_64", "llvm", None);
+    verify_sdk_source(&request(&fixture, fixture.identity.clone(), "example-sdk")).unwrap();
+    let path = fixture.materialized_source_root.join("aros-targets.toml");
+    let original = fs::read_to_string(&path).unwrap();
+    let ambiguous = original.replace(
+        "sdk_consumer_contract='consumer.json'",
+        "sdk_consumer_contract='consumer.json'\nnative_consumer_contract='absent-native-consumer.json'",
+    );
+    assert_ne!(ambiguous, original);
+    fs::write(path, ambiguous).unwrap();
+    verify_rejects_without_writes(
+        &fixture,
+        &request(&fixture, fixture.identity.clone(), "example-sdk"),
+        "SDK source preset has ambiguous consumer contracts",
+    );
 }
 
 #[test]

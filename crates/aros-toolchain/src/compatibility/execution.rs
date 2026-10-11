@@ -976,6 +976,14 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
         }
         None
     };
+    if source_profile
+        .as_ref()
+        .is_some_and(|profile| profile.sdk_consumer_contract.is_some())
+    {
+        return Err(ContractError::compatibility(
+            "compatibility executor does not yet support a generic SDK consumer contract",
+        ));
+    }
     let native_consumer_contract = source_profile
         .as_ref()
         .and_then(|profile| {

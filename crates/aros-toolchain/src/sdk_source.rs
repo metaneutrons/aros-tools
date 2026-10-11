@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use aros_common::native_consumer_contract::load_bound_native_consumer_contract;
-use aros_common::sdk_manifest::{SdkAbiValue, SdkIdentity};
+use aros_common::sdk_consumer_contract::load_bound_sdk_consumer_contract;
+use aros_common::sdk_manifest::{SdkAbiValue, SdkIdentity, SdkTarget};
 use aros_common::TargetProfile;
 
 use crate::compatibility_source::{
@@ -38,6 +39,7 @@ pub struct SdkSourceVerificationRequest {
 pub struct VerifiedSdkSource {
     request: SdkSourceVerificationRequest,
     profile: TargetProfile,
+    contract_schema: String,
 }
 
 impl VerifiedSdkSource {
@@ -57,6 +59,12 @@ impl VerifiedSdkSource {
         &self.profile
     }
 
+    /// Measured source contract schema, not an execution capability claim.
+    #[must_use]
+    pub fn consumer_contract_schema(&self) -> &str {
+        &self.contract_schema
+    }
+
     /// Canonical engine-free source root, not an SDK build output.
     #[must_use]
     pub fn materialized_source_root(&self) -> &std::path::Path {
@@ -69,7 +77,7 @@ impl VerifiedSdkSource {
     /// Rejects changed source inputs or profile selection. No files are written.
     pub fn revalidate(&self) -> Result<(), ContractError> {
         let current = verify_sdk_source(&self.request)?;
-        if current.profile != self.profile {
+        if current.profile != self.profile || current.contract_schema != self.contract_schema {
             return Err(ContractError::identity(
                 "verified SDK source profile changed",
             ));
@@ -82,7 +90,7 @@ impl VerifiedSdkSource {
 ///
 /// `identity.source.content_sha256` is the normalized engine-free projection
 /// digest, whereas commit/tree bind the complete original checkout. The sealed
-/// v2 consumer contract must declare ordinary SDK link probes. Its exact raw
+/// consumer contract must declare ordinary SDK link probes. Its exact raw
 /// digest and all scalar ABI facts must match the selected descriptor.
 ///
 /// # Errors
@@ -113,41 +121,13 @@ pub fn verify_sdk_source(
     if matching.next().is_some() {
         return Err(ContractError::identity("SDK source preset is ambiguous"));
     }
-    let contract_path = profile.native_consumer_contract.as_deref().ok_or_else(|| {
-        ContractError::identity("SDK source preset has no native consumer contract")
-    })?;
-    let loaded = load_bound_native_consumer_contract(
-        &projection,
-        std::path::Path::new(contract_path),
-        &profile,
-    )
-    .map_err(|_| {
-        ContractError::identity(
-            "SDK source consumer contract is not sealed to its profile and inputs",
-        )
-    })?;
-    loaded
-        .contract
-        .require_native_sdk_link_probes()
-        .map_err(|_| {
-            ContractError::identity("SDK source contract must declare v2 ordinary link probes")
-        })?;
-    if loaded.sha256 != request.identity.source.contract_sha256 {
+    let (target, contract_sha256, contract_schema) = source_target(&projection, &profile)?;
+    if contract_sha256 != request.identity.source.contract_sha256 {
         return Err(ContractError::identity(
             "SDK source contract differs from its selected digest",
         ));
     }
-    // Project the closed source ABI representation, not a board-specific list.
-    // serde's scalar enum rejects any future non-scalar field until explicitly
-    // represented by the SDK contract, rather than silently dropping it.
-    let abi: BTreeMap<String, SdkAbiValue> = serde_json::from_value(
-        serde_json::to_value(&loaded.contract.abi)
-            .map_err(|_| ContractError::identity("cannot encode SDK source ABI"))?,
-    )
-    .map_err(|_| ContractError::identity("SDK source ABI contains unsupported nonscalar facts"))?;
-    if request.identity.target.target_triple != loaded.contract.abi.target_triple
-        || request.identity.target.abi != abi
-    {
+    if request.identity.target != target {
         return Err(ContractError::identity(
             "SDK target or ABI differs from its source contract",
         ));
@@ -177,5 +157,74 @@ pub fn verify_sdk_source(
             identity: request.identity.clone(),
         },
         profile,
+        contract_schema,
     })
+}
+
+fn source_target(
+    projection: &std::path::Path,
+    profile: &TargetProfile,
+) -> Result<(SdkTarget, aros_common::Sha256Digest, String), ContractError> {
+    let contract_path = match (
+        profile.native_consumer_contract.as_deref(),
+        profile.sdk_consumer_contract.as_deref(),
+    ) {
+        (Some(path), None) => path,
+        (None, Some(path)) => {
+            let loaded =
+                load_bound_sdk_consumer_contract(projection, std::path::Path::new(path), profile)
+                    .map_err(|_| {
+                    ContractError::identity(
+                        "SDK source consumer contract is not sealed to its profile and inputs",
+                    )
+                })?;
+            return Ok((
+                loaded.contract.target,
+                loaded.sha256,
+                loaded.contract.schema,
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(ContractError::identity(
+                "SDK source preset has ambiguous consumer contracts",
+            ));
+        }
+        (None, None) => {
+            return Err(ContractError::identity(
+                "SDK source preset has no consumer contract",
+            ));
+        }
+    };
+    let loaded = load_bound_native_consumer_contract(
+        projection,
+        std::path::Path::new(contract_path),
+        profile,
+    )
+    .map_err(|_| {
+        ContractError::identity(
+            "SDK source consumer contract is not sealed to its profile and inputs",
+        )
+    })?;
+    loaded
+        .contract
+        .require_native_sdk_link_probes()
+        .map_err(|_| {
+            ContractError::identity("SDK source contract must declare v2 ordinary link probes")
+        })?;
+    // Project the closed source ABI representation, not a board-specific list.
+    // serde's scalar enum rejects any future non-scalar field until explicitly
+    // represented by the SDK contract, rather than silently dropping it.
+    let abi: BTreeMap<String, SdkAbiValue> = serde_json::from_value(
+        serde_json::to_value(&loaded.contract.abi)
+            .map_err(|_| ContractError::identity("cannot encode SDK source ABI"))?,
+    )
+    .map_err(|_| ContractError::identity("SDK source ABI contains unsupported nonscalar facts"))?;
+    Ok((
+        SdkTarget {
+            target_triple: loaded.contract.abi.target_triple,
+            abi,
+        },
+        loaded.sha256,
+        loaded.contract.schema,
+    ))
 }

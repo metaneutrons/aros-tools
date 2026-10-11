@@ -93,6 +93,9 @@ pub struct TargetProfile {
     /// Source-owned native compiler-consumer graph, without boot/media claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_consumer_contract: Option<String>,
+    /// Source-owned generic SDK consumer contract, independent of compiler ABI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_consumer_contract: Option<String>,
 }
 
 /// Public ABI configuration, independent of runtime SMP enablement.
@@ -300,6 +303,7 @@ fn validate_config(label: &str, config: &ArosConfig) -> Result<()> {
         for (field, path) in [
             ("native_build_contract", &target.native_build_contract),
             ("native_consumer_contract", &target.native_consumer_contract),
+            ("sdk_consumer_contract", &target.sdk_consumer_contract),
         ] {
             let Some(path) = path else { continue };
             if path.len() > 1024
