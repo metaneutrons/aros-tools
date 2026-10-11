@@ -79,11 +79,16 @@ reads back the complete archive against the generation selection. Changed
 records, SDK bytes, maps, outputs or source inputs fail; diagnostic roots and
 uncertain published local outputs are retained, not repaired.
 
-This is a library orchestration boundary with assurance
-`local-generation-binding-not-release-admission`. The separate local CLI stages
-below retain their byte-consistency claims. Public producer/CLI integration,
-authenticated owning-job evidence, release index and full release qualification
-remain required; neither this record nor its self-hash grants publication rights.
+This orchestration boundary has assurance
+`local-generation-binding-not-release-admission`. `aros sdk build` verifies the
+source selection before preparing execution roots, derives the epoch from its
+identity, and runs generation and packaging in one process. It accepts no
+independent candidate or SDK tree digest. The current generation executor
+requires a family-v2 GNU compiler matching the source preset's compiler profile;
+unsupported families fail before preparation. The separate local CLI stages below
+retain their byte-consistency claims. Public producer integration, authenticated
+owning-job evidence, release index and full release qualification remain required;
+neither this record nor its self-hash grants publication rights.
 
 ## Complete local package
 

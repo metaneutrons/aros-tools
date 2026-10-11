@@ -100,6 +100,47 @@ fn explicit_epoch_accepts_zero_and_portable_maximum_without_source_reads() {
 }
 
 #[test]
+fn sdk_compiler_selection_rejects_unsupported_family_and_profile_before_preparation() {
+    use aros_toolchain::source_lock::CompilerFamily;
+
+    super::preflight_sdk_compiler_selection(CompilerFamily::Gnu, "compiler", "compiler").unwrap();
+    let error =
+        super::preflight_sdk_compiler_selection(CompilerFamily::Llvm, "compiler", "compiler")
+            .unwrap_err();
+    assert!(error.to_string().contains("GNU package"));
+    let error = super::preflight_sdk_compiler_selection(CompilerFamily::Gnu, "compiler", "other")
+        .unwrap_err();
+    assert!(error.to_string().contains("different compiler profile"));
+}
+
+#[test]
+fn sdk_forbidden_prefixes_are_validated_but_not_treated_as_owned_roots() {
+    let directory = tempfile::tempdir().unwrap();
+    let selected_input = directory.path().join("selected-input");
+    fs::create_dir(&selected_input).unwrap();
+    let package_output = directory.path().join("package-output");
+
+    // A byte-scan pattern may be a namespace ancestor of the output, provided
+    // the actual selected inputs and execution roots remain disjoint.
+    super::preflight_sdk_destination(
+        "package output",
+        &package_output,
+        &[selected_input.as_path()],
+        &[directory.path().to_path_buf()],
+    )
+    .unwrap();
+
+    let error = super::preflight_sdk_destination(
+        "package output",
+        &package_output,
+        &[selected_input.as_path()],
+        &[PathBuf::from("relative-prefix")],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("absolute paths"));
+}
+
+#[test]
 fn missing_epoch_rejects_v2_before_mutating_source_or_creating_output_roots() {
     let (source, _) = write_fixture(true, true);
     let before = source_snapshot(source.path());

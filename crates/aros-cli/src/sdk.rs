@@ -7,6 +7,8 @@ use miette::{IntoDiagnostic, Result};
 use std::io::Read;
 use std::path::PathBuf;
 
+use crate::toolchain_producer::native_compatibility;
+
 const SDK_SELECTION_HELP: &str = "Select either `--release-lock FILE --lock-sha256 SHA256` or `--project-lock FILE`. A project lock is explicit local application configuration, not publisher authentication.";
 
 #[derive(Subcommand)]
@@ -14,6 +16,8 @@ const SDK_SELECTION_HELP: &str = "Select either `--release-lock FILE --lock-sha2
 pub enum SdkCommand {
     /// Bind SDK identity to an audited committed source projection without building
     VerifySource(SourceArgs),
+    /// Verify a source-owned SDK, generate it with native compatibility and package it
+    Build(Box<BuildArgs>),
     /// Package one source-produced SDK without modifying it or publishing a release
     Package(PackageArgs),
     /// Verify a complete local SDK package against explicit identity and digests
@@ -43,6 +47,7 @@ impl SdkCommand {
     pub const fn diagnostic_mode(&self) -> &'static str {
         match self {
             Self::VerifySource(_) => "sdk.verify-source",
+            Self::Build(_) => "sdk.build",
             Self::Package(_) => "sdk.package",
             Self::VerifyPackage(_) => "sdk.verify-package",
             Self::Extract(_) => "sdk.extract",
@@ -74,6 +79,15 @@ pub struct SourceArgs {
     /// Exact source-owned profile with a sealed v2 native SDK consumer contract
     #[arg(long, value_name = "NAME")]
     source_preset: String,
+}
+
+#[derive(Args)]
+/// Complete local SDK generation and packaging from a verified source binding.
+pub struct BuildArgs {
+    #[command(flatten)]
+    source: SourceArgs,
+    #[command(flatten)]
+    native: native_compatibility::SdkBuildArgs,
 }
 
 #[derive(Args)]
@@ -181,7 +195,8 @@ fn verification(args: &VerifyArgs) -> Result<aros_toolchain::sdk_package::SdkVer
 /// Execute one SDK operation without source discovery or release publication.
 pub async fn run(command: SdkCommand) -> Result<()> {
     match command {
-        SdkCommand::VerifySource(args) => verify_source(args),
+        SdkCommand::VerifySource(args) => verify_source(&args),
+        SdkCommand::Build(args) => build(*args).await,
         SdkCommand::Download(args) => crate::sdk_managed::download(args).await,
         SdkCommand::Install(args) => crate::sdk_managed::install(args).await,
         SdkCommand::List(args) => crate::sdk_managed::list(args),
@@ -193,20 +208,8 @@ pub async fn run(command: SdkCommand) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn verify_source(args: SourceArgs) -> Result<()> {
-    let identity = read_selected_identity(&args.identity, &args.identity_sha256)?;
-    let verified = aros_toolchain::sdk_source::verify_sdk_source(
-        &aros_toolchain::sdk_source::SdkSourceVerificationRequest {
-            source_root: args.source_dir,
-            materialized_source_root: args.materialized_source_dir,
-            source_preset: args.source_preset,
-            identity,
-        },
-    ).map_err(|error| {
-        let mut diagnostic = error.diagnostics().diagnostics[0].clone();
-        diagnostic.hint = Some("select the exact clean original checkout, its engine-free materialization and sealed source SDK contract; source verification is read-only and does not repair or execute inputs".into());
-        crate::observability::native_diagnostic(diagnostic)
-    })?;
+fn verify_source(args: &SourceArgs) -> Result<()> {
+    let verified = verify_source_selection(args)?;
     read_selected_identity(&args.identity, &args.identity_sha256)?;
     aros_common::outputln!(
         "{}",
@@ -218,6 +221,42 @@ fn verify_source(args: SourceArgs) -> Result<()> {
         })
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn verify_source_selection(
+    args: &SourceArgs,
+) -> Result<aros_toolchain::sdk_source::VerifiedSdkSource> {
+    let identity = read_selected_identity(&args.identity, &args.identity_sha256)?;
+    let verified = aros_toolchain::sdk_source::verify_sdk_source(
+        &aros_toolchain::sdk_source::SdkSourceVerificationRequest {
+            source_root: args.source_dir.clone(),
+            materialized_source_root: args.materialized_source_dir.clone(),
+            source_preset: args.source_preset.clone(),
+            identity,
+        },
+    ).map_err(|error| {
+        let mut diagnostic = error.diagnostics().diagnostics[0].clone();
+        diagnostic.hint = Some("select the exact clean original checkout, its engine-free materialization and sealed source SDK contract; source verification is read-only and does not repair or execute inputs".into());
+        crate::observability::native_diagnostic(diagnostic)
+    })?;
+    Ok(verified)
+}
+
+#[cfg(unix)]
+async fn build(args: BuildArgs) -> Result<()> {
+    // Establish the SDK identity/source binding before the compatibility path can
+    // materialize any private roots or invoke source-owned programs.
+    let source = verify_source_selection(&args.source)?;
+    read_selected_identity(&args.source.identity, &args.source.identity_sha256)?;
+    let original_source_dir = args.source.source_dir.clone();
+    let identity_path = args.source.identity.clone();
+    native_compatibility::build_sdk(source, original_source_dir, identity_path, args.native).await
+}
+
+#[cfg(not(unix))]
+async fn build(_args: BuildArgs) -> Result<()> {
+    miette::bail!("local SDK generation requires a supported Unix host")
 }
 
 #[cfg(unix)]
@@ -285,4 +324,45 @@ fn native_error(error: &aros_toolchain::ContractError) -> miette::Report {
 /// Refuse unsupported local SDK execution rather than approximating Unix policy.
 pub async fn run(_command: SdkCommand) -> Result<()> {
     miette::bail!("local SDK package stages require a supported Unix host")
+}
+
+#[cfg(test)]
+mod build_tests {
+    use clap::CommandFactory as _;
+
+    #[test]
+    fn sdk_build_reuses_source_binding_without_redundant_generation_selectors() {
+        let root = crate::Cli::command();
+        let command = root
+            .find_subcommand("sdk")
+            .unwrap()
+            .find_subcommand("build")
+            .unwrap();
+        let ids = command
+            .get_arguments()
+            .map(|argument| argument.get_id().as_str())
+            .collect::<Vec<_>>();
+
+        for required in [
+            "identity",
+            "identity_sha256",
+            "source_dir",
+            "materialized_source_dir",
+            "source_preset",
+            "preset",
+            "generation_record",
+            "output_dir",
+            "sdk_forbidden_prefixes",
+            "forbidden_prefixes",
+        ] {
+            assert!(ids.contains(&required), "missing --{required}");
+        }
+        for prohibited in [
+            "candidate_root",
+            "tree_sha256",
+            "consumer_source_date_epoch",
+        ] {
+            assert!(!ids.contains(&prohibited), "unexpected --{prohibited}");
+        }
+    }
 }

@@ -7,6 +7,46 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 
 | Command | ID | Spelling | Position | Constraint | Arity | Default | Values | Environment | Conflicts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `aros sdk build` | identity | `--identity` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | identity_sha256 | `--identity-sha256` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | source_dir | `--source-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | materialized_source_dir | `--materialized-source-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | source_preset | `--source-preset` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | recipe | `--recipe` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | source_lock | `--source-lock` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | profiles | `--profiles` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | preset | `--preset` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | release_id | `--release-id` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | host | `--host` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | build_environment | `--build-environment` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | forbidden_prefixes | `--forbidden-prefix` | — | optional | 1 |  |  | — |  |
+| `aros sdk build` | package_dir | `--package-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | first_root | `--first-root` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | second_root | `--second-root` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | engine_work_dir | `--engine-work-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | helpers_dir | `--helpers-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | cmake_program | `--cmake-program` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | ninja_program | `--ninja-program` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | upstream_source_dir | `--upstream-source-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | upstream_build_dir | `--upstream-build-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | python_cache_dir | `--python-cache-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | ports_lock | `--ports-lock` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | ports_cache_dir | `--ports-cache-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | ports_sources_dir | `--ports-sources-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | python_environment_dir | `--python-environment-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | host_tools_dir | `--host-tools-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | host_tools | `--host-tool` | — | optional | 1 |  |  | — |  |
+| `aros sdk build` | cmake_build_dir | `--cmake-build-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | c_fixture | `--c-fixture` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | cxx_fixture | `--cxx-fixture` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | standalone_output_dir | `--standalone-output-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | reports_dir | `--reports-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | jobs | `--jobs` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | timeout_seconds | `--timeout-seconds` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | generation_record | `--generation-record` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | output_dir | `--output-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | sdk_forbidden_prefixes | `--sdk-forbidden-prefix` | — | required | 1 |  |  | — |  |
+| `aros sdk build` | format | `--format` | — | optional | 1 | human | human, json | — |  |
 | `aros sdk download` | release_lock | `--release-lock` | — | optional | 1 |  |  | — | project_lock |
 | `aros sdk download` | lock_sha256 | `--lock-sha256` | — | optional | 1 |  |  | — | project_lock |
 | `aros sdk download` | project_lock | `--project-lock` | — | optional | 1 |  |  | — | release_lock, lock_sha256 |

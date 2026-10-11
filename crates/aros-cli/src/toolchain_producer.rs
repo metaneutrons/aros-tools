@@ -35,7 +35,7 @@ use crate::observability;
 
 mod compatibility_export;
 mod finished_package;
-mod native_compatibility;
+pub mod native_compatibility;
 mod qualification_bytes;
 mod recovery_family;
 mod release_evidence;

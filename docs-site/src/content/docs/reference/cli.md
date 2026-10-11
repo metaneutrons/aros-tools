@@ -111,6 +111,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | Command | Effect and boundary |
 | --- | --- |
 | `aros sdk verify-source` | Bind an independently selected SDK identity to its clean committed checkout, engine-free projection and sealed source ABI contract; no build or writes |
+| `aros sdk build` | Verify the selected source, generate and ordinarily link its SDK, then package only that completed generation; local only |
 | `aros sdk package` | Package a source-produced Developer tree against an explicit source/ABI identity and inventory digest; local only |
 | `aros sdk verify-package` | Read back all local package members and payload bytes against independent archive, tree and identity selections |
 | `aros sdk extract` | Verify then extract into one absent directory and recheck the payload; not managed installation |
@@ -138,6 +139,19 @@ target triple and all ABI facts must match the source's sealed v2 declaration.
 This command does not generate an SDK, prove execution or authorize packaging
 or publication. Its JSON assurance is
 `local-source-binding-not-execution-or-release-admission`.
+
+`build` uses the same source/identity selectors plus explicit compiler-package,
+native execution and output inputs. Its generation epoch comes from the verified
+SDK identity; there is no separate `--consumer-source-date-epoch`, candidate-root
+or SDK tree-digest selector. Generation currently requires a family-v2 GNU
+compiler matching the source preset's compiler profile.
+`--generation-record FILE`, `--output-dir DIR` and
+repeatable `--sdk-forbidden-prefix DIR` are required. The record and package
+destinations must be absent and disjoint from source and execution inputs.
+The six compatibility phases and four ordinary original/relocated C/C++ links
+must pass before packaging. Source changes or stale retained evidence fail.
+The command does not sign, publish or authenticate execution; its assurance is
+`local-generation-binding-not-release-admission`.
 
 External SDK selection requires `--release-lock FILE --lock-sha256 SHA256`. Commands do
 not discover a latest release or trust a downloaded lock as its own authority.
