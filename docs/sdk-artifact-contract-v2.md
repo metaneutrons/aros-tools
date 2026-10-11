@@ -135,8 +135,8 @@ Read-only inventory has an explicit namespace-entry budget and reports malformed
 entries and incomplete coverage. It reads bounded control metadata, does not
 hash or execute payloads, and marks every listed SDK `not-checked`. Full
 verification is a separate operation. An absent store stays absent; a symlinked
-store is reported as unsafe and is not followed. There is no global active SDK,
-automatic removal or project selection in this API.
+store is reported as unsafe and is not followed. There is no global active SDK
+or automatic removal in this API.
 
 `aros sdk download` acquires the exact locked manifest/archive into a dedicated
 lock-digest cache namespace and verifies the complete archive. `--offline`
@@ -154,8 +154,41 @@ the default dedicated archive-cache parent is the AROS archive cache's `sdk-v2`
 directory. Neither root is created by read-only observation. SDK input paths
 never override `AROS_SDK_INCLUDE_DIR`, which is an AROS source-build output.
 
-This is not a claim of a published SDK. Project-bound selection,
-source-input SBOM/signatures/attestations, a published SDK index/consumer lock
+### Application-project selection
+
+`aros sdk select --release-lock FILE --lock-sha256 SHA256 --project-lock FILE`
+previews selection into an explicitly named application-owned file. It requires
+an already installed SDK and verifies its complete payload. Preview creates no
+project file, directories or guard. Applying requires `--apply TOKEN` from that
+exact preview; the token binds normalized absolute paths, candidate bytes,
+the prior file identity and bytes, and the SDK identity/tree digest. Changed
+inputs require a new preview. It never downloads or installs implicitly.
+
+The project document is the canonical SDK release lock, without local store
+paths. Keep it in application version control. One file selects one target/ABI;
+multi-target applications use explicitly separate lock files. Replacing a
+selection with a different target or ABI is rejected. There is no project-root
+discovery, global activation, board inference or compiler-compatibility claim.
+
+Apply serializes cooperative writers with a path-specific sibling guard in the
+existing real parent, recomputes the plan, then publishes with no-clobber or
+file-identity/hash compare-and-swap and exact readback. An identical canonical
+selection is read-only reuse. Symlinks, hard-linked lock files, malformed prior
+locks and project destinations inside the SDK store are rejected, not repaired.
+If a failure occurs after publication, the project file is retained and the
+diagnostic reports the commit state; no rollback overwrites later user changes.
+
+`aros sdk verify --project-lock FILE` and `aros sdk path --project-lock FILE`
+read explicit local application configuration and verify the full installed
+payload. This is an alternative to the independently selected external
+`--release-lock FILE --lock-sha256 SHA256` pair, not an additional selector.
+The project lock is local configuration authority, not publisher
+authentication. These read-only operations create no absent state and
+remeasure the lock after verification. `path` returns an application input
+directory; it never changes source-generation settings.
+
+This is not a claim of a published SDK. Source-input
+SBOM/signatures/attestations, a published SDK index/consumer lock
 and release/consumer qualification remain required distribution work. The
 three local files are not an SDK release inventory and do not expand or
 replace the compiler release asset contract.

@@ -507,3 +507,187 @@ fn sdk_cli_metadata_listing_is_nonmutating_and_full_verification_detects_corrupt
         "verification must not repair"
     );
 }
+
+fn project_command(fixture: &Fixture, leaf: &str, project_lock: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
+    command
+        .current_dir(&fixture.root)
+        .env("AROS_HOME", fixture.root.join("state"))
+        .args(["sdk", leaf, "--project-lock"])
+        .arg(project_lock);
+    command
+}
+
+#[test]
+fn sdk_project_cli_previews_applies_reuses_and_reads_a_portable_application_lock() {
+    let fixture = Fixture::new();
+    let package = fixture.root.join("package");
+    let packaged = success(&fixture.package(&package));
+    let (lock_path, digest, lock) = release_fixture(&fixture, &package, &packaged);
+    let installed = managed_success(
+        &managed_command(&fixture, "install", &lock_path, &digest)
+            .arg("--archive")
+            .arg(package.join(lock.identity.asset_name().unwrap()))
+            .output()
+            .unwrap(),
+    );
+    let app = fixture.root.join("app");
+    fs::create_dir(&app).unwrap();
+    let project = app.join("aros-sdk.lock.json");
+    let preview = managed_success(
+        &managed_command(&fixture, "select", &lock_path, &digest)
+            .arg("--project-lock")
+            .arg(&project)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(preview["result"]["will_write"], true);
+    assert!(!project.exists());
+    assert_eq!(
+        fs::read_dir(&app).unwrap().count(),
+        0,
+        "preview creates no guard"
+    );
+    let token = preview["result"]["confirmation"].as_str().unwrap();
+    let selected = managed_success(
+        &managed_command(&fixture, "select", &lock_path, &digest)
+            .arg("--project-lock")
+            .arg(&project)
+            .args(["--apply", token])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(selected["result"]["already_selected"], false);
+    let bytes = fs::read(&project).unwrap();
+    assert_eq!(bytes, lock.canonical_bytes().unwrap());
+    assert_eq!(
+        fs::read(&lock_path).unwrap(),
+        bytes,
+        "candidate is immutable"
+    );
+    assert!(!String::from_utf8(bytes.clone())
+        .unwrap()
+        .contains(fixture.root.to_str().unwrap()));
+    managed_success(
+        &project_command(&fixture, "verify", &project)
+            .output()
+            .unwrap(),
+    );
+    let path = project_command(&fixture, "path", &project)
+        .output()
+        .unwrap();
+    assert!(
+        path.status.success(),
+        "{}",
+        String::from_utf8_lossy(&path.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(path.stdout).unwrap(),
+        format!("{}\n", installed["result"]["payload"].as_str().unwrap())
+    );
+    let reuse = managed_success(
+        &managed_command(&fixture, "select", &lock_path, &digest)
+            .arg("--project-lock")
+            .arg(&project)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(reuse["result"]["will_write"], false);
+    let reused = managed_success(
+        &managed_command(&fixture, "select", &lock_path, &digest)
+            .arg("--project-lock")
+            .arg(&project)
+            .args(["--apply", reuse["result"]["confirmation"].as_str().unwrap()])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(reused["result"]["already_selected"], true);
+    assert_eq!(fs::read(&project).unwrap(), bytes);
+    fs::write(
+        Path::new(installed["result"]["payload"].as_str().unwrap()).join("include/aros.h"),
+        b"corrupt",
+    )
+    .unwrap();
+    for leaf in ["verify", "path"] {
+        assert!(!project_command(&fixture, leaf, &project)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    assert_eq!(
+        fs::read(&project).unwrap(),
+        bytes,
+        "verification must not alter the project lock"
+    );
+}
+
+#[test]
+fn sdk_project_cli_rejects_stale_token_and_unsafe_local_authority_without_repair() {
+    let fixture = Fixture::new();
+    let package = fixture.root.join("package");
+    let packaged = success(&fixture.package(&package));
+    let (lock_path, digest, lock) = release_fixture(&fixture, &package, &packaged);
+    managed_success(
+        &managed_command(&fixture, "install", &lock_path, &digest)
+            .arg("--archive")
+            .arg(package.join(lock.identity.asset_name().unwrap()))
+            .output()
+            .unwrap(),
+    );
+    let project = fixture.root.join("aros-sdk.lock.json");
+    assert!(!managed_command(&fixture, "select", &lock_path, &digest)
+        .arg("--project-lock")
+        .arg(&project)
+        .args(["--apply", &"0".repeat(64)])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(!project.exists());
+    let preview = managed_success(
+        &managed_command(&fixture, "select", &lock_path, &digest)
+            .arg("--project-lock")
+            .arg(&project)
+            .output()
+            .unwrap(),
+    );
+    fs::write(&project, b"{}\n").unwrap();
+    assert!(!managed_command(&fixture, "select", &lock_path, &digest)
+        .arg("--project-lock")
+        .arg(&project)
+        .args([
+            "--apply",
+            preview["result"]["confirmation"].as_str().unwrap()
+        ])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    for leaf in ["verify", "path"] {
+        assert!(!project_command(&fixture, leaf, &project)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    assert_eq!(fs::read(&project).unwrap(), b"{}\n");
+    let symlink = fixture.root.join("symlink-sdk.json");
+    std::os::unix::fs::symlink(&lock_path, &symlink).unwrap();
+    let hardlink = fixture.root.join("hardlink-sdk.json");
+    fs::hard_link(&lock_path, &hardlink).unwrap();
+    for input in [&symlink, &hardlink] {
+        for leaf in ["verify", "path"] {
+            assert!(!project_command(&fixture, leaf, input)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+    }
+    assert_eq!(
+        fs::read(&lock_path).unwrap(),
+        lock.canonical_bytes().unwrap()
+    );
+    assert!(!fixture.root.join("aros-toolchains.lock.toml").exists());
+}

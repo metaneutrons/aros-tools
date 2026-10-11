@@ -12,6 +12,13 @@ pub struct ContractError {
 }
 
 impl ContractError {
+    pub(crate) fn sdk_project_hint(mut self) -> Self {
+        for diagnostic in &mut self.diagnostics.diagnostics {
+            diagnostic.hint = Some("inspect the explicit application project lock, selected release lock and installed SDK; preview is read-only, changed inputs need a fresh token, and any published project file is retained rather than repaired or rolled back".into());
+        }
+        self
+    }
+
     pub(crate) fn sdk_store_hint(mut self) -> Self {
         for diagnostic in &mut self.diagnostics.diagnostics {
             diagnostic.hint = Some("inspect the selected SDK lock, archive and exact store envelope; private installation staging is cleaned on prepublication failure, but a possibly published destination is never overwritten, repaired or removed automatically".into());

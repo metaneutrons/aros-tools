@@ -116,6 +116,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros sdk download` | Acquire the exact lock-selected archive and manifest, then verify the complete payload without installation |
 | `aros sdk install` | Install or fully verify reuse of one lock-selected SDK in the content-addressed store |
 | `aros sdk list` | List bounded store metadata without hashing or executing payloads; integrity remains unchecked |
+| `aros sdk select` | Preview one project lock; apply only with the exact confirmation token after full SDK verification |
 | `aros sdk verify` | Fully verify the exact lock-selected installed SDK; never repair corrupt files |
 | `aros sdk path` | Print the fully verified installed SDK path for application build tools |
 
@@ -123,7 +124,7 @@ SDK identity is target/ABI-specific, not build-host-specific. Local packaging,
 package verification and extraction require independent identity/tree digests
 and an absolute `--forbidden-prefix` to scan for build-path leakage.
 
-Managed commands require `--release-lock FILE --lock-sha256 SHA256`. They do
+Download, install and select require `--release-lock FILE --lock-sha256 SHA256`. They do
 not discover a latest release or trust a downloaded lock as its own authority.
 `install --archive FILE` verifies a local archive instead of downloading;
 it conflicts with `--cache` and `--offline`. Otherwise download/install may
@@ -132,12 +133,22 @@ Existing poisoned cache entries and corrupt installations are rejected,
 not replaced. The default store is `AROS_HOME/sdks`; `--store` and `--cache`
 accept explicit absolute roots. `list` does not create an absent store.
 
+`select --project-lock FILE` previews a portable, version-controlled application
+lock without writing it. Add `--apply TOKEN` from that exact preview to publish
+the selection. One lock selects one target/ABI; multi-target projects use
+separate files. The SDK must already be installed. Changed inputs, malformed
+existing locks and target/ABI replacements are rejected.
+
+`verify` and `path` accept either `--project-lock FILE` or the external
+`--release-lock FILE --lock-sha256 SHA256` pair, never both. A project lock is
+explicit local application configuration, not publisher authentication.
+
 The installed SDK is an application-build input, not the AROS source build's
 SDK generation directory. `path` does not change CMake generation settings.
-These commands neither build the SDK, select a project SDK nor publish a
+These commands neither build the SDK nor publish a
 release. Hash consistency is not publisher authentication.
 The [SDK artifact contract](https://github.com/metaneutrons/aros-tools/blob/main/docs/sdk-artifact-contract-v2.md)
-defines the format and the remaining release/selection boundary.
+defines the format, project selection and remaining release boundary.
 
 ### Native producer control plane
 

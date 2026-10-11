@@ -314,6 +314,72 @@ fn sdk_managed_commands_keep_selection_and_acquisition_boundaries_explicit() {
 }
 
 #[test]
+fn sdk_project_selection_requires_preview_token_and_explicit_project_authority() {
+    let digest = "1".repeat(64);
+    let release = [
+        "--release-lock",
+        "/tmp/release.json",
+        "--lock-sha256",
+        &digest,
+    ];
+    for leaf in ["verify", "path"] {
+        for selectors in [
+            vec!["--release-lock", "/tmp/release.json"],
+            vec!["--lock-sha256", &digest],
+        ] {
+            let mut args = vec!["aros", "sdk", leaf];
+            args.extend(selectors);
+            assert_eq!(parse_error(&args), ErrorKind::MissingRequiredArgument);
+        }
+        let command =
+            Cli::try_parse_from(["aros", "sdk", leaf, "--project-lock", "/tmp/app-sdk.json"])
+                .unwrap()
+                .command;
+        assert_eq!(
+            command.repository_requirement(),
+            RepositoryRequirement::Global
+        );
+        let (_, context) = command_boundary(&command);
+        assert_eq!(
+            context.mode.as_deref(),
+            Some(format!("sdk.{leaf}").as_str())
+        );
+        for conflicting in [
+            release.to_vec(),
+            vec!["--lock-sha256", &digest],
+            vec!["--release-lock", "/tmp/release.json"],
+        ] {
+            let mut args = vec!["aros", "sdk", leaf, "--project-lock", "/tmp/app-sdk.json"];
+            args.extend(conflicting);
+            assert_eq!(parse_error(&args), ErrorKind::ArgumentConflict);
+        }
+    }
+    let mut select = vec!["aros", "sdk", "select"];
+    select.extend(release);
+    assert_eq!(parse_error(&select), ErrorKind::MissingRequiredArgument);
+    select.extend(["--project-lock", "/tmp/app-sdk.json"]);
+    let command = Cli::try_parse_from(&select).unwrap().command;
+    assert_eq!(
+        command.repository_requirement(),
+        RepositoryRequirement::Global
+    );
+    let (_, context) = command_boundary(&command);
+    assert_eq!(context.mode.as_deref(), Some("sdk.select"));
+    select.extend(["--apply", &digest]);
+    assert!(Cli::try_parse_from(select).is_ok());
+    assert_eq!(
+        parse_error(&["aros", "sdk", "select", "--apply", "yes"]),
+        ErrorKind::ValueValidation
+    );
+    for leaf in ["download", "install"] {
+        assert_eq!(
+            parse_error(&["aros", "sdk", leaf, "--project-lock", "/tmp/app-sdk.json"]),
+            ErrorKind::UnknownArgument
+        );
+    }
+}
+
+#[test]
 fn image_build_requires_explicit_inputs_and_apply_is_mutually_exclusive_with_dry_run() {
     assert_eq!(
         parse_error(&["aros", "image", "build"]),
