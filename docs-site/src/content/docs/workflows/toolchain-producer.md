@@ -39,9 +39,12 @@ selection. Read-only `producer profile --source-dir … --source-preset …`
 verifies the committed contract and sealed inputs and marks SDK evidence as
 required. The LLVM library adapter also measures both payload drivers and checks
 their version and selected triple; this is not package authentication or SDK
-link qualification. This does not yet enable generic `aros sdk build`:
-ordinary C/C++ link and retained-evidence adapters are still required. GNU/RV32 local SDK
-generation retains its existing native-consumer-v2 path.
+link qualification. The library executes four normal C/C++ links from sealed
+probes against original and relocated SDK trees and rechecks their retained
+outputs. A CMake binding selects the SDK path from source configuration.
+These APIs do not yet enable generic `aros sdk build` or release admission;
+LLVM SDK generation and authenticated portable evidence remain separate gates.
+GNU/RV32 local SDK generation retains its native-consumer-v2 path.
 
 - A clean AROS source checkout, an `aros-toolchains` producer checkout, and an
   `aros-tools` checkout at the commits selected by the producer declaration.

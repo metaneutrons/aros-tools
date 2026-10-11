@@ -97,6 +97,71 @@ triple. A bounded compiler-tree snapshot includes executable bytes and aliases;
 revalidation rejects subsequent changes. It neither authenticates the package
 nor proves the scalar ABI facts, SDK completeness or ordinary application links.
 The caller must independently verify its selected compiler package.
+The additive `compatibility::plan_llvm_sdk_application_links` API binds four
+ordinary driver commands to that measured compiler, the sealed source probes,
+and equal, disjoint original/relocated SDK trees. It performs no build, link,
+copy or filesystem write. Commands preserve startup and standard-library
+defaults; additional library arguments are bounded names from the sealed
+contract, not arbitrary compiler or linker options.
+
+This planner requires explicit unsigned `pointer_width` (32 or 64),
+`elf_machine` (1–65535), `elf_flags_mask` and `elf_flags_value` (32-bit values,
+with no value bit outside the mask) in the source target's ABI map. Its ELF
+check uses those facts, AROS OSABI/ABI-version marking and the collector symbol;
+there is no CPU-to-machine table. Optional `float_abi` selects exactly one
+driver flag. These structural checks do not establish full ABI compatibility,
+C++ initialization, SDK completeness or which invocation produced an ELF.
+The additive `compatibility::execute_llvm_sdk_links` API executes that four-link
+selection through the shared supervised runner. It copies the complete SDK,
+uses a private temporary directory and a closed environment, and requires
+byte-identical original/relocated C and C++ outputs. Every traced input must
+resolve inside the SDK or authenticated compiler tree, except the direct
+short-lived Clang object derived from the sealed probe name. The trace is the
+used-input list; maps are bounded retained evidence checked for original-SDK
+leakage, not a second input-list parser.
+
+An opaque completed handle revalidates source, compiler, both SDK trees,
+commands, reports, logs, maps, outputs and the closed receipt without rerunning
+or repairing anything. Only exact empty lock sidecars from atomic publication
+are admitted; extra members fail. Cancelled, expired or failed execution cannot
+return a completed handle. Filesystem validation is not preemptible, so the
+elapsed-time budget is not a hard limit on filesystem I/O.
+
+Its `aros-llvm-sdk-link-receipt-v1` is local link evidence, not SDK generation,
+full ABI qualification, C++ execution or authenticated owning-job evidence.
+Synthetic positive and tampering tests do not qualify a real compiler. The
+generation owner must still connect these links to the generated SDK and an
+independently authenticated portable export.
+
+`compatibility::readback_llvm_sdk_links` reconstructs an existing local proof
+from independent source/compiler selections and the execution owner's expected
+receipt digest. It remeasures both SDK trees and derives the commands from the
+sealed probes; it never links applications again, copies an SDK, creates output
+or repairs evidence. Read-only source audits and compiler-tree remeasurement
+still run; the reader does not repeat driver queries. Missing, extra or altered
+receipt, inventory, report, log, map and ELF members fail; the prior in-memory
+completed handle is not required.
+
+`compatibility::bind_llvm_sdk_generated_root` validates the retained CMake
+consumer binding against the exact committed source and a fresh response from
+the measured transpiler. The source validator derives the SDK include/root path
+from sealed source configuration; Rust does not assume a conventional directory.
+The opaque result retains the exact binding bytes and complete SDK tree and
+rejects changed selection/content on readback. It does not prove that a build
+completed or that the SDK is complete.
+
+`compatibility::execute_llvm_sdk_build_links` runs the four ordinary links only
+against that source-selected build SDK, never a separately supplied candidate.
+`compatibility::readback_llvm_sdk_build_links` joins retained links to the same
+source/CMake selection and independently expected binding and receipt digests.
+Neither local reader is rootless portable evidence or remote-job authentication.
+Proof outputs must be outside the entire CMake build tree. One elapsed budget
+covers source binding, links and final helper revalidation; filesystem I/O and
+existing bounded Git/source audits are not preempted. Expiry prevents a
+successful result; it is not a hard return-time guarantee. The generation owner
+still needs the six-phase execution and independently authenticated portable
+job export before package admission.
+
 `aros sdk build` explicitly rejects this generic schema before compatibility
 preparation until the family-specific link and evidence adapters are implemented.
 
