@@ -63,6 +63,34 @@ pub struct SdkConsumerContract {
     pub native_sdk_link_probes: NativeSdkLinkProbes,
 }
 
+impl SdkConsumerContract {
+    /// Merge explicit shared and actual-host configuration without fallback.
+    ///
+    /// # Errors
+    /// Rejects an absent host in a declared host table or duplicate bindings.
+    pub fn make_variables_for_host(&self, host: &str) -> Result<BTreeMap<String, String>> {
+        let mut variables = self.make_variables.clone();
+        if self.host_make_variables.is_empty() {
+            return Ok(variables);
+        }
+        let selected = self.host_make_variables.get(host).ok_or_else(|| {
+            invalid(
+                "host_make_variables",
+                "actual host has no explicit configuration",
+            )
+        })?;
+        for (name, value) in selected {
+            if variables.insert(name.clone(), value.clone()).is_some() {
+                return Err(invalid(
+                    "host_make_variables",
+                    "ambiguous shared and host binding",
+                ));
+            }
+        }
+        Ok(variables)
+    }
+}
+
 /// Bounded, measured source-owned SDK contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedSdkConsumerContract {

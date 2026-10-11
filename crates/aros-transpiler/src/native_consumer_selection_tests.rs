@@ -172,7 +172,7 @@ fn consumer_selection_requires_a_source_profile_and_consumer_binding() {
         .err()
         .expect("unbound consumer rejected")
         .to_string();
-    assert!(error.contains("no native consumer contract"), "{error}");
+    assert!(error.contains("exactly one"), "{error}");
 }
 
 #[test]
@@ -205,6 +205,9 @@ fn consumer_selection_checks_digest_and_every_selector() {
             "changed {name} was accepted"
         );
     }
+    let mut omitted_float_abi = context(&args);
+    omitted_float_abi.float_abi = None;
+    assert!(load_native_selection(&args, Some(&omitted_float_abi)).is_err());
 }
 
 #[test]

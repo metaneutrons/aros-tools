@@ -13,10 +13,14 @@ use std::path::Path;
 #[cfg(test)]
 #[path = "native_consumer_selection_tests.rs"]
 mod native_consumer_selection_tests;
+#[cfg(test)]
+#[path = "sdk_consumer_selection_tests.rs"]
+mod sdk_consumer_selection_tests;
 
 pub enum LoadedNativeSelection {
     Build(Box<aros_common::native_build_contract::LoadedNativeBuildContract>),
     Consumer(Box<aros_common::native_consumer_contract::LoadedNativeConsumerContract>),
+    SdkConsumer(Box<aros_common::sdk_consumer_contract::LoadedSdkConsumerContract>),
 }
 
 /// Borrow shared invocation facts without manufacturing boot/package fields.
@@ -34,13 +38,16 @@ pub struct NativeInvocationRef<'a> {
     pub metamake_projection: Option<&'a str>,
     pub optional_meta_dependencies:
         &'a [aros_common::native_build_contract::NativeOptionalMetaDependency],
-    pub abi: &'a aros_common::native_build_contract::NativeBuildAbi,
+    pub source_cpu: &'a str,
+    pub make_variables: &'a std::collections::BTreeMap<String, String>,
+    pub host_make_variables:
+        &'a std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 impl LoadedNativeSelection {
     pub fn invocation(&self) -> NativeInvocationRef<'_> {
         macro_rules! view {
-            ($contract:expr, $projection:expr) => {{
+            ($contract:expr, $projection:expr, $source_cpu:expr) => {{
                 let contract = $contract;
                 NativeInvocationRef {
                     profile: &contract.profile,
@@ -52,19 +59,36 @@ impl LoadedNativeSelection {
                     kernel_compiler_role: contract.kernel_compiler_role.as_deref(),
                     metamake_projection: $projection,
                     optional_meta_dependencies: &contract.optional_meta_dependencies,
-                    abi: &contract.abi,
+                    source_cpu: $source_cpu,
+                    make_variables: &contract.make_variables,
+                    host_make_variables: &contract.host_make_variables,
                 }
             }};
         }
         match self {
             Self::Build(loaded) => view!(
                 &loaded.contract,
-                loaded.contract.metamake_projection.as_deref()
+                loaded.contract.metamake_projection.as_deref(),
+                loaded.contract.abi.source_cpu.as_str()
             ),
             Self::Consumer(loaded) => view!(
                 &loaded.contract,
-                Some(loaded.contract.metamake_projection.as_str())
+                Some(loaded.contract.metamake_projection.as_str()),
+                loaded.contract.abi.source_cpu.as_str()
             ),
+            Self::SdkConsumer(loaded) => {
+                let source_cpu = match loaded.contract.target.abi.get("source_cpu") {
+                    Some(aros_common::sdk_manifest::SdkAbiValue::Text(source_cpu)) => {
+                        source_cpu.as_str()
+                    }
+                    _ => unreachable!("loaded SDK consumer contracts validate source_cpu"),
+                };
+                view!(
+                    &loaded.contract,
+                    Some(loaded.contract.metamake_projection.as_str()),
+                    source_cpu
+                )
+            }
         }
     }
 
@@ -72,6 +96,7 @@ impl LoadedNativeSelection {
         match self {
             Self::Build(loaded) => &loaded.sha256,
             Self::Consumer(loaded) => &loaded.sha256,
+            Self::SdkConsumer(loaded) => &loaded.sha256,
         }
     }
 
@@ -79,6 +104,7 @@ impl LoadedNativeSelection {
         match self {
             Self::Build(_) => "build",
             Self::Consumer(_) => "consumer",
+            Self::SdkConsumer(_) => "sdk-consumer",
         }
     }
 
@@ -89,6 +115,7 @@ impl LoadedNativeSelection {
         match self {
             Self::Build(loaded) => loaded.contract.make_variables_for_host(host),
             Self::Consumer(loaded) => loaded.contract.make_variables_for_host(host),
+            Self::SdkConsumer(loaded) => loaded.contract.make_variables_for_host(host),
         }
     }
 
@@ -97,7 +124,7 @@ impl LoadedNativeSelection {
     ) -> Option<&aros_common::native_build_contract::NativeBuildContract> {
         match self {
             Self::Build(loaded) => Some(&loaded.contract),
-            Self::Consumer(_) => None,
+            Self::Consumer(_) | Self::SdkConsumer(_) => None,
         }
     }
 
@@ -107,6 +134,7 @@ impl LoadedNativeSelection {
             // The ordinary strict closure and source-owner proof below verify
             // these literal roots. No guessed substitute endpoint is allowed.
             Self::Consumer(loaded) => Ok(loaded.contract.roots.clone()),
+            Self::SdkConsumer(loaded) => Ok(loaded.contract.roots.clone()),
         }
     }
 }
@@ -271,20 +299,36 @@ pub fn load_native_selection(
         .find(|profile| &profile.name == name)
         .ok_or_else(|| invalid("native profile is not declared by the selected source"))?;
     let (loaded, expected) = if args.native_consumer_profile.is_some() {
-        let relative = profile
-            .native_consumer_contract
-            .as_ref()
-            .ok_or_else(|| invalid("selected source profile has no native consumer contract"))?;
-        (
-            LoadedNativeSelection::Consumer(Box::new(
-                aros_common::native_consumer_contract::load_bound_native_consumer_contract(
-                    &args.source_dir,
-                    Path::new(relative),
-                    profile,
-                )?,
-            )),
-            &args.native_consumer_contract_sha256,
-        )
+        match (
+            profile.native_consumer_contract.as_deref(),
+            profile.sdk_consumer_contract.as_deref(),
+        ) {
+            (Some(relative), None) => (
+                LoadedNativeSelection::Consumer(Box::new(
+                    aros_common::native_consumer_contract::load_bound_native_consumer_contract(
+                        &args.source_dir,
+                        Path::new(relative),
+                        profile,
+                    )?,
+                )),
+                &args.native_consumer_contract_sha256,
+            ),
+            (None, Some(relative)) => (
+                LoadedNativeSelection::SdkConsumer(Box::new(
+                    aros_common::sdk_consumer_contract::load_bound_sdk_consumer_contract(
+                        &args.source_dir,
+                        Path::new(relative),
+                        profile,
+                    )?,
+                )),
+                &args.native_consumer_contract_sha256,
+            ),
+            _ => {
+                return Err(invalid(
+                    "selected source profile must declare exactly one of native_consumer_contract or sdk_consumer_contract",
+                ));
+            }
+        }
     } else {
         let relative = profile
             .native_build_contract
@@ -314,14 +358,20 @@ pub fn load_native_selection(
         .transpiler
         .as_ref()
         .ok_or_else(|| invalid("native source profile requires explicit transpiler selectors"))?;
-    if context.cpu.as_deref() != Some(loaded.invocation().abi.source_cpu.as_str())
+    let float_abi_matches = match &loaded {
+        LoadedNativeSelection::SdkConsumer(_) => {
+            context.float_abi.as_deref().unwrap_or("") == profile.float_abi.as_deref().unwrap_or("")
+        }
+        _ => context.float_abi == profile.float_abi,
+    };
+    if context.cpu.as_deref() != Some(loaded.invocation().source_cpu)
         || context.platform.as_deref() != Some(profile.platform.as_str())
         || context.family.as_deref() != Some(selectors.family.as_str())
         || context.variant.as_deref() != Some(selectors.variant.as_str())
         || context.toolchain.as_deref() != Some(selectors.toolchain.as_str())
         || context.cpu32.as_deref() != Some(selectors.cpu32.as_str())
         || context.use_mmu.as_deref() != Some(if selectors.use_mmu { "1" } else { "0" })
-        || context.float_abi != profile.float_abi
+        || !float_abi_matches
         || selectors
             .mesa_version
             .as_ref()

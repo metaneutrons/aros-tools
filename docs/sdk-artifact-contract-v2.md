@@ -63,8 +63,26 @@ validation use the same sealed graph validator as the native consumer.
 Historical native-consumer-v1/v2 and native-build ABI validation stay unchanged.
 
 The generic source binding covers LLVM-shaped x86-64, ARM hard-float and
-AArch64 descriptors as well as GNU/RV32-shaped descriptors. This is descriptor
-validation, not a claim of native SDK generation or compiler compatibility.
+AArch64 descriptors as well as GNU/RV32-shaped descriptors. The transpiler's
+existing `--native-consumer-profile` selector admits exactly one declared
+contract and repeats the sealed selection for inventory and graph export.
+Generic consumers retain literal source roots and cannot authorize core,
+package or boot-media builds. Pre-compiler JSON uses
+`aros-sdk-consumer-validation-v1` with `target`; legacy consumers keep
+`aros-native-consumer-validation-v1` with `abi`.
+
+The owned CMake engine admits the generic response only for LLVM. Execution
+requires explicit source `flavour` and `platform_smp` facts in addition to CPU,
+pointer width and MMU selection. After compiler detection it checks both Clang
+driver target triples, pointer width and the selected ARM float ABI flags. A
+target/sysroot override, conflicting configuration flag or changed binding
+fails without publishing a current consumer binding. The source-derived
+Developer include root is shared by bootstrap and target producers.
+
+These graph and configured-compiler checks are not native SDK generation or
+ordinary application-link qualification. GNU/RV32 execution still uses its
+existing native-consumer-v2 contract; a generic GNU descriptor is not admitted
+by the LLVM CMake adapter.
 `aros sdk build` explicitly rejects this generic schema before compatibility
 preparation until the family-specific link and evidence adapters are implemented.
 

@@ -1,7 +1,7 @@
 //! Synthetic consumer graphs prove selection, not compiler execution or boot.
 use super::*;
 
-fn consumer_fixture(extra_recipe: bool) -> Fixture {
+pub fn consumer_fixture(extra_recipe: bool) -> Fixture {
     let mut fixture = Fixture::new();
     if extra_recipe {
         add_unowned_literal_object_failure(&fixture, None);

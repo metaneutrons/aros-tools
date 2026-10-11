@@ -32,6 +32,13 @@ SDK-bearing inputs until the complete shared package/evidence pipeline is
 implemented. See the [SDK commands](/aros-tools/reference/cli-contract/sdk/)
 for current local generation and management options.
 
+SDK source profiles can declare a target-generic `sdk_consumer_contract`.
+The transpiler uses it for strict inventory and graph export; CMake checks the
+LLVM driver triples, pointer width and ARM float ABI against the source
+selection. This does not yet enable generic `aros sdk build`: ordinary C/C++
+link and retained-evidence adapters are still required. GNU/RV32 local SDK
+generation retains its existing native-consumer-v2 path.
+
 - A clean AROS source checkout, an `aros-toolchains` producer checkout, and an
   `aros-tools` checkout at the commits selected by the producer declaration.
 - The `aros` executable built from that selected tools checkout.

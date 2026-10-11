@@ -360,3 +360,46 @@ fn sdk_contract_rejects_wrong_seals_changed_bytes_and_duplicate_abi_keys() {
         assert!(load(&fresh, &symlink_input).is_err());
     }
 }
+
+#[test]
+fn sdk_consumer_make_variables_merge_only_the_selected_host_without_collisions() {
+    let fixture = make_fixture(FixtureTarget {
+        name: "pc-x86_64",
+        arch: "x86_64",
+        source_cpu: "x86_64",
+        target_triple: "x86_64-unknown-aros",
+        toolchain: "llvm",
+        float_abi: None,
+        bootstrap: None,
+        use_mmu: true,
+    });
+    let mut document = fixture.document.clone();
+    document["make_variables"] = json!({"SDK_SHARED_FIXTURE": "shared"});
+    document["host_make_variables"] = json!({
+        "fixture-host": {"SDK_HOST_FIXTURE": "host"},
+        "other-host": {"SDK_OTHER_HOST_FIXTURE": "other"}
+    });
+    let loaded = load(&fixture, &document).unwrap();
+    assert_eq!(
+        loaded
+            .contract
+            .make_variables_for_host("fixture-host")
+            .unwrap(),
+        BTreeMap::from([
+            ("SDK_SHARED_FIXTURE".into(), "shared".into()),
+            ("SDK_HOST_FIXTURE".into(), "host".into()),
+        ])
+    );
+    assert!(loaded
+        .contract
+        .make_variables_for_host("undeclared-host")
+        .is_err());
+
+    let mut conflicting = loaded.contract;
+    conflicting
+        .host_make_variables
+        .get_mut("fixture-host")
+        .unwrap()
+        .insert("SDK_SHARED_FIXTURE".into(), "shadow".into());
+    assert!(conflicting.make_variables_for_host("fixture-host").is_err());
+}
