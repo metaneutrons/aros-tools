@@ -82,6 +82,8 @@ pub mod sdk_package;
 #[cfg(unix)]
 pub mod sdk_project;
 #[cfg(unix)]
+pub mod sdk_release_selection;
+#[cfg(unix)]
 pub mod sdk_source;
 #[cfg(unix)]
 pub mod sdk_store;

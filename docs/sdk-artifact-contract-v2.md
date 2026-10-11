@@ -178,6 +178,15 @@ Unknown or duplicate fields, URL aliases/credentials, zero digests and oversized
 metadata are rejected. The lock itself has a 1 MiB limit and its URL a 4096-byte
 limit.
 
+`sdk_release_selection::build_measured_sdk_release_lock` constructs that lock
+from a complete local package. The caller independently selects its identity,
+payload tree, archive hash/size, release tag and URL. The builder verifies the
+closed package, measures the external manifest through bounded no-follow
+descriptors, validates canonical lock serialization, and verifies the archive
+against the resulting lock. Final package and manifest checks reject changed
+inputs. It neither writes package files nor publishes the lock. This measured
+selection is not authenticated owning-job evidence or release admission.
+
 The consumer read-back API measures the exact opened archive, checks the
 embedded canonical manifest against the independent lock, and verifies the
 complete payload inventory. Installed verification repeats bounded no-follow
