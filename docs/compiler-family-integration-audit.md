@@ -72,6 +72,15 @@ provenance or independent A/B requirements.
 
 ### Local consistency and portable admission are different
 
+The [ordinary native SDK link boundary](native-sdk-link-evidence.md) adds a
+source-v2 declaration, four normal GNU application links and full SDK
+relocation/readback. Selected consumer-v2 GNU compatibility now requires that
+operation and retains a complete rootless byte closure, joined to receipt-v5.
+The collector requires a separate source-derived SDK policy; it cannot infer
+that requirement from downloaded claims. Actual integrated compiler execution,
+authenticated origin and a released runtime remain unqualified. The six
+historical freestanding phases are not equivalent SDK-completeness proof.
+
 The retained compatibility reader uses the original host paths, bounded offline
 Git inspection, a prepared Python version probe and temporary sealed source
 inputs. A Linux collector cannot validate a macOS result by pretending those

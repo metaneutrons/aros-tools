@@ -37,6 +37,7 @@ const MAX_MAKE_JOBS: usize = 64;
 const UPSTREAM_SOURCE_AUDIT_TIMEOUT: Duration = Duration::from_mins(5);
 const COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v2";
 const GNU_COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v3";
+const GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v5";
 const LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v4";
 const COMPATIBILITY_RECEIPT_FILE: &str = "native-compatibility.receipt.json";
 
@@ -146,6 +147,9 @@ pub struct NativeCompatibilityReport {
     pub probes: CompatibilityProbeSet,
     /// Post-process verification of C/C++ collector output identities.
     pub standalone: StandaloneOutputReport,
+    /// Ordinary source-v2 application links against the complete native SDK.
+    /// This is separate from the six historical freestanding phases.
+    pub native_sdk: Option<super::NativeSdkLinkReport>,
     /// Durable aggregate receipt binding every phase report and standalone
     /// collector result without workstation-local paths.
     pub receipt: CompatibilityReceipt,
@@ -172,6 +176,16 @@ struct CompatibilityReceiptDocument {
     standalone_targets: BTreeMap<String, CompatibilityReceiptTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     package: Option<CompatibilityReceiptPackage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_sdk: Option<CompatibilityReceiptSdk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptSdk {
+    receipt_sha256: Sha256Digest,
+    inventory_sha256: Sha256Digest,
+    entries: usize,
 }
 
 /// V3 binds GNU packages and V4 binds LLVM family-v2 packages. Neither is a
@@ -385,10 +399,21 @@ pub fn execute_native_compatibility(
             "pristine upstream source tree changed during native compatibility execution",
         ));
     }
+    let native_sdk = if let Some(sdk_request) = native_sdk_request(request, &inputs)? {
+        Some(super::execute_native_sdk_links(&sdk_request, cancellation)?)
+    } else {
+        None
+    };
+    if package_binding_required(request) {
+        // The SDK stage must not change either verified family-v2 prefix.
+        // Legacy v1 execution retains its separate package/receipt contract.
+        revalidate_bound_roots(request)?;
+        super::validate_preparation(&request.preparation)?;
+    }
     let receipt = write_compatibility_receipt(
         &outputs.reports,
         &probes,
-        &standalone,
+        (&standalone, native_sdk.as_ref()),
         &inputs.upstream_source_commit,
         &inputs.upstream_source_tree,
         &inputs.ports_sources,
@@ -397,19 +422,58 @@ pub fn execute_native_compatibility(
     Ok(NativeCompatibilityReport {
         probes,
         standalone,
+        native_sdk,
         receipt,
     })
+}
+
+fn native_sdk_request(
+    request: &NativeCompatibilityRequest,
+    inputs: &Inputs,
+) -> Result<Option<super::NativeSdkLinkRequest>, ContractError> {
+    if inputs
+        .native_consumer_contract
+        .as_ref()
+        .is_none_or(|loaded| loaded.contract.native_sdk_link_probes.is_none())
+    {
+        return Ok(None);
+    }
+    let selected_root = |path: &Path, label| {
+        if path.try_exists().map_err(|_| {
+            ContractError::compatibility("cannot inspect selected SDK operation root")
+        })? {
+            checked_directory(path, label)
+        } else {
+            checked_absent_root(path, label)
+        }
+    };
+    Ok(Some(super::NativeSdkLinkRequest {
+        preparation: request.preparation.clone(),
+        source_profile: inputs.source_profile.clone().ok_or_else(|| {
+            ContractError::compatibility("ordinary SDK proof lost its source profile")
+        })?,
+        cmake_build_root: selected_root(
+            &request.cmake_build_root,
+            "selected native SDK CMake build",
+        )?,
+        compiler_root: inputs.cmake_toolchain_root.clone(),
+        compiler: inputs.compiler.clone(),
+        output_root: selected_root(&request.reports_root, "selected native SDK reports")?
+            .join("native-sdk-links"),
+        timeout: request.timeout,
+    }))
 }
 
 fn write_compatibility_receipt(
     reports_root: &Path,
     probes: &CompatibilityProbeSet,
-    standalone: &StandaloneOutputReport,
+    verified_outputs: (&StandaloneOutputReport, Option<&super::NativeSdkLinkReport>),
     upstream_source_commit: &GitObjectId,
     upstream_source_tree: &GitObjectId,
     ports_sources: &CompatibilityPortsSources,
     request: &NativeCompatibilityRequest,
 ) -> Result<CompatibilityReceipt, ContractError> {
+    let (standalone, native_sdk) = verified_outputs;
     let mut persisted_reports = BTreeMap::new();
     let mut phase_reports = Vec::with_capacity(super::REQUIRED_PROBE_PHASES.len());
     for phase in super::REQUIRED_PROBE_PHASES {
@@ -487,7 +551,9 @@ fn write_compatibility_receipt(
         None
     };
     let document = CompatibilityReceiptDocument {
-        schema: if is_gnu {
+        schema: if native_sdk.is_some() {
+            GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+        } else if is_gnu {
             GNU_COMPATIBILITY_RECEIPT_SCHEMA
         } else if package.is_some() {
             LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA
@@ -502,6 +568,11 @@ fn write_compatibility_receipt(
         phase_reports,
         standalone_targets,
         package,
+        native_sdk: native_sdk.map(|proof| CompatibilityReceiptSdk {
+            receipt_sha256: proof.receipt_sha256.clone(),
+            inventory_sha256: proof.sdk_inventory_sha256.clone(),
+            entries: proof.sdk_entries,
+        }),
     };
     document.validate()?;
     let encoded = canonical::bytes(
@@ -553,9 +624,9 @@ impl CompatibilityReceiptDocument {
         if self.operation != "native-compatibility"
             || match self.schema.as_str() {
                 COMPATIBILITY_RECEIPT_SCHEMA => self.package.is_some(),
-                GNU_COMPATIBILITY_RECEIPT_SCHEMA | LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA => {
-                    self.package.is_none()
-                }
+                GNU_COMPATIBILITY_RECEIPT_SCHEMA
+                | GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+                | LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA => self.package.is_none(),
                 _ => true,
             }
         {
@@ -563,9 +634,20 @@ impl CompatibilityReceiptDocument {
                 "native compatibility receipt has an unsupported schema or operation",
             ));
         }
+        if (self.schema == GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA) != self.native_sdk.is_some()
+            || self
+                .native_sdk
+                .as_ref()
+                .is_some_and(|sdk| sdk.entries == 0 || sdk.entries > 100_000)
+        {
+            return Err(ContractError::compatibility("native compatibility receipt lacks its mandatory ordinary SDK proof or mixes legacy schemas"));
+        }
         if let Some(package) = &self.package {
             let valid_family = match (&package.compiler, self.schema.as_str()) {
-                (ArosCompilerIdentity::Gnu { .. }, GNU_COMPATIBILITY_RECEIPT_SCHEMA) => package
+                (
+                    ArosCompilerIdentity::Gnu { .. },
+                    GNU_COMPATIBILITY_RECEIPT_SCHEMA | GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA,
+                ) => package
                     .source_preset
                     .as_deref()
                     .is_some_and(crate::profiles::identifier),
@@ -1579,6 +1661,21 @@ fn utf8_path(path: &Path, label: &str) -> Result<String, ContractError> {
 mod gnu_tests;
 #[cfg(test)]
 pub use gnu_tests::riscv_elf as fixture_riscv_elf;
+
+/// Build the measured GNU request and source contract used by native SDK link
+/// executor tests. The SDK-specific test owns conversion of the contract to
+/// v2 and refreshes the source tree digest after adding its sealed sources.
+#[cfg(test)]
+pub(super) fn native_sdk_links_test_request(root: &Path) -> NativeCompatibilityRequest {
+    let mut fixture = gnu_tests::gnu_fixture(root, 32, false);
+    let producer_profile = fixture.request.profile.clone();
+    gnu_tests::write_native_consumer_contract_fixture(
+        &mut fixture.request,
+        &producer_profile,
+        false,
+    );
+    fixture.request
+}
 
 #[cfg(test)]
 #[path = "execution_tests.rs"]

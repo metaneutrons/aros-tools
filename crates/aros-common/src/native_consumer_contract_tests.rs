@@ -14,7 +14,7 @@ fn fixture() -> (tempfile::TempDir, TargetProfile, Value) {
         .targets
         .remove(0);
     let document = json!({
-        "schema": SCHEMA, "profile": "example-sdk",
+        "schema": SCHEMA_V1, "profile": "example-sdk",
         "source_baseline": "0123456789abcdef0123456789abcdef01234567",
         "roots": ["includes", "linklibs"],
         "metamake_projection": "policy.json",
@@ -27,6 +27,36 @@ fn fixture() -> (tempfile::TempDir, TargetProfile, Value) {
             "flavour": "native", "platform_smp": true, "use_mmu": true }
     });
     (directory, profile, document)
+}
+
+fn v2_document(directory: &Path, document: &Value) -> Value {
+    fs::write(
+        directory.join("probe.c"),
+        b"/* sealed C contract fixture */\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("probe.cpp"),
+        b"/* sealed C++ contract fixture */\n",
+    )
+    .unwrap();
+    let mut v2 = document.clone();
+    v2["schema"] = json!(SCHEMA_V2);
+    v2["inputs"].as_array_mut().unwrap().extend([
+        json!({
+            "path": "probe.c",
+            "sha256": crate::sha256_bytes(b"/* sealed C contract fixture */\n")
+        }),
+        json!({
+            "path": "probe.cpp",
+            "sha256": crate::sha256_bytes(b"/* sealed C++ contract fixture */\n")
+        }),
+    ]);
+    v2["native_sdk_link_probes"] = json!({
+        "c": { "source": "probe.c", "libraries": [] },
+        "cxx": { "source": "probe.cpp", "libraries": [] }
+    });
+    v2
 }
 
 fn load(
@@ -47,6 +77,11 @@ fn consumer_contract_requires_no_core_package_or_media_and_binds_exact_bytes() {
     let (directory, profile, document) = fixture();
     let loaded = load(directory.path(), &profile, &document).unwrap();
     assert_eq!(loaded.contract.roots, ["includes", "linklibs"]);
+    assert!(!serde_json::to_value(&loaded.contract)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("native_sdk_link_probes"));
     assert_eq!(
         loaded.sha256,
         crate::sha256_file(&loaded.path).unwrap().digest
@@ -58,6 +93,97 @@ fn consumer_contract_requires_no_core_package_or_media_and_binds_exact_bytes() {
             .unwrap(),
         BTreeMap::new()
     );
+    assert!(loaded.contract.require_native_sdk_link_probes().is_err());
+}
+
+#[test]
+fn consumer_v2_requires_sealed_c_and_cxx_sources_and_preserves_library_order() {
+    let (directory, profile, document) = fixture();
+    let default_driver = v2_document(directory.path(), &document);
+    let loaded = load(directory.path(), &profile, &default_driver).unwrap();
+    let probes = loaded.contract.require_native_sdk_link_probes().unwrap();
+    assert_eq!(probes.c.source, "probe.c");
+    assert!(probes.c.libraries.is_empty());
+    assert_eq!(probes.cxx.source, "probe.cpp");
+    assert!(probes.cxx.libraries.is_empty());
+
+    let mut explicit = default_driver;
+    explicit["native_sdk_link_probes"]["c"]["libraries"] = json!(["zeta", "alpha"]);
+    let loaded = load(directory.path(), &profile, &explicit).unwrap();
+    assert_eq!(
+        loaded
+            .contract
+            .require_native_sdk_link_probes()
+            .unwrap()
+            .c
+            .libraries,
+        ["zeta".to_owned(), "alpha".to_owned()]
+    );
+}
+
+#[test]
+fn consumer_v2_probe_contract_rejects_missing_mismatched_and_unsafe_facts() {
+    let (directory, profile, document) = fixture();
+    let v2 = v2_document(directory.path(), &document);
+
+    let mut missing = v2.clone();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("native_sdk_link_probes");
+    assert!(load(directory.path(), &profile, &missing).is_err());
+
+    let mut schema_mismatch = v2.clone();
+    schema_mismatch["schema"] = json!(SCHEMA_V1);
+    assert!(load(directory.path(), &profile, &schema_mismatch).is_err());
+
+    let mut unknown = v2.clone();
+    unknown["native_sdk_link_probes"]["c"]["flags"] = json!(["-Wl,--as-needed"]);
+    assert!(load(directory.path(), &profile, &unknown).is_err());
+    let mut null_probes = v2.clone();
+    null_probes["native_sdk_link_probes"] = Value::Null;
+    assert!(load(directory.path(), &profile, &null_probes).is_err());
+
+    let mut escaped = v2.clone();
+    escaped["native_sdk_link_probes"]["c"]["source"] = json!("../outside.c");
+    assert!(load(directory.path(), &profile, &escaped).is_err());
+
+    let mut wrong_suffix = v2.clone();
+    wrong_suffix["native_sdk_link_probes"]["c"]["source"] = json!("probe.cpp");
+    assert!(load(directory.path(), &profile, &wrong_suffix).is_err());
+    wrong_suffix["native_sdk_link_probes"]["c"]["source"] = json!("probe.c");
+    wrong_suffix["native_sdk_link_probes"]["cxx"]["source"] = json!("probe.c");
+    assert!(load(directory.path(), &profile, &wrong_suffix).is_err());
+
+    fs::write(
+        directory.path().join("unsealed.c"),
+        b"/* present but unsealed */\n",
+    )
+    .unwrap();
+    let mut unsealed = v2.clone();
+    unsealed["native_sdk_link_probes"]["c"]["source"] = json!("unsealed.c");
+    assert!(load(directory.path(), &profile, &unsealed).is_err());
+
+    let mut duplicate_library = v2.clone();
+    duplicate_library["native_sdk_link_probes"]["c"]["libraries"] = json!(["library", "library"]);
+    assert!(load(directory.path(), &profile, &duplicate_library).is_err());
+
+    for libraries in [
+        json!(["-Wl,--as-needed"]),
+        json!(["../library"]),
+        json!(["$(LIBRARY)"]),
+        json!((0..17)
+            .map(|index| format!("library{index}"))
+            .collect::<Vec<_>>()),
+    ] {
+        let mut unsafe_library = v2.clone();
+        unsafe_library["native_sdk_link_probes"]["c"]["libraries"] = libraries;
+        assert!(load(directory.path(), &profile, &unsafe_library).is_err());
+    }
+
+    let mut v1_with_probes = document;
+    v1_with_probes["native_sdk_link_probes"] = v2["native_sdk_link_probes"].clone();
+    assert!(load(directory.path(), &profile, &v1_with_probes).is_err());
 }
 
 #[test]

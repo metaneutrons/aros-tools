@@ -34,6 +34,9 @@ mod environment_plan;
 mod execution;
 mod host_generator_inputs;
 mod host_tools;
+mod native_sdk_links;
+mod native_sdk_portable;
+mod native_sdk_relocation;
 mod relocation;
 mod standalone;
 pub use environment::{CompatibilityEnvironment, CompatibilityHostToolReport};
@@ -64,6 +67,10 @@ pub use host_tools::{
     HostToolClosure, HostToolClosureRequest, HostToolIdentity,
     REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
 };
+pub use native_sdk_links::{
+    execute_native_sdk_links, readback_native_sdk_links, NativeSdkLinkReport, NativeSdkLinkRequest,
+};
+pub use native_sdk_portable::{NativeSdkLinkSelection, NativeSdkPortableProof};
 pub use relocation::{
     extract_two_roots, extract_two_roots_with_format, TwoRootRelocation, TwoRootRelocationRequest,
 };

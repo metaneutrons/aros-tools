@@ -106,6 +106,7 @@ pub(super) struct ExpectedRetainedEvidence {
     helpers: BTreeMap<String, CompatibilityHelperReport>,
     ports: Vec<NativeCompatibilityExpectedPortSource>,
     cmake_build_required: bool,
+    native_sdk: Option<crate::compatibility::NativeSdkLinkSelection>,
 }
 
 impl ExpectedRetainedEvidence {
@@ -131,6 +132,7 @@ impl ExpectedRetainedEvidence {
             profile: &request.profile,
             gnu_source_preset: request.source_preset.as_deref(),
             cmake_build_required: self.cmake_build_required,
+            native_sdk: self.native_sdk.as_ref(),
             sdk_consumer_source_tree_sha256: &request.preparation.source_tree_sha256,
             engine_api_version: request.preparation.engine_api_version,
             engine_sha256: &request.preparation.engine_sha256,
@@ -181,6 +183,10 @@ impl ExpectedRetainedEvidence {
                 size: source.size,
             })
             .collect();
+        let native_sdk = super::native_sdk_request(request, &inputs)?
+            .as_ref()
+            .map(crate::compatibility::native_sdk_portable::select)
+            .transpose()?;
         Ok(Self {
             compiler: inputs.compiler,
             upstream_tree: inputs.upstream_source_tree,
@@ -188,6 +194,7 @@ impl ExpectedRetainedEvidence {
             helpers,
             ports,
             cmake_build_required: inputs.native_consumer_contract.is_some(),
+            native_sdk,
         })
     }
 
@@ -265,14 +272,62 @@ impl ExpectedRetainedEvidence {
             }
             logs.insert(phase, command_logs);
         }
-        verify_report_inventory(&reports_root, &paths)?;
+        verify_report_inventory(&reports_root, &paths, self.native_sdk.is_some())?;
+        let native_sdk = if let Some(selection) = &self.native_sdk {
+            let inputs = validate_inputs(request)?;
+            let sdk_request = super::native_sdk_request(request, &inputs)?.ok_or_else(|| {
+                ContractError::compatibility("retained SDK evidence lost its source-v2 requirement")
+            })?;
+            if crate::compatibility::native_sdk_portable::select(&sdk_request)? != *selection {
+                return Err(ContractError::compatibility(
+                    "retained SDK selection changed after compatibility execution",
+                ));
+            }
+            let bytes = super::portable::read_sdk_members(&sdk_request.output_root)?;
+            let proof = crate::compatibility::native_sdk_portable::readback(
+                &bytes,
+                selection,
+                &crate::compatibility::native_sdk_portable::NativeSdkPortableExpectations {
+                    source_tree_sha256: &request.preparation.source_tree_sha256,
+                    engine_api_version: request.preparation.engine_api_version,
+                    engine_sha256: &request.preparation.engine_sha256,
+                    helpers: &self.helpers,
+                    compiler: &self.compiler,
+                    source_profile: request.source_preset.as_deref().ok_or_else(|| {
+                        ContractError::compatibility(
+                            "retained SDK requirement lost its source preset",
+                        )
+                    })?,
+                },
+            )?;
+            super::super::readback_native_sdk_links(
+                &sdk_request,
+                &super::super::NativeSdkLinkReport {
+                    receipt: sdk_request
+                        .output_root
+                        .join("native-sdk-links.receipt.json"),
+                    receipt_sha256: proof.receipt_sha256().clone(),
+                    sdk_inventory_sha256: proof.inventory_sha256().clone(),
+                    sdk_entries: proof.entries(),
+                },
+            )?;
+            Some(proof)
+        } else {
+            None
+        };
         let receipt = super::super::read_regular_bounded(
             &reports_root.join(super::COMPATIBILITY_RECEIPT_FILE),
             "retained aggregate compatibility receipt",
             crate::canonical::MAX_DOCUMENT_BYTES,
         )?;
         self.portable_expectations(request, profiles)?
-            .readback_documents(&receipt, &phase_reports, &logs, &standalone)
+            .readback_documents(
+                &receipt,
+                &phase_reports,
+                &logs,
+                &standalone,
+                native_sdk.as_ref(),
+            )
     }
 }
 
@@ -335,7 +390,11 @@ fn read_log(path: &Path) -> Result<Vec<u8>, ContractError> {
     )
 }
 
-fn verify_report_inventory(root: &Path, expected: &BTreeSet<PathBuf>) -> Result<(), ContractError> {
+fn verify_report_inventory(
+    root: &Path,
+    expected: &BTreeSet<PathBuf>,
+    native_sdk: bool,
+) -> Result<(), ContractError> {
     // The common durable publisher intentionally retains a persistent empty
     // advisory lock for each published file. Admit only names derived from
     // the exact data inventory, not arbitrary lock-shaped entries or journals.
@@ -349,6 +408,10 @@ fn verify_report_inventory(root: &Path, expected: &BTreeSet<PathBuf>) -> Result<
         })?;
         super::super::read_regular_bounded(&lock, "retained report publication lock", 0)?;
         expected_with_locks.insert(relative_name(&lock)?);
+    }
+    if native_sdk {
+        expected_with_locks.insert(PathBuf::from("native-sdk-links"));
+        super::checked_directory(&root.join("native-sdk-links"), "retained native SDK proof")?;
     }
     verify_directory_inventory(root, &expected_with_locks)
 }

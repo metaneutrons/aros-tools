@@ -10,6 +10,16 @@ function(_aros_native_consumer_fail reason)
 endfunction()
 
 function(aros_validate_native_consumer_contract)
+    if(NOT CMAKE_SCRIPT_MODE_FILE)
+        set(_binding "${CMAKE_BINARY_DIR}/aros-native-consumer-binding.json")
+        if(IS_DIRECTORY "${_binding}")
+            _aros_native_consumer_fail("binding output path is a directory")
+        endif()
+        # A failed reconfigure must not leave a binding from an earlier configure
+        # available to a later SDK gate.
+        file(REMOVE "${_binding}")
+    endif()
+
     foreach(_required IN ITEMS AROS_NATIVE_CONSUMER_CONTRACT
             AROS_NATIVE_CONSUMER_CONTRACT_SHA256 AROS_SOURCE_DIR AROS_TARGET_PROFILE
             AROS_TARGET_CPU AROS_TARGET_PLATFORM AROS_TARGET_TRIPLE AROS_TOOLCHAIN
@@ -134,6 +144,21 @@ function(aros_validate_native_consumer_contract)
         list(APPEND _configure_inputs "${_source}/${_input}")
     endforeach()
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_configure_inputs}")
+
+    if(NOT CMAKE_SCRIPT_MODE_FILE)
+        # Defer publication until the actual configure has succeeded. Keep the
+        # exact response in a global property because DEFER arguments are
+        # evaluated later and must not depend on this function's local scope.
+        set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_BINDING_JSON "${_json}")
+        get_property(_binding_deferred GLOBAL PROPERTY
+            AROS_NATIVE_CONSUMER_BINDING_DEFERRED)
+        if(NOT _binding_deferred)
+            set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_BINDING_DEFERRED TRUE)
+            cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}"
+                CALL _aros_finalize_native_consumer_binding)
+        endif()
+    endif()
+
     set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_SOURCE_DIR "${_source}")
     set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_PATH "${_contract}")
     set_property(GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_SHA256 "${_digest}")
@@ -156,6 +181,26 @@ function(aros_validate_native_consumer_contract)
     set(AROS_NATIVE_CONSUMER_SDK_INCLUDE_RELATIVE "${_sdk_include_relative}" PARENT_SCOPE)
     set(AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED TRUE PARENT_SCOPE)
     set(AROS_TRANSPILER_BIN "${_transpiler}" PARENT_SCOPE)
+endfunction()
+
+function(_aros_finalize_native_consumer_binding)
+    if(CMAKE_SCRIPT_MODE_FILE)
+        return()
+    endif()
+    # Revalidate after the directory's configure logic has run. A later
+    # selector mutation or fatal configure error must not publish stale output.
+    _aros_native_consumer_current(_source _contract _digest)
+    get_property(_json GLOBAL PROPERTY AROS_NATIVE_CONSUMER_BINDING_JSON)
+    if(_json STREQUAL "")
+        _aros_native_consumer_fail("validated response is unavailable for publication")
+    endif()
+    set(_binding "${CMAKE_BINARY_DIR}/aros-native-consumer-binding.json")
+    if(IS_DIRECTORY "${_binding}")
+        _aros_native_consumer_fail("binding output path is a directory")
+    endif()
+    # Configure-time write preserves the response byte-for-byte; unlike
+    # file(GENERATE), it does not interpret literal $<...> in validated paths.
+    file(WRITE "${_binding}" "${_json}")
 endfunction()
 
 function(_aros_native_consumer_current out_source out_path out_digest)

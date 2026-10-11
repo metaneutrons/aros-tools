@@ -5,7 +5,7 @@
 
 #![cfg(unix)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -13,8 +13,8 @@ use std::process::Command;
 
 use aros_common::elf::{self, riscv::TargetContract, AROS_ABI_VERSION, OS_ABI_AROS};
 use aros_common::{
-    measure_tree_content_cas, run_status, sha256_bytes, ArosCompilerIdentity,
-    ArosToolchainManifest, CancellationToken, Sha256Digest,
+    measure_tree_content_cas, run_status, sha256_bytes, toolchain_tree_inventory,
+    ArosCompilerIdentity, ArosToolchainManifest, CancellationToken, Sha256Digest,
 };
 use serde_json::{json, Value};
 
@@ -49,6 +49,43 @@ pub(super) struct Fixture {
     make_log: PathBuf,
 }
 
+struct NativeSdkPortableSelection {
+    inputs: super::NativeCompatibilityInputClaims,
+    manifest: ArosToolchainManifest,
+    archive_sha256: Sha256Digest,
+    archive_size: u64,
+    compiler: ArosCompilerIdentity,
+    package_source_commit: GitObjectId,
+    host: String,
+    profiles: Profiles,
+    profile: Profile,
+}
+
+impl NativeSdkPortableSelection {
+    fn expected_package(&self) -> super::NativeCompatibilityExpectedPackage<'_> {
+        super::NativeCompatibilityExpectedPackage {
+            manifest: &self.manifest,
+            archive_sha256: &self.archive_sha256,
+            archive_size: self.archive_size,
+            compiler: &self.compiler,
+            source_commit: &self.package_source_commit,
+            host: &self.host,
+        }
+    }
+
+    fn expectations(
+        &self,
+        native_sdk_required: bool,
+    ) -> Result<super::NativeCompatibilityReceiptExpectations<'_>, crate::ContractError> {
+        self.inputs.expectations(
+            self.expected_package(),
+            &self.profiles,
+            &self.profile,
+            native_sdk_required,
+        )
+    }
+}
+
 #[test]
 fn executes_all_gnu_phases_for_rv32_with_declared_driver_roles() {
     let temporary = tempfile::tempdir().unwrap();
@@ -59,6 +96,341 @@ fn executes_all_gnu_phases_for_rv32_with_declared_driver_roles() {
 fn executes_all_gnu_phases_for_rv64_with_declared_driver_roles() {
     let temporary = tempfile::tempdir().unwrap();
     assert_successful_gnu_execution(&gnu_fixture(temporary.path(), 64, false), 64);
+}
+
+#[test]
+fn executes_consumer_v2_with_six_compatibility_phases_and_four_native_sdk_links() {
+    let temporary = tempfile::tempdir().unwrap();
+    let fixture = gnu_native_sdk_fixture(temporary.path(), NativeSdkBindingMode::Valid);
+    let report = execute_native_compatibility_with_readback(
+        &fixture.request,
+        &fixture.profiles,
+        &CancellationToken::default(),
+    )
+    .expect("consumer-v2 GNU compatibility should include ordinary SDK links");
+
+    assert_eq!(report.probes.reports.len(), 6);
+    assert!(report.native_sdk.is_some());
+    let native_sdk = report.native_sdk.as_ref().unwrap();
+    assert_eq!(
+        native_sdk.receipt,
+        fixture
+            .request
+            .reports_root
+            .join("native-sdk-links/native-sdk-links.receipt.json")
+            .canonicalize()
+            .unwrap()
+    );
+    assert_eq!(native_sdk.sdk_entries, 5);
+    let receipt: Value = serde_json::from_slice(&fs::read(&report.receipt.path).unwrap()).unwrap();
+    assert_eq!(
+        receipt["schema"],
+        "aros-toolchain-native-compatibility-receipt-v5"
+    );
+    assert_eq!(receipt["phase_reports"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        receipt["native_sdk"]["receipt_sha256"],
+        native_sdk.receipt_sha256.to_string()
+    );
+    assert_eq!(
+        receipt["native_sdk"]["inventory_sha256"],
+        native_sdk.sdk_inventory_sha256.to_string()
+    );
+    assert_eq!(receipt["native_sdk"]["entries"], native_sdk.sdk_entries);
+
+    let sdk_receipt: Value =
+        serde_json::from_slice(&fs::read(&native_sdk.receipt).unwrap()).unwrap();
+    assert_eq!(sdk_receipt["outputs"].as_object().unwrap().len(), 4);
+    for language in ["c", "cxx"] {
+        assert_eq!(
+            sdk_receipt["outputs"][format!("original-{language}")]["sha256"],
+            sdk_receipt["outputs"][format!("relocated-{language}")]["sha256"]
+        );
+    }
+    for source in ["native-sdk-probe.c", "native-sdk-probe.cpp"] {
+        assert!(fixture
+            .request
+            .preparation
+            .source_root
+            .join(source)
+            .is_file());
+    }
+}
+
+#[test]
+fn consumer_v2_portable_sdk_evidence_roundtrips_rootlessly_and_rejects_mutations() {
+    let original_root = tempfile::tempdir().unwrap();
+    let original_root_path = original_root.path().to_path_buf();
+    let fixture = gnu_native_sdk_fixture(original_root.path(), NativeSdkBindingMode::Valid);
+    let execution = super::execute_native_compatibility_with_export(
+        &fixture.request,
+        &fixture.profiles,
+        &CancellationToken::default(),
+    )
+    .expect("consumer-v2 GNU compatibility export should include ordinary SDK links");
+
+    assert_eq!(execution.report().probes.reports.len(), 6);
+    assert!(execution.report().native_sdk.is_some());
+    let receipt_sha256 = execution.report().receipt.sha256.clone();
+    let input_claims = super::NativeCompatibilityInputClaims::parse(
+        execution.inputs().bytes(),
+        execution.inputs().sha256(),
+    )
+    .unwrap();
+    let input_document: Value = serde_json::from_slice(execution.inputs().bytes()).unwrap();
+    assert_eq!(
+        input_document["schema"],
+        "aros-toolchain-compatibility-inputs-v2"
+    );
+    assert!(input_document["native_sdk"].is_object());
+
+    let manifest = fixture.request.relocation.first.verified.manifest.clone();
+    let compiler = manifest.compiler_identity().unwrap();
+    let selection = NativeSdkPortableSelection {
+        inputs: input_claims,
+        manifest,
+        archive_sha256: fixture
+            .request
+            .relocation
+            .first
+            .verified
+            .archive_sha256
+            .clone(),
+        archive_size: fixture.request.relocation.first.verified.archive_size,
+        compiler,
+        package_source_commit: fixture
+            .request
+            .package_source_commit
+            .as_ref()
+            .unwrap()
+            .clone(),
+        host: fixture.request.host.clone(),
+        profiles: fixture.profiles.clone(),
+        profile: fixture.request.profile.clone(),
+    };
+    let expected = selection.expectations(true).unwrap();
+    assert!(expected.native_sdk.is_some());
+
+    let mut downgraded_input_document: Value =
+        serde_json::from_slice(selection.inputs.bytes()).unwrap();
+    downgraded_input_document["schema"] = json!("aros-toolchain-compatibility-inputs-v1");
+    downgraded_input_document
+        .as_object_mut()
+        .unwrap()
+        .remove("native_sdk");
+    let downgraded_input_bytes = crate::canonical::bytes(&downgraded_input_document).unwrap();
+    let downgraded_input_sha256 = sha256_bytes(&downgraded_input_bytes);
+    let downgraded_input_claims = super::NativeCompatibilityInputClaims::parse(
+        &downgraded_input_bytes,
+        &downgraded_input_sha256,
+    )
+    .unwrap();
+    let downgrade_error = downgraded_input_claims
+        .expectations(
+            selection.expected_package(),
+            &selection.profiles,
+            &selection.profile,
+            true,
+        )
+        .unwrap_err();
+    assert_eq!(
+        downgrade_error.diagnostics().diagnostics[0].code,
+        aros_common::DiagnosticCode::ProducerCompatibility
+    );
+    assert!(downgrade_error
+        .to_string()
+        .contains("SDK requirement differs from independent source policy"));
+
+    let files = execution
+        .evidence()
+        .files()
+        .map(|(name, bytes)| (name.to_owned(), bytes.to_vec()))
+        .collect::<BTreeMap<_, _>>();
+    let manifest_sha256 = execution.evidence().manifest_sha256().clone();
+    assert_eq!(
+        files.keys().filter(|name| name.starts_with("sdk-")).count(),
+        21
+    );
+    let aggregate: Value =
+        serde_json::from_slice(&files["native-compatibility.receipt.json"]).unwrap();
+    assert_eq!(
+        aggregate["schema"],
+        "aros-toolchain-native-compatibility-receipt-v5"
+    );
+
+    let download_root = tempfile::tempdir().unwrap();
+    let downloaded = download_root.path().join("evidence");
+    write_native_sdk_portable_files(&downloaded, &files);
+    let downloaded = downloaded.canonicalize().unwrap();
+    drop(execution);
+    drop(fixture);
+    drop(original_root);
+    assert!(!original_root_path.exists());
+
+    let readback =
+        super::readback_portable_native_compatibility(&super::PortableNativeCompatibilityRequest {
+            directory: downloaded,
+            manifest_sha256: manifest_sha256.clone(),
+            expected,
+        })
+        .expect("portable SDK export should read without original execution roots");
+    assert_eq!(readback.manifest_sha256(), &manifest_sha256);
+    assert_eq!(readback.receipt().receipt_sha256, receipt_sha256);
+    assert_eq!(readback.receipt().phases.len(), 6);
+    assert!(readback.native_sdk().is_some());
+
+    let mut missing_elf = files.clone();
+    missing_elf.remove("sdk-original-c.elf");
+    assert_native_sdk_portable_rejected(
+        &missing_elf,
+        &manifest_sha256,
+        &selection,
+        "omitted SDK ELF",
+        "portable compatibility directory differs from its exact inventory",
+    );
+
+    let mut changed_elf = files.clone();
+    changed_elf.get_mut("sdk-original-c.elf").unwrap()[0] ^= 1;
+    assert_native_sdk_portable_rejected(
+        &changed_elf,
+        &manifest_sha256,
+        &selection,
+        "changed SDK ELF without resealing",
+        "portable compatibility member differs from its selected manifest",
+    );
+
+    let mut changed_map = files.clone();
+    let map = "sdk-original-c.map";
+    changed_map
+        .get_mut(map)
+        .unwrap()
+        .extend_from_slice(b"changed map\n");
+    let changed_map_manifest = reseal_native_sdk_portable_member(&mut changed_map, map);
+    assert_native_sdk_portable_rejected(
+        &changed_map,
+        &changed_map_manifest,
+        &selection,
+        "resealed altered SDK map",
+        "portable native SDK receipt differs from its link map",
+    );
+
+    let mut changed_log = files.clone();
+    let log = "sdk-standalone-c.1.stdout.log";
+    changed_log
+        .get_mut(log)
+        .unwrap()
+        .extend_from_slice(b"changed retained linker trace\n");
+    let changed_log_manifest = reseal_native_sdk_portable_member(&mut changed_log, log);
+    assert_native_sdk_portable_rejected(
+        &changed_log,
+        &changed_log_manifest,
+        &selection,
+        "resealed altered SDK log",
+        "portable native SDK retained logs differ from their report",
+    );
+
+    let mut downgraded_receipt = files;
+    let aggregate_name = "native-compatibility.receipt.json";
+    let mut aggregate: Value = serde_json::from_slice(&downgraded_receipt[aggregate_name]).unwrap();
+    aggregate["schema"] = json!("aros-toolchain-native-compatibility-receipt-v3");
+    aggregate.as_object_mut().unwrap().remove("native_sdk");
+    downgraded_receipt.insert(
+        aggregate_name.into(),
+        crate::canonical::bytes(&aggregate).unwrap(),
+    );
+    let downgraded_manifest =
+        reseal_native_sdk_portable_member(&mut downgraded_receipt, aggregate_name);
+    assert_native_sdk_portable_rejected(
+        &downgraded_receipt,
+        &downgraded_manifest,
+        &selection,
+        "v2 input selection paired with downgraded aggregate receipt",
+        "native compatibility receipt schema does not match the expected compiler family",
+    );
+}
+
+fn write_native_sdk_portable_files(directory: &Path, files: &BTreeMap<String, Vec<u8>>) {
+    fs::create_dir(directory).unwrap();
+    for (name, bytes) in files {
+        assert_eq!(Path::new(name).file_name().unwrap(), name.as_str());
+        fs::write(directory.join(name), bytes).unwrap();
+    }
+}
+
+fn assert_native_sdk_portable_rejected(
+    files: &BTreeMap<String, Vec<u8>>,
+    manifest_sha256: &Sha256Digest,
+    selection: &NativeSdkPortableSelection,
+    label: &str,
+    expected_message: &str,
+) {
+    let owner = tempfile::tempdir().unwrap();
+    let directory = owner.path().join("downloaded");
+    write_native_sdk_portable_files(&directory, files);
+    let directory = directory.canonicalize().unwrap();
+    let error =
+        super::readback_portable_native_compatibility(&super::PortableNativeCompatibilityRequest {
+            directory,
+            manifest_sha256: manifest_sha256.clone(),
+            expected: selection.expectations(true).unwrap(),
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.diagnostics().diagnostics[0].code,
+        aros_common::DiagnosticCode::ProducerCompatibility,
+        "{label}: {error}"
+    );
+    assert!(
+        error.to_string().contains(expected_message),
+        "{label}: expected {expected_message:?}, got {error}"
+    );
+}
+
+fn reseal_native_sdk_portable_member(
+    files: &mut BTreeMap<String, Vec<u8>>,
+    name: &str,
+) -> Sha256Digest {
+    let bytes = files.get(name).unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&files[super::PORTABLE_NATIVE_COMPATIBILITY_MANIFEST]).unwrap();
+    manifest["files"][name]["sha256"] = json!(sha256_bytes(bytes));
+    manifest["files"][name]["size"] = json!(bytes.len() as u64);
+    let bytes = crate::canonical::bytes(&manifest).unwrap();
+    let digest = sha256_bytes(&bytes);
+    files.insert(super::PORTABLE_NATIVE_COMPATIBILITY_MANIFEST.into(), bytes);
+    digest
+}
+
+#[test]
+fn missing_v2_native_sdk_binding_blocks_aggregate_receipt() {
+    assert_v2_binding_failure_has_no_aggregate_receipt(NativeSdkBindingMode::Missing);
+}
+
+#[test]
+fn stale_v2_native_sdk_binding_blocks_aggregate_receipt() {
+    assert_v2_binding_failure_has_no_aggregate_receipt(NativeSdkBindingMode::Stale);
+}
+
+fn assert_v2_binding_failure_has_no_aggregate_receipt(mode: NativeSdkBindingMode) {
+    let temporary = tempfile::tempdir().unwrap();
+    let fixture = gnu_native_sdk_fixture(temporary.path(), mode);
+    let result = execute_native_compatibility(&fixture.request, &CancellationToken::default());
+    assert!(result.is_err(), "{mode:?} SDK binding must fail");
+    assert!(!fixture
+        .request
+        .reports_root
+        .join("native-compatibility.receipt.json")
+        .exists());
+    assert!(fixture
+        .request
+        .cmake_build_root
+        .join("SYS/Developer/include/native-sdk-fixture.h")
+        .is_file());
+    assert!(fixture
+        .request
+        .reports_root
+        .join("standalone-cxx.report.json")
+        .is_file());
 }
 
 #[test]
@@ -1156,6 +1528,210 @@ pub(super) fn gnu_fixture(root: &Path, width: u8, wrong_float_abi: bool) -> Fixt
         cmake_log,
         make_log,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeSdkBindingMode {
+    Valid,
+    Missing,
+    Stale,
+}
+
+fn gnu_native_sdk_fixture(root: &Path, mode: NativeSdkBindingMode) -> Fixture {
+    let mut fixture = gnu_fixture(root, 32, false);
+    let profile = fixture.request.profile.clone();
+    let contract_path =
+        write_native_consumer_contract_fixture(&mut fixture.request, &profile, false);
+    let source_root = fixture.request.preparation.source_root.clone();
+    let mut contract: Value = serde_json::from_slice(&fs::read(&contract_path).unwrap()).unwrap();
+    contract["schema"] = json!("aros-native-consumer-contract-v2");
+
+    let c_source = "native-sdk-probe.c";
+    let cxx_source = "native-sdk-probe.cpp";
+    let probe_bytes =
+        b"#include <native-sdk-fixture.h>\nint main(void) { return native_sdk_fixture_value(); }\n";
+    let cxx_probe_bytes =
+        b"#include <native-sdk-fixture.h>\nint main() { return native_sdk_fixture_value(); }\n";
+    fs::write(source_root.join(c_source), probe_bytes).unwrap();
+    fs::write(source_root.join(cxx_source), cxx_probe_bytes).unwrap();
+    for (path, bytes) in [
+        (c_source, probe_bytes.as_slice()),
+        (cxx_source, cxx_probe_bytes.as_slice()),
+    ] {
+        contract["inputs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"path": path, "sha256": sha256_bytes(bytes)}));
+    }
+    contract["native_sdk_link_probes"] = json!({
+        "c": {"source": c_source, "libraries": ["client"]},
+        "cxx": {"source": cxx_source, "libraries": ["client"]}
+    });
+    fs::write(
+        &contract_path,
+        serde_json::to_vec_pretty(&contract).unwrap(),
+    )
+    .unwrap();
+    refresh_source_digest(&mut fixture.request);
+
+    let binding = native_consumer_binding(&fixture.request, &contract_path, &contract);
+    let helper = fixture
+        .request
+        .preparation
+        .helpers
+        .get_mut("aros-transpiler")
+        .unwrap();
+    let rendered_binding = serde_json::to_string(&binding).unwrap();
+    let helper_script = format!(
+        "#!/bin/sh\nprintf '%s\\n' {}\n",
+        shell_quote(&rendered_binding)
+    );
+    fs::write(&helper.path, helper_script.as_bytes()).unwrap();
+    fs::set_permissions(&helper.path, fs::Permissions::from_mode(0o755)).unwrap();
+    helper.sha256 = sha256_bytes(helper_script.as_bytes());
+    helper.size = helper_script.len() as u64;
+
+    amend_cmake_to_build_native_sdk(&fixture.request, &binding, mode);
+    let fixture_root = fixture.request.relocation.first.root.parent().unwrap();
+    let c_elf = fixture_root.join("gnu-rv32-c.elf");
+    let cxx_elf = fixture_root.join("gnu-rv32-cxx.elf");
+    let second_package_root = fixture
+        .request
+        .relocation
+        .second
+        .root
+        .canonicalize()
+        .unwrap();
+    for package_root in [
+        fixture.request.relocation.first.root.clone(),
+        second_package_root.clone(),
+    ] {
+        executable(
+            &package_root.join(C_ROLE),
+            &native_sdk_shell_driver(&c_elf, C_ROLE, &second_package_root),
+        );
+        executable(
+            &package_root.join(CXX_ROLE),
+            &native_sdk_shell_driver(&cxx_elf, CXX_ROLE, &second_package_root),
+        );
+    }
+    let first_manifest = refresh_gnu_package_manifest(&fixture.request.relocation.first.root);
+    let second_manifest = refresh_gnu_package_manifest(&fixture.request.relocation.second.root);
+    assert_eq!(first_manifest, second_manifest);
+    fixture.request.relocation.first.verified.manifest = first_manifest;
+    fixture.request.relocation.second.verified.manifest = second_manifest;
+    fixture
+}
+
+fn native_consumer_binding(
+    request: &NativeCompatibilityRequest,
+    contract_path: &Path,
+    contract: &Value,
+) -> Value {
+    let contract_path = contract_path.canonicalize().unwrap();
+    let source_root = request.preparation.source_root.canonicalize().unwrap();
+    let contract_bytes = fs::read(&contract_path).unwrap();
+    json!({
+        "schema": "aros-native-consumer-validation-v1",
+        "qualification": "source-binding-not-graph-or-build-proof",
+        "source_dir": source_root.to_string_lossy(),
+        "contract_path": contract_path.to_string_lossy(),
+        "contract_sha256": sha256_bytes(&contract_bytes),
+        "profile": contract["profile"],
+        "abi": contract["abi"],
+        "exec_smp": false,
+        "input_paths": contract["inputs"].as_array().unwrap().iter()
+            .map(|input| input["path"].clone()).collect::<Vec<_>>(),
+        "sdk_include_relative": "SYS/Developer/include"
+    })
+}
+
+fn amend_cmake_to_build_native_sdk(
+    request: &NativeCompatibilityRequest,
+    binding: &Value,
+    mode: NativeSdkBindingMode,
+) {
+    let cmake_log = shell_quote(&cmake_log_path(request));
+    let mut binding = binding.clone();
+    if mode == NativeSdkBindingMode::Stale {
+        binding["profile"] = json!("stale-source-profile");
+    }
+    let binding_line = if mode == NativeSdkBindingMode::Missing {
+        String::new()
+    } else {
+        format!(
+            "printf '%s\\n' {} > \"$build_root/aros-native-consumer-binding.json\" || exit 53\n",
+            shell_quote(&serde_json::to_string(&binding).unwrap())
+        )
+    };
+    let script = format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' '-- invocation --' >> {cmake_log}\n\
+         printf '%s\\n' \"$@\" >> {cmake_log}\n\
+         if [ \"$1\" = --build ]; then\n\
+         build_root= previous=\n\
+         for arg do if [ \"$previous\" = --build ]; then build_root=$arg; break; fi; previous=$arg; done\n\
+         [ -n \"$build_root\" ] || exit 51\n\
+         /bin/mkdir -p \"$build_root/SYS/Developer/include\" \"$build_root/SYS/Developer/lib\" || exit 52\n\
+         printf '%s\\n' '#ifndef NATIVE_SDK_FIXTURE_H' '#define NATIVE_SDK_FIXTURE_H' 'static inline int native_sdk_fixture_value(void) {{ return 0; }}' '#endif' > \"$build_root/SYS/Developer/include/native-sdk-fixture.h\" || exit 54\n\
+         printf '%s\\n' 'synthetic native SDK client archive' > \"$build_root/SYS/Developer/lib/client.a\" || exit 55\n\
+         /bin/chmod 0640 \"$build_root/SYS/Developer/lib/client.a\" || exit 56\n\
+         /bin/ln -s client.a \"$build_root/SYS/Developer/lib/libclient.a\" || exit 57\n\
+         {binding_line}\
+         fi\n\
+         printf '%s\\n' \"$@\"\n"
+    );
+    executable(&request.cmake_program, script.as_bytes());
+}
+
+fn native_sdk_shell_driver(fixture: &Path, role: &str, second_package_root: &Path) -> Vec<u8> {
+    let fixture = shell_quote(&fixture.to_string_lossy());
+    let second_package_root = shell_quote(&second_package_root.to_string_lossy());
+    format!(
+        "#!/bin/sh\n\
+         [ \"$PATH\" = /nonexistent ] || exit 41\n\
+         sysroot= map= out= source= library= previous= freestanding=no\n\
+         for arg do\n\
+         case \"$arg\" in\n\
+         --sysroot=*) sysroot=${{arg#--sysroot=}} ;;\n\
+         -Wl,-Map=*,--cref,--trace) map=${{arg#-Wl,-Map=}}; map=${{map%,--cref,--trace}} ;;\n\
+         -lclient) library=yes ;;\n\
+         *.c|*.cpp) source=$arg ;;\n\
+         -c|-r) exit 42 ;;\n\
+         -nostdlib|-nostartfiles|-nodefaultlibs) freestanding=yes ;;\n\
+         esac\n\
+         if [ \"$previous\" = -o ]; then out=$arg; fi\n\
+         previous=$arg\n\
+         done\n\
+         if [ -n \"$map\" ]; then\n\
+         [ \"$freestanding\" != yes ] || exit 42\n\
+         case \"$0\" in {second_package_root}/*) exit 48 ;; esac\n\
+         [ -n \"$sysroot\" ] && [ -n \"$out\" ] && [ -n \"$source\" ] && [ \"$library\" = yes ] || exit 43\n\
+         [ -f \"$source\" ] && [ -f \"$sysroot/include/native-sdk-fixture.h\" ] && [ -f \"$sysroot/lib/client.a\" ] && [ -f \"$sysroot/lib/libclient.a\" ] || exit 44\n\
+         trace=\"$sysroot/lib/libclient.a\"\n\
+         printf 'synthetic application map\\n%s\\n' \"$trace\" > \"$map\" || exit 45\n\
+         printf '%s\\n' \"$trace\"\n\
+         /bin/cp {fixture} \"$out\" || exit 46\n\
+         exit 0\n\
+         fi\n\
+         printf 'path=<%s>\\n' \"$PATH\"\n\
+         printf 'declared-role=<{role}>\\n'\n\
+         for arg do printf 'arg=<%s>\\n' \"$arg\"; done\n\
+         [ -n \"$out\" ] || exit 47\n\
+         /bin/cp {fixture} \"$out\"\n"
+    )
+    .into_bytes()
+}
+
+fn refresh_gnu_package_manifest(root: &Path) -> ArosToolchainManifest {
+    let (tree_sha256, files) = toolchain_tree_inventory(root).unwrap();
+    let path = root.join(aros_common::AROS_TOOLCHAIN_MANIFEST_FILE);
+    let mut manifest: ArosToolchainManifest =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest.tree_sha256 = tree_sha256;
+    manifest.files = files;
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    ArosToolchainManifest::load(root).unwrap()
 }
 
 fn amend_cmake_to_log_invocations(request: &NativeCompatibilityRequest) {

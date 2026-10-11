@@ -144,6 +144,8 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer profile` | recipe | --recipe | — | required | 1 |  |  | — |  |
 | `aros toolchain producer profile` | profiles | --profiles | — | required | 1 |  |  | — |  |
 | `aros toolchain producer profile` | preset | --preset | — | required | 1 |  |  | — |  |
+| `aros toolchain producer profile` | source_dir | --source-dir | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer profile` | source_preset | --source-preset | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer profile` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer recipe` | source_dir | --source-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain producer recipe` | producer_dir | --producer-dir | — | required | 1 |  |  | — |  |

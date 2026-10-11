@@ -24,6 +24,25 @@ fn source_owned_p4_sdk_contract_is_bound_and_rejects_drift() {
     let binding = load_bound_native_consumer_contract(root, relative, profile).unwrap();
     let contract = &binding.contract;
     assert_eq!(contract.roots, ["includes", "linklibs"]);
+    let probes = contract.require_native_sdk_link_probes().unwrap();
+    assert_eq!(
+        probes.c.source,
+        "arch/riscv-esp32p4/native-sdk/probes/application.c"
+    );
+    assert_eq!(
+        probes.cxx.source,
+        "arch/riscv-esp32p4/native-sdk/probes/application.cpp"
+    );
+    assert!(probes.c.libraries.is_empty());
+    assert!(probes.cxx.libraries.is_empty());
+    assert!(contract
+        .inputs
+        .iter()
+        .any(|input| input.path == probes.c.source));
+    assert!(contract
+        .inputs
+        .iter()
+        .any(|input| input.path == probes.cxx.source));
     assert_eq!(contract.abi.source_cpu, "riscv");
     assert_eq!(contract.abi.target_triple, "riscv-aros");
     assert_eq!(contract.abi.isa, "rv32imafc_zicsr_zifencei_zaamo_zalrsc");
@@ -57,6 +76,31 @@ fn source_owned_p4_sdk_contract_is_bound_and_rejects_drift() {
     let contract_path = isolated.path().join(relative);
     fs::create_dir_all(contract_path.parent().unwrap()).unwrap();
     let original = fs::read(root.join(relative)).unwrap();
+    fs::write(&contract_path, &original).unwrap();
+    load_bound_native_consumer_contract(isolated.path(), relative, profile).unwrap();
+
+    // The v2 source seal includes both actual application fixtures. A changed
+    // copy is rejected without touching the source checkout or build tree.
+    let c_probe_path = isolated.path().join(&probes.c.source);
+    let original_c_probe = fs::read(&c_probe_path).unwrap();
+    fs::write(&c_probe_path, b"/* changed isolated application probe */\n").unwrap();
+    let failure = load_bound_native_consumer_contract(isolated.path(), relative, profile)
+        .unwrap_err()
+        .to_string();
+    assert!(failure.contains("measured source input digest differs"));
+    fs::write(&c_probe_path, original_c_probe).unwrap();
+    load_bound_native_consumer_contract(isolated.path(), relative, profile).unwrap();
+
+    let mut missing_probes: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    missing_probes
+        .as_object_mut()
+        .unwrap()
+        .remove("native_sdk_link_probes");
+    fs::write(&contract_path, serde_json::to_vec(&missing_probes).unwrap()).unwrap();
+    let failure = load_bound_native_consumer_contract(isolated.path(), relative, profile)
+        .unwrap_err()
+        .to_string();
+    assert!(failure.contains("v2 contract requires ordinary SDK links"));
     fs::write(&contract_path, &original).unwrap();
     load_bound_native_consumer_contract(isolated.path(), relative, profile).unwrap();
 

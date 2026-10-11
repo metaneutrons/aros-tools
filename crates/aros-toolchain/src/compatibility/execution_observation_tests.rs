@@ -191,6 +191,7 @@ fn measured_inputs_and_export_rebind_rootlessly_to_independent_selection() {
             fixture.selected.package(),
             &fixture.selected.profiles,
             &fixture.selected.profile,
+            false,
         )
         .unwrap();
     let request = PortableNativeCompatibilityRequest {
@@ -401,7 +402,7 @@ fn assert_expectations_rejected(
 ) {
     let before = claims.bytes().to_vec();
     let error = claims
-        .expectations(selected.package(), &selected.profiles, profile)
+        .expectations(selected.package(), &selected.profiles, profile, false)
         .unwrap_err();
     assert_ax0703(&error, fragment);
     assert_eq!(claims.bytes(), before);

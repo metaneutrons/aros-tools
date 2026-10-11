@@ -185,8 +185,9 @@ excluded capabilities remain unsupported, including unsealed `.d` includes.
 ### SDK and compiler-consumer graphs
 
 A source profile can separately declare `native_consumer_contract`, using
-`aros-native-consumer-contract-v1`. This experimental contract lists real,
-sorted graph `roots`, an explicit ABI and measured invocation inputs, including
+`aros-native-consumer-contract-v1` or `aros-native-consumer-contract-v2`.
+This experimental contract lists real, sorted graph `roots`, an explicit ABI
+and measured invocation inputs, including
 `aros-targets.toml` and a sealed MetaMake policy. It has no core, package or media
 fields. Parsing it does not qualify a compiler, boot medium or board.
 
@@ -203,6 +204,12 @@ The GNU compatibility runner selects a declared consumer contract for its SDK
 test. If the same source profile also declares a full-build contract, that
 contract is not used for this test. An invalid consumer contract fails; the
 runner does not fall back to a full or unscoped build.
+
+Consumer-v2 also seals C and C++ application sources and their additional SDK
+libraries. After the SDK build, compatibility requires normal driver links at
+the original and relocated SDK roots. Missing libraries, wrong ABI, stale
+source bindings or old SDK paths in relocated link evidence fail the run.
+This integration is not a separately released SDK product or a board boot test.
 
 Direct CMake callers pass `AROS_NATIVE_CONSUMER_CONTRACT` and its
 `AROS_NATIVE_CONSUMER_CONTRACT_SHA256`, an explicit source profile and selectors,

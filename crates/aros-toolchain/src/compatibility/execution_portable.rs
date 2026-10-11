@@ -28,6 +28,7 @@ use crate::ContractError;
 /// Protected evidence manifest, not a public toolchain release asset.
 pub const PORTABLE_NATIVE_COMPATIBILITY_MANIFEST: &str = "compatibility-measurement.json";
 const SCHEMA: &str = "aros-toolchain-compatibility-measurement-v2";
+const SDK_SCHEMA: &str = "aros-toolchain-compatibility-measurement-v3";
 const MAX_ELF_BYTES: usize = super::super::standalone::MAX_STANDALONE_ARTIFACT_BYTES as usize;
 
 /// Independently retained expectations for one compatibility lane.
@@ -48,6 +49,9 @@ pub struct NativeCompatibilityReceiptExpectations<'a> {
     pub gnu_source_preset: Option<&'a str>,
     /// CMake build requirement derived from the selected source contract.
     pub cmake_build_required: bool,
+    /// Exact SDK requirement and probe/compiler/path identities measured from
+    /// the selected source contract before any compatibility phase executes.
+    pub native_sdk: Option<&'a crate::compatibility::NativeSdkLinkSelection>,
     /// Independently measured engine-free SDK consumer source tree.
     pub sdk_consumer_source_tree_sha256: &'a Sha256Digest,
     /// Selected tools engine API version.
@@ -77,6 +81,7 @@ impl NativeCompatibilityReceiptExpectations<'_> {
         reports: &BTreeMap<CompatibilityPhase, Vec<u8>>,
         logs: &BTreeMap<CompatibilityPhase, Vec<NativeCompatibilityCommandLogs>>,
         standalone: &StandaloneOutputReport,
+        native_sdk: Option<&crate::compatibility::NativeSdkPortableProof>,
     ) -> Result<NativeCompatibilityReceiptReadback, ContractError> {
         readback_native_compatibility_receipt(&NativeCompatibilityReceiptReadbackRequest {
             receipt_bytes: receipt,
@@ -87,6 +92,8 @@ impl NativeCompatibilityReceiptExpectations<'_> {
             profile: self.profile,
             gnu_source_preset: self.gnu_source_preset,
             cmake_build_required: self.cmake_build_required,
+            native_sdk_required: self.native_sdk.is_some(),
+            native_sdk,
             sdk_consumer_source_tree_sha256: self.sdk_consumer_source_tree_sha256,
             engine_api_version: self.engine_api_version,
             engine_sha256: self.engine_sha256,
@@ -154,6 +161,7 @@ pub struct PortableNativeCompatibilityReadback {
     manifest_sha256: Sha256Digest,
     readback: NativeCompatibilityReceiptReadback,
     standalone: StandaloneOutputReport,
+    native_sdk: Option<crate::compatibility::NativeSdkPortableProof>,
 }
 
 impl PortableNativeCompatibilityReadback {
@@ -173,6 +181,13 @@ impl PortableNativeCompatibilityReadback {
     #[must_use]
     pub const fn standalone(&self) -> &StandaloneOutputReport {
         &self.standalone
+    }
+
+    /// Complete ordinary SDK proof required by a selected consumer-v2 source.
+    /// Its presence is not execution authentication or publication authority.
+    #[must_use]
+    pub const fn native_sdk(&self) -> Option<&crate::compatibility::NativeSdkPortableProof> {
+        self.native_sdk.as_ref()
     }
 }
 
@@ -235,7 +250,8 @@ pub(super) fn export_with_expectations(
     let files = acquire_members(&shape, None, BTreeSet::new())?;
     let standalone = verify_standalone_outputs_with_compilers(&shape.standalone, &shape.compilers)?;
     verify_snapshot_elf_identities(&files, &shape, &standalone)?;
-    let joined = readback_snapshot(&files, &shape, &expected, &standalone)?;
+    let native_sdk = readback_sdk_snapshot(&files, &expected)?;
+    let joined = readback_snapshot(&files, &shape, &expected, &standalone, native_sdk.as_ref())?;
     if local != joined || prepared.readback(request, profiles)? != joined {
         return Err(error(
             "retained compatibility changed during portable export",
@@ -243,7 +259,7 @@ pub(super) fn export_with_expectations(
     }
     verify_members_unchanged(&shape, &files, BTreeSet::new())?;
     let document = MeasurementDocument {
-        schema: SCHEMA.into(),
+        schema: measurement_schema(&expected).into(),
         files: files
             .iter()
             .map(|(name, bytes)| {
@@ -317,7 +333,7 @@ pub fn readback_portable_native_compatibility(
     super::receipt_readback::reject_duplicate_json_keys(&manifest)?;
     let document: MeasurementDocument = serde_json::from_slice(&manifest)
         .map_err(|_| error("portable compatibility manifest is not closed JSON"))?;
-    if document.schema != SCHEMA
+    if document.schema != measurement_schema(&request.expected)
         || !document.files.keys().eq(shape.members.keys())
         || manifest_bytes(&document)? != manifest
     {
@@ -328,7 +344,14 @@ pub fn readback_portable_native_compatibility(
     let files = acquire_members(&shape, Some(&document), identities)?;
     let standalone = verify_standalone_outputs_with_compilers(&shape.standalone, &shape.compilers)?;
     verify_snapshot_elf_identities(&files, &shape, &standalone)?;
-    let joined = readback_snapshot(&files, &shape, &request.expected, &standalone)?;
+    let native_sdk = readback_sdk_snapshot(&files, &request.expected)?;
+    let joined = readback_snapshot(
+        &files,
+        &shape,
+        &request.expected,
+        &standalone,
+        native_sdk.as_ref(),
+    )?;
     validate_root(&request.directory)?;
     require_inventory(&request.directory, &expected_inventory)?;
     let mut repeated_identities = BTreeSet::new();
@@ -354,6 +377,7 @@ pub fn readback_portable_native_compatibility(
         manifest_sha256: request.manifest_sha256.clone(),
         readback: joined,
         standalone,
+        native_sdk,
     })
 }
 
@@ -425,6 +449,19 @@ impl Shape {
         for object in objects {
             shape.insert(object, MAX_ELF_BYTES)?;
         }
+        if expected.native_sdk.is_some() {
+            for name in crate::compatibility::native_sdk_portable::expected_member_names() {
+                let path = if reports == outputs {
+                    reports.join(&name)
+                } else {
+                    sdk_member_path(&reports.join("native-sdk-links"), &name)?
+                };
+                let limit = sdk_member_limit(&name)?;
+                if shape.members.insert(name, (path, limit)).is_some() {
+                    return Err(error("portable SDK and compatibility filenames collide"));
+                }
+            }
+        }
         Ok(shape)
     }
 
@@ -492,6 +529,7 @@ fn readback_snapshot(
     shape: &Shape,
     expected: &NativeCompatibilityReceiptExpectations<'_>,
     standalone: &StandaloneOutputReport,
+    native_sdk: Option<&crate::compatibility::NativeSdkPortableProof>,
 ) -> Result<NativeCompatibilityReceiptReadback, ContractError> {
     let mut reports = BTreeMap::new();
     let mut logs = BTreeMap::new();
@@ -518,7 +556,87 @@ fn readback_snapshot(
         &reports,
         &logs,
         standalone,
+        native_sdk,
     )
+}
+
+const fn measurement_schema(expected: &NativeCompatibilityReceiptExpectations<'_>) -> &'static str {
+    if expected.native_sdk.is_some() {
+        SDK_SCHEMA
+    } else {
+        SCHEMA
+    }
+}
+
+fn readback_sdk_snapshot(
+    files: &BTreeMap<String, Vec<u8>>,
+    expected: &NativeCompatibilityReceiptExpectations<'_>,
+) -> Result<Option<crate::compatibility::NativeSdkPortableProof>, ContractError> {
+    let Some(selection) = expected.native_sdk else {
+        return Ok(None);
+    };
+    let sdk_files = files
+        .iter()
+        .filter(|(name, _)| name.starts_with("sdk-"))
+        .map(|(name, bytes)| (name.clone(), bytes.as_slice()))
+        .collect();
+    crate::compatibility::native_sdk_portable::readback(
+        &sdk_files,
+        selection,
+        &crate::compatibility::native_sdk_portable::NativeSdkPortableExpectations {
+            source_tree_sha256: expected.sdk_consumer_source_tree_sha256,
+            engine_api_version: expected.engine_api_version,
+            engine_sha256: expected.engine_sha256,
+            helpers: expected.helpers,
+            compiler: expected.package.compiler,
+            source_profile: expected
+                .gnu_source_preset
+                .ok_or_else(|| error("portable SDK requirement lost its source preset"))?,
+        },
+    )
+    .map(Some)
+}
+
+pub(super) fn read_sdk_members(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, ContractError> {
+    let mut aliases = BTreeSet::new();
+    crate::compatibility::native_sdk_portable::expected_member_names()
+        .into_iter()
+        .map(|name| {
+            let bytes = read_member(
+                &sdk_member_path(root, &name)?,
+                sdk_member_limit(&name)?,
+                &mut aliases,
+            )?;
+            Ok((name, bytes))
+        })
+        .collect()
+}
+
+fn sdk_member_path(root: &Path, name: &str) -> Result<PathBuf, ContractError> {
+    let name = name
+        .strip_prefix("sdk-")
+        .ok_or_else(|| error("SDK evidence filename lacks its namespace"))?;
+    if name.starts_with("standalone-") {
+        Ok(root.join("reports").join(name))
+    } else {
+        Ok(root.join(name))
+    }
+}
+
+fn sdk_member_limit(name: &str) -> Result<usize, ContractError> {
+    if name == "sdk-native-sdk-inventory.json" {
+        return Ok(16 * 1024 * 1024);
+    }
+    match Path::new(name)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+    {
+        Some("elf") => Ok(MAX_ELF_BYTES),
+        Some("map") => Ok(16 * 1024 * 1024),
+        Some("log") => Ok(super::super::MAX_RENDERED_LOG_BYTES),
+        Some("json") => Ok(crate::canonical::MAX_DOCUMENT_BYTES),
+        _ => Err(error("SDK evidence filename has no closed byte bound")),
+    }
 }
 
 fn verify_snapshot_elf_identities(

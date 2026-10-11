@@ -60,6 +60,9 @@ pub(super) struct Compatibility {
     pub directory: PathBuf,
     pub inputs: SelectedFile,
     pub manifest_sha256: Sha256Digest,
+    /// Independently selected source-contract policy, not a report or inputs
+    /// document marker. Mandatory presence prevents silent legacy downgrade.
+    pub native_sdk_required: bool,
 }
 
 /// Parse bounded, closed selection declarations without opening selected paths.
@@ -208,7 +211,8 @@ mod tests {
             "compatibility":{
                 "directory":"/tmp/release-evidence/compatibility",
                 "inputs":selected_file("/tmp/release-evidence/compatibility-inputs.json"),
-                "manifest_sha256":digest
+                "manifest_sha256":digest,
+                "native_sdk_required":false
             }
         });
         json!({
@@ -232,6 +236,29 @@ mod tests {
             selection.lanes["llvm-pc-x86_64-linux.tar.xz"].builds.len(),
             2
         );
+    }
+
+    #[test]
+    fn requires_explicit_independent_native_sdk_policy() {
+        let mut value = valid_selection();
+        value["lanes"]["llvm-pc-x86_64-linux.tar.xz"]["compatibility"]["native_sdk_required"] =
+            json!(true);
+        let selected = parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            selected.lanes["llvm-pc-x86_64-linux.tar.xz"]
+                .compatibility
+                .native_sdk_required
+        );
+
+        value["lanes"]["llvm-pc-x86_64-linux.tar.xz"]["compatibility"]
+            .as_object_mut()
+            .unwrap()
+            .remove("native_sdk_required");
+        assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+
+        value["lanes"]["llvm-pc-x86_64-linux.tar.xz"]["compatibility"]["native_sdk_required"] =
+            json!("false");
+        assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]
