@@ -163,27 +163,27 @@ fn measures_both_historical_driver_roles_for_source_defined_target_triples() {
         );
         assert!(binding.clang_identity().file_size() > 0);
         assert_eq!(
-            binding.clang_identity().version_stdout().stdout(),
+            binding.clang_identity().version_query().stdout_bytes(),
             b"clang version 18.1.8\n"
         );
         assert_eq!(
-            binding.clang_identity().target_stdout().stdout(),
+            binding.clang_identity().target_query().stdout_bytes(),
             format!("{triple}\n").as_bytes()
         );
         assert_eq!(
-            binding.clang_identity().target_stdout().size(),
-            binding.clang_identity().target_stdout().stdout().len() as u64
+            binding.clang_identity().target_query().size(),
+            binding.clang_identity().target_query().stdout_bytes().len() as u64
         );
         assert_eq!(
-            binding.clang_identity().target_stdout().sha256(),
-            &aros_common::sha256_bytes(binding.clang_identity().target_stdout().stdout())
+            binding.clang_identity().target_query().sha256(),
+            &aros_common::sha256_bytes(binding.clang_identity().target_query().stdout_bytes())
         );
         assert_eq!(
-            binding.clangxx_identity().version_stdout().stdout(),
+            binding.clangxx_identity().version_query().stdout_bytes(),
             b"clang version 18.1.8\n"
         );
         assert_eq!(
-            binding.clangxx_identity().target_stdout().stdout(),
+            binding.clangxx_identity().target_query().stdout_bytes(),
             format!("{triple}\n").as_bytes()
         );
         assert_eq!(binding.compiler_tree_sha256().as_str().len(), 64);

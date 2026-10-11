@@ -67,7 +67,7 @@ impl LlvmSdkDriverQueryIdentity {
 
     /// Exact bounded stdout bytes returned by this driver query.
     #[must_use]
-    pub fn stdout(&self) -> &[u8] {
+    pub fn stdout_bytes(&self) -> &[u8] {
         &self.stdout
     }
 }
@@ -139,13 +139,13 @@ impl LlvmSdkDriverRoleIdentity {
 
     /// Complete stdout evidence for the `--version` query.
     #[must_use]
-    pub const fn version_stdout(&self) -> &LlvmSdkDriverQueryIdentity {
+    pub const fn version_query(&self) -> &LlvmSdkDriverQueryIdentity {
         &self.version_stdout
     }
 
     /// Complete stdout evidence for the selected `-dumpmachine` query.
     #[must_use]
-    pub const fn target_stdout(&self) -> &LlvmSdkDriverQueryIdentity {
+    pub const fn target_query(&self) -> &LlvmSdkDriverQueryIdentity {
         &self.target_stdout
     }
 }
