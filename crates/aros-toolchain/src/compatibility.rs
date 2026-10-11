@@ -34,6 +34,7 @@ mod environment_plan;
 mod execution;
 mod host_generator_inputs;
 mod host_tools;
+mod llvm_sdk_driver;
 mod native_sdk_links;
 mod native_sdk_portable;
 mod native_sdk_relocation;
@@ -69,6 +70,10 @@ pub use host_tools::{
     native_compatibility_host_tools, prepare_host_tool_closure, CompatibilityHostTool,
     HostToolClosure, HostToolClosureRequest, HostToolIdentity,
     REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
+};
+pub use llvm_sdk_driver::{
+    inspect_llvm_sdk_drivers, LlvmSdkDriverBinding, LlvmSdkDriverQueryIdentity,
+    LlvmSdkDriverRequest, LlvmSdkDriverRole, LlvmSdkDriverRoleIdentity,
 };
 pub use native_sdk_links::{
     execute_native_sdk_links, readback_native_sdk_links, NativeSdkLinkReport, NativeSdkLinkRequest,

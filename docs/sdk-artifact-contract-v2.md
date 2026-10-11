@@ -91,6 +91,12 @@ These graph and configured-compiler checks are not native SDK generation or
 ordinary application-link qualification. GNU/RV32 execution still uses its
 existing native-consumer-v2 contract; a generic GNU descriptor is not admitted
 by the LLVM CMake adapter.
+The additive `compatibility::inspect_llvm_sdk_drivers` API measures both
+payload-owned Clang drivers and queries their exact selected version and AROS
+triple. A bounded compiler-tree snapshot includes executable bytes and aliases;
+revalidation rejects subsequent changes. It neither authenticates the package
+nor proves the scalar ABI facts, SDK completeness or ordinary application links.
+The caller must independently verify its selected compiler package.
 `aros sdk build` explicitly rejects this generic schema before compatibility
 preparation until the family-specific link and evidence adapters are implemented.
 
