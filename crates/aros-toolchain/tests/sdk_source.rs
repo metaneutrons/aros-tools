@@ -946,7 +946,10 @@ fn llvm_link_selection(
         preparation,
         sdk_root: selection.original_sdk,
         output_root: selection.output_root,
-        timeout: std::time::Duration::from_secs(10),
+        // This fixture proves ordinary link correctness, not ten-second host
+        // performance. Cold parallel CI also runs repeated source/driver audits.
+        // Dedicated deadline tests override this budget and remain strict.
+        timeout: std::time::Duration::from_secs(60),
     }
 }
 
@@ -1046,7 +1049,9 @@ fn llvm_generated_selection(
             source: links.source,
             preparation,
             cmake_build_root: build,
-            timeout: std::time::Duration::from_secs(10),
+            // This fixture qualifies source/root binding, not cold CI speed.
+            // Dedicated deadline tests override this budget and remain strict.
+            timeout: std::time::Duration::from_secs(60),
         },
         links.drivers,
         links.output_root,
