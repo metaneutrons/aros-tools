@@ -13,17 +13,19 @@ use aros_common::sdk_manifest::{
     SdkIdentity, SdkManifest, SDK_MANIFEST_FILE, SDK_MANIFEST_SCHEMA, SDK_MAX_ENTRIES,
     SDK_MAX_METADATA_BYTES, SDK_MAX_REGULAR_BYTES,
 };
+use aros_common::sdk_release_lock::SdkReleaseLock;
 use aros_common::{
     directory_entry_names_nofollow_bounded, finish_sha256, measure_tree_content_cas_bounded,
-    open_regular_file_nofollow, publish_prepared_tree_noclobber, toolchain_inventory_sha256,
-    ArosToolchainManifestEntry, Sha256Digest, TreeContentCas, TreeTraversalLimits,
+    open_regular_file_nofollow, publish_prepared_tree_noclobber, sha256_bytes,
+    toolchain_inventory_sha256, ArosToolchainManifestEntry, Sha256Digest, TreeContentCas,
+    TreeTraversalLimits,
 };
 use sha2::{Digest, Sha256};
 use tempfile::{Builder as TempDirBuilder, TempDir};
 
 use crate::package::{pretty_json, write_payload_archive};
 use crate::package_verify::{
-    extract_payload_archive, verify_payload_archive, PayloadArchiveContract,
+    extract_payload_archive, verify_payload_archive, PayloadArchiveContract, PayloadArchiveReadback,
 };
 use crate::ContractError;
 
@@ -90,6 +92,15 @@ pub struct VerifiedSdkPackage {
     pub archive_sha256: Sha256Digest,
     /// Measured archive byte count.
     pub archive_size: u64,
+}
+
+/// One archive selected by an explicit SDK release lock.
+#[derive(Debug, Clone)]
+pub struct SdkLockedArchiveRequest {
+    /// No-follow regular archive input selected by `lock`.
+    pub archive: PathBuf,
+    /// Independently selected release identity and artifact byte digests.
+    pub lock: SdkReleaseLock,
 }
 
 /// Package an SDK candidate into a deterministic local artifact set.
@@ -450,6 +461,152 @@ pub fn verify_and_extract(
     })
 }
 
+/// Verify a locally available SDK archive against an explicit release lock.
+///
+/// This checks archive and embedded-manifest bytes only. It does not establish
+/// provenance, publisher authenticity or release authorization. Producer-side
+/// forbidden-prefix checks remain the responsibility of packaging; this
+/// consumer checks the exact bytes selected by the lock.
+///
+/// # Errors
+///
+/// Returns an error if the lock is invalid, the archive cannot be opened and
+/// measured safely, its bytes differ from the selected archive digest/size,
+/// or its structure, manifest or inventory differs from the selected lock.
+pub fn verify_locked_archive(
+    request: &SdkLockedArchiveRequest,
+) -> Result<VerifiedSdkPackage, ContractError> {
+    validate_sdk_release_lock(&request.lock)?;
+    let (archive_file, opened_metadata, archive_measurement) =
+        measure_locked_archive(&request.archive, &request.lock)?;
+    let readback = verify_payload_archive(
+        archive_file,
+        payload_archive_contract(&request.lock.identity),
+        &[],
+    )?;
+    let manifest = validate_locked_payload_readback(&request.lock, &readback)?;
+    revalidate_archive_path(&request.archive, &opened_metadata, &archive_measurement)?;
+    Ok(VerifiedSdkPackage {
+        manifest,
+        archive_sha256: archive_measurement.digest,
+        archive_size: archive_measurement.size,
+    })
+}
+
+/// Verify a locked archive and extract its payload into a fresh retained root.
+///
+/// The archive descriptor used for extraction is independently measured and
+/// its own read-back is matched to the lock. Extraction does not rely on an
+/// earlier pathname verification as authority for a reopened file. This is a
+/// byte-consistency operation, not a provenance or release-authorization
+/// check.
+///
+/// # Errors
+///
+/// Returns an error if lock verification fails, the output root is unsafe,
+/// overlapping or already exists, or archive extraction, installed-tree
+/// read-back or final archive revalidation fails. A root created before a
+/// subsequent failure is retained for inspection.
+pub fn extract_locked_archive(
+    request: &SdkLockedArchiveRequest,
+    output_root: &Path,
+) -> Result<VerifiedSdkPackage, ContractError> {
+    validate_sdk_release_lock(&request.lock)?;
+    let verified = verify_locked_archive(request)?;
+    let root = checked_absent_root(output_root, false)?;
+    require_disjoint(&request.archive, &root, false)?;
+
+    // Bind the extracting parser to a newly opened descriptor that itself
+    // matches the lock, rather than relying on the earlier verification pass.
+    let (archive_file, opened_metadata, archive_measurement) =
+        measure_locked_archive(&request.archive, &request.lock)?;
+    with_fresh_retained_root(&root, |root| {
+        let readback = extract_payload_archive(
+            archive_file,
+            payload_archive_contract(&request.lock.identity),
+            &[],
+            root,
+        )?;
+        let manifest = validate_locked_payload_readback(&request.lock, &readback)?;
+        if manifest != verified.manifest {
+            return Err(ContractError::verification(
+                "extracted SDK archive differs from its earlier locked read-back",
+            ));
+        }
+        let installed = verify_installed_sdk(root, &request.lock)?;
+        if installed != manifest {
+            return Err(ContractError::verification(
+                "extracted SDK tree differs from its archive manifest",
+            ));
+        }
+        revalidate_archive_path(&request.archive, &opened_metadata, &archive_measurement)?;
+        Ok(VerifiedSdkPackage {
+            manifest: installed,
+            archive_sha256: archive_measurement.digest,
+            archive_size: archive_measurement.size,
+        })
+    })
+}
+
+/// Verify a fully installed SDK tree against its release lock.
+///
+/// The root must include the canonical bounded `sdk-manifest.json`; every
+/// other filesystem object is inventoried from the installed bytes. This
+/// proves local byte consistency only and makes no provenance or authenticity
+/// claim.
+///
+/// # Errors
+///
+/// Returns an error if the lock, root, manifest bytes or installed filesystem
+/// objects are invalid, exceed SDK resource bounds, change during measurement,
+/// or differ from the selected identity, tree digest or manifest digest.
+pub fn verify_installed_sdk(
+    root: &Path,
+    lock: &SdkReleaseLock,
+) -> Result<SdkManifest, ContractError> {
+    validate_sdk_release_lock(lock)?;
+    let root = checked_existing_directory(root, false)?;
+    let root_identity = directory_identity(&root, false)?;
+    let limits = installed_sdk_snapshot_limits()?;
+    let before = measure_tree_content_cas_bounded(&root, limits).map_err(|_| {
+        ContractError::verification("cannot safely measure bounded installed SDK tree")
+    })?;
+    let manifest_path = root.join(SDK_MANIFEST_FILE);
+    let manifest_bytes = read_metadata(&manifest_path, SDK_MAX_METADATA_BYTES as u64, false)?;
+    let manifest = validate_locked_manifest_bytes(lock, &manifest_bytes)?;
+    let scan = scan_sdk_tree(
+        &root,
+        true,
+        &[],
+        SDK_MAX_REGULAR_BYTES + SDK_MAX_METADATA_BYTES as u64,
+    )
+    .map_err(|_| ContractError::verification("cannot safely inventory installed SDK tree"))?;
+    if scan.entries != manifest.files {
+        return Err(ContractError::verification(
+            "installed SDK inventory differs from its selected manifest",
+        ));
+    }
+    let tree_sha256 = toolchain_inventory_sha256(&scan.entries)
+        .map_err(|_| ContractError::verification("cannot serialize installed SDK inventory"))?;
+    if tree_sha256 != lock.tree_sha256.as_str() {
+        return Err(ContractError::verification(
+            "installed SDK inventory differs from the selected tree digest",
+        ));
+    }
+
+    let after = measure_tree_content_cas_bounded(&root, limits)
+        .map_err(|_| ContractError::verification("cannot recheck bounded installed SDK tree"))?;
+    if before != after
+        || directory_identity(&root, false)? != root_identity
+        || read_metadata(&manifest_path, SDK_MAX_METADATA_BYTES as u64, false)? != manifest_bytes
+    {
+        return Err(ContractError::verification(
+            "installed SDK tree or manifest changed during verification",
+        ));
+    }
+    Ok(manifest)
+}
+
 /// Run extraction work against a newly created destination while retaining it
 /// on every subsequent error for caller inspection.
 fn with_fresh_retained_root<T>(
@@ -486,11 +643,111 @@ const fn payload_archive_contract(identity: &SdkIdentity) -> PayloadArchiveContr
     }
 }
 
+fn validate_sdk_release_lock(lock: &SdkReleaseLock) -> Result<(), ContractError> {
+    lock.validate()
+        .map_err(|error| ContractError::verification(format!("invalid SDK release lock: {error}")))
+}
+
+fn measure_locked_archive(
+    path: &Path,
+    lock: &SdkReleaseLock,
+) -> Result<(File, fs::Metadata, FileMeasurement), ContractError> {
+    if !path.is_absolute() {
+        return Err(ContractError::verification(
+            "locked SDK archive path must be absolute",
+        ));
+    }
+    let archive_file = open_outer_regular(path, false)?;
+    let (archive_file, metadata, measurement) =
+        measure_open_file(archive_file, path, MAX_ARCHIVE_BYTES, None, false)?;
+    if measurement.digest != lock.archive.sha256 || measurement.size != lock.archive.size {
+        return Err(ContractError::verification(
+            "SDK archive differs from its locked hash or size",
+        ));
+    }
+    Ok((archive_file, metadata, measurement))
+}
+
+fn revalidate_archive_path(
+    path: &Path,
+    opened_metadata: &fs::Metadata,
+    opened_measurement: &FileMeasurement,
+) -> Result<(), ContractError> {
+    let (current_metadata, current_measurement) =
+        measure_file(path, MAX_ARCHIVE_BYTES, None, false)?;
+    if metadata_identity(opened_metadata) != metadata_identity(&current_metadata)
+        || &current_measurement != opened_measurement
+    {
+        return Err(ContractError::verification(
+            "locked SDK archive path or bytes changed during read-back",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_locked_payload_readback(
+    lock: &SdkReleaseLock,
+    readback: &PayloadArchiveReadback,
+) -> Result<SdkManifest, ContractError> {
+    let manifest = validate_locked_manifest_bytes(lock, &readback.embedded_manifest)?;
+    if readback.entries != manifest.files {
+        return Err(ContractError::verification(
+            "SDK archive payload inventory differs from its locked manifest",
+        ));
+    }
+    if readback.tree_sha256 != manifest.tree_sha256.as_str() {
+        return Err(ContractError::verification(
+            "SDK archive payload tree digest differs from its locked manifest",
+        ));
+    }
+    Ok(manifest)
+}
+
+fn validate_locked_manifest_bytes(
+    lock: &SdkReleaseLock,
+    bytes: &[u8],
+) -> Result<SdkManifest, ContractError> {
+    if u64::try_from(bytes.len()).ok() != Some(lock.manifest.size)
+        || sha256_bytes(bytes) != lock.manifest.sha256
+    {
+        return Err(ContractError::verification(
+            "SDK manifest bytes differ from their locked hash or size",
+        ));
+    }
+    let manifest = SdkManifest::from_bytes(bytes)
+        .map_err(|_| ContractError::verification("locked SDK manifest is invalid"))?;
+    if bounded_pretty_manifest(&manifest, false)? != bytes {
+        return Err(ContractError::verification(
+            "locked SDK manifest is not canonical JSON",
+        ));
+    }
+    if manifest.identity != lock.identity {
+        return Err(ContractError::verification(
+            "locked SDK manifest identity differs from the selected identity",
+        ));
+    }
+    if manifest.tree_sha256 != lock.tree_sha256 {
+        return Err(ContractError::verification(
+            "locked SDK manifest tree digest differs from the selected tree digest",
+        ));
+    }
+    Ok(manifest)
+}
+
+fn installed_sdk_snapshot_limits() -> Result<TreeTraversalLimits, ContractError> {
+    let max_entries = SDK_MAX_ENTRIES.saturating_add(1);
+    let max_regular_bytes = SDK_MAX_REGULAR_BYTES
+        .checked_add(SDK_MAX_METADATA_BYTES as u64)
+        .ok_or_else(|| ContractError::verification("installed SDK byte limit overflow"))?;
+    TreeTraversalLimits::new(max_entries, max_regular_bytes)
+        .map_err(|_| ContractError::verification("invalid bounded installed SDK policy"))
+}
+
 /// Bound the SDK manifest's canonical pretty-JSON size before the shared
 /// serializer builds a whole-document `serde_json::Value` tree. The estimate
 /// computes each inventory entry independently, so an oversized manifest is
 /// rejected before memory grows with the complete `files` array.
-fn bounded_pretty_manifest(
+pub(crate) fn bounded_pretty_manifest(
     manifest: &SdkManifest,
     package: bool,
 ) -> Result<Vec<u8>, ContractError> {
@@ -872,6 +1129,14 @@ fn scan_directory(
                 });
             }
         } else if metadata.is_dir() {
+            // Source candidates are normalized by the archive writer. An
+            // extracted/installed tree must retain those exact payload modes,
+            // rather than treating chmod (including privilege bits) as benign.
+            if exclude_manifest && metadata.permissions().mode() & 0o7777 != 0o755 {
+                return Err(
+                    "installed SDK directory mode differs from normalized archive metadata".into(),
+                );
+            }
             output.push(ArosToolchainManifestEntry {
                 path: path_text,
                 mode: "0755".into(),
@@ -904,6 +1169,19 @@ fn scan_directory(
                         error.diagnostics().diagnostics[0].message
                     )
                 })?;
+            if exclude_manifest {
+                let expected_mode = if is_manifest || mode.permissions().mode() & 0o111 == 0 {
+                    0o644
+                } else {
+                    0o755
+                };
+                if mode.permissions().mode() & 0o7777 != expected_mode {
+                    return Err(
+                        "installed SDK regular-file mode differs from normalized archive metadata"
+                            .into(),
+                    );
+                }
+            }
             *bytes = bytes
                 .checked_add(measurement.size)
                 .filter(|total| *total <= max_regular_bytes)
