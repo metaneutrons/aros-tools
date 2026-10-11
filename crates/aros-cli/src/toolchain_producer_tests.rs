@@ -90,6 +90,12 @@ struct PackageParser {
     args: PackageArgs,
 }
 
+#[derive(Parser)]
+struct VerifyPackageParser {
+    #[command(flatten)]
+    args: super::VerifyPackageArgs,
+}
+
 fn guarded_package_arguments() -> Vec<&'static str> {
     vec![
         "package",
@@ -141,6 +147,107 @@ fn finished_package_options_require_the_complete_explicit_selection() {
         let error = PackageParser::try_parse_from(incomplete).err().unwrap();
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{option}");
     }
+}
+
+fn portable_package_arguments() -> Vec<&'static str> {
+    vec![
+        "aros",
+        "toolchain",
+        "producer",
+        "verify-package",
+        "--recipe",
+        "/selected/recipe.json",
+        "--source-lock",
+        "/selected/sources.json",
+        "--profiles",
+        "/selected/profiles.json",
+        "--preset",
+        "rv32-esp32p4",
+        "--release-id",
+        "candidate-1",
+        "--host",
+        "macos-aarch64",
+        "--build-environment",
+        "/selected/environment.json",
+        "--input-dir",
+        "/downloaded/package",
+        "--package-format",
+        "family-v2",
+        "--package-measurement",
+        "/downloaded/measurement.json",
+        "--package-measurement-sha256",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--executor-contract-sha256",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "--executor-binary-sha256",
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    ]
+}
+
+#[test]
+fn portable_package_options_require_every_independent_selector() {
+    let arguments = portable_package_arguments();
+    assert!(Cli::try_parse_from(&arguments).is_ok());
+    for option in [
+        "--package-measurement",
+        "--package-measurement-sha256",
+        "--executor-contract-sha256",
+        "--executor-binary-sha256",
+        "--package-format",
+    ] {
+        let mut incomplete = arguments.clone();
+        let position = incomplete
+            .iter()
+            .position(|value| *value == option)
+            .unwrap();
+        incomplete.drain(position..position + 2);
+        assert_eq!(
+            Cli::try_parse_from(incomplete).err().unwrap().kind(),
+            ErrorKind::MissingRequiredArgument,
+            "{option}"
+        );
+    }
+}
+
+#[test]
+fn portable_package_digests_reject_noncanonical_values() {
+    for option in [
+        "--package-measurement-sha256",
+        "--executor-contract-sha256",
+        "--executor-binary-sha256",
+    ] {
+        for invalid in [
+            "abc",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ] {
+            let mut arguments = portable_package_arguments();
+            let position = arguments.iter().position(|value| *value == option).unwrap();
+            arguments[position + 1] = invalid;
+            assert_eq!(
+                Cli::try_parse_from(arguments).err().unwrap().kind(),
+                ErrorKind::ValueValidation,
+                "{option}"
+            );
+        }
+    }
+}
+
+#[test]
+fn portable_package_legacy_format_is_rejected_before_input_io() {
+    let mut arguments = portable_package_arguments();
+    let position = arguments
+        .iter()
+        .position(|value| *value == "--package-format")
+        .unwrap();
+    arguments[position + 1] = "legacy-v1";
+    let selected = VerifyPackageParser::try_parse_from(
+        std::iter::once("verify-package").chain(arguments.into_iter().skip(4)),
+    )
+    .unwrap();
+    let error = super::verify_package(selected.args).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("explicit --package-format family-v2"));
 }
 
 #[test]

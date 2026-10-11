@@ -151,6 +151,19 @@ the collectors. Guarded JSON output includes the joined result/receipt/raw-tree
 and package-tree digests. These options do not authenticate a build or qualify
 a release; ordinary packaging remains available without them.
 
+To verify a downloaded finished-build package before A/B comparison, add all
+four selectors to `verify-package`: `--package-measurement FILE`,
+`--package-measurement-sha256 SHA`, `--executor-contract-sha256 SHA` and
+`--executor-binary-sha256 SHA`, with explicit `--package-format family-v2`.
+Select recipe/profile/environment and executor expectations independently, not
+from the measurement being checked. The native verifier joins all six phase
+receipts, the build result and finished record to the four measured package
+members without accessing original runner paths. JSON includes
+`finished_candidate` with assurance `portable-byte-readback-only`.
+This verifies bytes, not owning-job provenance, compiler execution, A/B
+independence or release eligibility. Authenticate transport separately before
+using downloaded evidence; a final index is not needed for this single package.
+
 `producer index` independently selects `--release-format legacy-v1|family-v2`.
 The default V1 path requires `--source-lock-filename`. V2 requires independent
 `--lane-inputs` and an external `--subject-manifest`; its final stage also

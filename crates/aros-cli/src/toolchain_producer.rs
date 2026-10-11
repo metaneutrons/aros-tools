@@ -36,6 +36,7 @@ use crate::observability;
 mod compatibility_export;
 mod finished_package;
 mod native_compatibility;
+mod portable_package_readback;
 mod qualification_bytes;
 mod recovery_family;
 mod release_evidence;
@@ -320,6 +321,8 @@ struct VerifyPackageArgs {
     /// Package metadata format; omitted selects the existing compiler-family default
     #[arg(long, value_enum)]
     package_format: Option<PackageFormatArg>,
+    #[command(flatten)]
+    readback: portable_package_readback::ReadbackArgs,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -957,6 +960,7 @@ fn parse_build_result_digest(value: &str) -> Result<Sha256Digest, &'static str> 
 }
 
 fn verify_package(args: VerifyPackageArgs) -> miette::Result<()> {
+    args.readback.validate_format(args.package_format)?;
     let context = package_context(args.context)?;
     let request = package_verify::PackageVerificationRequest {
         package_dir: args.input_dir,
@@ -968,24 +972,42 @@ fn verify_package(args: VerifyPackageArgs) -> miette::Result<()> {
         build_environment: context.build_environment,
         forbidden_prefixes: context.forbidden_prefixes,
     };
-    let result = args.package_format.map_or_else(
-        || package_verify::verify(&request),
-        |format| package_verify::verify_with_format(&request, format.into()),
-    );
-    let output = result.map_err(|error| native_error(&error))?;
+    let (output, finished_candidate) = if args.readback.enabled() {
+        let (output, readback) = portable_package_readback::run(&request, &args.readback)?;
+        (output, Some(readback))
+    } else {
+        let result = args.package_format.map_or_else(
+            || package_verify::verify(&request),
+            |format| package_verify::verify_with_format(&request, format.into()),
+        );
+        (result.map_err(|error| native_error(&error))?, None)
+    };
     match args.format {
-        ResultFormat::Human => aros_common::outputln!(
-            "Native package verified\nSHA-256: {}\nSize: {}",
-            output.archive_sha256,
-            output.archive_size
-        ),
-        ResultFormat::Json => print_json(&serde_json::json!({
+        ResultFormat::Human => {
+            aros_common::outputln!(
+                "Native package verified\nSHA-256: {}\nSize: {}",
+                output.archive_sha256,
+                output.archive_size
+            );
+            if finished_candidate.is_some() {
+                aros_common::outputln!(
+                    "Portable build/package bytes joined; no execution or provenance authentication."
+                );
+            }
+        }
+        ResultFormat::Json => {
+            let mut document = serde_json::json!({
             "schema": "aros-toolchain-producer-stage-v1",
             "operation": "verify-package",
             "sha256": output.archive_sha256,
             "size": output.archive_size,
             "manifest": output.manifest,
-        }))?,
+            });
+            if let Some(readback) = finished_candidate {
+                document["finished_candidate"] = readback;
+            }
+            print_json(&document)?;
+        }
     }
     Ok(())
 }
