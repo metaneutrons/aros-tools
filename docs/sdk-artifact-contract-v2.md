@@ -111,8 +111,27 @@ check uses those facts, AROS OSABI/ABI-version marking and the collector symbol;
 there is no CPU-to-machine table. Optional `float_abi` selects exactly one
 driver flag. These structural checks do not establish full ABI compatibility,
 C++ initialization, SDK completeness or which invocation produced an ELF.
-The execution owner must still qualify and retain all four application links,
-their input closure and byte-identical relocated outputs.
+The additive `compatibility::execute_llvm_sdk_links` API executes that four-link
+selection through the shared supervised runner. It copies the complete SDK,
+uses a private temporary directory and a closed environment, and requires
+byte-identical original/relocated C and C++ outputs. Every traced input must
+resolve inside the SDK or authenticated compiler tree, except the direct
+short-lived Clang object derived from the sealed probe name. The trace is the
+used-input list; maps are bounded retained evidence checked for original-SDK
+leakage, not a second input-list parser.
+
+An opaque completed handle revalidates source, compiler, both SDK trees,
+commands, reports, logs, maps, outputs and the closed receipt without rerunning
+or repairing anything. Only exact empty lock sidecars from atomic publication
+are admitted; extra members fail. Cancelled, expired or failed execution cannot
+return a completed handle. Filesystem validation is not preemptible, so the
+elapsed-time budget is not a hard limit on filesystem I/O.
+
+Its `aros-llvm-sdk-link-receipt-v1` is local link evidence, not SDK generation,
+full ABI qualification, C++ execution or authenticated owning-job evidence.
+Synthetic positive and tampering tests do not qualify a real compiler. The
+generation owner must still connect these links to the generated SDK and an
+independently authenticated portable export.
 
 `aros sdk build` explicitly rejects this generic schema before compatibility
 preparation until the family-specific link and evidence adapters are implemented.

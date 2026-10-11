@@ -49,6 +49,24 @@ pub struct LlvmSdkApplicationPlan {
 }
 
 impl LlvmSdkApplicationPlan {
+    /// Recheck only immutable inputs after the execution owner reserved output.
+    pub(super) fn revalidate_inputs(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ContractError> {
+        bound_contract(&self.request, cancellation)?;
+        if checked_directory(&self.request.original_sdk, "original LLVM SDK")?
+            != self.request.original_sdk
+            || checked_directory(&self.request.relocated_sdk, "relocated LLVM SDK")?
+                != self.request.relocated_sdk
+            || snapshot(&self.request.original_sdk)? != self.original_snapshot
+            || snapshot(&self.request.relocated_sdk)? != self.relocated_snapshot
+        {
+            return Err(error("LLVM SDK application plan inputs changed"));
+        }
+        Ok(())
+    }
+
     /// C original/relocated followed by C++ original/relocated normal links.
     #[must_use]
     pub fn commands(&self) -> &[CompatibilityCommand] {

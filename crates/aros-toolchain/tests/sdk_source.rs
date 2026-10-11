@@ -887,3 +887,229 @@ fn rejects_unbound_llvm_plan_selections_before_writing() {
     );
     assert_eq!(snapshot(fixture.temporary.path()), before);
 }
+
+// Synthetic drivers qualify the harness and rejection paths, never a real SDK.
+fn llvm_link_selection(
+    fixture: &Fixture,
+    mode: &str,
+) -> aros_toolchain::compatibility::LlvmSdkLinkRequest {
+    use aros_common::{ArosCompilerIdentity, CancellationToken};
+    use aros_toolchain::compatibility::{
+        inspect_llvm_sdk_drivers, prepare, CompatibilityPreparationRequest, LlvmSdkDriverRequest,
+        LlvmSdkLinkRequest, REQUIRED_HELPERS,
+    };
+    let selection = application_selection(fixture);
+    let compiler = fixture.temporary.path().join("compiler");
+    fs::write(compiler.join("fixture.elf"), synthetic_application_elf()).unwrap();
+    fs::write(
+        selection.original_sdk.join("libclient.a"),
+        b"synthetic SDK archive",
+    )
+    .unwrap();
+    let driver = compiler.join("bin/clang");
+    fs::write(&driver, format!(
+        "#!/bin/sh\nset -eu\nif [ \"$1\" = --version ]; then printf 'clang version 11.0.0\\n'; exit 0; fi\nif [ \"$2\" = -dumpmachine ]; then printf '{}\\n'; exit 0; fi\n[ \"$PATH\" = /nonexistent ]\n[ -z \"${{HOME+x}}\" ]\nsdk=\nmap=\nout=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --sysroot=*) sdk=${{1#--sysroot=}} ;;\n    -Wl,-Map=*) map=${{1#-Wl,-Map=}}; map=${{map%%,*}} ;;\n    -o) shift; out=$1 ;;\n    -nostdlib|-nostartfiles|-nodefaultlibs|-c|-r) exit 88 ;;\n  esac\n  shift\ndone\ncase '{mode}' in\n  failed) printf 'simulated link failure\\n' >&2; exit 29 ;;\n  timeout) /bin/sleep 2 ;;\nesac\n/bin/cp '{}/fixture.elf' \"$out\"\nprintf 'synthetic link map\\n' > \"$map\"\nprintf '%s/libclient.a\\n' \"$sdk\"\ncase '{mode}' in\n  foreign) printf '/etc/passwd\\n' ;;\n  extra) printf 'extra\\n' > \"$out.extra\" ;;\n  different) case \"$out\" in *relocated*) printf X >> \"$out\" ;; esac ;;\nesac\n",
+        fixture.identity.target.target_triple, compiler.display(),
+    )).unwrap();
+    let drivers = inspect_llvm_sdk_drivers(
+        &LlvmSdkDriverRequest {
+            compiler_root: compiler,
+            compiler: ArosCompilerIdentity::Llvm {
+                version: "11.0.0".into(),
+            },
+            target: fixture.identity.target.clone(),
+            timeout: std::time::Duration::from_secs(2),
+        },
+        &CancellationToken::default(),
+    )
+    .unwrap();
+    let work = fixture.temporary.path().join("preparation");
+    let helpers = fixture.temporary.path().join("helpers");
+    fs::create_dir(&work).unwrap();
+    fs::create_dir(&helpers).unwrap();
+    for name in REQUIRED_HELPERS {
+        let path = helpers.join(name);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let preparation = prepare(&CompatibilityPreparationRequest {
+        source_root: fixture.materialized_source_root.clone(),
+        work_root: work,
+        helpers_root: helpers,
+    })
+    .unwrap();
+    LlvmSdkLinkRequest {
+        source: selection.source,
+        drivers,
+        preparation,
+        sdk_root: selection.original_sdk,
+        output_root: selection.output_root,
+        timeout: std::time::Duration::from_secs(10),
+    }
+}
+
+fn synthetic_application_elf() -> Vec<u8> {
+    let names = b"\0__TOOLCHAIN_LIST__\0";
+    let strings = 64 + 3 * 64;
+    let symbols = strings + names.len();
+    let mut bytes = vec![0; symbols + 48];
+    bytes[..9].copy_from_slice(b"\x7fELF\x02\x01\x01\x0f\x01");
+    for (offset, value) in [(16, 1_u16), (18, 62), (52, 64), (58, 64), (60, 3)] {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    for (offset, value) in [
+        (20, 1_u32),
+        (128 + 4, 3),
+        (192 + 4, 2),
+        (192 + 40, 1),
+        (symbols + 24, 1),
+    ] {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (offset, value) in [
+        (40, 64_u64),
+        (128 + 24, strings as u64),
+        (128 + 32, names.len() as u64),
+        (128 + 48, 1),
+        (192 + 24, symbols as u64),
+        (192 + 32, 48),
+        (192 + 48, 8),
+        (192 + 56, 24),
+    ] {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[strings..strings + names.len()].copy_from_slice(names);
+    bytes[symbols + 24 + 4] = 0x10;
+    bytes[symbols + 24 + 6..symbols + 24 + 8].copy_from_slice(&1_u16.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn executes_and_revalidates_four_llvm_links_with_closed_retained_evidence() {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::execute_llvm_sdk_links;
+    let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
+    let selection = llvm_link_selection(&fixture, "success");
+    let source_before = snapshot(&fixture.source_root);
+    let sdk_before = snapshot(&selection.sdk_root);
+    let proof = execute_llvm_sdk_links(&selection, &CancellationToken::default()).unwrap();
+    proof.revalidate(&CancellationToken::default()).unwrap();
+    assert_eq!(
+        sha256_bytes(&fs::read(proof.receipt_path()).unwrap()),
+        *proof.receipt_sha256()
+    );
+    assert_eq!(snapshot(&fixture.source_root), source_before);
+    assert_eq!(snapshot(&selection.sdk_root), sdk_before);
+    for member in [
+        "links/original-c.elf",
+        "links/relocated-c.elf",
+        "links/original-cxx.elf",
+        "links/relocated-cxx.elf",
+        "links/reports/standalone-c.1.stdout.log",
+        "links/reports/standalone-cxx.2.stderr.log",
+        "sdk-inventory.json",
+        "relocated-sdk/libclient.a",
+    ] {
+        assert!(selection.output_root.join(member).is_file());
+    }
+    let log = selection
+        .output_root
+        .join("links/reports/standalone-c.1.stdout.log");
+    fs::write(log, b"tampered retained log\n").unwrap();
+    assert!(proof.revalidate(&CancellationToken::default()).is_err());
+}
+
+#[test]
+fn llvm_link_failure_foreign_inputs_extra_members_and_relocation_drift_never_finish() {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::execute_llvm_sdk_links;
+    for (mode, expected) in [
+        ("failed", "exited unsuccessfully"),
+        ("foreign", "outside the SDK or compiler roots"),
+        ("extra", "proof directory cannot be bounded"),
+        ("different", "differs after relocation"),
+    ] {
+        let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
+        let selection = llvm_link_selection(&fixture, mode);
+        let failure =
+            execute_llvm_sdk_links(&selection, &CancellationToken::default()).unwrap_err();
+        assert!(
+            failure.to_string().contains(expected),
+            "unexpected {mode} failure: {failure}"
+        );
+        assert!(!selection
+            .output_root
+            .join("receipt/llvm-sdk-links.receipt.json")
+            .exists());
+        assert!(selection
+            .output_root
+            .join("links/reports/standalone-c.1.stdout.log")
+            .exists());
+    }
+}
+
+#[test]
+fn llvm_execution_rejects_cancelled_mixed_or_reused_selection_before_writes() {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::execute_llvm_sdk_links;
+    let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
+    let selection = llvm_link_selection(&fixture, "success");
+    let before = snapshot(fixture.temporary.path());
+    let cancelled = CancellationToken::default();
+    cancelled.cancel();
+    assert!(execute_llvm_sdk_links(&selection, &cancelled).is_err());
+    let mut mixed = selection.clone();
+    mixed.timeout = std::time::Duration::ZERO;
+    assert!(execute_llvm_sdk_links(&mixed, &CancellationToken::default()).is_err());
+    mixed = selection.clone();
+    mixed.preparation.source_tree_sha256 = sha256_bytes(b"other source");
+    assert!(execute_llvm_sdk_links(&mixed, &CancellationToken::default()).is_err());
+    mixed = selection.clone();
+    mixed.output_root = selection.sdk_root.join("overlapping");
+    assert!(execute_llvm_sdk_links(&mixed, &CancellationToken::default()).is_err());
+    assert_eq!(snapshot(fixture.temporary.path()), before);
+    fs::create_dir(&selection.output_root).unwrap();
+    fs::write(selection.output_root.join("owned.txt"), b"existing owner\n").unwrap();
+    let before = snapshot(fixture.temporary.path());
+    assert!(execute_llvm_sdk_links(&selection, &CancellationToken::default()).is_err());
+    assert_eq!(snapshot(fixture.temporary.path()), before);
+}
+
+#[test]
+fn llvm_link_deadline_rejects_slow_driver_without_completed_evidence() {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::execute_llvm_sdk_links;
+    let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
+    let mut selection = llvm_link_selection(&fixture, "timeout");
+    selection.timeout = std::time::Duration::from_secs(1);
+    let failure = execute_llvm_sdk_links(&selection, &CancellationToken::default()).unwrap_err();
+    assert!(
+        failure.to_string().contains("deadline") || failure.to_string().contains("timed out"),
+        "unexpected deadline failure: {failure}"
+    );
+    assert!(!selection
+        .output_root
+        .join("receipt/llvm-sdk-links.receipt.json")
+        .exists());
+}
+
+#[test]
+fn llvm_link_readback_rejects_changed_receipt_sdk_and_extra_members() {
+    use aros_common::CancellationToken;
+    use aros_toolchain::compatibility::execute_llvm_sdk_links;
+    for mutation in ["receipt", "sdk", "extra"] {
+        let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
+        let selection = llvm_link_selection(&fixture, "success");
+        let proof = execute_llvm_sdk_links(&selection, &CancellationToken::default()).unwrap();
+        let path = match mutation {
+            "receipt" => proof.receipt_path(),
+            "sdk" => selection.output_root.join("relocated-sdk/libclient.a"),
+            "extra" => selection.output_root.join("unselected.txt"),
+            _ => unreachable!(),
+        };
+        fs::write(path, b"modified retained evidence\n").unwrap();
+        let before = snapshot(&selection.output_root);
+        assert!(proof.revalidate(&CancellationToken::default()).is_err());
+        assert_eq!(snapshot(&selection.output_root), before);
+    }
+}

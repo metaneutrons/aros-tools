@@ -149,6 +149,10 @@ or SDK tree-digest selector. Generic SDK source contracts can be verified but
 are rejected by `build` before preparation until their execution adapters exist.
 Generation currently requires a family-v2 GNU
 compiler matching the source preset's compiler profile.
+The LLVM library adapter can now execute four source-bound C/C++ links against
+an existing SDK and its relocated copy, retaining and revalidating the complete
+local link evidence. This does not enable LLVM SDK generation through `build`,
+authenticate a CI job or qualify a release.
 `--generation-record FILE`, `--output-dir DIR` and
 repeatable `--sdk-forbidden-prefix DIR` are required. The record and package
 destinations must be absent and disjoint from source and execution inputs.
