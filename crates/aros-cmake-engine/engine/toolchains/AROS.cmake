@@ -82,6 +82,73 @@ set(AROS_TARGET_PROFILE "${_aros_profile}" CACHE STRING
 set(AROS_TARGET_TRIPLE "${_aros_triple}" CACHE STRING
     "AROS compiler target triple" FORCE)
 
+function(_aros_manifest_require_type json label expected_type)
+    string(JSON _actual_type ERROR_VARIABLE _json_error TYPE "${json}" ${ARGN})
+    if(NOT _json_error STREQUAL "NOTFOUND" OR
+       NOT _actual_type STREQUAL expected_type)
+        message(FATAL_ERROR "AROS toolchain ${label} must be ${expected_type}")
+    endif()
+endfunction()
+
+function(_aros_manifest_require_members json label expected_fields)
+    string(JSON _length ERROR_VARIABLE _json_error LENGTH "${json}" ${ARGN})
+    if(NOT _json_error STREQUAL "NOTFOUND")
+        message(FATAL_ERROR "AROS toolchain ${label} is not a JSON object")
+    endif()
+    set(_expected ${expected_fields})
+    list(LENGTH _expected _expected_length)
+    if(NOT _length EQUAL _expected_length)
+        message(FATAL_ERROR
+            "AROS toolchain ${label} has ${_length} fields; expected ${_expected_length}")
+    endif()
+    set(_seen "")
+    math(EXPR _last "${_length} - 1")
+    foreach(_index RANGE 0 ${_last})
+        string(JSON _member MEMBER "${json}" ${ARGN} ${_index})
+        if(NOT _member IN_LIST _expected OR _member IN_LIST _seen)
+            message(FATAL_ERROR "AROS toolchain ${label} has invalid field '${_member}'")
+        endif()
+        list(APPEND _seen "${_member}")
+    endforeach()
+    foreach(_member IN LISTS _expected)
+        if(NOT _member IN_LIST _seen)
+            message(FATAL_ERROR "AROS toolchain ${label} omits field '${_member}'")
+        endif()
+    endforeach()
+endfunction()
+
+function(_aros_manifest_require_absent json label member)
+    string(JSON _member_type ERROR_VARIABLE _json_error TYPE "${json}" "${member}")
+    if(_json_error STREQUAL "NOTFOUND")
+        message(FATAL_ERROR "AROS toolchain ${label} must not contain ${member}")
+    endif()
+endfunction()
+
+function(_aros_manifest_validate_llvm_version value schema)
+    if(NOT "${value}" MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+        message(FATAL_ERROR "AROS toolchain LLVM version must have three numeric components")
+    endif()
+    # Schema 1 preserves its historical unbounded numeric grammar. Only the
+    # family-v2 compiler descriptor adopts the common bounded version contract.
+    if(schema EQUAL 1)
+        return()
+    endif()
+    string(REPLACE "." ";" _components "${value}")
+    foreach(_component IN LISTS _components)
+        string(LENGTH "${_component}" _component_length)
+        if(_component_length GREATER 10)
+            message(FATAL_ERROR "AROS toolchain LLVM version has an invalid component")
+        endif()
+        string(REGEX REPLACE "^0+" "" _numeric_component "${_component}")
+        if(_numeric_component STREQUAL "")
+            set(_numeric_component 0)
+        endif()
+        if(_numeric_component GREATER 2147483647)
+            message(FATAL_ERROR "AROS toolchain LLVM version has an invalid component")
+        endif()
+    endforeach()
+endfunction()
+
 # CMake loads this file again inside compiler checks. Custom cache variables
 # are not copied into those try_compile projects unless the toolchain declares
 # them as platform inputs, so preserve the fail-closed root/profile contract
@@ -98,10 +165,19 @@ list(REMOVE_DUPLICATES CMAKE_TRY_COMPILE_PLATFORM_VARIABLES)
 # usable, but when a manifest exists it is authoritative and mismatches fail
 # before any compiler or runtime probing.
 set(_aros_manifest "${_aros_cross_root}/toolchain-manifest.json")
+unset(_aros_manifest_llvm_version)
 if(EXISTS "${_aros_manifest}")
     file(READ "${_aros_manifest}" _aros_manifest_json)
+    _aros_manifest_require_type("${_aros_manifest_json}" "manifest schema" NUMBER schema)
+    string(JSON _aros_manifest_schema GET "${_aros_manifest_json}" schema)
+    if(NOT _aros_manifest_schema MATCHES "^[12]$")
+        message(FATAL_ERROR
+            "Unsupported AROS toolchain manifest schema ${_aros_manifest_schema}")
+    endif()
     foreach(_aros_field IN ITEMS
-            schema release_id host target_profile target_triple tree_sha256)
+            release_id host target_profile target_triple tree_sha256)
+        _aros_manifest_require_type(
+            "${_aros_manifest_json}" "manifest ${_aros_field}" STRING "${_aros_field}")
         string(JSON _aros_manifest_${_aros_field}
             ERROR_VARIABLE _aros_json_error
             GET "${_aros_manifest_json}" "${_aros_field}")
@@ -110,10 +186,32 @@ if(EXISTS "${_aros_manifest}")
                 "Invalid ${_aros_manifest}: missing ${_aros_field}: ${_aros_json_error}")
         endif()
     endforeach()
-    if(NOT _aros_manifest_schema EQUAL 1)
-        message(FATAL_ERROR
-            "Unsupported AROS toolchain manifest schema ${_aros_manifest_schema}")
+
+    if(_aros_manifest_schema EQUAL 1)
+        _aros_manifest_require_absent("${_aros_manifest_json}" "schema 1 manifest" compiler)
+        _aros_manifest_require_type(
+            "${_aros_manifest_json}" "manifest llvm_version" STRING llvm_version)
+        string(JSON _aros_manifest_llvm_version GET "${_aros_manifest_json}" llvm_version)
+    else()
+        _aros_manifest_require_absent(
+            "${_aros_manifest_json}" "schema 2 manifest" llvm_version)
+        _aros_manifest_require_type(
+            "${_aros_manifest_json}" "manifest compiler" OBJECT compiler)
+        string(JSON _aros_manifest_compiler GET "${_aros_manifest_json}" compiler)
+        _aros_manifest_require_type(
+            "${_aros_manifest_compiler}" "manifest compiler family" STRING family)
+        string(JSON _aros_manifest_compiler_family GET "${_aros_manifest_compiler}" family)
+        if(NOT _aros_manifest_compiler_family STREQUAL "llvm")
+            message(FATAL_ERROR "AROS toolchain manifest has a non-LLVM compiler identity")
+        endif()
+        _aros_manifest_require_members(
+            "${_aros_manifest_compiler}" "manifest compiler" "family;version")
+        _aros_manifest_require_type(
+            "${_aros_manifest_compiler}" "manifest compiler version" STRING version)
+        string(JSON _aros_manifest_llvm_version GET "${_aros_manifest_compiler}" version)
     endif()
+    _aros_manifest_validate_llvm_version("${_aros_manifest_llvm_version}" "${_aros_manifest_schema}")
+
     foreach(_aros_field IN ITEMS release_id host target_profile target_triple)
         if("${_aros_manifest_${_aros_field}}" STREQUAL "")
             message(FATAL_ERROR
@@ -189,6 +287,15 @@ if(NOT _aros_builtins_archive_count EQUAL 1)
         "selection for ${_aros_builtins}: ${_aros_builtins_archives}")
 endif()
 list(GET _aros_builtins_archives 0 _aros_builtins_archive)
+if(DEFINED _aros_manifest_llvm_version)
+    set(_aros_expected_builtins_archive
+        "${_aros_cross_root}/lib/clang/${_aros_manifest_llvm_version}/lib/aros/libclang_rt.builtins-${_aros_builtins}.a")
+    if(NOT _aros_builtins_archive STREQUAL _aros_expected_builtins_archive)
+        message(FATAL_ERROR
+            "AROS toolchain ${_aros_profile} compiler-rt builtins do not match LLVM version "
+            "${_aros_manifest_llvm_version}")
+    endif()
+endif()
 if(AROS_TARGET_CPU STREQUAL "x86_64")
     file(GLOB _aros_i386_builtins
         "${_aros_cross_root}/lib/clang/*/lib/aros/libclang_rt.builtins-i386.a")
@@ -204,6 +311,15 @@ if(AROS_TARGET_CPU STREQUAL "x86_64")
             "companion: ${_aros_i386_builtins}")
     endif()
     list(GET _aros_i386_builtins 0 _aros_i386_builtins_archive)
+    if(DEFINED _aros_manifest_llvm_version)
+        set(_aros_expected_i386_builtins_archive
+            "${_aros_cross_root}/lib/clang/${_aros_manifest_llvm_version}/lib/aros/libclang_rt.builtins-i386.a")
+        if(NOT _aros_i386_builtins_archive STREQUAL _aros_expected_i386_builtins_archive)
+            message(FATAL_ERROR
+                "AROS x86_64 i386 compiler-rt companion does not match LLVM version "
+                "${_aros_manifest_llvm_version}")
+        endif()
+    endif()
     set(AROS_CROSS_TOOLCHAIN_COMPANION_TRIPLE "i386-unknown-aros"
         CACHE INTERNAL "Validated release-toolchain companion triple" FORCE)
     set(AROS_CROSS_TOOLCHAIN_COMPANION_BUILTINS_ARCHIVE

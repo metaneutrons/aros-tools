@@ -102,6 +102,12 @@ triple. A bounded compiler-tree snapshot includes executable bytes and aliases;
 revalidation rejects subsequent changes. It neither authenticates the package
 nor proves the scalar ABI facts, SDK completeness or ordinary application links.
 The caller must independently verify its selected compiler package.
+The production LLVM CMake toolchain accepts both legacy schema-1 manifests
+and family-v2 schema-2 manifests. Schema 2 requires the closed LLVM compiler
+descriptor; mixed schema fields, a different compiler family, and runtime
+archives from a different declared LLVM version are rejected. Schema 1 retains
+its existing numeric version grammar. This admission check does not replace
+package verification, authenticated CI evidence or release qualification.
 The additive `compatibility::plan_llvm_sdk_application_links` API binds four
 ordinary driver commands to that measured compiler, the sealed source probes,
 and equal, disjoint original/relocated SDK trees. It performs no build, link,
