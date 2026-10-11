@@ -737,8 +737,8 @@ fn expand_source_names(raw: &str, scope: &VarScope, line: usize) -> Result<Vec<S
     expanded
         .split_whitespace()
         .map(|token| {
-            validate_identifier(token)
-                .map_err(|reason| format!("invalid source basename {token:?}: {reason}"))?;
+            validate_relative_path(token)
+                .map_err(|reason| format!("invalid source-relative path {token:?}: {reason}"))?;
             Ok(token.to_owned())
         })
         .collect()
@@ -1204,9 +1204,15 @@ mod tests {
         };
         let (scope, states) = collect_arch_effect_scope_with_context(input, Some(&riscv));
         let result = collect_arch_endpoint_effects(input, recipe, &scope, Some(&states)).unwrap();
-        // The tag resolves, so the rejection names its owner.
-        assert_eq!(result.rejected.len(), 1);
-        assert_eq!(result.rejected[0].endpoint.as_deref(), Some("m-riscv"));
+        assert!(result.rejected.is_empty(), "{:?}", result.rejected);
+        assert_eq!(result.effects.len(), 2);
+        assert!(result.effects.iter().any(|effect| matches!(
+            &effect.data,
+            ArchEndpointEffectData::ArchModuleObjects { tag, module_sources, .. }
+                if tag == "riscv"
+                    && module_sources.len() == 1
+                    && module_sources[0] == "riscv/stackswap"
+        )));
 
         let (scope, states) = collect_arch_effect_scope(input);
         let result = collect_arch_endpoint_effects(input, recipe, &scope, Some(&states)).unwrap();

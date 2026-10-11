@@ -286,6 +286,73 @@ fn sealed_architecture_effects_refuse_filesystem_enumeration() {
 }
 
 #[test]
+fn nested_source_paths_keep_declaration_time_values_and_line_positions() {
+    let input = concat!(
+        "FILES := math/e_fmod.c\n",
+        "ASMFILES := arch/riscv/stackswap.S\n",
+        "%build_archspecific mainmmake=demo maindir=rom/demo modname=demo arch=$(AROS_TARGET_CPU) files=\"$(FILES)\" asmfiles=\"$(ASMFILES)\"\n",
+        "FILES := later/ignored.c\n",
+        "ASMFILES := later/ignored.S\n",
+    );
+    let mut target = context(Some(""), &[]);
+    target.cpu = Some("riscv".into());
+
+    let result = scan(input, &target);
+
+    assert!(result.rejected.is_empty(), "{:?}", result.rejected);
+    assert_eq!(result.effects.len(), 2);
+    assert!(result.effects.iter().all(|effect| effect.line == 3));
+    assert_eq!(
+        module_sources(&result).as_deref(),
+        Some(
+            [
+                "math/e_fmod.c".to_owned(),
+                "arch/riscv/stackswap.S".to_owned()
+            ]
+            .as_slice()
+        )
+    );
+}
+
+#[test]
+fn unsafe_nested_source_paths_are_rejected_for_files_and_asmfiles() {
+    for key in ["files", "asmfiles"] {
+        for path in [
+            "/absolute.c",
+            "math//empty-component.c",
+            "math/./dot-component.c",
+            "math/../parent-component.c",
+            "math\\backslash.c",
+            "math/*.c",
+            "math/file;touch",
+            "math/$(UNRESOLVED).c",
+        ] {
+            let input = format!(
+                "%build_archspecific mainmmake=demo maindir=rom/demo modname=demo arch=pc-x86_64 files={} asmfiles={}\n",
+                if key == "files" {
+                    format!("\"{path}\"")
+                } else {
+                    "safe/source.c".to_owned()
+                },
+                if key == "asmfiles" {
+                    format!("\"{path}\"")
+                } else {
+                    "safe/source.S".to_owned()
+                },
+            );
+            let result = scan(&input, &context(Some(""), &[]));
+
+            assert!(
+                result.effects.is_empty(),
+                "{key}={path}: {:?}",
+                result.effects
+            );
+            assert_eq!(result.rejected.len(), 1, "{key}={path}");
+        }
+    }
+}
+
+#[test]
 fn pure_make_branch_selection_does_not_evaluate_an_inactive_filesystem_call() {
     let input = format!("FILES = $(if 1,base,$(wildcard *.c))\n{DECLARATION}");
     let result = scan(&input, &context(Some(""), &[]));
