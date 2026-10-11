@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 /// The directory is read twice through the same descriptor and must retain its
 /// path binding and identity. Callers still need to validate every listed
 /// entry before treating it as authority for a state-changing operation.
+/// This read-only operation accepts actual filesystem directory names,
+/// including Unicode; publication targets retain their stricter naming policy.
 ///
 /// # Errors
 ///
@@ -30,7 +32,6 @@ pub fn directory_entry_names_nofollow_bounded(
             "directory entry limit must be greater than zero",
         ));
     }
-    validate_target_leaf(path)?;
     #[cfg(unix)]
     {
         unix::directory_entry_names_nofollow_bounded_impl(&absolute_path(path)?, max_entries)

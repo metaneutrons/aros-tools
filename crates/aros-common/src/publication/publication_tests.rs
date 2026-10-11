@@ -613,6 +613,29 @@ fn bounded_nofollow_directory_listing_refuses_a_symlink() {
 }
 
 #[cfg(unix)]
+#[test]
+fn bounded_nofollow_listing_accepts_payload_names_without_weakening_publication_names() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let directory = root.join("Größe-😀");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("header-😀.h"), b"fixture").unwrap();
+    assert_eq!(
+        directory_entry_names_nofollow_bounded(&directory, 1).unwrap(),
+        vec![std::ffi::OsString::from("header-😀.h")]
+    );
+    assert!(directory_entry_names_nofollow_bounded(&directory, 0).is_err());
+    std::fs::write(directory.join("extra.h"), b"fixture").unwrap();
+    assert!(directory_entry_names_nofollow_bounded(&directory, 1).is_err());
+    let link = root.join("linked-directory");
+    symlink(&directory, &link).unwrap();
+    assert!(directory_entry_names_nofollow_bounded(&link, 2).is_err());
+    assert!(PortableOutputName::new("Größe-😀").is_err());
+}
+
+#[cfg(unix)]
 struct BoundaryAction {
     point: &'static str,
     matches: Box<dyn Fn(&Path) -> bool>,
