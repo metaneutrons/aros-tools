@@ -26,9 +26,9 @@ const REQUIRED_COLLECTOR_SYMBOL: &str = "__TOOLCHAIN_LIST__";
 ///
 /// Driver defaults remain enabled. The complete source-owned target is
 /// validated without CPU/board allowlists; explicitly declared `float_abi`,
-/// `compiler_arch`, `compiler_cpu` and `compiler_fpu` facts become driver
-/// flags. The caller remains responsible for authenticating the selected
-/// source and SDK and for proving the full ABI.
+/// `compiler_arch`, `compiler_cpu`, `compiler_fpu` and `compiler_code_model`
+/// facts become driver flags. The caller remains responsible for
+/// authenticating the selected source and SDK and for proving the full ABI.
 ///
 /// # Errors
 /// Rejects invalid target facts, selectors, paths, probe source or libraries.
@@ -91,6 +91,9 @@ pub(super) fn application_command(
     }
     if let Some(compiler_fpu) = facts.compiler_fpu {
         arguments.push(format!("-mfpu={compiler_fpu}"));
+    }
+    if let Some(compiler_code_model) = facts.compiler_code_model {
+        arguments.push(format!("-mcmodel={compiler_code_model}"));
     }
     if language == "cxx" {
         arguments.push("-std=c++17".to_owned());
@@ -193,6 +196,7 @@ struct TargetFacts {
     compiler_arch: Option<String>,
     compiler_cpu: Option<String>,
     compiler_fpu: Option<String>,
+    compiler_code_model: Option<String>,
     arm_attributes: Option<Vec<(u64, u64)>>,
 }
 
@@ -205,6 +209,7 @@ fn target_facts(target: &SdkTarget) -> Result<TargetFacts, ContractError> {
     let architecture_option = compiler_option_fact(target, "compiler_arch")?;
     let cpu_option = compiler_option_fact(target, "compiler_cpu")?;
     let floating_point_option = compiler_option_fact(target, "compiler_fpu")?;
+    let code_model_option = compiler_option_fact(target, "compiler_code_model")?;
     target
         .validate()
         .map_err(|_| error("LLVM SDK source target descriptor is invalid"))?;
@@ -252,6 +257,7 @@ fn target_facts(target: &SdkTarget) -> Result<TargetFacts, ContractError> {
         compiler_arch: architecture_option,
         compiler_cpu: cpu_option,
         compiler_fpu: floating_point_option,
+        compiler_code_model: code_model_option,
         arm_attributes,
     })
 }

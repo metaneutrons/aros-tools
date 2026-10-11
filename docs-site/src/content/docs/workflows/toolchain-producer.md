@@ -42,6 +42,10 @@ their version and selected triple; this is not package authentication or SDK
 link qualification. The library executes four normal C/C++ links from sealed
 probes against original and relocated SDK trees and rechecks their retained
 outputs. A CMake binding selects the SDK path from source configuration.
+The source ABI selects `compiler_arch` or `compiler_cpu`, optional
+`compiler_fpu` and `compiler_code_model`. SDK generation and application links
+use the same declared options; the tools do not infer them from a board name.
+Conflicting environment or configuration flags are rejected.
 `aros sdk build` selects the source-owned LLVM SDK contract or GNU native
 consumer contract matching the family-v2 compiler. It generates and packages
 the SDK and can export portable compatibility evidence. Owning-job

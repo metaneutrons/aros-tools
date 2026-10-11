@@ -82,7 +82,8 @@ authenticated CI evidence or release admission.
 The owned CMake engine admits the generic response only for LLVM. Execution
 requires explicit source `flavour` and `platform_smp` facts in addition to CPU,
 pointer width and MMU selection. Before compiler detection, language-rule
-hooks apply the sealed `compiler_arch` or `compiler_cpu`, `compiler_fpu` and
+hooks apply the sealed `compiler_arch` or `compiler_cpu`, `compiler_fpu`,
+`compiler_code_model` and
 ARM `float_abi` options to C, C++ and Assembly. Unrelated environment and
 initial flags remain intact; explicit flags are not reconstructed. Repeated
 configuration must not duplicate selected options. After compiler detection
@@ -113,12 +114,16 @@ This planner requires explicit unsigned `pointer_width` (32 or 64),
 with no value bit outside the mask) in the source target's ABI map. Its ELF
 check uses those facts, AROS OSABI/ABI-version marking and the collector symbol;
 there is no CPU-to-machine table. Optional `float_abi` selects exactly one
-driver flag. Optional `compiler_arch`, `compiler_cpu` and `compiler_fpu` text
-facts select `-march`, `-mcpu` and `-mfpu`; each is a bounded ASCII token, not a
+driver flag. Optional `compiler_arch`, `compiler_cpu`, `compiler_fpu` and
+`compiler_code_model` text facts select `-march`, `-mcpu`, `-mfpu` and
+`-mcmodel`; each is a bounded ASCII token, not a
 board name inferred by the tools. Architecture and CPU selections are explicit
 alternatives: declaring both is rejected rather than depending on flag order.
 The SDK build and all original/relocated application commands must use those
 same source-owned selections. ARM selections require an explicit float ABI.
+No code model is inferred from the architecture or board. An absent fact adds
+no option; a declared model is applied once and conflicting or per-configuration
+overrides fail before a consumer binding is published.
 
 ELF32 ARM selections additionally require explicit unsigned `arm_cpu_arch`,
 `arm_cpu_profile`, `arm_fp_arch`, `arm_simd_arch` and `arm_vfp_args` facts.

@@ -75,6 +75,13 @@ fn with_compiler_arch(mut target: SdkTarget, architecture: SdkAbiValue) -> SdkTa
     target
 }
 
+fn with_compiler_code_model(mut target: SdkTarget, code_model: SdkAbiValue) -> SdkTarget {
+    target
+        .abi
+        .insert("compiler_code_model".to_owned(), code_model);
+    target
+}
+
 fn probe(source: &str, libraries: &[&str]) -> NativeSdkLinkProbe {
     NativeSdkLinkProbe {
         source: source.to_owned(),
@@ -650,6 +657,140 @@ fn compiler_arch_is_optional_bounded_and_exclusive_with_compiler_cpu() {
         validate_target(&with_both),
         "SDK target compiler_arch and compiler_cpu are mutually exclusive",
     );
+}
+
+#[test]
+fn compiler_code_model_applies_to_c_and_cxx_for_original_and_relocated_sources() {
+    let target = with_compiler_code_model(target64(), SdkAbiValue::Text("large".into()));
+    validate_target(&target).unwrap();
+
+    for (language, label, driver, fixture, source) in [
+        (
+            "c",
+            "original",
+            "/prefix/bin/clang",
+            "/source/app.c",
+            "app.c",
+        ),
+        (
+            "c",
+            "relocated",
+            "/prefix/bin/clang",
+            "/source/relocated/app.c",
+            "app.c",
+        ),
+        (
+            "cxx",
+            "original",
+            "/prefix/bin/clang++",
+            "/source/app.cpp",
+            "app.cpp",
+        ),
+        (
+            "cxx",
+            "relocated",
+            "/prefix/bin/clang++",
+            "/source/relocated/app.cpp",
+            "app.cpp",
+        ),
+    ] {
+        let command = application_command(
+            Path::new(driver),
+            Path::new(fixture),
+            &probe(source, &[]),
+            &target,
+            Path::new("/selected/sdk"),
+            Path::new("/proof"),
+            (language, label),
+        )
+        .unwrap();
+        assert_eq!(
+            command
+                .arguments
+                .iter()
+                .filter(|argument| argument.starts_with("-mcmodel="))
+                .count(),
+            1
+        );
+        let code_model_index = command
+            .arguments
+            .iter()
+            .position(|argument| argument == "-mcmodel=large")
+            .unwrap();
+        let debug_index = command
+            .arguments
+            .iter()
+            .position(|argument| argument == "-g0")
+            .unwrap();
+        assert_eq!(code_model_index, debug_index + 1);
+        if language == "cxx" {
+            let standard_index = command
+                .arguments
+                .iter()
+                .position(|argument| argument == "-std=c++17")
+                .unwrap();
+            assert!(code_model_index < standard_index);
+        }
+        assert!(command.arguments.contains(&format!(
+            "-Wl,-Map=/proof/{label}-{language}.map,--cref,--trace"
+        )));
+    }
+}
+
+#[test]
+fn compiler_code_model_is_optional_and_uses_bounded_generic_token_validation() {
+    let absent = target64();
+    validate_target(&absent).unwrap();
+    let absent_command = application_command(
+        Path::new("/prefix/bin/clang"),
+        Path::new("/source/app.c"),
+        &probe("app.c", &[]),
+        &absent,
+        Path::new("/selected/sdk"),
+        Path::new("/proof"),
+        ("c", "original"),
+    )
+    .unwrap();
+    assert!(!absent_command
+        .arguments
+        .iter()
+        .any(|argument| argument.starts_with("-mcmodel=")));
+
+    for value in [SdkAbiValue::Boolean(false), unsigned(1)] {
+        let target = with_compiler_code_model(target64(), value);
+        assert_rejection(
+            validate_target(&target),
+            "SDK target compiler_code_model must be text",
+        );
+    }
+
+    for value in [
+        String::new(),
+        "_model".into(),
+        ".model".into(),
+        "+model".into(),
+        "-model".into(),
+        "large model".into(),
+        "model=large".into(),
+        "/large".into(),
+        "@model.rsp".into(),
+        "large\\model".into(),
+        "large\nmodel".into(),
+        "lárge".into(),
+        "x".repeat(MAX_COMPILER_OPTION_BYTES + 1),
+    ] {
+        let target = with_compiler_code_model(target64(), SdkAbiValue::Text(value));
+        assert_rejection(
+            validate_target(&target),
+            "SDK target compiler_code_model must be 1..=64 ASCII characters, start with a letter or digit, and contain only letters, digits, _, ., + or -",
+        );
+    }
+
+    let maximum_length = with_compiler_code_model(
+        target64(),
+        SdkAbiValue::Text("x".repeat(MAX_COMPILER_OPTION_BYTES)),
+    );
+    validate_target(&maximum_length).unwrap();
 }
 
 #[test]
