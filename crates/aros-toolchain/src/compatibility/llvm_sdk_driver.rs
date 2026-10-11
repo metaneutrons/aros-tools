@@ -72,7 +72,7 @@ impl LlvmSdkDriverQueryIdentity {
     }
 }
 
-/// The fixed command role whose invocation spelling is preserved in argv[0].
+/// The fixed command role whose invocation spelling is preserved in `argv[0]`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LlvmSdkDriverRole {
     /// C compiler driver role at `bin/clang`.
@@ -104,7 +104,7 @@ impl LlvmSdkDriverRoleIdentity {
         self.role
     }
 
-    /// Original `bin/clang` or `bin/clang++` command path used for argv[0].
+    /// Original `bin/clang` or `bin/clang++` command path used for `argv[0]`.
     ///
     /// This deliberately preserves `clang++` when that path is an internal
     /// symlink to `clang`.
