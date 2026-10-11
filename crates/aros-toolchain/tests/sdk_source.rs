@@ -23,6 +23,12 @@ use tempfile::TempDir;
 // binary only; retain every short negative deadline and its strict assertions.
 static SOURCE_AUDIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+// Driver inspection prepares correctness fixtures; it is not the deadline
+// under test. Use the public bounded maximum so cold-host scheduling cannot
+// replace a source/ABI assertion with an unrelated two-second query timeout.
+// Explicit slow-link and shared-helper deadline probes keep their own budgets.
+const DRIVER_FIXTURE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn source_audit_test_guard() -> std::sync::MutexGuard<'static, ()> {
     SOURCE_AUDIT_TEST_LOCK
         .lock()
@@ -257,6 +263,22 @@ fn create_generic_fixture_with_elf(
             ("elf_flags_mask".into(), SdkAbiValue::Unsigned(0)),
             ("elf_flags_value".into(), SdkAbiValue::Unsigned(0)),
         ]);
+        if machine == 40 {
+            assert_eq!(arch, "arm", "EM_ARM fixture must use the ARM profile");
+            assert_eq!(float_abi, Some("hard"), "ARM fixture uses hard-float ABI");
+            // The selected ARMv7-A hard-float source target must explicitly
+            // bind every ARM attribute checked by the LLVM application
+            // validator. Keep these source facts in the sealed synthetic
+            // contract; the planner only derives the Clang float flag from
+            // float_abi and does not infer the remaining attributes.
+            abi.extend([
+                ("arm_cpu_arch".into(), SdkAbiValue::Unsigned(10)),
+                ("arm_cpu_profile".into(), SdkAbiValue::Unsigned(65)),
+                ("arm_fp_arch".into(), SdkAbiValue::Unsigned(5)),
+                ("arm_simd_arch".into(), SdkAbiValue::Unsigned(2)),
+                ("arm_vfp_args".into(), SdkAbiValue::Unsigned(1)),
+            ]);
+        }
     }
     let target = SdkTarget {
         target_triple: format!("{source_cpu}-unknown-aros"),
@@ -741,7 +763,7 @@ fn application_selection(
                 version: "11.0.0".into(),
             },
             target: fixture.identity.target.clone(),
-            timeout: std::time::Duration::from_secs(2),
+            timeout: DRIVER_FIXTURE_QUERY_TIMEOUT,
         },
         &CancellationToken::default(),
     )
@@ -887,7 +909,7 @@ fn rejects_unbound_llvm_plan_selections_before_writing() {
                 version: "11.0.0".into(),
             },
             target,
-            timeout: std::time::Duration::from_secs(2),
+            timeout: DRIVER_FIXTURE_QUERY_TIMEOUT,
         },
         &CancellationToken::default(),
     )
@@ -946,7 +968,7 @@ fn llvm_link_selection(
                 version: "11.0.0".into(),
             },
             target: fixture.identity.target.clone(),
-            timeout: std::time::Duration::from_secs(2),
+            timeout: DRIVER_FIXTURE_QUERY_TIMEOUT,
         },
         &CancellationToken::default(),
     )
@@ -1648,7 +1670,7 @@ fn instrument_application_links(
             compiler_root: path.parent().unwrap().parent().unwrap().to_path_buf(),
             compiler: selection.drivers.compiler().clone(),
             target: selection.drivers.target().clone(),
-            timeout: std::time::Duration::from_secs(2),
+            timeout: DRIVER_FIXTURE_QUERY_TIMEOUT,
         },
         &CancellationToken::default(),
     )
