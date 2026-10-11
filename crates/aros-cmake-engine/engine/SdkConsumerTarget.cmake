@@ -93,7 +93,21 @@ function(_aros_validate_sdk_consumer_target json)
     set_property(GLOBAL PROPERTY AROS_SDK_CONSUMER_VALIDATED_FLOAT_ABI "${_float_abi}")
 endfunction()
 
+function(_aros_sdk_reject_opaque_compiler_arguments flags)
+    separate_arguments(_flags UNIX_COMMAND "${flags}")
+    foreach(_flag IN LISTS _flags)
+        # Forwarding and external files can inject options beyond the sealed
+        # driver's visible arguments. Do not interpret them as harmless flags.
+        if(_flag MATCHES "^@" OR
+           _flag MATCHES "^(-Xclang|-mllvm|--config)(=|$)")
+            _aros_native_consumer_fail(
+                "SDK compiler flags contain an opaque compiler argument: ${_flag}")
+        endif()
+    endforeach()
+endfunction()
+
 function(_aros_sdk_count_compiler_options out_count out_exact out_split flags option_name value)
+    _aros_sdk_reject_opaque_compiler_arguments("${flags}")
     separate_arguments(_flags UNIX_COMMAND "${flags}")
     set(_count 0)
     set(_exact 0)
@@ -375,6 +389,30 @@ function(aros_register_sdk_consumer_compiler_option_overrides)
         return()
     endif()
     _aros_native_consumer_current(_source _contract _digest)
+    # This registration runs before project(), including compiler-ID probes.
+    # Reject caller-supplied opaque inputs here; reconcile source options later
+    # when the language hook has the toolchain/platform initialization flags.
+    _aros_sdk_get_configuration_names(_configurations)
+    foreach(_language IN ITEMS C CXX ASM)
+        if(_language STREQUAL "C")
+            set(_environment_flags "$ENV{CFLAGS}")
+        elseif(_language STREQUAL "CXX")
+            set(_environment_flags "$ENV{CXXFLAGS}")
+        else()
+            set(_environment_flags "$ENV{ASMFLAGS}")
+        endif()
+        _aros_sdk_reject_opaque_compiler_arguments("${_environment_flags}")
+        foreach(_suffix IN ITEMS "" "_INIT")
+            set(_variable "CMAKE_${_language}_FLAGS${_suffix}")
+            _aros_sdk_reject_opaque_compiler_arguments("${${_variable}}")
+        endforeach()
+        foreach(_configuration IN LISTS _configurations)
+            foreach(_suffix IN ITEMS "" "_INIT")
+                set(_variable "CMAKE_${_language}_FLAGS_${_configuration}${_suffix}")
+                _aros_sdk_reject_opaque_compiler_arguments("${${_variable}}")
+            endforeach()
+        endforeach()
+    endforeach()
     if(AROS_CROSS_TOOLCHAIN_ROOT)
         set(_toolchain_root "${AROS_CROSS_TOOLCHAIN_ROOT}")
     elseif(DEFINED ENV{AROS_CROSS_TOOLCHAIN_ROOT} AND

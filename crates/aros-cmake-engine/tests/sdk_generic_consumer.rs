@@ -368,6 +368,146 @@ file(WRITE "${ROOT}/selected-sdk-root" "${_selected_root}")
 file(WRITE "${ROOT}/passed" "initialized and validated")
 "##;
 
+const CMAKE_PRODUCTION_INITIALIZATION_PROBE: &str = r#"
+cmake_minimum_required(VERSION 3.22)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+set(AROS_TARGET_CPU arm)
+set(AROS_TARGET_PLATFORM raspi)
+set(AROS_TOOLCHAIN llvm)
+set(GCC_CONFIG_FLOAT_ABI hard)
+set(GCC_CONFIG_FLOAT_ABI hard CACHE STRING "fixture source float ABI" FORCE)
+set(AROS_ABI_FLAVOUR fixture-flavour)
+set(AROS_ABI_PLATFORM_SMP OFF)
+set(AROS_ENABLE_MMU OFF)
+
+include("${ENGINE}/NativeConsumerContract.cmake")
+include("${ENGINE}/tests/NativeSourceSelectionFixture.cmake")
+aros_test_prepare_native_consumer_selection("${ROOT}" "${ROOT}/consumer.json")
+
+# The fixture response represents source-owned facts. These are deliberately
+# independent of the board, target platform, and toolchain selector above.
+set(AROS_TARGET_PROFILE arm-raspi)
+set(AROS_TARGET_TRIPLE arm-unknown-aros)
+set(AROS_TARGET_FAMILY fixture-family)
+set(AROS_TARGET_VARIANT fixture-variant)
+set(AROS_TARGET_CPU32 fixture-cpu32)
+set(AROS_MESA_VERSION fixture-mesa)
+set(AROS_TOOLCHAIN llvm)
+set(GCC_CONFIG_FLOAT_ABI hard)
+set(AROS_ABI_FLAVOUR fixture-flavour)
+set(AROS_ABI_PLATFORM_SMP OFF)
+set(AROS_ENABLE_MMU OFF)
+
+file(READ "${CMAKE_CURRENT_BINARY_DIR}/native-consumer-validation-response.json" _response)
+string(JSON _response REMOVE "${_response}" abi)
+string(JSON _response SET "${_response}" schema "\"aros-sdk-consumer-validation-v1\"")
+string(JSON _response SET "${_response}" profile "\"${AROS_TARGET_PROFILE}\"")
+set(_target "{}")
+string(JSON _target SET "${_target}" target_triple "\"${AROS_TARGET_TRIPLE}\"")
+set(_abi "{}")
+string(JSON _abi SET "${_abi}" source_cpu "\"${AROS_TARGET_CPU}\"")
+string(JSON _abi SET "${_abi}" pointer_width 32)
+string(JSON _abi SET "${_abi}" use_mmu false)
+string(JSON _abi SET "${_abi}" flavour "\"${AROS_ABI_FLAVOUR}\"")
+string(JSON _abi SET "${_abi}" platform_smp false)
+string(JSON _abi SET "${_abi}" float_abi "\"${GCC_CONFIG_FLOAT_ABI}\"")
+string(JSON _abi SET "${_abi}" compiler_cpu "\"cortex-a7\"")
+string(JSON _abi SET "${_abi}" compiler_fpu "\"neon-vfpv4\"")
+string(JSON _target SET "${_target}" abi "${_abi}")
+string(JSON _response SET "${_response}" target "${_target}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/native-consumer-validation-response.json" "${_response}\n")
+
+aros_validate_native_consumer_contract()
+set(AROS_DEVELOPER_INCLUDE_DIR "${CMAKE_BINARY_DIR}/SYS/Developer/include")
+aros_resolve_sdk_include_root(_selected_root)
+aros_lock_native_consumer_contract_identity()
+set(AROS_CROSS_TOOLCHAIN_ROOT "${ROOT}/mock-release-toolchain")
+file(MAKE_DIRECTORY "${AROS_CROSS_TOOLCHAIN_ROOT}")
+aros_register_sdk_consumer_compiler_option_overrides()
+
+# Supply only the files the production prefix validator requires. Except for
+# real host compiler/archive-tool symlinks, every file below is an inert stub:
+# this fixture tests CMake initialization, not SDK qualification.
+set(_mock_prefix "${ROOT}/mock-release-toolchain")
+file(MAKE_DIRECTORY
+    "${_mock_prefix}/bin"
+    "${_mock_prefix}/include/c++/v1"
+    "${_mock_prefix}/lib/clang/17.0.0/lib/aros"
+    "${_mock_prefix}/lib")
+foreach(_tool IN ITEMS clang clang++ llvm-ar llvm-ranlib)
+    unset(_host_tool CACHE)
+    unset(_host_tool)
+    find_program(_host_tool NAMES "${_tool}" REQUIRED)
+    if(NOT EXISTS "${_mock_prefix}/bin/${_tool}")
+        file(CREATE_LINK "${_host_tool}" "${_mock_prefix}/bin/${_tool}" SYMBOLIC)
+    endif()
+endforeach()
+foreach(_tool IN ITEMS ld.lld llvm-nm llvm-strip llvm-objcopy llvm-objdump)
+    file(WRITE "${_mock_prefix}/bin/${_tool}" "unused test-only tool stub\n")
+endforeach()
+foreach(_path IN ITEMS
+    include/c++/v1/algorithm
+    include/c++/v1/cerrno
+    include/c++/v1/cinttypes
+    include/c++/v1/cstddef
+    include/c++/v1/cstdint
+    include/c++/v1/deque
+    include/c++/v1/memory
+    include/c++/v1/string
+    include/c++/v1/system_error
+    include/c++/v1/vector
+    lib/libc++.a
+    lib/libc++abi.a
+    lib/libunwind.a
+    lib/clang/17.0.0/lib/aros/libclang_rt.builtins-armhf.a)
+    file(WRITE "${_mock_prefix}/${_path}" "unused test-only SDK fixture stub\n")
+endforeach()
+
+file(WRITE "${ROOT}/probe.c" "int sdk_c_probe(void) { return 0; }\n")
+file(WRITE "${ROOT}/probe.cpp" "int sdk_cxx_probe() { return 0; }\n")
+file(WRITE "${ROOT}/probe.S"
+    ".text\n.globl sdk_asm_probe\nsdk_asm_probe:\n    bx lr\n")
+
+project(SdkGenericProductionCompilerInitialization LANGUAGES C CXX ASM)
+aros_validate_native_consumer_compiler_target()
+
+set(_abi_diagnostic "")
+foreach(_name IN ITEMS
+    CMAKE_SIZEOF_VOID_P
+    CMAKE_C_SIZEOF_DATA_PTR
+    CMAKE_CXX_SIZEOF_DATA_PTR
+    CMAKE_ASM_SIZEOF_DATA_PTR
+    CMAKE_C_COMPILER_TARGET
+    CMAKE_CXX_COMPILER_TARGET
+    CMAKE_ASM_COMPILER_TARGET
+    CMAKE_C_COMPILER_ID
+    CMAKE_CXX_COMPILER_ID
+    CMAKE_ASM_COMPILER_ID
+    CMAKE_C_COMPILER_ABI
+    CMAKE_CXX_COMPILER_ABI)
+    if(DEFINED ${_name})
+        string(APPEND _abi_diagnostic "${_name}=${${_name}}\n")
+    else()
+        string(APPEND _abi_diagnostic "${_name}=<undefined>\n")
+    endif()
+endforeach()
+file(WRITE "${ROOT}/compiler-abi" "${_abi_diagnostic}")
+
+foreach(_language IN ITEMS C CXX ASM)
+    get_property(_${_language}_flags CACHE "CMAKE_${_language}_FLAGS" PROPERTY VALUE)
+endforeach()
+file(WRITE "${ROOT}/compiler-flags"
+    "C=${_C_flags}\nCXX=${_CXX_flags}\nASM=${_ASM_flags}\n")
+file(WRITE "${ROOT}/selected-sdk-root" "${_selected_root}")
+file(WRITE "${ROOT}/passed" "initialized with production AROS toolchain")
+
+add_library(sdk_production_initialization_probe STATIC
+    "${ROOT}/probe.c"
+    "${ROOT}/probe.cpp"
+    "${ROOT}/probe.S")
+"#;
+
 fn harness(probe: &Probe) -> Harness {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -485,6 +625,43 @@ find_program(CMAKE_RANLIB NAMES llvm-ranlib REQUIRED)
     test_harness
 }
 
+fn production_initialization_harness() -> Harness {
+    let probe = Probe::new("arm", "arm-unknown-aros", "32", "hard")
+        .compiler_options("cortex-a7", "neon-vfpv4");
+    let test_harness = harness(&probe);
+    for path in [
+        test_harness.root.join("passed"),
+        test_harness.root.join("selected-sdk-root"),
+        test_harness.root.join("compiler-flags"),
+        test_harness.build.join("compile_commands.json"),
+        test_harness.root.join("compiler-abi"),
+        test_harness.build.join("aros-native-consumer-binding.json"),
+    ] {
+        let _ = fs::remove_file(path);
+    }
+    fs::write(
+        test_harness.root.join("CMakeLists.txt"),
+        CMAKE_PRODUCTION_INITIALIZATION_PROBE,
+    )
+    .unwrap();
+
+    let toolchain = format!(
+        "set(AROS_TOOLCHAIN llvm CACHE STRING \"\" FORCE)\n\
+         set(AROS_TARGET_CPU arm CACHE STRING \"\" FORCE)\n\
+         set(AROS_TARGET_PLATFORM raspi CACHE STRING \"\" FORCE)\n\
+         set(AROS_CROSS_TOOLCHAIN_ROOT \"{}\" CACHE PATH \"\" FORCE)\n\
+         include(\"{}\")\n",
+        test_harness.root.join("mock-release-toolchain").display(),
+        test_harness.engine.join("toolchains/AROS.cmake").display()
+    );
+    fs::write(
+        test_harness.root.join("production-toolchain.cmake"),
+        toolchain,
+    )
+    .unwrap();
+    test_harness
+}
+
 fn configure(harness: &Harness, reconfigure_fail: bool) -> Outcome {
     let mut command = Command::new("cmake");
     command
@@ -551,6 +728,47 @@ fn configure_initialization_with_cache(
         command.arg(format!("-D{name}={value}"));
     }
     let output = command
+        .env("CFLAGS", c_flags)
+        .env("CXXFLAGS", cxx_flags)
+        .env("ASMFLAGS", asm_flags)
+        .env_remove("AROS_CROSS_TOOLCHAIN_ROOT")
+        .output()
+        .unwrap();
+    Outcome {
+        output,
+        marker: harness.root.join("passed").exists(),
+        selected: fs::read(harness.root.join("selected-sdk-root")).ok(),
+        compiler_flags: fs::read(harness.root.join("compiler-flags")).ok(),
+        compile_commands: fs::read(harness.build.join("compile_commands.json")).ok(),
+        initialization_abi: fs::read(harness.root.join("compiler-abi")).ok(),
+        configure_log: fs::read(harness.build.join("CMakeFiles/CMakeConfigureLog.yaml")).ok(),
+        response: fs::read(
+            harness
+                .build
+                .join("native-consumer-validation-response.json"),
+        )
+        .ok(),
+        binding: fs::read(harness.build.join("aros-native-consumer-binding.json")).ok(),
+    }
+}
+
+fn configure_production_initialization(
+    harness: &Harness,
+    c_flags: &str,
+    cxx_flags: &str,
+    asm_flags: &str,
+) -> Outcome {
+    let output = Command::new("cmake")
+        .arg("-S")
+        .arg(&harness.root)
+        .arg("-B")
+        .arg(&harness.build)
+        .arg(format!("-DENGINE={}", harness.engine.display()))
+        .arg(format!("-DROOT={}", harness.root.display()))
+        .arg(format!(
+            "-DCMAKE_TOOLCHAIN_FILE={}",
+            harness.root.join("production-toolchain.cmake").display()
+        ))
         .env("CFLAGS", c_flags)
         .env("CXXFLAGS", cxx_flags)
         .env("ASMFLAGS", asm_flags)
@@ -1527,6 +1745,148 @@ fn language_rule_overrides_reject_conflicting_environment_and_init_options() {
 }
 
 #[test]
+fn unsealed_response_files_are_rejected_before_compiler_detection() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Measure the actual process boundary, not a marker written after project().
+    // A valid configuration must call every wrapper; rejected caller inputs
+    // must call none, even for compiler-ID discovery.
+    for opaque in [false, true] {
+        let test_harness = initialization_harness("", "", "", false);
+        let invocations = test_harness.root.join("compiler-invocations");
+        let mut wrappers = Vec::new();
+        for (language, compiler) in [("C", "clang"), ("CXX", "clang++"), ("ASM", "clang")] {
+            let wrapper = test_harness
+                .root
+                .join(format!("record-{language}-{compiler}"));
+            let quoted_marker = format!(
+                "'{}'",
+                invocations.display().to_string().replace('\'', "'\\''")
+            );
+            fs::write(
+                &wrapper,
+                format!("#!/bin/sh\nprintf '%s\\n' '{language}' >> {quoted_marker}\nexec {compiler} \"$@\"\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+            wrappers.push((format!("CMAKE_{language}_COMPILER"), wrapper));
+        }
+        let wrapper_values: Vec<_> = wrappers
+            .iter()
+            .map(|(name, path)| (name.clone(), path.display().to_string()))
+            .collect();
+        let cache_variables: Vec<_> = wrapper_values
+            .iter()
+            .map(|(name, path)| (name.as_str(), path.as_str()))
+            .collect();
+        let response = test_harness.root.join("unsealed-flags.rsp");
+        fs::write(&response, "-mcpu=cortex-a9\n").unwrap();
+        let selected = if opaque {
+            format!("-O0 -mcpu=cortex-a7 @{}", response.display())
+        } else {
+            "-O0 -mcpu=cortex-a7".to_owned()
+        };
+        let outcome = configure_initialization_with_cache(
+            &test_harness,
+            &selected,
+            "-O1",
+            "-O2",
+            &cache_variables,
+        );
+        if opaque {
+            assert_failure(
+                &outcome,
+                "SDK compiler flags contain an opaque compiler argument",
+            );
+            assert!(
+                !invocations.exists(),
+                "opaque flags reached a compiler process"
+            );
+        } else {
+            assert_success(&test_harness, &outcome);
+            let actual = fs::read_to_string(&invocations).unwrap();
+            for language in ["C", "CXX", "ASM"] {
+                assert!(
+                    actual.lines().any(|line| line == language),
+                    "missing {language} compiler invocation"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn opaque_compiler_arguments_cannot_override_sealed_source_options() {
+    for language in ["C", "CXX", "ASM"] {
+        for escape in [
+            "-Xclang -target-cpu -Xclang cortex-a9",
+            "-mllvm -enable-no-infs-fp-math",
+            "--config=unsealed.cfg",
+        ] {
+            let test_harness = initialization_harness("", "", "", false);
+            let selected = format!("-O0 -mcpu=cortex-a7 {escape}");
+            let (c, cxx, asm) = match language {
+                "C" => (selected.as_str(), "-O1", "-O2"),
+                "CXX" => ("-O0", selected.as_str(), "-O2"),
+                "ASM" => ("-O0", "-O1", selected.as_str()),
+                _ => unreachable!(),
+            };
+            let outcome = configure_initialization(&test_harness, c, cxx, asm);
+            assert_failure(
+                &outcome,
+                "SDK compiler flags contain an opaque compiler argument",
+            );
+        }
+
+        let test_harness = initialization_harness("", "", "", false);
+        let response = test_harness.root.join("unsealed-flags.rsp");
+        fs::write(&response, "-mcpu=cortex-a9\n").unwrap();
+        let selected = format!("-O0 -mcpu=cortex-a7 @{}", response.display());
+        let (c, cxx, asm) = match language {
+            "C" => (selected.as_str(), "-O1", "-O2"),
+            "CXX" => ("-O0", selected.as_str(), "-O2"),
+            "ASM" => ("-O0", "-O1", selected.as_str()),
+            _ => unreachable!(),
+        };
+        let outcome = configure_initialization(&test_harness, c, cxx, asm);
+        assert_failure(
+            &outcome,
+            "SDK compiler flags contain an opaque compiler argument",
+        );
+
+        let (c_init, cxx_init, asm_init) = match language {
+            "C" => ("-Xclang -target-cpu -Xclang cortex-a9", "", ""),
+            "CXX" => ("", "-Xclang -target-cpu -Xclang cortex-a9", ""),
+            "ASM" => ("", "", "-Xclang -target-cpu -Xclang cortex-a9"),
+            _ => unreachable!(),
+        };
+        let test_harness = initialization_harness(c_init, cxx_init, asm_init, false);
+        let outcome = configure_initialization(&test_harness, "-O0", "-O1", "-O2");
+        assert_failure(
+            &outcome,
+            "SDK compiler flags contain an opaque compiler argument",
+        );
+
+        let test_harness = initialization_harness("", "", "", false);
+        let variable = format!("CMAKE_{language}_FLAGS_COVERAGE");
+        let outcome = configure_initialization_with_cache(
+            &test_harness,
+            "-O0",
+            "-O1",
+            "-O2",
+            &[
+                ("CMAKE_TRY_COMPILE_CONFIGURATION", "Coverage"),
+                (variable.as_str(), "-Xclang -target-cpu -Xclang cortex-a9"),
+            ],
+        );
+        assert_failure(
+            &outcome,
+            "SDK compiler flags contain an opaque compiler argument",
+        );
+    }
+}
+
+#[test]
 fn language_rule_overrides_reuse_matching_environment_options_and_reject_replacement() {
     let test_harness = initialization_harness(
         "-mfloat-abi=hard -g",
@@ -1557,6 +1917,113 @@ fn language_rule_overrides_reuse_matching_environment_options_and_reject_replace
     let conflicting = initialization_harness("", "", "", true);
     let outcome = configure_initialization(&conflicting, "-O0", "-O1", "-O2");
     assert_failure(&outcome, "CMAKE_USER_MAKE_RULES_OVERRIDE_C is already set");
+}
+
+#[test]
+fn production_arm_toolchain_reuses_matching_environment_float_abi_once() {
+    let test_harness = production_initialization_harness();
+    let outcome = configure_production_initialization(
+        &test_harness,
+        "-O0 -mfloat-abi=hard -g",
+        "-O1 -mfloat-abi=hard -g",
+        "-O2 -mfloat-abi=hard -g",
+    );
+    assert_success(&test_harness, &outcome);
+    let abi = String::from_utf8_lossy(outcome.initialization_abi.as_ref().unwrap());
+    for detected in [
+        "CMAKE_SIZEOF_VOID_P=4",
+        "CMAKE_C_COMPILER_ID=Clang",
+        "CMAKE_CXX_COMPILER_ID=Clang",
+        "CMAKE_ASM_COMPILER_ID=Clang",
+        "CMAKE_C_COMPILER_TARGET=arm-unknown-aros",
+        "CMAKE_CXX_COMPILER_TARGET=arm-unknown-aros",
+        "CMAKE_ASM_COMPILER_TARGET=arm-unknown-aros",
+    ] {
+        assert!(
+            abi.contains(detected),
+            "missing real compiler detection {detected}:\n{abi}"
+        );
+    }
+    let flags = String::from_utf8_lossy(outcome.compiler_flags.as_ref().unwrap());
+    for (language, unrelated) in [("C", "-O0"), ("CXX", "-O1"), ("ASM", "-O2")] {
+        let line = flags
+            .lines()
+            .find(|line| line.starts_with(&format!("{language}=")))
+            .unwrap();
+        assert_eq!(line.matches("-mfloat-abi=hard").count(), 1, "{line}");
+        assert_eq!(line.matches("-mcpu=cortex-a7").count(), 1, "{line}");
+        assert_eq!(line.matches("-mfpu=neon-vfpv4").count(), 1, "{line}");
+        assert!(
+            line.contains(unrelated),
+            "{language} lost ENV option: {line}"
+        );
+        assert_eq!(
+            line.matches(unrelated).count(),
+            1,
+            "{language} duplicated ENV option: {line}"
+        );
+        assert!(
+            line.contains("-g"),
+            "{language} lost ENV debug option: {line}"
+        );
+    }
+    let commands = String::from_utf8_lossy(outcome.compile_commands.as_ref().unwrap());
+    for source in ["probe.c", "probe.cpp"] {
+        assert!(
+            commands.contains(source),
+            "missing production compile command for {source}"
+        );
+    }
+    let build = Command::new("cmake")
+        .arg("--build")
+        .arg(&test_harness.build)
+        .arg("--target")
+        .arg("sdk_production_initialization_probe")
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "production ARM compiler probe build failed:\n{}\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reconfigured = configure_production_initialization(
+        &test_harness,
+        "-O0 -mfloat-abi=hard -g",
+        "-O1 -mfloat-abi=hard -g",
+        "-O2 -mfloat-abi=hard -g",
+    );
+    assert_success(&test_harness, &reconfigured);
+    let flags = String::from_utf8_lossy(reconfigured.compiler_flags.as_ref().unwrap());
+    for language in ["C", "CXX", "ASM"] {
+        let line = flags
+            .lines()
+            .find(|line| line.starts_with(&format!("{language}=")))
+            .unwrap();
+        assert_eq!(line.matches("-mfloat-abi=hard").count(), 1, "{line}");
+        assert_eq!(line.matches("-mcpu=cortex-a7").count(), 1, "{line}");
+        assert_eq!(line.matches("-mfpu=neon-vfpv4").count(), 1, "{line}");
+    }
+
+    let default_environment = production_initialization_harness();
+    let outcome = configure_production_initialization(&default_environment, "", "", "");
+    assert_success(&default_environment, &outcome);
+    let flags = String::from_utf8_lossy(outcome.compiler_flags.as_ref().unwrap());
+    for language in ["C", "CXX", "ASM"] {
+        let line = flags
+            .lines()
+            .find(|line| line.starts_with(&format!("{language}=")))
+            .unwrap();
+        assert_eq!(line.matches("-mfloat-abi=hard").count(), 1, "{line}");
+    }
+
+    let conflict = production_initialization_harness();
+    let outcome = configure_production_initialization(&conflict, "-mfloat-abi=soft", "", "");
+    assert_failure(
+        &outcome,
+        "C flags must contain exactly one selected -mfloat-abi=hard option",
+    );
 }
 
 #[test]

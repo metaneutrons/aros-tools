@@ -81,7 +81,7 @@ authenticated CI evidence or release admission.
 
 The owned CMake engine admits the generic response only for LLVM. Execution
 requires explicit source `flavour` and `platform_smp` facts in addition to CPU,
-pointer width and MMU selection. Before compiler detection, language-rule
+pointer width and MMU selection. Before compiler ABI detection, language-rule
 hooks apply the sealed `compiler_arch` or `compiler_cpu`, `compiler_fpu`,
 `compiler_code_model` and
 ARM `float_abi` options to C, C++ and Assembly. Unrelated environment and
@@ -91,6 +91,13 @@ it checks all three driver targets, pointer width and selected options. A
 target/sysroot override, conflicting configuration flag or changed binding
 fails without publishing a current consumer binding. The source-derived
 Developer include root is shared by bootstrap and target producers.
+Generic SDK compiler flags cannot use response files, Clang frontend/backend
+forwarding or external driver configuration files. These opaque inputs could
+change source-selected options. Registration rejects caller environment,
+general and configuration flags before `project()` can invoke compiler-ID
+probes. Language hooks recheck toolchain/platform initialization flags before
+ABI detection. Harmless direct environment and initialization options remain
+preserved.
 
 These graph and configured-compiler checks are not native SDK generation or
 ordinary application-link qualification. GNU/RV32 execution still uses its
@@ -102,6 +109,12 @@ triple. A bounded compiler-tree snapshot includes executable bytes and aliases;
 revalidation rejects subsequent changes. It neither authenticates the package
 nor proves the scalar ABI facts, SDK completeness or ordinary application links.
 The caller must independently verify its selected compiler package.
+The production LLVM CMake toolchain accepts both legacy schema-1 manifests
+and family-v2 schema-2 manifests. Schema 2 requires the closed LLVM compiler
+descriptor; mixed schema fields, a different compiler family, and runtime
+archives from a different declared LLVM version are rejected. Schema 1 retains
+its existing numeric version grammar. This admission check does not replace
+package verification, authenticated CI evidence or release qualification.
 The additive `compatibility::plan_llvm_sdk_application_links` API binds four
 ordinary driver commands to that measured compiler, the sealed source probes,
 and equal, disjoint original/relocated SDK trees. It performs no build, link,
