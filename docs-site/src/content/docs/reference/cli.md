@@ -238,6 +238,11 @@ receipt is local evidence, not release admission. Complete V2 byte read-back
 is available; authenticated producer and recovery execution integration remain
 unqualified.
 
+Native compatibility consumes the prepared source cache offline in both CMake
+and upstream Make. `compatibility-host-tools` includes the archive inspection
+and SHA-256 tools; resolve and measure every listed role. A missing source or
+tool fails the gate rather than falling back to the runner's PATH or network.
+
 
 ### Physical-board workflow
 

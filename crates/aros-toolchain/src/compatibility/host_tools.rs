@@ -26,7 +26,7 @@ use crate::ContractError;
 // guessed ambient-tool allowance. It equals the largest reviewed v1 role set
 // (macOS, including its SDK aliases); enlarging it requires an explicit
 // source-graph review and keeps the bounded invariant auditable.
-const MAX_HOST_TOOLS: usize = 78;
+const MAX_HOST_TOOLS: usize = 80;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -65,6 +65,11 @@ const MAX_HOST_TOOLS: usize = 78;
 /// literal `tee` to retain compiler and linker diagnostics, including during
 /// otherwise successful commands that emit warnings. It is therefore also a
 /// required command inside this closure, not an ambient reporting helper.
+/// The source-owned fetcher checks archive magic with `od` and verifies
+/// declared SHA-256 identities with `shasum -a 256`. Both roles are required
+/// even for offline cache hits; omitting them misclassifies valid archives
+/// or prevents checksum verification. `shasum` is the portable selected hash
+/// implementation, not an allowance for an ambient hash-tool fallback.
 /// macOS has two SDK-discovery commands and two measured compatibility aliases;
 /// see
 /// [`native_compatibility_host_tools`].
@@ -115,6 +120,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "make",
     "mkdir",
     "mv",
+    "od",
     "patch",
     "perl",
     "pngtopnm",
@@ -126,6 +132,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "rm",
     "sed",
     "sh",
+    "shasum",
     "sleep",
     "sort",
     "strip",
@@ -779,6 +786,8 @@ mod tests {
             "bzip2",
             "xz",
             "unzip",
+            "od",
+            "shasum",
         ] {
             assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&role));
         }

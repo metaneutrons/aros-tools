@@ -275,15 +275,18 @@ pub fn execute_native_compatibility(
         ));
     }
     let inputs = validate_inputs(request)?;
-    let outputs = create_output_roots(request, &inputs)?;
-    let cmake_source_cache = request
-        .ports_sources
-        .materialize_cmake_cache(&outputs.cmake_build)?;
+    // Reject an incomplete measured command environment before creating any
+    // phase roots or staging the CMake cache, not after an expensive consumer
+    // has already started or discovered a missing tool indirectly.
     let environments = super::environment_plan::prepare_native_environments(
         &request.host_python,
         &request.host_tools,
         &request.host,
     )?;
+    let outputs = create_output_roots(request, &inputs)?;
+    let cmake_source_cache = request
+        .ports_sources
+        .materialize_cmake_cache(&outputs.cmake_build)?;
     let sealed_environment = environments.sdk;
     let poisoned_environment = environments.standalone;
     let helpers_root = helpers_root(&request.preparation)?;

@@ -175,6 +175,35 @@ fn rejects_a_missing_measured_host_c_compiler_before_cmake_starts() {
 }
 
 #[test]
+fn rejects_missing_archive_validation_tools_before_any_phase_starts() {
+    for missing in ["od", "shasum"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut request, cmake_log, make_log) = request(temporary.path());
+        let tools = request
+            .host_tools
+            .tools
+            .iter()
+            .filter(|(name, _)| name.as_str() != missing)
+            .map(|(name, identity)| CompatibilityHostTool {
+                name: name.clone(),
+                program: identity.program.clone(),
+            })
+            .collect();
+        request.host_tools = prepare_host_tool_closure(&HostToolClosureRequest {
+            output_root: temporary.path().join("incomplete-host-tools"),
+            tools,
+        })
+        .unwrap();
+        let error =
+            execute_native_compatibility(&request, &CancellationToken::default()).unwrap_err();
+        assert!(error.to_string().contains(&format!("missing {missing}")));
+        assert!(!cmake_log.exists());
+        assert!(!make_log.exists());
+        assert!(!request.reports_root.exists());
+    }
+}
+
+#[test]
 fn rejects_an_unselected_measured_host_tool_before_cmake_starts() {
     let temporary = tempfile::tempdir().unwrap();
     let (mut request, cmake_log, _) = request(temporary.path());
@@ -294,7 +323,7 @@ pub(super) fn request(root: &Path) -> (NativeCompatibilityRequest, PathBuf, Path
     script(
         &upstream.join("configure"),
         &format!(
-            "[ \"$PATH\" != /nonexistent ] || exit 20\n[ \"${{ac_cv_prog_cc_c23+x}}\" = x ] && [ -z \"$ac_cv_prog_cc_c23\" ] || exit 21\ncase \" $* \" in *\" --with-portssources={} \"*) ;; *) exit 22;; esac\npython3 -S -P -c 'import mako, markupsafe'",
+            "[ \"$PATH\" != /nonexistent ] || exit 20\n[ \"${{ac_cv_prog_cc_c23+x}}\" = x ] && [ -z \"$ac_cv_prog_cc_c23\" ] || exit 21\n[ \"$AROS_FETCH_OFFLINE\" = 1 ] || exit 23\ncase \" $* \" in *\" --with-portssources={} \"*) ;; *) exit 22;; esac\npython3 -S -P -c 'import mako, markupsafe'",
             ports_sources.root.display(),
         ),
     );
