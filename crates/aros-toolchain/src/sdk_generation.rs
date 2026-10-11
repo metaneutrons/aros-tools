@@ -1,0 +1,350 @@
+//! Source-bound SDK generation and packaging, without publication authority.
+//!
+//! Only the six-phase native executor can construct a completed generation.
+//! Packaging cannot substitute another identity, SDK root or inventory. All
+//! retained inputs are revalidated; this is local consistency, not authenticated
+//! execution, a concurrent-writer snapshot or release admission.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use aros_common::sdk_manifest::SdkIdentity;
+use aros_common::{
+    publish_atomic_file, sha256_bytes, AtomicFilePolicy, CancellationToken, Sha256Digest,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::compatibility::{
+    derive_native_compatibility_environment_identity_with_epoch,
+    execute_native_compatibility_with_readback, readback_generated_sdk_root,
+    NativeCompatibilityReport, NativeCompatibilityRequest,
+};
+use crate::profiles::Profiles;
+use crate::sdk_package::{self, SdkPackageOutput, SdkPackageRequest, SdkVerificationRequest};
+use crate::sdk_source::VerifiedSdkSource;
+use crate::{canonical, inspection, ContractError};
+
+/// Independent selection for executing and recording one source-owned SDK.
+#[derive(Debug, Clone)]
+pub struct SdkGenerationRequest {
+    /// Previously verified committed source, sealed contract and complete ABI.
+    pub source: VerifiedSdkSource,
+    /// Independently selected native compiler/runtime and disjoint work roots.
+    pub compatibility: NativeCompatibilityRequest,
+    /// Recipe-bound compiler profiles, separate from the SDK source profile.
+    pub profiles: Profiles,
+    /// Absent regular record outside all source, input and execution roots.
+    pub record_path: PathBuf,
+}
+
+/// Opaque completed generation; a descriptor alone cannot construct it.
+#[derive(Debug, Clone)]
+pub struct CompletedSdkGeneration {
+    request: SdkGenerationRequest,
+    report: NativeCompatibilityReport,
+    candidate_root: PathBuf,
+    record: GenerationRecord,
+    record_sha256: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenerationRecord {
+    schema: String,
+    assurance: String,
+    identity: SdkIdentity,
+    source_profile: String,
+    environment_sha256: Sha256Digest,
+    compatibility_receipt_sha256: Sha256Digest,
+    sdk_link_receipt_sha256: Sha256Digest,
+    sdk_inventory_sha256: Sha256Digest,
+    sdk_entries: usize,
+}
+
+impl CompletedSdkGeneration {
+    /// Source-owned identity that actually selected this generation.
+    #[must_use]
+    pub const fn identity(&self) -> &SdkIdentity {
+        &self.record.identity
+    }
+
+    /// Complete inventory from original and independently relocated links.
+    #[must_use]
+    pub const fn tree_sha256(&self) -> &Sha256Digest {
+        &self.record.sdk_inventory_sha256
+    }
+
+    /// Exact no-clobber generation record, not a release attestation.
+    #[must_use]
+    pub fn record_path(&self) -> &Path {
+        &self.request.record_path
+    }
+
+    /// Digest of the closed generation record.
+    #[must_use]
+    pub const fn record_sha256(&self) -> &Sha256Digest {
+        &self.record_sha256
+    }
+
+    /// Recheck source, environment, six phases, four links and record bytes.
+    ///
+    /// # Errors
+    /// Rejects changed inputs or retained evidence; never reruns a build.
+    pub fn revalidate(&self) -> Result<(), ContractError> {
+        validate_selection(&self.request)?;
+        let root = readback_generated_sdk_root(
+            &self.request.compatibility,
+            &self.request.profiles,
+            &self.report,
+        )?;
+        if root != self.candidate_root
+            || generation_record(&self.request, &self.report)? != self.record
+        {
+            return Err(error(
+                "completed SDK generation selection or evidence changed",
+            ));
+        }
+        let bytes = inspection::read(&self.request.record_path)?;
+        if sha256_bytes(&bytes) != self.record_sha256 || bytes != record_bytes(&self.record)? {
+            return Err(error("completed SDK generation record changed"));
+        }
+        self.request.source.revalidate()
+    }
+}
+
+/// Execute the complete native SDK proof with the explicit product epoch.
+///
+/// No source/compiler identity is inferred from another product. Generation
+/// requires the source-v2 ordinary links and family-v2 GNU compiler. Failed
+/// execution roots remain diagnostic evidence; no completed record is emitted.
+///
+/// # Errors
+/// Rejects mismatched selection before execution, incomplete/changed retained
+/// evidence or an occupied record path. Never retries, signs or publishes.
+pub fn generate(
+    request: &SdkGenerationRequest,
+    cancellation: &CancellationToken,
+) -> Result<CompletedSdkGeneration, ContractError> {
+    validate_selection(request)?;
+    let mut request = request.clone();
+    request.record_path = selected_destination(&request, &request.record_path)?;
+    require_absent(&request.record_path)?;
+    let report = execute_native_compatibility_with_readback(
+        &request.compatibility,
+        &request.profiles,
+        cancellation,
+    )?;
+    request.source.revalidate()?;
+    let candidate_root =
+        readback_generated_sdk_root(&request.compatibility, &request.profiles, &report)?;
+    let record = generation_record(&request, &report)?;
+    let bytes = record_bytes(&record)?;
+    let record_sha256 = sha256_bytes(&bytes);
+    require_absent(&request.record_path)?;
+    publish_atomic_file(&request.record_path, &bytes, AtomicFilePolicy::NoClobber)
+        .map_err(|_| error("cannot persist complete SDK generation record"))?;
+    let completed = CompletedSdkGeneration {
+        request,
+        report,
+        candidate_root,
+        record,
+        record_sha256,
+    };
+    completed.revalidate()?;
+    Ok(completed)
+}
+
+/// Package only the exact source-generated and ordinarily linked SDK.
+///
+/// The caller supplies an absent output and forbidden prefixes, never another
+/// product identity, candidate or tree hash. Successful output is read back
+/// against this completed generation; it is not signed or release-admitted.
+///
+/// # Errors
+/// Rejects stale source/evidence, overlapping output, unsafe package bytes or
+/// failed complete package read-back. Published local outputs are retained.
+pub fn package_generated(
+    completed: &CompletedSdkGeneration,
+    output_dir: &Path,
+    forbidden_prefixes: &[PathBuf],
+) -> Result<SdkPackageOutput, ContractError> {
+    completed.revalidate()?;
+    let output_dir = inspection::destination(output_dir)?;
+    if overlaps(&output_dir, &completed.request.record_path) {
+        return Err(error("SDK package output overlaps its generation record"));
+    }
+    let output_dir = selected_destination(&completed.request, &output_dir)?;
+    let output = sdk_package::package(&SdkPackageRequest {
+        candidate_root: completed.candidate_root.clone(),
+        output_dir,
+        identity: completed.identity().clone(),
+        expected_tree_sha256: completed.tree_sha256().clone(),
+        forbidden_prefixes: forbidden_prefixes.to_vec(),
+    })?;
+    completed.revalidate()?;
+    sdk_package::verify(&SdkVerificationRequest {
+        package_dir: output.output_dir.clone(),
+        identity: completed.identity().clone(),
+        expected_tree_sha256: completed.tree_sha256().clone(),
+        expected_archive_sha256: output.archive_sha256.clone(),
+        expected_archive_size: output.archive_size,
+        forbidden_prefixes: forbidden_prefixes.to_vec(),
+    })?;
+    completed.revalidate()?;
+    Ok(output)
+}
+
+fn validate_selection(request: &SdkGenerationRequest) -> Result<(), ContractError> {
+    let identity = request.source.identity();
+    let native = &request.compatibility;
+    // Cheap explicit mismatches must not run source programs or reserve roots.
+    if native.consumer_source_date_epoch != Some(identity.source_date_epoch) {
+        return Err(error(
+            "SDK generation epoch differs from its selected product identity",
+        ));
+    }
+    if native.preparation.source_root != request.source.materialized_source_root()
+        || native.preparation.source_tree_sha256 != identity.source.content_sha256
+    {
+        return Err(error(
+            "SDK generation source differs from its verified committed projection",
+        ));
+    }
+    if native.source_preset.as_deref() != Some(request.source.source_profile().name.as_str()) {
+        return Err(error(
+            "SDK generation preset differs from its verified source profile",
+        ));
+    }
+    let compiler = native.relocation.first.verified.manifest.compiler.as_ref();
+    if compiler.is_none_or(|compiler| compiler.family() != "gnu") {
+        return Err(error(
+            "SDK generation requires a compiler-family-v2 GNU package",
+        ));
+    }
+    request.source.revalidate()
+}
+
+fn generation_record(
+    request: &SdkGenerationRequest,
+    report: &NativeCompatibilityReport,
+) -> Result<GenerationRecord, ContractError> {
+    let sdk = report
+        .native_sdk
+        .as_ref()
+        .ok_or_else(|| error("SDK generation requires four ordinary SDK links"))?;
+    let environment = derive_native_compatibility_environment_identity_with_epoch(
+        &request.compatibility.host_python,
+        &request.compatibility.host_tools,
+        &request.compatibility.host,
+        request.compatibility.consumer_source_date_epoch,
+    )?;
+    Ok(GenerationRecord {
+        schema: "aros-sdk-generation-record-v1".into(),
+        assurance: "local-generation-binding-not-release-admission".into(),
+        identity: request.source.identity().clone(),
+        source_profile: request.source.source_profile().name.clone(),
+        environment_sha256: environment.sdk_environment_sha256,
+        compatibility_receipt_sha256: report.receipt.sha256.clone(),
+        sdk_link_receipt_sha256: sdk.receipt_sha256.clone(),
+        sdk_inventory_sha256: sdk.sdk_inventory_sha256.clone(),
+        sdk_entries: sdk.sdk_entries,
+    })
+}
+
+fn record_bytes(record: &GenerationRecord) -> Result<Vec<u8>, ContractError> {
+    canonical::bytes(
+        &serde_json::to_value(record).map_err(|_| error("cannot encode SDK generation record"))?,
+    )
+}
+
+fn selected_destination(
+    request: &SdkGenerationRequest,
+    path: &Path,
+) -> Result<PathBuf, ContractError> {
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(error("SDK generation output must be an absolute leaf"));
+    }
+    let path = inspection::destination(path)?;
+    let native = &request.compatibility;
+    let mut roots = vec![
+        request.source.original_source_root(),
+        request.source.materialized_source_root(),
+        &native.preparation.engine_root,
+        &native.cmake_build_root,
+        &native.upstream_source_root,
+        &native.upstream_build_root,
+        &native.standalone_output_root,
+        &native.reports_root,
+        &native.relocation.first.root,
+        &native.relocation.second.root,
+        &native.host_tools.root,
+        &native.ports_sources.root,
+    ];
+    roots.extend(
+        native
+            .host_python
+            .import_roots()
+            .iter()
+            .map(PathBuf::as_path),
+    );
+    roots.extend(native.host_generator_cache_root.as_deref());
+    // Programs are regular file leaves, not directories. Protect their parent
+    // namespaces without asking directory resolution to accept a file.
+    roots.extend(
+        native
+            .preparation
+            .helpers
+            .values()
+            .filter_map(|helper| helper.path.parent()),
+    );
+    for root in roots {
+        if overlaps(&path, &inspection::destination(root)?) {
+            return Err(error(
+                "SDK generation output overlaps protected inputs or execution roots",
+            ));
+        }
+    }
+    let mut files = vec![
+        native.cmake_program.as_path(),
+        native.ninja_program.as_path(),
+        native.host_python.interpreter().path.as_path(),
+        native.standalone_fixtures.c.as_path(),
+        native.standalone_fixtures.cxx.as_path(),
+    ];
+    files.extend(
+        native
+            .host_tools
+            .tools
+            .values()
+            .map(|tool| tool.program.as_path()),
+    );
+    for file in files {
+        // These already selected inputs are remeasured by native read-back.
+        // Resolve file leaves separately: `destination` accepts directories,
+        // not existing executable files as a destination ancestor.
+        let file = file
+            .canonicalize()
+            .map_err(|_| error("cannot resolve protected SDK generation file"))?;
+        if !file.is_file() || overlaps(&path, &file) {
+            return Err(error(
+                "SDK generation output overlaps a protected input file",
+            ));
+        }
+    }
+    Ok(path)
+}
+
+fn overlaps(first: &Path, second: &Path) -> bool {
+    first.starts_with(second) || second.starts_with(first)
+}
+
+fn require_absent(path: &Path) -> Result<(), ContractError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(error("SDK generation record must be absent")),
+    }
+}
+
+fn error(message: &str) -> ContractError {
+    ContractError::compatibility(message)
+}

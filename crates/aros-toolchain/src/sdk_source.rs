@@ -41,6 +41,10 @@ pub struct VerifiedSdkSource {
 }
 
 impl VerifiedSdkSource {
+    pub(crate) fn original_source_root(&self) -> &std::path::Path {
+        &self.request.source_root
+    }
+
     /// Exact independently selected SDK product identity.
     #[must_use]
     pub const fn identity(&self) -> &SdkIdentity {

@@ -48,10 +48,39 @@ The library returns an opaque `VerifiedSdkSource` with read-only revalidation;
 CLI JSON states `local-source-binding-not-execution-or-release-admission`.
 
 The identity's epoch is explicit selection, not proof that generation consumed
-it. This source check does not yet join the native execution/link receipts with
-the package stage. That generation/package binding and the release matrix are
-separate remaining producer requirements; source verification alone cannot
-qualify or publish an SDK.
+it. Source verification alone cannot qualify or publish an SDK.
+
+## Bound native generation and package API
+
+`sdk_generation::generate` takes the opaque source selection, independently
+selected native compatibility request and recipe-bound compiler profiles. It
+requires the exact projected source, preset, content digest and explicit SDK
+epoch before execution. The compiler package's source identity remains separate
+from the SDK source identity. A family-v2 GNU compiler and source-v2 ordinary
+SDK links are mandatory.
+
+The adapter runs all six compatibility phases and four original/relocated
+ordinary C/C++ links, then reads back their complete retained evidence. It
+derives the generated SDK root from the validated CMake source binding, never
+from a caller-supplied candidate path. An absent record outside the protected
+source and execution roots binds the SDK identity, source profile, generation
+environment, compatibility/link receipt digests and complete SDK inventory.
+The record uses `aros-sdk-generation-record-v1`; its schema version is independent
+of the SDK artifact version.
+
+Only successful execution returns an opaque `CompletedSdkGeneration`.
+`package_generated` accepts that value, an absent output and forbidden prefixes;
+the caller cannot substitute another candidate, identity or inventory. It
+revalidates the source and retained evidence around packaging and independently
+reads back the complete archive against the generation selection. Changed
+records, SDK bytes, maps, outputs or source inputs fail; diagnostic roots and
+uncertain published local outputs are retained, not repaired.
+
+This is a library orchestration boundary with assurance
+`local-generation-binding-not-release-admission`. The separate local CLI stages
+below retain their byte-consistency claims. Public producer/CLI integration,
+authenticated owning-job evidence, release index and full release qualification
+remain required; neither this record nor its self-hash grants publication rights.
 
 ## Complete local package
 
