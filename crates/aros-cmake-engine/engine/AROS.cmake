@@ -4281,6 +4281,17 @@ function(_aros_generate_module_support out_prefix)
     if(NOT EXISTS "${_conf}")
         message(FATAL_ERROR "${GM_MMAKE_ID}: missing genmodule config ${_conf}")
     endif()
+    file(REAL_PATH "${AROS_SOURCE_DIR}" _source_real)
+    file(REAL_PATH "${_conf}" _config_real)
+    set(_source_real_path "${_source_real}")
+    cmake_path(IS_PREFIX _source_real_path "${_config_real}" NORMALIZE _config_inside)
+    if(NOT _config_inside)
+        message(FATAL_ERROR
+            "${GM_MMAKE_ID}: genmodule config resolves outside the source tree: ${_config_real}")
+    endif()
+    file(RELATIVE_PATH _config_rel "${_source_real}" "${_config_real}")
+    _aros_genmodule_header_validate_relative(
+        "${_config_rel}" "${GM_MMAKE_ID} genmodule config" FALSE)
     string(MAKE_C_IDENTIFIER "${GM_MMAKE_ID}" _override_key)
     get_property(_override GLOBAL PROPERTY
         "AROS_MODULE_CONFIG_OVERRIDE_${_override_key}")
@@ -4300,7 +4311,7 @@ function(_aros_generate_module_support out_prefix)
     set(_stub_dir "${_root}/linklib")
     set(_fd_dir "${_root}/fd")
 
-    set(_opts -c "${_conf}")
+    set(_opts -c "${_config_rel}")
     if(_override)
         list(APPEND _opts -o "${_override}")
     endif()
@@ -4394,6 +4405,7 @@ function(_aros_generate_module_support out_prefix)
             COMMAND "${AROS_HOST_GENMODULE}" ${_opts} -d "${_include_dir}"
                 writeincludes "${GM_TARGET}" "${GM_MODTYPE}"
             ${_publish_commands}
+            WORKING_DIRECTORY "${_source_real}"
             DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs}
             COMMENT "Generating exact ${GM_TARGET}.${GM_MODTYPE} ABI headers"
             VERBATIM)
@@ -4425,6 +4437,7 @@ function(_aros_generate_module_support out_prefix)
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${_gen_dir}"
         COMMAND "${AROS_HOST_GENMODULE}" ${_opts} -d "${_gen_dir}"
             writelibdefs "${GM_TARGET}" "${GM_MODTYPE}"
+        WORKING_DIRECTORY "${_source_real}"
         DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs}
         COMMENT "Generating exact ${GM_TARGET}.${GM_MODTYPE} libdefs"
         VERBATIM)
@@ -4479,6 +4492,7 @@ function(_aros_generate_module_support out_prefix)
         COMMAND "${AROS_HOST_GENMODULE}" ${_opts}
             -d "${_gen_dir}" -l "${_stub_dir}"
             writefiles "${GM_TARGET}" "${GM_MODTYPE}"
+        WORKING_DIRECTORY "${_source_real}"
         DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs} "${_libdefs}"
         COMMENT "Generating ${GM_TARGET}.${GM_MODTYPE} module support sources"
         VERBATIM)
@@ -4510,6 +4524,7 @@ function(_aros_generate_module_support out_prefix)
                 writefd "${GM_TARGET}" "${GM_MODTYPE}"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "${_private_fd}" "${_fd}"
+            WORKING_DIRECTORY "${_source_real}"
             DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs}
             COMMENT "Generating ${GM_TARGET}.${GM_MODTYPE} FD"
             VERBATIM)

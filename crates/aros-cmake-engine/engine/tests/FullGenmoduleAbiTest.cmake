@@ -169,6 +169,17 @@ function(_exercise_publication_roots _mode)
         endforeach()
     endforeach()
 
+    file(READ "${_public_root}/proto/tiff.h" _published_tiff_header)
+    string(FIND "${_published_tiff_header}"
+        "Automatically generated from 'workbench/libs/tiff/tiff.conf'"
+        _relative_config_comment)
+    string(FIND "${_published_tiff_header}" "${AROS_TEST_TREE}"
+        _absolute_source_root)
+    if(_relative_config_comment LESS 0 OR NOT _absolute_source_root LESS 0)
+        message(FATAL_ERROR
+            "${_mode} published header did not retain a source-relative config comment")
+    endif()
+
     execute_process(
         COMMAND "${CMAKE_COMMAND}" --build "${_probe_build}"
             --target publication-root-probe-includes-generated
@@ -327,6 +338,19 @@ foreach(_target archive-native-includes archive-native-genmodfiles)
 endforeach()
 
 set(_archive_output_root "${_archive_probe_build}/SYS/Developer")
+file(READ "${_archive_output_root}/include/proto/tiff.h" _archive_tiff_header)
+file(READ "${_archive_output_root}/SDK/fd/tiff_lib.fd" _archive_tiff_fd)
+foreach(_published_text _archive_tiff_header _archive_tiff_fd)
+    string(FIND "${${_published_text}}"
+        "Automatically generated from 'workbench/libs/tiff/tiff.conf'"
+        _relative_config_comment)
+    string(FIND "${${_published_text}}" "${AROS_TEST_TREE}"
+        _absolute_source_root)
+    if(_relative_config_comment LESS 0 OR NOT _absolute_source_root LESS 0)
+        message(FATAL_ERROR
+            "archive-suppressed SDK publication ${_published_text} has an absolute config comment")
+    endif()
+endforeach()
 file(GLOB _archive_public_protos
     "${_archive_output_root}/include/clib/*_protos.h")
 file(GLOB _archive_public_fds

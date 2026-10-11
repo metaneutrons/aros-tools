@@ -112,6 +112,19 @@ if(NOT _cold_result EQUAL 0)
         "${_cold_stdout}\n${_cold_stderr}")
 endif()
 
+function(_assert_source_relative_config_comment module config)
+    file(READ "${_build}/SDK/include/proto/${module}.h" _generated_header)
+    string(FIND "${_generated_header}"
+        "Automatically generated from '${config}'" _relative_config_comment)
+    string(FIND "${_generated_header}" "${AROS_TEST_TREE}" _absolute_source_root)
+    if(_relative_config_comment LESS 0 OR NOT _absolute_source_root LESS 0)
+        message(FATAL_ERROR
+            "${module} generated header did not retain a source-relative config comment")
+    endif()
+endfunction()
+_assert_source_relative_config_comment(clocksource "rom/kernel/clocksource.conf")
+_assert_source_relative_config_comment(vhi "workbench/libs/vhi/vhi.conf")
+
 set(_expected_stamps
     "${_build}/gen/rom/kernel/.includes-generated"
     "${_build}/gen/workbench/libs/gl/.includes-generated"
