@@ -368,13 +368,10 @@ set(AROS_LLD_BIN "${_aros_cross_root}/bin/ld.lld" CACHE FILEPATH
 
 if(AROS_TARGET_CPU STREQUAL "arm")
     if(AROS_NATIVE_CONSUMER_VALIDATED_GENERIC_SDK)
-        # Generic SDK code-generation choices come only from its sealed
-        # source ABI. Do not guess Cortex-A7 or Neon from the board/CPU
-        # selector; the measured release profile supplies the compiler.
-        foreach(_language IN ITEMS C CXX ASM)
-            string(APPEND CMAKE_${_language}_FLAGS_INIT
-                " -mfloat-abi=${GCC_CONFIG_FLOAT_ABI}")
-        endforeach()
+        # The language-rule hook reconciles ENV and INIT with the sealed
+        # source ABI before cache initialization. Appending here would
+        # duplicate a matching environment flag (or this file's second load).
+        # Do not infer CPU/FPU choices from the board selector either.
     else()
         # Preserve the established release profile for legacy consumers.
         string(APPEND CMAKE_C_FLAGS_INIT " -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard")
