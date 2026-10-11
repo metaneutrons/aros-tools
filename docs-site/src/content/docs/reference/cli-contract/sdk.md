@@ -55,6 +55,11 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros sdk verify-package` | package_dir | `--package-dir` | — | required | 1 |  |  | — |  |
 | `aros sdk verify-package` | archive_sha256 | `--archive-sha256` | — | required | 1 |  |  | — |  |
 | `aros sdk verify-package` | archive_size | `--archive-size` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-source` | identity | `--identity` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-source` | identity_sha256 | `--identity-sha256` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-source` | source_dir | `--source-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-source` | materialized_source_dir | `--materialized-source-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-source` | source_preset | `--source-preset` | — | required | 1 |  |  | — |  |
 
 ## Command notes
 

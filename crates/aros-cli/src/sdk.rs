@@ -12,6 +12,8 @@ const SDK_SELECTION_HELP: &str = "Select either `--release-lock FILE --lock-sha2
 #[derive(Subcommand)]
 /// Local artifact stages and management for a separately identified SDK.
 pub enum SdkCommand {
+    /// Bind SDK identity to an audited committed source projection without building
+    VerifySource(SourceArgs),
     /// Package one source-produced SDK without modifying it or publishing a release
     Package(PackageArgs),
     /// Verify a complete local SDK package against explicit identity and digests
@@ -40,6 +42,7 @@ impl SdkCommand {
     /// Exact operation label for the frontend diagnostic envelope.
     pub const fn diagnostic_mode(&self) -> &'static str {
         match self {
+            Self::VerifySource(_) => "sdk.verify-source",
             Self::Package(_) => "sdk.package",
             Self::VerifyPackage(_) => "sdk.verify-package",
             Self::Extract(_) => "sdk.extract",
@@ -51,6 +54,26 @@ impl SdkCommand {
             Self::Path(_) => "sdk.path",
         }
     }
+}
+
+#[derive(Args)]
+/// Read-only source/ABI verification, not SDK generation or release admission.
+pub struct SourceArgs {
+    /// Independently selected closed SDK product identity JSON
+    #[arg(long, value_name = "FILE")]
+    identity: PathBuf,
+    /// Independently selected SHA-256 of the exact identity document bytes
+    #[arg(long, value_name = "SHA256")]
+    identity_sha256: Sha256Digest,
+    /// Clean original Git checkout, including initialized committed submodules
+    #[arg(long, value_name = "DIR")]
+    source_dir: PathBuf,
+    /// Existing engine-free source projection to compare against raw Git contents
+    #[arg(long, value_name = "DIR")]
+    materialized_source_dir: PathBuf,
+    /// Exact source-owned profile with a sealed v2 native SDK consumer contract
+    #[arg(long, value_name = "NAME")]
+    source_preset: String,
 }
 
 #[derive(Args)]
@@ -118,14 +141,17 @@ fn parse_positive_bytes(value: &str) -> std::result::Result<u64, String> {
 }
 
 fn selected_identity(args: &SelectionArgs) -> Result<SdkIdentity> {
-    let (_, measured) =
-        measure_regular_file_digest_bounded(&args.identity, SDK_MAX_METADATA_BYTES as u64)
-            .into_diagnostic()?;
-    if measured.digest != args.identity_sha256 {
+    read_selected_identity(&args.identity, &args.identity_sha256)
+}
+
+fn read_selected_identity(path: &std::path::Path, expected: &Sha256Digest) -> Result<SdkIdentity> {
+    let (_, measured) = measure_regular_file_digest_bounded(path, SDK_MAX_METADATA_BYTES as u64)
+        .into_diagnostic()?;
+    if &measured.digest != expected {
         miette::bail!("SDK identity document differs from its independently selected SHA-256");
     }
     let mut bytes = Vec::new();
-    open_regular_file_nofollow(&args.identity)
+    open_regular_file_nofollow(path)
         .into_diagnostic()?
         .take(SDK_MAX_METADATA_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
@@ -155,6 +181,7 @@ fn verification(args: &VerifyArgs) -> Result<aros_toolchain::sdk_package::SdkVer
 /// Execute one SDK operation without source discovery or release publication.
 pub async fn run(command: SdkCommand) -> Result<()> {
     match command {
+        SdkCommand::VerifySource(args) => verify_source(args),
         SdkCommand::Download(args) => crate::sdk_managed::download(args).await,
         SdkCommand::Install(args) => crate::sdk_managed::install(args).await,
         SdkCommand::List(args) => crate::sdk_managed::list(args),
@@ -163,6 +190,34 @@ pub async fn run(command: SdkCommand) -> Result<()> {
         SdkCommand::Path(args) => crate::sdk_managed::verify(args, true),
         local => run_local(local),
     }
+}
+
+#[cfg(unix)]
+fn verify_source(args: SourceArgs) -> Result<()> {
+    let identity = read_selected_identity(&args.identity, &args.identity_sha256)?;
+    let verified = aros_toolchain::sdk_source::verify_sdk_source(
+        &aros_toolchain::sdk_source::SdkSourceVerificationRequest {
+            source_root: args.source_dir,
+            materialized_source_root: args.materialized_source_dir,
+            source_preset: args.source_preset,
+            identity,
+        },
+    ).map_err(|error| {
+        let mut diagnostic = error.diagnostics().diagnostics[0].clone();
+        diagnostic.hint = Some("select the exact clean original checkout, its engine-free materialization and sealed source SDK contract; source verification is read-only and does not repair or execute inputs".into());
+        crate::observability::native_diagnostic(diagnostic)
+    })?;
+    read_selected_identity(&args.identity, &args.identity_sha256)?;
+    aros_common::outputln!(
+        "{}",
+        serde_json::json!({
+            "schema":"aros-sdk-source-binding-v2", "operation":"sdk.verify-source",
+            "assurance":"local-source-binding-not-execution-or-release-admission",
+            "identity":verified.identity(), "source_preset":verified.source_profile().name,
+            "materialized_source_dir":verified.materialized_source_root(),
+        })
+    );
+    Ok(())
 }
 
 #[cfg(unix)]

@@ -8,16 +8,19 @@
 //! It never copies an untracked build tree, runs a source-owned program, or
 //! follows source-tree symbolic links.
 
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
-use std::os::unix::fs::{symlink, PermissionsExt as _};
+use std::os::unix::fs::{symlink, MetadataExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use aros_common::{
-    measure_tree_content_cas, publish_prepared_source_tree_noclobber, CancellationToken,
-    Sha256Digest,
+    measure_tree_content_cas, measure_tree_content_cas_bounded, open_regular_file_nofollow,
+    publish_prepared_source_tree_noclobber, sha256_bytes, CancellationToken, Sha256Digest,
+    TreeContentCas, TreeTraversalLimits,
 };
+use rustix::fs::{chmodat, statat, AtFlags, FileType, Mode};
 
 use crate::filesystem::open_directory;
 use crate::inspection::{self, Checkout};
@@ -59,6 +62,156 @@ pub struct EngineFreeSourceOutput {
     pub source_tree: String,
     /// Content-only digest of the materialized engine-free source tree.
     pub source_tree_sha256: Sha256Digest,
+}
+
+/// Read-only verification of an existing engine-free projection against Git.
+#[derive(Debug, Clone)]
+pub struct EngineFreeSourceVerificationRequest {
+    /// Clean original checkout, including initialized committed submodules.
+    pub source_root: PathBuf,
+    /// Independently selected original commit and root Git tree.
+    pub expected_source: CommittedSourceIdentity,
+    /// Existing real directory containing only the normalized source projection.
+    pub materialized_source_root: PathBuf,
+}
+
+/// Bind an existing source projection to exact audited committed Git contents.
+///
+/// Every path, kind, normalized mode and content must equal the materializer's
+/// raw-Git projection. Only the original top-level `cmake/` tree is omitted.
+/// Extra entries (including empty directories), dirty original material and
+/// uninitialized submodules fail. No source program runs and no output is
+/// created. Whole-tree descriptor snapshots bracket the recursive audit.
+///
+/// The returned content digest describes the engine-free projection; the Git
+/// commit/tree describe the complete original checkout. This is local source
+/// consistency, not compiler execution, publisher authentication or release
+/// admission. As with materialization, inputs must be quiescent and owned by
+/// the caller; before/after checks are not hostile-writer isolation.
+///
+/// # Errors
+/// Rejects mismatched identities, unsafe roots or links, source/projection
+/// differences, resource-limit violations and changes during verification.
+pub fn verify_engine_free_source(
+    request: &EngineFreeSourceVerificationRequest,
+) -> Result<EngineFreeSourceOutput, ContractError> {
+    let deadline = Instant::now()
+        .checked_add(MATERIALIZATION_TIMEOUT)
+        .ok_or_else(|| {
+            ContractError::preflight("source verification deadline is not representable")
+        })?;
+    let source_root = inspection::directory(&request.source_root)?;
+    let materialized = inspection::directory(&request.materialized_source_root)?;
+    open_directory(&materialized)
+        .map_err(|_| ContractError::preflight("source projection is not a real directory"))?;
+    if materialized.starts_with(&source_root) || source_root.starts_with(&materialized) {
+        return Err(ContractError::identity(
+            "source projection cannot overlap its original checkout",
+        ));
+    }
+    let (commit, tree) = observed_identity(&source_root, deadline)?;
+    if request.expected_source.commit != commit || request.expected_source.tree != tree {
+        return Err(ContractError::identity(
+            "compatibility source checkout differs from the selected source identity",
+        ));
+    }
+    let checkout = Checkout::inspect(&source_root, (&commit, &tree), deadline)?;
+    let before = source_snapshot(&materialized)?;
+    let mut expected_paths = BTreeSet::new();
+    let mut links = SourceCopy::new(&materialized);
+    let mut budget = Budget::new(deadline);
+    source_audit::visit(&checkout, &mut budget, 0, "", &mut |path, entry, bytes| {
+        if path == "cmake" {
+            if entry.mode != "040000" {
+                return Err(ContractError::identity(
+                    "source top-level cmake entry is not a directory",
+                ));
+            }
+            return Ok(());
+        }
+        if path.starts_with("cmake/") {
+            return Ok(());
+        }
+        if !expected_paths.insert(path.to_owned()) {
+            return Err(ContractError::identity(
+                "source projection contains a duplicate committed path",
+            ));
+        }
+        let matches = match entry.mode {
+            "040000" | "160000" => before.matches_directory(path, 0o755),
+            "100644" | "100755" => {
+                // The materializer creates independent files, never hardlinks.
+                // A content match alone cannot establish that isolation: later
+                // generation must not modify an alias outside this projection.
+                let metadata = open_regular_file_nofollow(&materialized.join(path))
+                    .and_then(|file| file.metadata())
+                    .map_err(|_| {
+                        ContractError::identity("cannot inspect projected regular file")
+                    })?;
+                if metadata.nlink() != 1 {
+                    return Err(ContractError::identity(
+                        "projected regular files must have exactly one link",
+                    )
+                    .source_path(path));
+                }
+                before.matches_regular_file(
+                    path,
+                    if entry.mode == "100755" { 0o755 } else { 0o644 },
+                    &sha256_bytes(bytes),
+                )
+            }
+            "120000" => {
+                let target = std::str::from_utf8(bytes).map(Path::new).map_err(|_| {
+                    ContractError::identity("source projection symbolic-link target is not UTF-8")
+                })?;
+                validate_link_target(Path::new(path), target)?;
+                links.links.push(PathBuf::from(path));
+                before.matches_symbolic_link(path, 0o777, &sha256_bytes(bytes))
+            }
+            _ => {
+                return Err(ContractError::identity(
+                    "source projection has an unsupported Git mode",
+                ))
+            }
+        };
+        if !matches {
+            return Err(ContractError::identity(
+                "source projection differs from raw committed material",
+            )
+            .source_path(path));
+        }
+        Ok(())
+    })?;
+    if before.entry_count() != expected_paths.len() {
+        return Err(ContractError::identity(
+            "source projection contains undeclared entries",
+        ));
+    }
+    links.revalidate_links()?;
+    budget.check(0)?;
+    if before != source_snapshot(&materialized)? {
+        return Err(ContractError::identity(
+            "source projection changed during verification",
+        ));
+    }
+    checkout.recheck()?;
+    Ok(EngineFreeSourceOutput {
+        root: materialized,
+        source_commit: commit.as_str().to_owned(),
+        source_tree: tree.as_str().to_owned(),
+        source_tree_sha256: before.payload_digest_excluding(None),
+    })
+}
+
+fn source_snapshot(root: &Path) -> Result<TreeContentCas, ContractError> {
+    measure_tree_content_cas_bounded(
+        root,
+        TreeTraversalLimits {
+            max_entries: source_audit::MAX_ENTRIES,
+            max_regular_file_bytes: 8 * 1024 * 1024 * 1024,
+        },
+    )
+    .map_err(|_| ContractError::identity("cannot measure bounded engine-free source projection"))
 }
 
 /// Materialize a clean committed AROS source tree without its top-level CMake engine.
@@ -372,7 +525,44 @@ fn write_symlink(
     }
     symlink(target, destination).map_err(|_| {
         ContractError::compatibility("cannot create committed compatibility source symbolic link")
-    })
+    })?;
+    // Darwin derives link permissions from umask; Linux normally fixes them at
+    // 0777. Git stores target bytes, not link permissions. Normalize the newly
+    // created link itself so the source-content identity is host-independent.
+    // Never chmod through the link and accidentally alter its target.
+    let parent = open_directory(parent).map_err(|_| {
+        ContractError::compatibility("cannot open source link parent without following links")
+    })?;
+    let leaf = destination
+        .file_name()
+        .ok_or_else(|| ContractError::compatibility("source symbolic link has no leaf"))?;
+    let inspect = || {
+        statat(&parent, leaf, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| ContractError::compatibility("cannot inspect source symbolic link mode"))
+    };
+    let metadata = inspect()?;
+    if !FileType::from_raw_mode(metadata.st_mode).is_symlink() {
+        return Err(ContractError::compatibility(
+            "source symbolic link changed kind",
+        ));
+    }
+    if metadata.st_mode & 0o7777 != 0o777 {
+        chmodat(
+            &parent,
+            leaf,
+            Mode::from_raw_mode(0o777),
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(|_| ContractError::compatibility("cannot normalize source symbolic link mode"))?;
+    }
+    let metadata = inspect()?;
+    if !FileType::from_raw_mode(metadata.st_mode).is_symlink() || metadata.st_mode & 0o7777 != 0o777
+    {
+        return Err(ContractError::compatibility(
+            "source symbolic link mode is not normalized",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
