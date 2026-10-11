@@ -1,12 +1,19 @@
-# AROS tools
+[![AROS — source, tools and toolchains](https://aros.metaneutrons.cc/social-card.png)](https://aros.metaneutrons.cc/)
+
+# <img src="https://metaneutrons.cc/brand/aros.svg" alt="" width="40" height="40"> AROS tools
+
+**A Rust toolsuite for building, verifying and deploying AROS.**
+
+[Documentation](https://aros.metaneutrons.cc/aros-tools/) ·
+[Installation](https://aros.metaneutrons.cc/aros-tools/getting-started/installation/) ·
+[Command reference](https://aros.metaneutrons.cc/aros-tools/reference/cli/) ·
+[AROS-NX](https://github.com/metaneutrons/AROS-NX) ·
+[Toolchains](https://github.com/metaneutrons/aros-toolchains)
 
 [![Workspace CI](https://github.com/metaneutrons/aros-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/metaneutrons/aros-tools/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/metaneutrons/aros-tools/actions/workflows/codeql.yml/badge.svg)](https://github.com/metaneutrons/aros-tools/actions/workflows/codeql.yml)
 [![Documentation](https://github.com/metaneutrons/aros-tools/actions/workflows/docs.yml/badge.svg)](https://aros.metaneutrons.cc/aros-tools/)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](#license)
-
-**A rigorous, upstream-compatible tool suite for building, verifying, and
-deploying AROS.**
 
 `aros-tools` turns the historically distributed AROS build tooling into a
 reviewable Rust workspace with explicit contracts for source inputs, build
