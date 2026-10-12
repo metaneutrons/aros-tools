@@ -296,6 +296,9 @@ set(AROS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 # This fixture tests source resolution and compiler-object dependencies only.
 # No bootstrap generation or complete SDK qualification is claimed.
 find_program(AROS_GENMODULE_BIN NAMES true PATHS /usr/bin /bin NO_DEFAULT_PATH REQUIRED)
+# This object/archive-only fixture never links a runtime or invokes a collector.
+# Bind its unused collector role explicitly instead of depending on host PATH.
+set(AROS_COLLECT_BIN "${AROS_GENMODULE_BIN}")
 file(MAKE_DIRECTORY "${AROS_SOURCE_DIR}/compiler/include/asm" "${AROS_SOURCE_DIR}/compiler/startup"
     "${AROS_SOURCE_DIR}/compiler/arossupport/include")
 file(WRITE "${AROS_SOURCE_DIR}/compiler/include/asm/cpu.h" "/* Fixture bootstrap header; not SDK evidence. */\n")
