@@ -77,6 +77,7 @@ pub mod repackage;
 pub mod repackage_v2;
 #[cfg(unix)]
 pub mod sdk_generation;
+pub mod sdk_generation_lanes;
 #[cfg(unix)]
 pub mod sdk_package;
 #[cfg(unix)]

@@ -54,6 +54,13 @@ does not perform that authentication. The readback result also does not prove
 all hosts, cross-host SDK reproducibility, the complete release inventory,
 signatures, public downloads or consumer installation.
 
+Complete generation coverage is the input-derived set of SDK product,
+referenced compiler group/profile and active host tuples. One successful host
+does not qualify a host-neutral SDK. Each host's verified SDK package must
+match the same index-bound package identity and archive bytes; generation
+records and compatibility receipts are host-bound and need not be identical.
+This coverage and authenticated transport are not implemented by this command.
+
 Frontend parser and selection counterprobes establish rejection behavior only.
 A complete positive frontend replay against actual retained generation/package
 evidence remains a qualification gate; it must not be inferred from help output
