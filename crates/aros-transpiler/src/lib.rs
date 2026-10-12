@@ -6,6 +6,7 @@ pub mod binary_objects;
 pub mod capability;
 pub mod catalogs;
 pub mod collector;
+mod compile_multi;
 pub mod copy_directories;
 pub mod copy_includes;
 pub mod default_link_set;

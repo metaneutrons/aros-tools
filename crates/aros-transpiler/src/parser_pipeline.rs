@@ -833,7 +833,7 @@ pub(super) fn parse_mmakefile_impl(
             copy_scan.decls.push(declaration);
         }
     }
-    let (literal_object_groups, literal_object_rejections) =
+    let (mut literal_object_groups, literal_object_rejections) =
         crate::literal_objects::collect_from_snapshot(
             &literal_scope,
             dirs,
@@ -842,6 +842,22 @@ pub(super) fn parse_mmakefile_impl(
             Some(&literal_states),
             &literal_joined,
         );
+    let (macro_objects, macro_object_rejections) =
+        crate::compile_multi::collect(&content, &relative_path, root, dirs, target);
+    literal_object_groups.extend(macro_objects);
+    for rejection in macro_object_rejections {
+        // This collector retains physical source lines, not positions in the
+        // expanded native configuration; do not remap its source anchors.
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            (rejection.owner != "<unknown>").then_some(rejection.owner.as_str()),
+            format!(
+                "compile-multi producer is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
     let literal_object_anchors = literal_object_source_anchors(
         root,
         &relative_path,

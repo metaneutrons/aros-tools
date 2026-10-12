@@ -743,6 +743,7 @@ mod tests {
             output: output.into(),
             language: "C".into(),
             arguments: Vec::new(),
+            dependency: None,
             line: 15,
         }
     }

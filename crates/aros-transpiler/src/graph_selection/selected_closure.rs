@@ -542,21 +542,22 @@ impl DependencyGraph {
             .filter(|group| selected.contains(&group.owner))
         {
             for object in &group.objects {
-                let key = object.output.to_ascii_lowercase();
-                if sdk_object_outputs.contains_key(&key) {
-                    return Err(failure(format!(
-                        "selected literal and SDK objects share output {}",
-                        object.output
-                    )));
-                }
-                if let Some((prior_owner, prior)) =
-                    literal_outputs.insert(key, (&group.owner, object))
-                {
-                    if prior != object {
+                for output in object.produced_outputs() {
+                    let key = output.to_ascii_lowercase();
+                    if sdk_object_outputs.contains_key(&key) {
                         return Err(failure(format!(
-                            "selected literal object groups {prior_owner} and {} conflict at {}",
-                            group.owner, object.output
+                            "selected literal and SDK objects share output {output}"
                         )));
+                    }
+                    if let Some((prior_owner, prior)) = literal_outputs.get(&key).copied() {
+                        if prior != object {
+                            return Err(failure(format!(
+                                "selected literal object groups {prior_owner} and {} conflict at {output}",
+                                group.owner
+                            )));
+                        }
+                    } else {
+                        literal_outputs.insert(key, (&group.owner, object));
                     }
                 }
             }

@@ -222,6 +222,7 @@ mod tests {
             output: format!("${{AROS_BUILD_DIR}}/gen/lib/hidd/{name}.o"),
             language: "C".into(),
             arguments: Vec::new(),
+            dependency: None,
             line: 15,
         });
         let mut graph = DependencyGraph::default();

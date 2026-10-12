@@ -1,0 +1,145 @@
+%define fileactionmsg msg= file= elipses=
+	$(Q)$(ECHO) "%(msg)  $(if $(filter /%,%(file)),$(if $(filter $(SRCDIR)/%,$(abspath %(file))),$(patsubst $(SRCDIR)/%,%,$(abspath %(file))),$(patsubst $(TOP)/%,%,$(abspath %(file)))),$(patsubst $(SRCDIR)/%,%,$(abspath $(SRCDIR)/$(CURDIR)/%(file)))) %(elipses)"
+%end
+
+%define compile_q cmd="$(strip $(TARGET_CC) $(TARGET_SYSROOT))" opt="$(strip $(CFLAGS) $(CPPFLAGS))" from="$<" to="$@" incextra="$(TOP)/$(CURDIR)" iquote="$(CFLAGS_IQUOTE)" iquote_end="$(CFLAGS_IQUOTE_END)"
+	%fileactionmsg msg="Compiling" file="%(from)"
+	$(Q)$(IF) %(cmd) %(iquote) $(dir %(from)) %(iquote) %(incextra) %(iquote) $(SRCDIR)/$(CURDIR) %(iquote) . %(iquote_end) %(opt) -D__SRCFILENAME__="\"$(subst $(TOP)/,,$(subst $(SRCDIR)/,,$(abspath %(from))))"\" -c %(from) -o %(to) > $(GENDIR)/cerrors 2>&1 ; then \
+		$(IF) $(TEST) -s $(GENDIR)/cerrors ; then \
+			$(ECHO) "%(from): %(cmd) %(iquote) $(dir %(from)) %(iquote) %(incextra) %(iquote) $(SRCDIR)/$(CURDIR) %(iquote) . %(iquote_end) %(opt) -D__SRCFILENAME__=\"$(subst $(TOP)/,,$(subst $(SRCDIR)/,,$(abspath %(from))))\" -c %(from) -o %(to)" >> $(GENDIR)/errors ; \
+			tee < $(GENDIR)/cerrors -a $(GENDIR)/errors ; \
+		else \
+			$(NOP) ; \
+		fi ; \
+	else \
+		$(ECHO) "Compile failed: %(cmd) %(iquote) $(dir %(from)) %(iquote) %(incextra) %(iquote) $(SRCDIR)/$(CURDIR) %(iquote) . %(iquote_end) %(opt) -D__SRCFILENAME__=\"$(subst $(TOP)/,,$(subst $(SRCDIR)/,,$(abspath %(from))))\" -c %(from) -o %(to)" 1>&2 ; \
+		tee < $(GENDIR)/cerrors -a $(GENDIR)/errors 1>&2 ; \
+		exit 1 ; \
+	fi
+%end
+
+%define mkdepend_q flags="$(strip $(CFLAGS) $(CPPFLAGS))" from=$< to=$@ cc="$(strip $(AROS_CC) $(TARGET_SYSROOT))"
+	%mkdir_q dir="$(dir %(to))"
+	%fileactionmsg msg="Makedepend" file="%(from)" elipses="..."
+	$(Q)AROS_CC="%(cc)" $(MKDEPEND) %(flags) -I$(TOP)/$(CURDIR) -I$(SRCDIR)/$(CURDIR) %(from) -o %(to)
+%end
+
+%define mkdir_q dir=.
+	$(Q)$(IF) $(TEST) ! -d %(dir) ; then $(MKDIR) %(dir) ; else $(NOP) ; fi
+%end
+
+%define include_deps deps=$(DEPS)/M  depstargets=
+ifneq (%(deps),)
+  ifneq (%(depstargets),)
+    ifneq ($(findstring $(TARGET),%(depstargets)),)
+      -include %(deps)
+    endif
+  else
+    ifeq (,$(filter clean% %clean %clean% setup% includes% %setup,$(TARGET)))
+      -include %(deps)
+    endif
+  endif
+endif
+%end
+
+%define rule_compile_multi mmake=TMP basenames=/A cppflags=$(CPPFLAGS) cflags=$(CFLAGS) dflags= srcdir= targetdir= \
+    compiler=target usetree=no incextra="$(TOP)/$(CURDIR)"
+
+ifeq (%(srcdir),)
+%(mmake)_MC_SRCWILDCARD := %
+else
+%(mmake)_MC_SRCWILDCARD := %(srcdir)/%
+endif
+
+ifeq (%(targetdir),)
+%(mmake)_MC_TARGETS := $(addsuffix .o,%(basenames))
+%(mmake)_MC_DTARGETS := $(addsuffix .d,%(basenames))
+%(mmake)_MC_TGTWILDCARD := %
+else
+ifeq (%(usetree),no)
+    %(mmake)_MC_TARGETS := $(addsuffix .o,$(addprefix %(targetdir)/,$(notdir %(basenames))))
+    %(mmake)_MC_DTARGETS := $(addsuffix .d,$(addprefix %(targetdir)/,$(notdir %(basenames))))
+else
+ifeq (%(srcdir),)
+    %(mmake)_MC_TARGETS := $(addsuffix .o,$(addprefix %(targetdir)/,%(basenames)))
+    %(mmake)_MC_DTARGETS := $(addsuffix .d,$(addprefix %(targetdir)/,%(basenames)))
+else
+    %(mmake)_MC_TARGETS := $(addsuffix .o,$(addprefix %(targetdir)/,$(patsubst %(srcdir)/%,%,%(basenames))))
+    %(mmake)_MC_DTARGETS := $(addsuffix .d,$(addprefix %(targetdir)/,$(patsubst %(srcdir)/%,%,%(basenames))))
+endif
+endif
+%(mmake)_MC_TGTWILDCARD := %(targetdir)/%
+
+# Be sure that all .c files are generated
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : | $(addsuffix .c,%(basenames))
+
+# Be sure that all .c files are found
+%(mmake)_MC_SRCDIR := $(shell $(ECHO) $(SRCDIR) | sed 's/^\(.\):\//\/\1\//')
+%(mmake)_MC_BASEDIRS := $(shell $(ECHO) $(sort $(dir %(basenames))) | sed 's/\(.\):\//\/\1\//g')
+%(mmake)_MC_DIRS := $(foreach dir, $(%(mmake)_MC_BASEDIRS), $(if $(filter /%,$(dir)),$(dir),$(%(mmake)_MC_SRCDIR)/$(CURDIR)/$(dir)))
+ifneq ($(%(mmake)_MC_DIRS),)
+    %(mmake)_MC_DIRS := $(shell $(ECHO) $(%(mmake)_MC_DIRS) | sed 's/\(.\):\//\/\1\//g')
+    vpath %.c $(%(mmake)_MC_DIRS)
+endif
+
+endif
+
+%(mmake)_MC_CPPFLAGS := %(cppflags)
+%(mmake)_CFLAGS := %(cflags)
+ifeq (%(dflags),)
+  %(mmake)_DFLAGS := %(cflags)
+else
+  %(mmake)_DFLAGS := %(dflags)
+endif
+
+ifeq ($(findstring %(compiler),host kernel target),)
+  $(error unknown compiler %(compiler))
+endif
+ifeq (%(compiler),target)
+%(mmake)_LINK ?= $(strip $(TARGET_CC) $(TARGET_SYSROOT))
+%(mmake)_LD_OPTS ?= $(TARGET_ISA_LDFLAGS)
+%(mmake)_LDFLAGS ?= $(strip $(TARGET_LDFLAGS))
+%(mmake)_STRIP ?= $(TARGET_STRIP)
+%(mmake)_ASSEMBLER ?= $(strip $(TARGET_CC) $(TARGET_SYSROOT))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : CMD:=$(strip $(TARGET_CC) $(TARGET_SYSROOT))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_MC_CPPFLAGS:=$(strip $(%(mmake)_MC_CPPFLAGS) $(%(mmake)_MC_EXTRA_CPPFLAGS))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_CFLAGS:=$(strip $(%(mmake)_CFLAGS) $(SAFETY_CFLAGS))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_DFLAGS:=$(%(mmake)_DFLAGS)
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_IQUOTE:=$(CFLAGS_IQUOTE)
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_IQUOTE_END:=$(CFLAGS_IQUOTE_END)
+endif
+ifeq (%(compiler),host)
+%(mmake)_LINK ?= $(strip $(HOST_CC))
+%(mmake)_LD_OPTS ?= $(HOST_ISA_LDFLAGS)
+%(mmake)_LDFLAGS ?= $(strip $(HOST_LDFLAGS))
+%(mmake)_STRIP ?= $(HOST_STRIP)
+%(mmake)_ASSEMBLER ?= $(strip $HOST_CC) $(HOST_SYSROOT))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : CMD:=$(HOST_CC)
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_MC_CPPFLAGS:=$(strip $(HOST_MC_CPPFLAGS) $(%(mmake)_MC_CPPFLAGS) $(%(mmake)_MC_EXTRA_CPPFLAGS))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_CFLAGS:=$(strip $(HOST_CFLAGS) $(%(mmake)_CFLAGS))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_DFLAGS:=$(strip $(HOST_CFLAGS) $(%(mmake)_DFLAGS))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_IQUOTE:=$(HOST_IQUOTE)
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_IQUOTE_END:=$(HOST_IQUOTE_END)
+endif
+ifeq (%(compiler),kernel)
+%(mmake)_LINK ?= $(strip $(KERNEL_CC) $(KERNEL_SYSROOT) $(KERNEL_ISA_LDFLAGS))
+%(mmake)_LD_OPTS ?= $(KERNEL_ISA_LDFLAGS)
+%(mmake)_LDFLAGS ?= $(strip $(USER_LDFLAGS) $(KERNEL_LDFLAGS))
+%(mmake)_STRIP ?= $(ECHO) >/dev/null
+%(mmake)_ASSEMBLER ?= $(strip $(KERNEL_CC) $(KERNEL_SYSROOT))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : CMD:=$(strip $(KERNEL_CC) $(KERNEL_SYSROOT))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_MC_CPPFLAGS:=$(strip $(KERNEL_MC_CPPFLAGS) $(%(mmake)_MC_CPPFLAGS) $(%(mmake)_MC_EXTRA_CPPFLAGS))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_CFLAGS:=$(strip $(KERNEL_ISA_CFLAGS) $(KERNEL_CFLAGS) $(%(mmake)_CFLAGS))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_DFLAGS:=$(strip $(KERNEL_ISA_CFLAGS) $(KERNEL_CFLAGS) $(%(mmake)_DFLAGS))
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_IQUOTE:=$(KERNEL_IQUOTE)
+$(%(mmake)_MC_TARGETS) $(%(mmake)_MC_DTARGETS) : %(mmake)_IQUOTE_END:=$(KERNEL_IQUOTE_END)
+endif
+
+$(%(mmake)_MC_TARGETS) : CPPFLAGS := $(%(mmake)_MC_CPPFLAGS)
+$(%(mmake)_MC_TARGETS) : CFLAGS := $(%(mmake)_CFLAGS)
+$(%(mmake)_MC_TARGETS) : $(%(mmake)_MC_TGTWILDCARD).o : $(%(mmake)_MC_SRCWILDCARD).c
+	%compile_q cmd="$(CMD)" iquote="$(%(mmake)_IQUOTE)" iquote_end="$(%(mmake)_IQUOTE_END)" incextra="%(incextra)"
+
+$(%(mmake)_MC_DTARGETS) : $(%(mmake)_MC_TGTWILDCARD).d : $(%(mmake)_MC_SRCWILDCARD).c
+	%mkdepend_q cc="$(CMD)" flags="$(strip $(%(mmake)_DFLAGS) $(%(mmake)_MC_CPPFLAGS))"
+%end

@@ -429,6 +429,7 @@ fn hidd_group(
             output,
             language: "C".into(),
             arguments,
+            dependency: None,
             line: invocation_line + 1,
         });
     }
@@ -467,6 +468,7 @@ fn ordinary_object(
         output: output.to_owned(),
         language: "C".into(),
         arguments,
+        dependency: None,
         line: rule_line + 1,
     })
 }

@@ -19,6 +19,7 @@ fn literal_object_generation_preserves_order_and_shared_ownership() {
         output: "${AROS_BUILD_DIR}/gen/compiler/local/entry.o".into(),
         language: "C".into(),
         arguments: vec!["-DX=1".into(), "-UX".into(), "-DX=2".into(), "-DX=2".into()],
+        dependency: None,
         line: 1,
     };
     let mut graph = DependencyGraph::new();
@@ -44,6 +45,72 @@ fn literal_object_generation_preserves_order_and_shared_ownership() {
     assert!(generate_cmake(&graph).contains("Conflicting literal object ownership"));
     graph.literal_object_groups[1].objects[0] = object.clone();
     graph.literal_object_groups[1].objects[0].output = object.output.to_ascii_uppercase();
+    assert!(generate_cmake(&graph).contains("Conflicting literal object ownership"));
+}
+
+#[test]
+fn source_dependency_generation_precedes_compile_and_keeps_independent_arguments() {
+    use crate::literal_objects::{
+        LiteralDependencyDecl, LiteralObjectDecl, LiteralObjectGroupDecl,
+    };
+    let object = LiteralObjectDecl {
+        source: "${AROS_SOURCE_DIR}/arch/example/unit.c".into(),
+        output: "${AROS_BUILD_DIR}/gen/example/unit.o".into(),
+        language: "C".into(),
+        arguments: vec!["-DCOMPILE_CONTEXT=1".into(), "-O2".into()],
+        dependency: Some(LiteralDependencyDecl {
+            output: "${AROS_BUILD_DIR}/gen/example/unit.d".into(),
+            arguments: vec!["-DDEPENDENCY_CONTEXT=1".into()],
+        }),
+        line: 7,
+    };
+    let mut graph = DependencyGraph::new();
+    for owner in ["unit-all", "unit-quick"] {
+        graph.literal_object_groups.push(LiteralObjectGroupDecl {
+            owner: owner.into(),
+            file: "arch/example/mmakefile.src".into(),
+            line: 6,
+            objects: vec![object.clone()],
+        });
+    }
+    let generated = generate_cmake(&graph);
+    assert_eq!(
+        generated
+            .matches("aros_generate_literal_dependencies(")
+            .count(),
+        1
+    );
+    assert_eq!(generated.matches("aros_compile_literal_object(").count(), 1);
+    let dependency_start = generated
+        .find("aros_generate_literal_dependencies(")
+        .unwrap();
+    let object_start = generated.find("aros_compile_literal_object(").unwrap();
+    assert!(dependency_start < object_start);
+    let dependency_call = &generated[dependency_start..object_start];
+    assert!(dependency_call.contains("OBJECT_OUTPUT \"${AROS_BUILD_DIR}/gen/example/unit.o\""));
+    assert!(dependency_call.contains("\"-DDEPENDENCY_CONTEXT=1\""));
+    assert!(!dependency_call.contains("COMPILE_CONTEXT"));
+    let compile_call = generated[object_start..]
+        .split("aros_literal_object_group(")
+        .next()
+        .unwrap();
+    assert!(
+        compile_call.contains("SOURCE_DEPENDENCY_OUTPUT \"${AROS_BUILD_DIR}/gen/example/unit.d\"")
+    );
+    assert!(compile_call.contains("\"-DCOMPILE_CONTEXT=1\""));
+    assert!(!compile_call.contains("DEPENDENCY_CONTEXT"));
+    graph.literal_object_groups[1].objects[0]
+        .dependency
+        .as_mut()
+        .unwrap()
+        .arguments
+        .push("-DX=1".into());
+    assert!(generate_cmake(&graph).contains("Conflicting literal object ownership"));
+    let mut conflicting = object;
+    conflicting.output = "${AROS_BUILD_DIR}/gen/example/unit.o.o".into();
+    conflicting.dependency.as_mut().unwrap().output =
+        "${AROS_BUILD_DIR}/gen/example/unit.o.d".into();
+    graph.literal_object_groups[1].objects[0] = conflicting;
     assert!(generate_cmake(&graph).contains("Conflicting literal object ownership"));
 }
 

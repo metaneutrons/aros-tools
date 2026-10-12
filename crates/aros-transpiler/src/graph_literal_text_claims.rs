@@ -22,11 +22,15 @@ impl DependencyGraph {
         selected: &BTreeSet<String>,
         context: &crate::TargetContext,
     ) -> Result<(), String> {
-        if !self
+        let has_selected_literal_text = self
             .source_literal_text_rules
             .iter()
-            .any(|rule| selected.contains(&rule.owner))
-        {
+            .any(|rule| selected.contains(&rule.owner));
+        let has_selected_literal_objects = self
+            .literal_object_groups
+            .iter()
+            .any(|group| selected.contains(&group.owner));
+        if !has_selected_literal_text && !has_selected_literal_objects {
             return Ok(());
         }
         let additional = crate::literal_additional_outputs::collect(self, selected);
@@ -42,18 +46,15 @@ impl DependencyGraph {
         for output in selected_concrete_outputs(self, selected) {
             *counts.entry(output_key(&output)).or_default() += 1;
         }
-        for group in &self.sdk_object_groups {
-            if selected.contains(&group.owner) {
-                for object in &group.objects {
-                    *counts.entry(output_key(&object.output)).or_default() += 1;
-                    *counts.entry(output_key(&object.intermediate)).or_default() += 1;
-                }
-            }
-        }
+        let mut literal_object_claims = BTreeMap::<String, usize>::new();
         for group in &self.literal_object_groups {
             if selected.contains(&group.owner) {
                 for object in &group.objects {
-                    *counts.entry(output_key(&object.output)).or_default() += 1;
+                    for output in object.produced_outputs() {
+                        *literal_object_claims
+                            .entry(output_key(&output))
+                            .or_default() += 1;
+                    }
                 }
             }
         }
@@ -142,10 +143,7 @@ impl DependencyGraph {
         // GENMODULE writefiles uses the private engine root
         // <binary>/genmodule/linklibs/<hash>, not <binary>/gen/<source-dir>.
         // It therefore cannot overlap the admitted direct literal outputs.
-        if self
-            .source_literal_text_rules
-            .iter()
-            .any(|rule| selected.contains(&rule.owner))
+        if (has_selected_literal_text || has_selected_literal_objects)
             && counts
                 .keys()
                 .any(|output| output.split('/').any(|component| component == ".."))
@@ -154,6 +152,13 @@ impl DependencyGraph {
             // after CMake expands its absolute path. Do not infer disjointness
             // from a symbolic spelling whose final location is not proved.
             return Err("selected literal text output ownership cannot be proved across unresolved output root traversal".into());
+        }
+        for (output, claims) in &literal_object_claims {
+            if counts.get(output).copied().unwrap_or_default() != *claims {
+                return Err(format!(
+                    "selected literal object output {output} has conflicting concrete file producers"
+                ));
+            }
         }
         for rule in self
             .source_literal_text_rules

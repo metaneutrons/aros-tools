@@ -165,6 +165,19 @@ fn concrete_output_claims(graph: &DependencyGraph) -> Vec<ConcreteOutputClaim> {
                 archive.declaration.output.clone(),
             );
         }
+        for group in &graph.sdk_object_groups {
+            for object in &group.objects {
+                add(&group.owner, object.output.clone());
+                add(&group.owner, object.intermediate.clone());
+            }
+        }
+        for group in &graph.literal_object_groups {
+            for object in &group.objects {
+                for output in object.produced_outputs() {
+                    add(&group.owner, output);
+                }
+            }
+        }
 
         for declaration in &graph.host_header_aggregates {
             for header in &declaration.headers {

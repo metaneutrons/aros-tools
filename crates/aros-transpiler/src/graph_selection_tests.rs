@@ -127,6 +127,7 @@ fn literal_group(owner: &str) -> crate::literal_objects::LiteralObjectGroupDecl 
             output: "${AROS_BUILD_DIR}/gen/compiler/example/entry.o".into(),
             language: "C".into(),
             arguments: vec!["-DX=1".into(), "-UX".into(), "-DX=2".into()],
+            dependency: None,
             line: 1,
         }],
     }
@@ -385,6 +386,49 @@ fn literal_object_groups_refuse_conflicting_kinds_and_outputs() {
     assert!(graph
         .selected_dependency_closure(&["shared".into(), "sdk".into()], &context, &[])
         .is_err());
+}
+
+#[test]
+fn literal_source_dependencies_have_unique_selected_file_ownership() {
+    let mut graph = DependencyGraph::new();
+    let mut group = literal_group("unit");
+    let object = &mut group.objects[0];
+    object.dependency = Some(crate::literal_objects::LiteralDependencyDecl {
+        output: "${AROS_BUILD_DIR}/gen/compiler/example/entry.d".into(),
+        arguments: vec!["-DDEP_CONTEXT=1".into()],
+    });
+    graph.literal_object_groups.push(group);
+    let context = TargetContext::default();
+    assert!(graph
+        .selected_dependency_closure(&["unit".into()], &context, &[])
+        .is_ok());
+    let mut sdk = sdk_group("sdk");
+    sdk.objects[0].intermediate = "${AROS_BUILD_DIR}/gen/compiler/example/entry.d".into();
+    graph.sdk_object_groups.push(sdk);
+    // Unselected writers cannot poison the selected closure.
+    assert!(graph
+        .selected_dependency_closure(&["unit".into()], &context, &[])
+        .is_ok());
+    let error = graph
+        .selected_dependency_closure(&["unit".into(), "sdk".into()], &context, &[])
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("entry.d has conflicting concrete file producers"),
+        "{error}"
+    );
+    graph.sdk_object_groups.clear();
+    let mut other = graph.literal_object_groups[0].clone();
+    other.owner = "other".into();
+    other.objects[0].output = "${AROS_BUILD_DIR}/gen/compiler/example/entry.o.o".into();
+    other.objects[0].dependency.as_mut().unwrap().output =
+        "${AROS_BUILD_DIR}/gen/compiler/example/entry.o.d".into();
+    graph.literal_object_groups.push(other);
+    let error = graph
+        .selected_dependency_closure(&["unit".into(), "other".into()], &context, &[])
+        .unwrap_err();
+    assert!(error.to_string().contains("conflict at"), "{error}");
 }
 
 #[test]

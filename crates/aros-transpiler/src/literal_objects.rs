@@ -13,6 +13,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+#[path = "literal_object_dependencies.rs"]
+mod dependencies;
+pub use dependencies::LiteralDependencyDecl;
+
 const BUILD_GENERATED_ROOT: &str = "${AROS_BUILD_DIR}/gen";
 const SOURCE_ROOT_ALIAS: &str = "${AROS_SOURCE_DIR}";
 const BUILD_ROOT_ALIAS: &str = "${AROS_BUILD_DIR}";
@@ -31,6 +35,9 @@ pub struct LiteralObjectDecl {
     pub language: String,
     /// Ordered compiler arguments, excluding the source, `-c`, and output pair.
     pub arguments: Vec<String>,
+    /// Independently generated, source-included Make dependency sidecar.
+    /// Its arguments are not borrowed from the object's compile command.
+    pub dependency: Option<LiteralDependencyDecl>,
     /// One-based line containing the object rule.
     pub line: usize,
 }
@@ -622,6 +629,7 @@ fn parse_compile_rule(
         output: output.to_owned(),
         language: language.to_owned(),
         arguments,
+        dependency: None,
         line: rule.line + 1,
     })
 }
@@ -741,7 +749,11 @@ fn validate_compile_arguments(
     Ok(arguments)
 }
 
-fn validate_flag_word(word: &str, next: Option<&str>, dirs: &DirVars) -> Result<(), String> {
+pub(crate) fn validate_flag_word(
+    word: &str,
+    next: Option<&str>,
+    dirs: &DirVars,
+) -> Result<(), String> {
     if matches!(word, "-D" | "-U" | "-I") {
         return next.map_or_else(
             || Err(format!("compiler option `{word}` has no value")),
@@ -856,7 +868,11 @@ fn validate_flag_word(word: &str, next: Option<&str>, dirs: &DirVars) -> Result<
     ))
 }
 
-fn validate_flag_value(option: &str, value: &str, _dirs: &DirVars) -> Result<(), String> {
+pub(crate) fn validate_flag_value(
+    option: &str,
+    value: &str,
+    _dirs: &DirVars,
+) -> Result<(), String> {
     match option {
         "-D" => validate_macro(value),
         "-U" => validate_identifier(value).then_some(()).ok_or_else(|| {

@@ -44,6 +44,11 @@ const LINK_Q_SHA256: &str = "3b10e411a1974ff5c0b29b038e9db3a916826ce4abf8b682d17
 
 const MKDEPEND_Q_SHA256: &str = "3e6afefd7813acc49f0c80df32b99f9ae3e0976420f04ffbf6be7872d2ff1c66";
 
+const MKDEP_SCRIPT_SHA256: &str =
+    "b1c53e301d009b32540090f13cca94bdaa0d4ba5ea76ae5edb076ee8a0b9dd11";
+
+const MAX_MKDEP_SCRIPT_BYTES: usize = 64 * 1024;
+
 const MKDIR_Q_SHA256: &str = "9c2abcb165988c8032728270f471abf11fd80b3ac2b3c64841b2b8ff8126c5f9";
 
 const RULE_COMPILE_CXX_MULTI_SHA256: &str =
@@ -122,6 +127,143 @@ type NativeMacroFileParts = (Vec<(String, NativeMacroDefinition)>, Vec<PathBuf>)
 pub(super) struct MacroArgumentSpec {
     pub(super) default: Option<String>,
     pub(super) required: bool,
+}
+
+/// Source-template proof for the two closed GenMF calls needed by a
+/// compile-multi source projection. The parsed arguments remain raw Make
+/// expressions; callers may expand them only in their own invocation scope.
+#[must_use]
+#[derive(Debug)]
+pub struct CompileMultiTemplateContract {
+    compile_multi: MacroContract,
+    include_deps: MacroContract,
+}
+
+impl CompileMultiTemplateContract {
+    /// Reads one bounded, no-follow native template set and verifies the exact
+    /// compile-multi and dependency-include contracts plus the mkdep script.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the source root, template closure, or mkdep script
+    /// cannot be read and verified within the configured bounds.
+    pub(crate) fn read(root: &Path) -> Result<Self, String> {
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|error| format!("could not resolve source root: {error}"))?;
+        let (template, definitions) =
+            read_native_template_set(&canonical_root).ok_or_else(|| {
+                "native Make template set is unavailable or outside its limits".to_owned()
+            })?;
+
+        let compile_multi =
+            verified_macro_contract(&template, "rule_compile_multi", COMPILE_MULTI_SHA256)
+                .ok_or_else(|| {
+                    "rule_compile_multi does not match the trusted source contract".to_owned()
+                })?;
+        if !verified_macro_closure("rule_compile_multi", &definitions) {
+            return Err("rule_compile_multi helper closure is not fully verified".to_owned());
+        }
+
+        let include_deps = verified_macro_contract(&template, "include_deps", INCLUDE_DEPS_SHA256)
+            .ok_or_else(|| "include_deps does not match the trusted source contract".to_owned())?;
+        if !verified_macro_closure("include_deps", &definitions) {
+            return Err("include_deps helper closure is not fully verified".to_owned());
+        }
+
+        verify_mkdep_script(&canonical_root)?;
+        Ok(Self {
+            compile_multi,
+            include_deps,
+        })
+    }
+
+    /// Parses closed GenMF arguments and supplies only verified source
+    /// defaults. Values are returned unevaluated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed arguments, unknown or repeated names, or
+    /// missing required fields.
+    pub(crate) fn arguments(&self, raw: &str) -> Result<BTreeMap<String, String>, String> {
+        closed_contract_arguments(raw, &self.compile_multi)
+    }
+
+    /// Parses closed GenMF arguments for `%include_deps` and supplies only
+    /// verified source defaults. Values are returned unevaluated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed arguments, unknown or repeated names, or
+    /// missing required fields.
+    pub(crate) fn include_arguments(&self, raw: &str) -> Result<BTreeMap<String, String>, String> {
+        closed_contract_arguments(raw, &self.include_deps)
+    }
+}
+
+fn closed_contract_arguments(
+    raw: &str,
+    contract: &MacroContract,
+) -> Result<BTreeMap<String, String>, String> {
+    let supplied = closed_macro_arguments(raw)
+        .ok_or_else(|| "arguments do not match the closed GenMF name=value grammar".to_owned())?;
+    if supplied.keys().any(|key| !contract.contains_key(key)) {
+        return Err("arguments contain a name outside the verified source contract".to_owned());
+    }
+    if contract
+        .iter()
+        .any(|(key, spec)| spec.required && !supplied.contains_key(key))
+    {
+        return Err("arguments omit a required verified source field".to_owned());
+    }
+
+    Ok(contract
+        .iter()
+        .map(|(key, spec)| {
+            (
+                key.clone(),
+                supplied
+                    .get(key)
+                    .cloned()
+                    .or_else(|| spec.default.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect())
+}
+
+fn verify_mkdep_script(root: &Path) -> Result<(), String> {
+    let path = root.join("scripts/mkdep");
+    let mut file = aros_common::open_regular_file_nofollow(&path)
+        .map_err(|error| format!("could not open the source mkdep script safely: {error}"))?;
+    let before = file
+        .metadata()
+        .map_err(|error| format!("could not inspect the source mkdep script: {error}"))?;
+    if !before.is_file() || before.len() > MAX_MKDEP_SCRIPT_BYTES as u64 {
+        return Err("source mkdep script is not a bounded regular file".to_owned());
+    }
+
+    let expected_len = usize::try_from(before.len())
+        .map_err(|_| "source mkdep script size is outside the supported range".to_owned())?;
+    let mut bytes = Vec::with_capacity(expected_len);
+    file.by_ref()
+        .take(MAX_MKDEP_SCRIPT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read the source mkdep script: {error}"))?;
+    let after = file
+        .metadata()
+        .map_err(|error| format!("could not recheck the source mkdep script: {error}"))?;
+    if bytes.len() > MAX_MKDEP_SCRIPT_BYTES
+        || bytes.len() != expected_len
+        || after.len() != before.len()
+        || !after.is_file()
+    {
+        return Err("source mkdep script changed or exceeded its byte limit".to_owned());
+    }
+    if aros_common::sha256_bytes(&bytes).as_str() != MKDEP_SCRIPT_SHA256 {
+        return Err("source mkdep script does not match its trusted raw hash".to_owned());
+    }
+    Ok(())
 }
 
 pub(super) fn verify_native_macros(root: &Path) -> VerifiedMacros {
@@ -569,10 +711,10 @@ fn parse_macro_header(lines: &[&str], start: usize, expected_name: &str) -> Opti
     if name != expected_name || arguments.len() > MAX_MACRO_ARGUMENT_BYTES {
         return None;
     }
-    parse_macro_argument_specs(arguments.trim())
+    parse_macro_argument_specs(arguments.trim(), expected_name == "include_deps")
 }
 
-fn parse_macro_argument_specs(raw: &str) -> Option<MacroContract> {
+fn parse_macro_argument_specs(raw: &str, named_multi: bool) -> Option<MacroContract> {
     let bytes = raw.as_bytes();
     let mut cursor = 0usize;
     let mut specs = MacroContract::new();
@@ -628,9 +770,14 @@ fn parse_macro_argument_specs(raw: &str) -> Option<MacroContract> {
                 value.truncate(value.len() - 2);
                 required = true;
             } else if value.ends_with("/M") {
-                // These four source graph macros have no GenMF multiarg field;
-                // do not approximate its remainder-capture semantics.
-                return None;
+                // The separately verified include-deps contract admits only
+                // fully named arguments. Its /M default is therefore safe to
+                // strip without accepting GenMF's bare remainder capture.
+                // The four source graph macros keep refusing multiarg forms.
+                if !named_multi || key != "deps" {
+                    return None;
+                }
+                value.truncate(value.len() - 2);
             }
         }
         if specs
@@ -824,5 +971,235 @@ mod source_read_tests {
             .unwrap()
             .success());
         assert!(read_included_native_template(root.path(), Path::new("fifo.tmpl")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod compile_multi_contract_tests {
+    use super::*;
+
+    fn fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let fixture_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compile-multi-contract");
+        fs::create_dir(root.path().join("config")).unwrap();
+        fs::create_dir(root.path().join("scripts")).unwrap();
+        fs::copy(
+            fixture_root.join("config/make.tmpl"),
+            root.path().join("config/make.tmpl"),
+        )
+        .unwrap();
+        fs::copy(
+            fixture_root.join("scripts/mkdep"),
+            root.path().join("scripts/mkdep"),
+        )
+        .unwrap();
+        root
+    }
+
+    fn definition(template: &str, name: &str) -> String {
+        let prefix = format!("%define {name}");
+        let lines = template.lines().collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|line| {
+                line.strip_prefix(&prefix)
+                    .is_some_and(|tail| tail.chars().next().is_none_or(char::is_whitespace))
+            })
+            .unwrap();
+        let end = lines[start..]
+            .iter()
+            .position(|line| line.starts_with("%end"))
+            .unwrap()
+            + start;
+        lines[start..=end].join("\n")
+    }
+
+    fn remove_definition(template: &str, name: &str) -> String {
+        let prefix = format!("%define {name}");
+        let lines = template.lines().collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|line| {
+                line.strip_prefix(&prefix)
+                    .is_some_and(|tail| tail.chars().next().is_none_or(char::is_whitespace))
+            })
+            .unwrap();
+        let end = lines[start..]
+            .iter()
+            .position(|line| line.starts_with("%end"))
+            .unwrap()
+            + start;
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| (!(start..=end).contains(&index)).then_some(*line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn reads_verified_templates_and_returns_raw_source_defaults() {
+        let root = fixture();
+        let contract = CompileMultiTemplateContract::read(root.path()).unwrap();
+
+        let arguments = contract.arguments("basenames=alpha.c").unwrap();
+        assert_eq!(arguments.len(), 10);
+        assert_eq!(arguments["mmake"], "TMP");
+        assert_eq!(arguments["basenames"], "alpha.c");
+        assert_eq!(arguments["cppflags"], "$(CPPFLAGS)");
+        assert_eq!(arguments["cflags"], "$(CFLAGS)");
+        assert_eq!(arguments["dflags"], "");
+        assert_eq!(arguments["srcdir"], "");
+        assert_eq!(arguments["targetdir"], "");
+        assert_eq!(arguments["compiler"], "target");
+        assert_eq!(arguments["usetree"], "no");
+        assert_eq!(arguments["incextra"], "$(TOP)/$(CURDIR)");
+
+        let overridden = contract
+            .arguments("basenames=alpha.c cflags=\"$(CUSTOM_CFLAGS)\"")
+            .unwrap();
+        assert_eq!(overridden["cflags"], "$(CUSTOM_CFLAGS)");
+
+        let include_defaults = contract.include_arguments("").unwrap();
+        assert_eq!(include_defaults.len(), 2);
+        assert_eq!(include_defaults["deps"], "$(DEPS)");
+        assert_eq!(include_defaults["depstargets"], "");
+
+        let include_arguments = contract
+            .include_arguments("depstargets=\"$(LOCAL_TARGETS)\"")
+            .unwrap();
+        assert_eq!(include_arguments.len(), 2);
+        assert_eq!(include_arguments["deps"], "$(DEPS)");
+        assert_eq!(include_arguments["depstargets"], "$(LOCAL_TARGETS)");
+    }
+
+    #[test]
+    fn refuses_the_diagnostic_test_fallback_without_source_templates() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_changed_root_helper_include_and_script_contracts() {
+        let root = fixture();
+        let make = root.path().join("config/make.tmpl");
+        let source = fs::read_to_string(&make).unwrap();
+        fs::write(
+            &make,
+            source.replace("%(mmake)_MC_TARGETS", "%(mmake)_MC_TGTCHANGED"),
+        )
+        .unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        let make = root.path().join("config/make.tmpl");
+        let source = fs::read_to_string(&make).unwrap();
+        fs::write(&make, source.replace("Compiling", "Compilinh")).unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        let make = root.path().join("config/make.tmpl");
+        let source = fs::read_to_string(&make).unwrap();
+        fs::write(
+            &make,
+            source.replace("-include %(deps)", "-include %(depstargets)"),
+        )
+        .unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        let script = root.path().join("scripts/mkdep");
+        let mut contents = fs::read(&script).unwrap();
+        contents.push(b'\n');
+        fs::write(&script, contents).unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_and_duplicate_root_or_helper_definitions() {
+        for name in ["rule_compile_multi", "include_deps", "compile_q"] {
+            let root = fixture();
+            let make = root.path().join("config/make.tmpl");
+            let source = fs::read_to_string(&make).unwrap();
+            fs::write(&make, remove_definition(&source, name)).unwrap();
+            assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+        }
+
+        for name in ["rule_compile_multi", "include_deps", "compile_q"] {
+            let root = fixture();
+            let make = root.path().join("config/make.tmpl");
+            let source = fs::read_to_string(&make).unwrap();
+            let duplicate = definition(&source, name);
+            fs::write(&make, format!("{source}\n{duplicate}\n")).unwrap();
+            assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_unknown_duplicate_and_missing_arguments() {
+        let root = fixture();
+        let contract = CompileMultiTemplateContract::read(root.path()).unwrap();
+        for arguments in [
+            "basenames=\"unterminated",
+            "basenames=alpha.c surprise=bad",
+            "cflags=$(CUSTOM_CFLAGS)",
+            "basenames=first.c basenames=second.c",
+        ] {
+            assert!(
+                contract.arguments(arguments).is_err(),
+                "accepted {arguments:?}"
+            );
+        }
+        for arguments in [
+            "deps=one extra=bad",
+            "deps=one deps=two",
+            "deps=\"unterminated",
+            "depstargets=owner unlabelled.d",
+            "deps=one another-unlabelled.d",
+        ] {
+            assert!(
+                contract.include_arguments(arguments).is_err(),
+                "accepted {arguments:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_mkdep_leaf_and_parent_symlinks_fifos_and_oversized_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture();
+        let script = root.path().join("scripts/mkdep");
+        let elsewhere = root.path().join("mkdep-copy");
+        fs::rename(&script, &elsewhere).unwrap();
+        symlink(&elsewhere, &script).unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        let scripts = root.path().join("scripts");
+        let real_scripts = root.path().join("real-scripts");
+        fs::rename(&scripts, &real_scripts).unwrap();
+        symlink(&real_scripts, &scripts).unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        let script = root.path().join("scripts/mkdep");
+        fs::remove_file(&script).unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&script)
+            .status()
+            .unwrap()
+            .success());
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        fs::write(
+            root.path().join("scripts/mkdep"),
+            vec![b'x'; MAX_MKDEP_SCRIPT_BYTES + 1],
+        )
+        .unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
     }
 }
