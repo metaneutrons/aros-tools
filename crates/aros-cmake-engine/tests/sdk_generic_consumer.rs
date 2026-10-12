@@ -1583,6 +1583,62 @@ fn changed_selection_or_contract_after_validation_invalidates_admission() {
 }
 
 #[test]
+fn direct_literal_compiler_roles_revalidate_the_closed_sdk_binding() {
+    // Use the existing closed-response source binding, not a boolean-only
+    // selection double. Compiler metadata remains synthetic in this probe;
+    // real driver/object-format execution is covered by LiteralCompilerRoleTest.
+    const ADAPTER: &str = r#"
+include("${ENGINE}/LiteralCompilerRole.cmake")
+set(AROS_BUILD_DIR "${CMAKE_BINARY_DIR}")
+set(AROS_TARGET_SYSROOT "${CMAKE_BINARY_DIR}/SYS/Developer")
+_aros_native_source_selection_validated(_selected)
+if(NOT _selected)
+    message(FATAL_ERROR "closed SDK binding was not selected")
+endif()
+@BINDING_EDIT@
+_aros_literal_compiler_role_arguments(_arguments C "-DKEEP=1;-mavx" "${_selected}")
+foreach(_required IN ITEMS "--target=x86_64-unknown-aros"
+        -mno-red-zone -fno-pic -fno-pie "--sysroot=${AROS_TARGET_SYSROOT}")
+    if(NOT _required IN_LIST _arguments)
+        message(FATAL_ERROR "direct SDK role omitted ${_required}")
+    endif()
+endforeach()
+"#;
+    for (edit, expected) in [
+        ("", None),
+        (
+            "file(APPEND \"${AROS_NATIVE_CONSUMER_CONTRACT}\" \"changed\")",
+            Some("contract changed after validation"),
+        ),
+        (
+            "set(AROS_TARGET_TRIPLE changed-triple)",
+            Some("AROS_TARGET_TRIPLE changed after validation"),
+        ),
+    ] {
+        let probe = Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
+            .response(DISABLED_CODEGEN_SWITCHES)
+            .compiler();
+        let test_harness = harness(&probe);
+        let path = test_harness.root.join("CMakeLists.txt");
+        let script = fs::read_to_string(&path).unwrap();
+        let anchor = "file(WRITE \"${ROOT}/selected-sdk-root\" \"${_selected_root}\")";
+        assert_eq!(script.matches(anchor).count(), 1);
+        let adapter = ADAPTER.replace("@BINDING_EDIT@", edit);
+        fs::write(
+            &path,
+            script.replace(anchor, &format!("{adapter}\n{anchor}")),
+        )
+        .unwrap();
+        let outcome = configure(&test_harness, false);
+        if let Some(expected) = expected {
+            assert_failure(&outcome, expected);
+        } else {
+            assert_success(&test_harness, &outcome);
+        }
+    }
+}
+
+#[test]
 fn failed_reconfigure_removes_the_previous_binding_and_marker() {
     let probe = Probe::new("x86_64", "x86_64-unknown-aros", "64", "");
     let test_harness = harness(&probe);

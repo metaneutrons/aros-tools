@@ -1,9 +1,10 @@
 include_guard(GLOBAL)
+include("${CMAKE_CURRENT_LIST_DIR}/LiteralCompilerRole.cmake")
 
 # Compile a source whose Make recipe is an audited, finite compiler argv. This
-# deliberately bypasses CMake target compile options: only ARGUMENTS is sent to
-# the selected compiler, in its declared order, followed by the private
-# dependency/output arguments owned here.
+# deliberately bypasses CMake target compile options: ARGUMENTS are sent to
+# the selected compiler in their declared order, followed only by the validated
+# compiler-role options and private dependency/output arguments owned here.
 function(aros_compile_literal_object)
     cmake_parse_arguments(PARSE_ARGV 0 L "" "NAME;SOURCE;OUTPUT;LANGUAGE;OUTPUT_MODE" "ARGUMENTS")
     if(L_UNPARSED_ARGUMENTS OR L_KEYWORDS_MISSING_VALUES)
@@ -124,6 +125,7 @@ function(aros_compile_literal_object)
         -fno-data-sections -fno-use-cxa-atexit -fno-threadsafe-statics
         -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-ident
         -fPIC -fpic -fPIE -fpie -fno-PIC -fno-pic -fno-PIE -fno-pie
+        -mavx
         -nostdinc -nostdinc++)
 
     set(expect_path_for "")
@@ -243,6 +245,9 @@ function(aros_compile_literal_object)
         message(FATAL_ERROR
             "Literal object: native source selection validator is required")
     endif()
+    _aros_literal_compiler_role_arguments(_compiler_role_arguments
+        "${L_LANGUAGE}" "${L_ARGUMENTS}" "${_native_source_selected}")
+    list(APPEND command_arguments ${_compiler_role_arguments})
     if(_native_source_selected)
         foreach(_include IN ITEMS AROS_GENINC_DIR AROS_SDK_INCLUDE_DIR)
             if(NOT DEFINED ${_include} OR "${${_include}}" STREQUAL "" OR

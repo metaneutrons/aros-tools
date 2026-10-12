@@ -71,6 +71,16 @@ if(NOT LITERAL_CASE STREQUAL "native-missing-helper")
     endfunction()
 endif()
 
+if(LITERAL_CASE STREQUAL "native-build-includes" OR
+   LITERAL_CASE STREQUAL "native-consumer-includes")
+    # These header-only admission fixtures do not configure a target ABI.
+    # Compiler-role execution and rejection are covered independently by
+    # LiteralCompilerRoleTest; do not claim this double validates that role.
+    function(_aros_literal_compiler_role_arguments out_arguments)
+        set(${out_arguments} "" PARENT_SCOPE)
+    endfunction()
+endif()
+
 set(_source "${AROS_SOURCE_DIR}/src/main.c")
 set(_cpp_source "${AROS_SOURCE_DIR}/src/helper.cpp")
 if(LITERAL_CASE STREQUAL "native-build-includes" OR

@@ -857,6 +857,11 @@ fn literal_objects_preserve_command_order_and_refuse_unsafe_outputs() {
 }
 
 #[test]
+fn literal_objects_preserve_selected_cross_compiler_roles() {
+    run_embedded_kobj_contract_test("LiteralCompilerRoleTest.cmake");
+}
+
+#[test]
 fn demos_images_are_generated_before_their_consumer_compiles() {
     let directory = tempfile::tempdir().expect("temp dir");
     let engine = directory.path().join("engine");

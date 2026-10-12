@@ -138,6 +138,10 @@ object outputs. The native compiler command preserves the source's ordered
 arguments, including repeated flag lanes; it does not inject CMake global
 flags. Bound configuration supplies the source-owned flags and fresh native
 Developer sysroot. Unknown flags, unmodelled commands and unsafe paths fail.
+Direct compiler calls preserve the selected language driver's target and
+validated SDK ABI options separately from those source arguments. A conflicting
+target, ABI or Developer sysroot is rejected; arbitrary `CMAKE_<LANG>_FLAGS`
+are not imported.
 
 Archive, HIDD-compile and layered-header projections may appear in the graph
 audit before their full producer contracts are implemented. These partial

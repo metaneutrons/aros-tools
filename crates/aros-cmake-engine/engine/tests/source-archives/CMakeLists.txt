@@ -58,6 +58,14 @@ set(AROS_DEVELOPER_INCLUDE_DIR "${CMAKE_BINARY_DIR}/SYS/Developer/include")
 aros_resolve_sdk_include_root(AROS_SDK_INCLUDE_DIR)
 set(one "${CMAKE_BINARY_DIR}/gen/objects/one.o")
 set(two "${CMAKE_BINARY_DIR}/gen/objects/two.o")
+# This fixture validates archive ownership/source freshness with host objects,
+# not a native compiler ABI. Its binding helper intentionally has no selected
+# compiler facts. Isolate only the role adapter; the real source-selection
+# checks before each object/archive still run, including all stale-binding
+# counter-probes. Real GNU/LLVM roles have separate compiler/ELF probes.
+function(_aros_literal_compiler_role_arguments out_arguments)
+    set(${out_arguments} "" PARENT_SCOPE)
+endfunction()
 aros_compile_literal_object(NAME one SOURCE "${AROS_SOURCE_DIR}/one.c" OUTPUT "${one}" LANGUAGE C)
 aros_compile_literal_object(NAME two SOURCE "${AROS_SOURCE_DIR}/two.c" OUTPUT "${two}" LANGUAGE C)
 set(objects "${two}" "${one}")
