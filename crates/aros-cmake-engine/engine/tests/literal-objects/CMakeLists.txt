@@ -87,19 +87,25 @@ if(LITERAL_CASE STREQUAL "native-build-includes" OR
    LITERAL_CASE STREQUAL "native-consumer-includes")
     file(MAKE_DIRECTORY
         "${AROS_GENINC_DIR}"
+        "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
         "${AROS_SDK_INCLUDE_DIR}/aros/stdc"
         "${AROS_SDK_INCLUDE_DIR}")
     file(WRITE "${AROS_GENINC_DIR}/literal-generated-only.h"
         "#define LITERAL_GEN_VALUE 17\n")
+    file(WRITE "${AROS_SDK_INCLUDE_DIR}/aros/posixc/literal-namespace.h"
+        "#define LITERAL_NAMESPACE_VALUE 41\n")
+    file(WRITE "${AROS_SDK_INCLUDE_DIR}/aros/stdc/literal-namespace.h"
+        "#error POSIX namespace must precede stdc for default native compilation\n")
     file(WRITE "${AROS_SDK_INCLUDE_DIR}/aros/stdc/literal-aros-stdc-only.h"
         "#define LITERAL_STDC_VALUE 23\n")
     file(WRITE "${AROS_SDK_INCLUDE_DIR}/literal-sdk-only.h"
         "#define LITERAL_SDK_VALUE 31\n")
     file(WRITE "${_source}" [=[
 #include <literal-generated-only.h>
+#include <literal-namespace.h>
 #include <literal-aros-stdc-only.h>
 #include <literal-sdk-only.h>
-#if LITERAL_GEN_VALUE != 17 || LITERAL_STDC_VALUE != 23 || LITERAL_SDK_VALUE != 31
+#if LITERAL_GEN_VALUE != 17 || LITERAL_STDC_VALUE != 23 || LITERAL_SDK_VALUE != 31 || LITERAL_NAMESPACE_VALUE != 41
 #error "native generated SDK include roots are required"
 #endif
 int literal_c_value(void)
@@ -109,9 +115,10 @@ int literal_c_value(void)
 ]=])
     file(WRITE "${_cpp_source}" [=[
 #include <literal-generated-only.h>
+#include <literal-namespace.h>
 #include <literal-aros-stdc-only.h>
 #include <literal-sdk-only.h>
-#if LITERAL_GEN_VALUE != 17 || LITERAL_STDC_VALUE != 23 || LITERAL_SDK_VALUE != 31
+#if LITERAL_GEN_VALUE != 17 || LITERAL_STDC_VALUE != 23 || LITERAL_SDK_VALUE != 31 || LITERAL_NAMESPACE_VALUE != 41
 #error "native generated SDK include roots are required"
 #endif
 extern "C" int literal_cpp_value()

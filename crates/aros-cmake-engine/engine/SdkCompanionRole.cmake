@@ -64,7 +64,7 @@ function(_aros_sdk_companion_role out_options out_library out_class out_machine 
         endif()
     endforeach()
     _aros_literal_native_sysroot_arguments(sysroot "${source_arguments}")
-    list(APPEND options ${sysroot})
+    list(APPEND options -nostdlibinc ${sysroot})
     set(${out_options} "${options}" PARENT_SCOPE)
     set(${out_library} "${library}" PARENT_SCOPE)
     set(${out_class} "${class}" PARENT_SCOPE)

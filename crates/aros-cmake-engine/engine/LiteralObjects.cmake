@@ -448,8 +448,14 @@ function(aros_compile_literal_object)
             _aros_literal_check_declared_path("${${_include}}"
                 "${source_root}" "${build_root}" "${source_directory}" "-I")
         endforeach()
+        list(APPEND command_arguments "-I${AROS_GENINC_DIR}")
+        # Match the ordinary target's default header namespace. Startup and
+        # source-owned literal rules need POSIX declarations unless their
+        # compile contract explicitly disables this namespace.
+        if(NOT "-noposixc" IN_LIST L_ARGUMENTS)
+            list(APPEND command_arguments "-I${AROS_SDK_INCLUDE_DIR}/aros/posixc")
+        endif()
         list(APPEND command_arguments
-            "-I${AROS_GENINC_DIR}"
             "-I${AROS_SDK_INCLUDE_DIR}/aros/stdc"
             "-I${AROS_SDK_INCLUDE_DIR}")
     endif()

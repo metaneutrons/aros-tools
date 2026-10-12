@@ -127,6 +127,9 @@ endforeach()
 if("-march=x86-64" IN_LIST _sdk_role_options)
     message(FATAL_ERROR "SDK role adapter duplicated an explicitly supplied ABI option")
 endif()
+if(NOT "-nostdlibinc" IN_LIST _sdk_role_options)
+    message(FATAL_ERROR "SDK literal role must retain only explicit C-library header roots")
+endif()
 
 set(AROS_BUILD_DIR "${_test_binary_dir}")
 set(AROS_TARGET_SYSROOT "${AROS_BUILD_DIR}/SYS/Developer")
@@ -398,6 +401,7 @@ if(native_sdk)
     foreach(_command IN LISTS _commands)
         file(READ "${_command}" _contents)
         foreach(_abi IN ITEMS -march=i386 -mno-red-zone -fno-pic -fno-pie
+                -nostdlibinc
                 "--sysroot=${_build}/declared-build/SYS/Developer")
             string(FIND "${_contents}" "${_abi}]==]" _found)
             if(_found LESS 0)

@@ -110,7 +110,7 @@ function(_literal_assert_native_roots build_dir label should_include)
     endif()
     foreach(_command IN LISTS _commands)
         file(READ "${_command}" _contents)
-        foreach(_root GENINCDIR "${_sdk}/aros/stdc" "${_sdk}")
+        foreach(_root GENINCDIR "${_sdk}/aros/posixc" "${_sdk}/aros/stdc" "${_sdk}")
             string(FIND "${_contents}"
                 "-I${build_dir}/declared-build/${_root}]==]" _found)
             if(should_include AND _found LESS 0)

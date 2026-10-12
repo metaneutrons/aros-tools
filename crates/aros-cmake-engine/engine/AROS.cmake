@@ -552,11 +552,15 @@ add_compile_options(
 # The generated trees come first. Search the POSIX and standard-C namespaces
 # before the shared SDK root unless the compile declaration disables POSIX.
 # GNU AROS specs inject these namespaces as -idirafter paths, while the common
-# SDK root is a built-in system directory. GCC discards -I entries duplicating
-# system directories: ordinary includes therefore cannot express this order.
-# Explicit -isystem namespaces precede the built-in SDK root. Bare LLVM has no
-# such specs; retain ordinary includes there so the namespaces precede its
-# ordinary SDK -I root. Do not change private/generated directory precedence.
+# SDK root is a built-in system directory. Clang 11's AROS driver also reports
+# the sysroot namespaces as built-in system directories and discards explicit
+# duplicate -I entries, retaining the root-first order. A source-validated SDK
+# consumer therefore disables only those implicit standard include paths;
+# the explicit namespace and SDK roots below remain the complete authority.
+# -nostdlibinc leaves Clang's resource headers available, unlike -nostdinc.
+# Keep this internal to the validated LLVM SDK source contract: public toolchain
+# defaults, GNU specs, legacy builds, and native core builds retain their normal
+# driver search paths. Do not change private/generated directory precedence.
 #
 # The historic build has no -I into the source tree at all: compiler/include
 # is staged into the SDK by %copy_includes, and genmodule then writes over what
@@ -564,25 +568,50 @@ add_compile_options(
 # compiler/include ahead of the SDK inverted that, and the hand-written
 # clib/input_protos.h -- which predates genmodule and still declares
 # PeekQualifier through AROS_LP0 -- shadowed the generated one.
-set(AROS_DEFAULT_POSIXC_INCLUDE
-    "$<$<NOT:$<BOOL:$<TARGET_PROPERTY:AROS_NO_POSIXC_HEADERS>>>:${AROS_SDK_INCLUDE_DIR}/aros/posixc>")
-if(AROS_TOOLCHAIN STREQUAL "gnu")
-    include_directories(SYSTEM
-        "${AROS_DEFAULT_POSIXC_INCLUDE}"
-        "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
-    set(_aros_default_namespace_includes "")
-else()
-    set(_aros_default_namespace_includes
-        "${AROS_DEFAULT_POSIXC_INCLUDE}"
-        "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
-endif()
-include_directories(
-    "${AROS_GENINC_DIR}"
-    ${_aros_default_namespace_includes}
-    "${AROS_SDK_INCLUDE_DIR}"
-    "${AROS_SOURCE_DIR}/compiler/include"
-    "${AROS_SOURCE_DIR}/arch/all-native/include"
-)
+function(_aros_configure_default_sdk_header_context)
+    set(_aros_sdk_header_authority FALSE)
+    if(AROS_TOOLCHAIN STREQUAL "llvm" AND
+       (AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED))
+        if(NOT COMMAND _aros_native_source_selection_validated)
+            message(FATAL_ERROR
+                "SDK header search order cannot verify the native consumer selection")
+        endif()
+        _aros_native_source_selection_validated(_aros_source_selected)
+        get_property(_aros_consumer_schema GLOBAL PROPERTY
+            AROS_NATIVE_CONSUMER_VALIDATED_SCHEMA)
+        if(_aros_source_selected AND
+           _aros_consumer_schema STREQUAL "aros-sdk-consumer-validation-v1")
+            set(_aros_sdk_header_authority TRUE)
+        endif()
+    endif()
+
+    if(_aros_sdk_header_authority)
+        add_compile_options(-nostdlibinc)
+    endif()
+
+    set(AROS_DEFAULT_POSIXC_INCLUDE
+        "$<$<NOT:$<BOOL:$<TARGET_PROPERTY:AROS_NO_POSIXC_HEADERS>>>:${AROS_SDK_INCLUDE_DIR}/aros/posixc>")
+    set(AROS_DEFAULT_POSIXC_INCLUDE "${AROS_DEFAULT_POSIXC_INCLUDE}" PARENT_SCOPE)
+    if(AROS_TOOLCHAIN STREQUAL "gnu")
+        include_directories(SYSTEM
+            "${AROS_DEFAULT_POSIXC_INCLUDE}"
+            "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
+        set(_aros_default_namespace_includes "")
+    else()
+        set(_aros_default_namespace_includes
+            "${AROS_DEFAULT_POSIXC_INCLUDE}"
+            "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
+    endif()
+    include_directories(
+        "${AROS_GENINC_DIR}"
+        ${_aros_default_namespace_includes}
+        "${AROS_SDK_INCLUDE_DIR}"
+        "${AROS_SOURCE_DIR}/compiler/include"
+        "${AROS_SOURCE_DIR}/arch/all-native/include"
+    )
+endfunction()
+
+_aros_configure_default_sdk_header_context()
 
 # Closed local-source runners for the audited `%build_with_configure`
 # capabilities.  Kept in a separate module because the implementation also

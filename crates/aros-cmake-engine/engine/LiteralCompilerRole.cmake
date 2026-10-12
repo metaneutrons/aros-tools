@@ -132,7 +132,9 @@ function(_aros_literal_sdk_role_options out_options language source_arguments)
     _aros_sdk_reconcile_float_abi(_with_float_abi
         "${_role_flags_text}" "${language}" TRUE)
 
-    set(_options ${_missing_options})
+    # The engine supplies source-bound SDK namespaces explicitly. Disable
+    # driver-injected C-library search roots, but retain compiler resources.
+    set(_options -nostdlibinc ${_missing_options})
     if(NOT _with_float_abi STREQUAL _role_flags_text)
         get_property(_float_abi GLOBAL PROPERTY AROS_SDK_CONSUMER_VALIDATED_FLOAT_ABI)
         if(NOT _float_abi STREQUAL "")
