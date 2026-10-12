@@ -132,6 +132,24 @@ endif()
 if(NOT DEFINED OUTPUT_MODE)
     set(OUTPUT_MODE OBJECT)
 endif()
+set(source_dependency_output "")
+if(DEFINED SOURCE_DEPENDENCY_OUTPUT)
+    if(NOT OUTPUT_MODE STREQUAL "OBJECT")
+        message(FATAL_ERROR
+            "Literal object runner: SOURCE_DEPENDENCY_OUTPUT is only valid for OBJECT")
+    endif()
+    if("${SOURCE_DEPENDENCY_OUTPUT}" STREQUAL "")
+        message(FATAL_ERROR
+            "Literal object runner: SOURCE_DEPENDENCY_OUTPUT requires one absolute path")
+    endif()
+    if(NOT IS_ABSOLUTE "${SOURCE_DEPENDENCY_OUTPUT}" OR
+       "${SOURCE_DEPENDENCY_OUTPUT}" MATCHES "[;\n\r$]")
+        message(FATAL_ERROR
+            "Literal object runner: source dependency output must be one safe absolute path")
+    endif()
+    cmake_path(ABSOLUTE_PATH SOURCE_DEPENDENCY_OUTPUT NORMALIZE
+        OUTPUT_VARIABLE source_dependency_output)
+endif()
 if(OUTPUT_MODE STREQUAL "OBJECT")
     set(output_extension "o")
     set(compile_mode "-c")
@@ -141,16 +159,18 @@ elseif(OUTPUT_MODE STREQUAL "ASSEMBLY" AND LANGUAGE STREQUAL "C")
 elseif(OUTPUT_MODE STREQUAL "DEPENDENCIES")
     set(output_extension "d")
     if(NOT DEFINED DEPENDENCY_TARGET_OUTPUT OR
-       "${DEPENDENCY_TARGET_OUTPUT}" STREQUAL "" OR DEFINED DEPFILE)
+       "${DEPENDENCY_TARGET_OUTPUT}" STREQUAL "" OR
+       NOT DEFINED DEPENDENCY_TRACKER_FILE OR
+       "${DEPENDENCY_TRACKER_FILE}" STREQUAL "" OR DEFINED DEPFILE)
         message(FATAL_ERROR
-            "Literal object runner: dependency mode requires only DEPENDENCY_TARGET_OUTPUT")
+            "Literal object runner: dependency mode requires DEPENDENCY_TARGET_OUTPUT and DEPENDENCY_TRACKER_FILE")
     endif()
 else()
     message(FATAL_ERROR "Literal object runner received invalid output mode")
 endif()
 if(NOT OUTPUT_MODE STREQUAL "DEPENDENCIES" AND
    (NOT DEFINED DEPFILE OR "${DEPFILE}" STREQUAL "" OR
-    DEFINED DEPENDENCY_TARGET_OUTPUT))
+    DEFINED DEPENDENCY_TARGET_OUTPUT OR DEFINED DEPENDENCY_TRACKER_FILE))
     message(FATAL_ERROR "Literal object runner requires one ordinary DEPFILE")
 endif()
 
@@ -162,8 +182,11 @@ _aros_literal_runner_assert_regular("${COMPILER}" "compiler driver" TRUE)
 if(NOT IS_ABSOLUTE "${SOURCE}" OR NOT IS_ABSOLUTE "${OUTPUT}" OR
    NOT IS_ABSOLUTE "${COMPILER}" OR NOT IS_ABSOLUTE "${SOURCE_DIRECTORY}" OR
    (NOT OUTPUT_MODE STREQUAL "DEPENDENCIES" AND NOT IS_ABSOLUTE "${DEPFILE}") OR
+   (NOT source_dependency_output STREQUAL "" AND
+    NOT IS_ABSOLUTE "${source_dependency_output}") OR
    (OUTPUT_MODE STREQUAL "DEPENDENCIES" AND
-    NOT IS_ABSOLUTE "${DEPENDENCY_TARGET_OUTPUT}"))
+    (NOT IS_ABSOLUTE "${DEPENDENCY_TARGET_OUTPUT}" OR
+     NOT IS_ABSOLUTE "${DEPENDENCY_TRACKER_FILE}")))
     message(FATAL_ERROR "Literal object runner paths must be absolute")
 endif()
 cmake_path(ABSOLUTE_PATH SOURCE NORMALIZE OUTPUT_VARIABLE SOURCE)
@@ -173,6 +196,8 @@ if(NOT OUTPUT_MODE STREQUAL "DEPENDENCIES")
 else()
     cmake_path(ABSOLUTE_PATH DEPENDENCY_TARGET_OUTPUT NORMALIZE
         OUTPUT_VARIABLE DEPENDENCY_TARGET_OUTPUT)
+    cmake_path(ABSOLUTE_PATH DEPENDENCY_TRACKER_FILE NORMALIZE
+        OUTPUT_VARIABLE DEPENDENCY_TRACKER_FILE)
 endif()
 cmake_path(ABSOLUTE_PATH SOURCE_DIRECTORY NORMALIZE OUTPUT_VARIABLE SOURCE_DIRECTORY)
 cmake_path(IS_PREFIX SOURCE_ROOT "${SOURCE}" NORMALIZE source_inside)
@@ -211,9 +236,36 @@ if(OUTPUT_MODE STREQUAL "DEPENDENCIES")
         message(FATAL_ERROR
             "Literal object runner received an invalid dependency output/target pair")
     endif()
+    string(SHA256 dependency_tracker_key "${OUTPUT}")
+    set(expected_dependency_tracker_file
+        "${command_root}/CMakeFiles/aros-literal-dependency-tracker-${dependency_tracker_key}.d")
+    if(NOT DEPENDENCY_TRACKER_FILE STREQUAL expected_dependency_tracker_file)
+        message(FATAL_ERROR
+            "Literal object runner received an invalid dependency tracker role")
+    endif()
+    _aros_literal_runner_check_path(
+        "${DEPENDENCY_TRACKER_FILE}" "${command_root}" "dependency tracker")
+    _aros_literal_runner_optional_regular(
+        "${DEPENDENCY_TRACKER_FILE}" "dependency tracker")
 else()
     if(NOT depfile_in_build OR NOT DEPFILE STREQUAL "${OUTPUT}.d")
         message(FATAL_ERROR "Literal object runner received invalid dependency output role")
+    endif()
+endif()
+if(NOT source_dependency_output STREQUAL "")
+    string(REGEX REPLACE "[.]o$" ".d" expected_source_dependency_output "${OUTPUT}")
+    if(NOT source_dependency_output STREQUAL expected_source_dependency_output)
+        message(FATAL_ERROR
+            "Literal object runner received an invalid source dependency output/object pair")
+    endif()
+    cmake_path(IS_PREFIX BUILD_ROOT "${source_dependency_output}" NORMALIZE
+        source_dependency_in_build)
+    cmake_path(IS_PREFIX gen_root "${source_dependency_output}" NORMALIZE
+        source_dependency_in_gen)
+    if(NOT source_dependency_in_build OR NOT source_dependency_in_gen OR
+       source_dependency_output STREQUAL gen_root)
+        message(FATAL_ERROR
+            "Literal object runner received a source dependency output outside build gen")
     endif()
 endif()
 
@@ -231,6 +283,12 @@ else()
     _aros_literal_runner_check_path("${DEPFILE}" "${BUILD_ROOT}" "dependency output")
     _aros_literal_runner_optional_regular("${OUTPUT}" "object output")
     _aros_literal_runner_optional_regular("${DEPFILE}" "dependency output")
+    if(NOT source_dependency_output STREQUAL "")
+        _aros_literal_runner_check_path(
+            "${source_dependency_output}" "${BUILD_ROOT}" "source dependency output")
+        _aros_literal_runner_optional_regular(
+            "${source_dependency_output}" "source dependency output")
+    endif()
 endif()
 
 set(expect_path_for "")
@@ -262,17 +320,38 @@ if(OUTPUT_MODE STREQUAL "DEPENDENCIES")
     _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "dependency output")
     _aros_literal_runner_check_path("${DEPENDENCY_TARGET_OUTPUT}" "${BUILD_ROOT}"
         "dependency target output")
+    _aros_literal_runner_check_path(
+        "${DEPENDENCY_TRACKER_FILE}" "${command_root}" "dependency tracker")
 else()
     _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "object output")
     _aros_literal_runner_check_path("${DEPFILE}" "${BUILD_ROOT}" "dependency output")
+    if(NOT source_dependency_output STREQUAL "")
+        _aros_literal_runner_check_path(
+            "${source_dependency_output}" "${BUILD_ROOT}" "source dependency output")
+        _aros_literal_runner_optional_regular(
+            "${source_dependency_output}" "source dependency output")
+        if(NOT EXISTS "${source_dependency_output}")
+            message(FATAL_ERROR
+                "Literal object runner: source dependency output is missing: ${source_dependency_output}")
+        endif()
+        file(SIZE "${source_dependency_output}" source_dependency_size)
+        if(source_dependency_size GREATER 4194304)
+            message(FATAL_ERROR
+                "Literal object runner: source dependency output exceeds 4 MiB: ${source_dependency_output}")
+        endif()
+    endif()
 endif()
 
 string(RANDOM LENGTH 20 ALPHABET 0123456789abcdef suffix)
 if(OUTPUT_MODE STREQUAL "DEPENDENCIES")
     set(temporary_output "${OUTPUT}.literal-${suffix}.tmp")
+    set(temporary_tracker "${DEPENDENCY_TRACKER_FILE}.literal-${suffix}.tmp")
     _aros_literal_runner_check_path("${temporary_output}" "${BUILD_ROOT}"
         "temporary dependency output")
-    if(EXISTS "${temporary_output}" OR IS_SYMLINK "${temporary_output}")
+    _aros_literal_runner_check_path(
+        "${temporary_tracker}" "${command_root}" "temporary dependency tracker")
+    if(EXISTS "${temporary_output}" OR IS_SYMLINK "${temporary_output}" OR
+       EXISTS "${temporary_tracker}" OR IS_SYMLINK "${temporary_tracker}")
         message(FATAL_ERROR "Literal object runner found a temporary output collision")
     endif()
     execute_process(
@@ -283,16 +362,50 @@ if(OUTPUT_MODE STREQUAL "DEPENDENCIES")
         OUTPUT_VARIABLE compiler_stdout
         ERROR_VARIABLE compiler_stderr)
     if(NOT compiler_result EQUAL 0)
-        file(REMOVE "${temporary_output}")
+        file(REMOVE "${temporary_output}" "${temporary_tracker}")
         message(FATAL_ERROR
             "Literal dependency compiler failed (${compiler_result}) for ${SOURCE}\n"
             "${compiler_stdout}${compiler_stderr}")
+    endif()
+    _aros_literal_runner_check_path(
+        "${temporary_output}" "${BUILD_ROOT}" "temporary dependency output")
+    _aros_literal_runner_assert_regular("${temporary_output}"
+        "compiler dependency output" FALSE)
+
+    execute_process(
+        COMMAND "${COMPILER}" ${ARGUMENTS}
+            -M -MF "${temporary_tracker}" -MQ "${OUTPUT}" "${SOURCE}"
+        WORKING_DIRECTORY "${SOURCE_DIRECTORY}"
+        RESULT_VARIABLE tracker_compiler_result
+        OUTPUT_VARIABLE tracker_compiler_stdout
+        ERROR_VARIABLE tracker_compiler_stderr)
+    if(NOT tracker_compiler_result EQUAL 0)
+        file(REMOVE "${temporary_output}" "${temporary_tracker}")
+        message(FATAL_ERROR
+            "Literal dependency tracker compiler failed (${tracker_compiler_result}) for ${SOURCE}\n"
+            "${tracker_compiler_stdout}${tracker_compiler_stderr}")
     endif()
     _aros_literal_runner_check_path("${temporary_output}" "${BUILD_ROOT}"
         "temporary dependency output")
     _aros_literal_runner_assert_regular("${temporary_output}"
         "compiler dependency output" FALSE)
+    _aros_literal_runner_check_path(
+        "${temporary_tracker}" "${command_root}" "temporary dependency tracker")
+    _aros_literal_runner_assert_regular("${temporary_tracker}"
+        "compiler dependency tracker" FALSE)
     _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "dependency output")
+    _aros_literal_runner_check_path(
+        "${DEPENDENCY_TRACKER_FILE}" "${command_root}" "dependency tracker")
+
+    # Both compiler contexts have completed before either published file is
+    # replaced. Publish the private Ninja tracker first and the public .d last.
+    file(RENAME "${temporary_tracker}" "${DEPENDENCY_TRACKER_FILE}"
+        RESULT tracker_rename_result)
+    if(NOT tracker_rename_result STREQUAL "0")
+        file(REMOVE "${temporary_output}" "${temporary_tracker}")
+        message(FATAL_ERROR
+            "Literal object runner could not publish dependency tracker: ${tracker_rename_result}")
+    endif()
     file(RENAME "${temporary_output}" "${OUTPUT}" RESULT rename_result)
     if(NOT rename_result STREQUAL "0")
         file(REMOVE "${temporary_output}")
@@ -301,6 +414,10 @@ if(OUTPUT_MODE STREQUAL "DEPENDENCIES")
     endif()
     _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "dependency output")
     _aros_literal_runner_assert_regular("${OUTPUT}" "compiler dependency output" FALSE)
+    _aros_literal_runner_check_path(
+        "${DEPENDENCY_TRACKER_FILE}" "${command_root}" "dependency tracker")
+    _aros_literal_runner_assert_regular(
+        "${DEPENDENCY_TRACKER_FILE}" "compiler dependency tracker" FALSE)
     return()
 endif()
 
@@ -332,6 +449,33 @@ _aros_literal_runner_check_path("${temporary_object}" "${BUILD_ROOT}" "temporary
 _aros_literal_runner_check_path("${temporary_depfile}" "${BUILD_ROOT}" "temporary dependency file")
 _aros_literal_runner_assert_regular("${temporary_object}" "compiler output" FALSE)
 _aros_literal_runner_assert_regular("${temporary_depfile}" "compiler dependency file" FALSE)
+if(NOT source_dependency_output STREQUAL "")
+    _aros_literal_runner_check_path(
+        "${source_dependency_output}" "${BUILD_ROOT}" "source dependency output")
+    _aros_literal_runner_optional_regular(
+        "${source_dependency_output}" "source dependency output")
+    if(NOT EXISTS "${source_dependency_output}")
+        file(REMOVE "${temporary_object}" "${temporary_depfile}")
+        message(FATAL_ERROR
+            "Literal object runner: source dependency output disappeared: ${source_dependency_output}")
+    endif()
+    file(SIZE "${source_dependency_output}" source_dependency_size)
+    if(source_dependency_size GREATER 4194304)
+        file(REMOVE "${temporary_object}" "${temporary_depfile}")
+        message(FATAL_ERROR
+            "Literal object runner: source dependency output exceeds 4 MiB: ${source_dependency_output}")
+    endif()
+    file(READ "${source_dependency_output}" source_dependency_contents LIMIT 4194305)
+    string(LENGTH "${source_dependency_contents}" source_dependency_content_length)
+    if(source_dependency_content_length GREATER 4194304)
+        file(REMOVE "${temporary_object}" "${temporary_depfile}")
+        message(FATAL_ERROR
+            "Literal object runner: source dependency output exceeds 4 MiB: ${source_dependency_output}")
+    endif()
+    file(APPEND "${temporary_depfile}" "\n${source_dependency_contents}")
+    _aros_literal_runner_assert_regular(
+        "${temporary_depfile}" "combined dependency file" FALSE)
+endif()
 _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "object output")
 _aros_literal_runner_check_path("${DEPFILE}" "${BUILD_ROOT}" "dependency output")
 

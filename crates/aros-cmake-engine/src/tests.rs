@@ -31,6 +31,11 @@ use std::fs;
 use std::process::Command;
 
 #[test]
+fn literal_objects_bind_independent_source_dependencies_and_incremental_headers() {
+    run_embedded_kobj_contract_test("LiteralDependencyBindingsTest.cmake");
+}
+
+#[test]
 fn mesa26_runtime_publication_respects_verified_sdk_consumer_authority() {
     let directory = tempfile::tempdir().expect("Mesa26 runtime authority fixture");
     let engine = directory.path().join("engine");
