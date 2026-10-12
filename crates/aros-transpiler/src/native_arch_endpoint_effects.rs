@@ -169,16 +169,19 @@ impl NativeOwnerProjection {
         // scope. This prevents a caller from substituting effect data that was
         // not produced by the source invocation at this line.
         let configuration =
-            crate::local_make_includes::inline_native_make_configuration_with_templates(
+            crate::local_make_includes::inline_native_make_configuration_for_context(
                 &source,
                 root,
                 Path::new(recipe),
                 crate::local_make_includes::LocalMakeIncludeLimits::default(),
-                &self.architecture_context.make_include_bindings,
-                &self.architecture_context.generated_make_templates,
+                &self.architecture_context,
             );
         if configuration.issues.is_empty() {
             for fragment in &configuration.fragments {
+                if fragment.is_proven_absent() {
+                    crate::local_make_includes::verify_absent_source_options(root, &fragment.path)?;
+                    continue;
+                }
                 let path = fragment
                     .path
                     .to_str()

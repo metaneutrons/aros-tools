@@ -211,16 +211,38 @@ pub(crate) fn collect_source_arch_endpoint_effects(
     root: &Path,
     target: Option<&crate::TargetContext>,
 ) -> Result<ArchEndpointEffectScan, String> {
-    let scan = crate::local_make_includes::inline_native_make_configuration_with_templates(
+    let scan = crate::local_make_includes::inline_native_make_configuration_for_selection(
         content,
         root,
         recipe,
         crate::local_make_includes::LocalMakeIncludeLimits::default(),
-        &target.map_or_else(BTreeMap::new, |target| target.make_include_bindings.clone()),
-        &target.map_or_else(BTreeMap::new, |target| {
-            target.generated_make_templates.clone()
-        }),
+        target,
     );
+    if !scan.issues.is_empty()
+        && target.is_some_and(|context| !context.native_configuration_inputs.is_empty())
+    {
+        let reason = format!(
+            "native architecture source scope is incomplete: {}",
+            scan.issues
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        let recipe = normalize_recipe(recipe)?;
+        return Ok(ArchEndpointEffectScan {
+            effects: Vec::new(),
+            rejected: ["%build_archspecific", "%set_archincludes"]
+                .into_iter()
+                .flat_map(|directive| {
+                    crate::includes::directive_bodies_at(content, directive)
+                        .into_iter()
+                        .map(|(line, body)| rejected(&recipe, line, directive, &reason, &body))
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+        });
+    }
     if scan.issues.is_empty() && !scan.fragments.is_empty() {
         let joined = crate::parser::join_continuations(&scan.expanded);
         let positions =

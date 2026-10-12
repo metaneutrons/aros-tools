@@ -86,6 +86,16 @@ contract's hashes. The fragment is evaluated at the include's position; later so
 retain their order. It is not an ignored include or an ambient Make configuration.
 Unmapped includes and unresolved values still refuse KOBJ consumption.
 
+Source-local configuration and `make.opts` files are read in include order
+against the selected source contract. Present files, including nested fragments,
+must match its input hashes. An optional include may be absent only at an exact,
+symlink-free source path; missing required files fail. Source option files cannot
+be replaced by `.mk` projections, and configuration fragments cannot declare
+build owners. Native parsing does not glob other architectures' option files.
+Existing plain source inventories and declaration-proved fetched-port/header
+scopes keep their own provenance rules; global native configuration does not
+replace them. If they consume source options, the sealed native path applies.
+
 `generated_make_templates` reconstructs a generated Make include from a sealed
 `.in` template, its literal `AC_CONFIG_FILES` declaration and explicit profile
 substitutions. It never reads the generated file. Only plain assignments and

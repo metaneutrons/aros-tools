@@ -313,6 +313,21 @@ pub(super) fn reconstruct_literal_source(
                 }
                 let fragment_path = fragment.path.clone();
                 *next_fragment += 1;
+                if fragment.is_proven_absent() {
+                    crate::local_make_includes::verify_absent_source_options(root, &fragment_path)
+                        .ok()?;
+                    if fragment.generated_output.is_some()
+                        || fragment.template_substitutions.is_some()
+                        || retain_include_directive
+                    {
+                        return None;
+                    }
+                    reconstructed
+                        .text
+                        .push_str("# Verified source configuration include\n");
+                    reconstructed.physical_anchors.push(None);
+                    continue;
+                }
                 let resolved_fragment_path = root.join(&fragment_path);
                 if std::fs::canonicalize(&resolved_fragment_path)
                     .ok()

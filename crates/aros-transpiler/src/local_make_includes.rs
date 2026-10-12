@@ -23,9 +23,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use aros_common::native_make_template::ResolvedGeneratedMakeTemplate;
+
+mod path_rules;
+mod source_options;
+use path_rules::{
+    assert_bound_regular, bound_include_key, lexical_normalize, resolve_local_path, safe_bound_path,
+};
+pub(crate) use source_options::contains_options;
+pub(crate) use source_options::verify_absent as verify_absent_source_options;
 
 const MAX_RESOLVED_TEMPLATE_BYTES: usize = 256 * 1024;
 const MAX_TEMPLATE_BINDINGS: usize = 16;
@@ -144,6 +152,9 @@ impl std::fmt::Display for LocalMakeIncludeIssue {
 /// Provenance for one fragment inserted at an include site.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncludedLocalMakeFragment {
+    /// Exact optional source options path proved absent. No bytes or
+    /// declaration owners are imported; replay rechecks the absence.
+    pub presence: NativeIncludePresence,
     /// Source-relative path of the fragment.
     pub path: PathBuf,
     /// Source-relative file containing the include directive.
@@ -169,9 +180,26 @@ pub struct IncludedLocalMakeFragment {
     pub template_substitutions: Option<BTreeMap<String, String>>,
 }
 
+/// A source include contributes either measured bytes or proved absence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeIncludePresence {
+    Present,
+    ProvenAbsent,
+}
+
+impl IncludedLocalMakeFragment {
+    /// Whether this event imports no bytes and requires an absence replay.
+    #[must_use]
+    pub const fn is_proven_absent(&self) -> bool {
+        matches!(self.presence, NativeIncludePresence::ProvenAbsent)
+    }
+}
+
 /// Result of scanning one mmakefile for local source-tree includes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalMakeIncludeScan {
+    /// An active resolved options include, or an unresolved possible one.
+    pub options_scope_required: bool,
     /// Original mmakefile text with every proven-safe fragment inserted at its
     /// include site. Rejected and unrelated include lines remain untouched.
     pub expanded: String,
@@ -204,6 +232,7 @@ pub fn inline_local_make_includes(
         policy,
         &BTreeMap::new(),
         &BTreeMap::new(),
+        None,
     )
 }
 
@@ -251,6 +280,7 @@ pub fn inline_native_make_configuration_with_templates(
         validate_template_bindings(bindings, templates, limits, mmake_relative_path)
     {
         return LocalMakeIncludeScan {
+            options_scope_required: false,
             expanded: content.to_owned(),
             fragments: Vec::new(),
             issues: vec![issue(mmake_relative_path, 1, kind, subject, detail)],
@@ -264,9 +294,94 @@ pub fn inline_native_make_configuration_with_templates(
         LocalMakeFragmentPolicy::NativeConfiguration,
         bindings,
         templates,
+        None,
     )
 }
 
+/// Expand native configuration using sealed source inputs.
+///
+/// Unlike legacy Make-option discovery, this resolves exactly one
+/// source path at each include site, in order, without filesystem globbing.
+#[must_use]
+pub fn inline_native_make_configuration_for_context(
+    content: &str,
+    source_root: &Path,
+    mmake_relative_path: &Path,
+    limits: LocalMakeIncludeLimits,
+    selected: &crate::TargetContext,
+) -> LocalMakeIncludeScan {
+    if let Err((kind, subject, detail)) = validate_template_bindings(
+        &selected.make_include_bindings,
+        &selected.generated_make_templates,
+        limits,
+        mmake_relative_path,
+    ) {
+        return LocalMakeIncludeScan {
+            options_scope_required: false,
+            expanded: content.to_owned(),
+            fragments: Vec::new(),
+            issues: vec![issue(mmake_relative_path, 1, kind, subject, detail)],
+        };
+    }
+    let mut scan = inline_make_includes(
+        content,
+        source_root,
+        mmake_relative_path,
+        limits,
+        LocalMakeFragmentPolicy::NativeConfiguration,
+        &selected.make_include_bindings,
+        &selected.generated_make_templates,
+        Some(selected),
+    );
+    if !selected.native_configuration_inputs.is_empty() && scan.issues.is_empty() {
+        source_options::report_unbound_includes(
+            &mut scan,
+            content,
+            source_root,
+            mmake_relative_path,
+            selected,
+        );
+    }
+    scan
+}
+
+/// Shared optional-selection entry point; target-agnostic callers retain
+/// their existing explicit-template behavior.
+#[must_use]
+pub fn inline_native_make_configuration_for_selection(
+    content: &str,
+    source_root: &Path,
+    mmake_relative_path: &Path,
+    limits: LocalMakeIncludeLimits,
+    selected: Option<&crate::TargetContext>,
+) -> LocalMakeIncludeScan {
+    selected.map_or_else(
+        || {
+            inline_native_make_configuration_with_templates(
+                content,
+                source_root,
+                mmake_relative_path,
+                limits,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            )
+        },
+        |context| {
+            inline_native_make_configuration_for_context(
+                content,
+                source_root,
+                mmake_relative_path,
+                limits,
+                context,
+            )
+        },
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit include policy and source bindings are independent inputs"
+)]
 fn inline_make_includes(
     content: &str,
     source_root: &Path,
@@ -275,8 +390,10 @@ fn inline_make_includes(
     policy: LocalMakeFragmentPolicy,
     bindings: &BTreeMap<String, String>,
     templates: &BTreeMap<String, ResolvedGeneratedMakeTemplate>,
+    selected: Option<&crate::TargetContext>,
 ) -> LocalMakeIncludeScan {
     let original = || LocalMakeIncludeScan {
+        options_scope_required: false,
         expanded: content.to_owned(),
         fragments: Vec::new(),
         issues: Vec::new(),
@@ -339,9 +456,14 @@ fn inline_make_includes(
         active: Vec::new(),
         bindings: bindings.clone(),
         templates: templates.clone(),
+        native_context: selected.cloned(),
+        native_prefix: String::new(),
+        option_directives: 0,
+        options_scope_required: false,
     };
     let expanded = expand_text(content, mmake_relative_path, false, &mut state);
     LocalMakeIncludeScan {
+        options_scope_required: state.options_scope_required,
         expanded: expanded.text,
         fragments: expanded.fragments,
         issues: expanded.issues,
@@ -349,6 +471,10 @@ fn inline_make_includes(
 }
 
 struct ExpansionState {
+    options_scope_required: bool,
+    option_directives: usize,
+    native_context: Option<crate::TargetContext>,
+    native_prefix: String,
     root: PathBuf,
     /// GNU Make's `CURDIR` remains the declaring mmakefile directory while an
     /// included fragment is parsed.
@@ -397,10 +523,59 @@ fn expand_text(
     for (index, chunk) in content.split_inclusive('\n').enumerate() {
         output.text.push_str(chunk);
         let line = chunk.strip_suffix('\n').unwrap_or(chunk);
-        let Some(include) = parse_include_directive(line) else {
+        let Some(mut include) = parse_include_directive(line) else {
             continue;
         };
         let line_no = index + 1;
+
+        let mut resolved_options = None;
+        if state.native_context.is_some() && source_options::is_candidate(include.path) {
+            state.option_directives += 1;
+            let prefix = format!(
+                "{}{}",
+                state.native_prefix,
+                &output.text[..output.text.len() - chunk.len()]
+            );
+            match source_options::resolve(include, &prefix, line, source, line_no, state) {
+                Ok(source_options::Resolution::Inactive) => continue,
+                Ok(source_options::Resolution::Absent(path)) => {
+                    state.options_scope_required |= source_options::is_options_path(&path);
+                    state.files_read += 1;
+                    output.text.truncate(output.text.len() - chunk.len());
+                    output
+                        .text
+                        .push_str("# Verified source configuration include\n");
+                    output.fragments.push(IncludedLocalMakeFragment {
+                        path,
+                        included_from: source.to_path_buf(),
+                        include_line: line_no,
+                        assigned_variables: Vec::new(),
+                        has_conditionals: false,
+                        plain_source_list: false,
+                        literal_define_header: false,
+                        generated_output: None,
+                        template_substitutions: None,
+                        presence: NativeIncludePresence::ProvenAbsent,
+                    });
+                    continue;
+                }
+                Ok(source_options::Resolution::Present(path)) => {
+                    state.options_scope_required |=
+                        source_options::is_options_path(Path::new(&path));
+                    resolved_options = Some(path);
+                }
+                Err(problem) => {
+                    state.options_scope_required |=
+                        source_options::potential_options_path(include.path);
+                    output.issues.push(problem);
+                    output.fatal |= inside_fragment;
+                    continue;
+                }
+            }
+        }
+        if let Some(path) = &resolved_options {
+            include.path = path;
+        }
 
         if state.policy == LocalMakeFragmentPolicy::NativeConfiguration {
             match generated_template_include_key(include.path, state) {
@@ -468,7 +643,7 @@ fn expand_text(
 
         let bound = bound_include_key(include.path, state)
             .is_some_and(|key| state.bindings.contains_key(&key));
-        if !bound && !is_local_candidate(include.path) {
+        if !bound && resolved_options.is_none() && !is_local_candidate(include.path) {
             if inside_fragment {
                 output.issues.push(issue(
                     source,
@@ -482,7 +657,14 @@ fn expand_text(
             continue;
         }
 
-        match expand_one_fragment(include, source, line_no, state) {
+        let previous_prefix = std::mem::take(&mut state.native_prefix);
+        state.native_prefix = format!(
+            "{previous_prefix}{}",
+            &output.text[..output.text.len() - chunk.len()]
+        );
+        let expansion = expand_one_fragment(include, source, line_no, state);
+        state.native_prefix = previous_prefix;
+        match expansion {
             Ok(fragment) => {
                 if state.policy == LocalMakeFragmentPolicy::NativeConfiguration {
                     // Only a successfully expanded directive is removed.
@@ -596,6 +778,7 @@ fn expand_one_fragment(
             )]);
         }
     };
+    source_options::verify_bytes(&path, &bytes, included_from, include_line, state)?;
     state.files_read += 1;
     let Some(total_bytes) = state.bytes_read.checked_add(bytes.len()) else {
         return Err(vec![issue(
@@ -657,6 +840,7 @@ fn expand_one_fragment(
 
     let mut fragments = Vec::with_capacity(nested.fragments.len() + 1);
     fragments.push(IncludedLocalMakeFragment {
+        presence: NativeIncludePresence::Present,
         path: relative,
         included_from: included_from.to_path_buf(),
         include_line,
@@ -734,6 +918,7 @@ fn expand_generated_template(
     Ok(TextExpansion {
         text: template.expanded_text,
         fragments: vec![IncludedLocalMakeFragment {
+            presence: NativeIncludePresence::Present,
             path: template_path,
             included_from: included_from.to_path_buf(),
             include_line,
@@ -1110,149 +1295,6 @@ fn paths_overlap(left: &str, right: &str) -> bool {
         || right
             .strip_prefix(&left)
             .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-fn resolve_local_path(
-    raw: &str,
-    source: &Path,
-    line: usize,
-    state: &ExpansionState,
-) -> Result<PathBuf, Vec<LocalMakeIncludeIssue>> {
-    let raw = raw.trim();
-    if raw.is_empty() || raw.split_whitespace().count() != 1 {
-        return Err(vec![issue(
-            source,
-            line,
-            LocalMakeIncludeIssueKind::UnresolvedPath,
-            raw,
-            "a local include must name exactly one fragment",
-        )]);
-    }
-    let root_text = state.root.to_string_lossy();
-    let curdir_text = state.curdir.to_string_lossy();
-    let expanded = raw
-        .replace("$(SRCDIR)", &root_text)
-        .replace("${SRCDIR}", &root_text)
-        .replace("$(CURDIR)", &curdir_text)
-        .replace("${CURDIR}", &curdir_text);
-    if expanded.contains('$') || expanded.contains('*') || expanded.contains('?') {
-        return Err(vec![issue(
-            source,
-            line,
-            LocalMakeIncludeIssueKind::UnresolvedPath,
-            raw,
-            "the local include path is dynamic",
-        )]);
-    }
-
-    let candidate = PathBuf::from(expanded);
-    let candidate = if candidate.is_absolute() {
-        candidate
-    } else {
-        state.root.join(candidate)
-    };
-    let lexical = lexical_normalize(&candidate);
-    if !lexical.starts_with(&state.root) {
-        return Err(vec![issue(
-            source,
-            line,
-            LocalMakeIncludeIssueKind::OutsideSourceTree,
-            raw,
-            "the local include path leaves the source tree",
-        )]);
-    }
-    let canonical = match fs::canonicalize(&lexical) {
-        Ok(path) => path,
-        Err(error) => {
-            return Err(vec![issue(
-                source,
-                line,
-                LocalMakeIncludeIssueKind::Missing,
-                raw,
-                format!("the local fragment cannot be resolved: {error}"),
-            )]);
-        }
-    };
-    if !canonical.starts_with(&state.root) {
-        return Err(vec![issue(
-            source,
-            line,
-            LocalMakeIncludeIssueKind::OutsideSourceTree,
-            raw,
-            "the local include resolves outside the source tree",
-        )]);
-    }
-    if state.policy == LocalMakeFragmentPolicy::NativeConfiguration {
-        if canonical != lexical {
-            return Err(vec![issue(
-                source,
-                line,
-                LocalMakeIncludeIssueKind::OutsideSourceTree,
-                raw,
-                "native configuration may not traverse symlinks",
-            )]);
-        }
-        assert_bound_regular(&canonical, &state.root, source, line, raw)?;
-    }
-    Ok(canonical)
-}
-
-fn safe_bound_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.contains(['$', '\\'])
-        && !path.contains(char::is_whitespace)
-        && Path::new(path)
-            .extension()
-            .is_some_and(|extension| extension == "mk")
-        && Path::new(path)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-}
-
-fn bound_include_key(raw: &str, state: &ExpansionState) -> Option<String> {
-    let relative = raw
-        .trim()
-        .strip_prefix("$(SRCDIR)/")
-        .or_else(|| raw.trim().strip_prefix("${SRCDIR}/"))
-        .unwrap_or_else(|| raw.trim());
-    let expanded = relative
-        .replace("$(CURDIR)", &state.curdir.to_string_lossy())
-        .replace("${CURDIR}", &state.curdir.to_string_lossy());
-    if expanded.is_empty()
-        || expanded.contains(['$', '\\'])
-        || expanded.contains(char::is_whitespace)
-        || !Path::new(&expanded)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-    {
-        return None;
-    }
-    Some(expanded)
-}
-
-fn assert_bound_regular(
-    path: &Path,
-    root: &Path,
-    source: &Path,
-    line: usize,
-    subject: &str,
-) -> Result<(), Vec<LocalMakeIncludeIssue>> {
-    let mut cursor = path.to_path_buf();
-    while cursor != root {
-        let valid = fs::symlink_metadata(&cursor).is_ok_and(|metadata| {
-            !metadata.file_type().is_symlink()
-                && if cursor == path {
-                    metadata.is_file()
-                } else {
-                    metadata.is_dir()
-                }
-        });
-        if !cursor.starts_with(root) || !valid || !cursor.pop() {
-            return Err(vec![issue(source, line, LocalMakeIncludeIssueKind::OutsideSourceTree,
-                subject, "native configuration endpoints must be regular source files without symlink ancestors")]);
-        }
-    }
-    Ok(())
 }
 
 fn validate_fragment(
@@ -1832,7 +1874,10 @@ fn parse_include_directive(line: &str) -> Option<IncludeDirective<'_>> {
         return None;
     }
     let line = line.trim_end();
-    let (optional, tail) = if let Some(tail) = directive_tail(line, "-include") {
+    let (optional, tail) = if let Some(tail) = directive_tail(line, "-include")
+        .or_else(|| directive_tail(line, "sinclude"))
+        .or_else(|| directive_tail(line, "-sinclude"))
+    {
         (true, tail)
     } else {
         let tail = directive_tail(line, "include")?;
@@ -1928,20 +1973,6 @@ fn strip_make_comment(line: &str) -> &str {
         }
     }
     line
-}
-
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut output = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                output.pop();
-            }
-            other => output.push(other.as_os_str()),
-        }
-    }
-    output
 }
 
 fn issue(

@@ -541,6 +541,9 @@ pub struct TargetContext {
     /// include -> replacement source-relative Make fragment. The CLI fills
     /// this only from the validated source contract; no implicit discovery.
     pub make_include_bindings: std::collections::BTreeMap<String, String>,
+    /// Hashes of exact source configuration inputs from the loaded native
+    /// contract. Source options never borrow a filesystem-discovered seal.
+    pub native_configuration_inputs: std::collections::BTreeMap<String, String>,
     /// Profile-bound, sealed Make templates; generated build-tree files are
     /// never inputs to native source parsing.
     pub generated_make_templates: std::collections::BTreeMap<

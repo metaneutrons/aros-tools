@@ -253,8 +253,12 @@ impl NativeOwnerProjection {
             &absent,
             limits,
         )?;
+        let mut architecture_context = context.clone();
+        architecture_context
+            .native_configuration_inputs
+            .clone_from(&sealed);
         let projection = Self {
-            architecture_context: context.clone(),
+            architecture_context,
             metamake_globals: globals.values,
             sealed_configuration_inputs: sealed,
             graph,

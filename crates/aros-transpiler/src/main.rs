@@ -235,6 +235,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         host_file_generators: Vec::new(),
         make_variables: std::collections::BTreeMap::new(),
         make_include_bindings: std::collections::BTreeMap::new(),
+        native_configuration_inputs: std::collections::BTreeMap::new(),
         generated_make_templates: std::collections::BTreeMap::new(),
         cpu: args.cpu.clone(),
         platform: args.platform.clone(),
@@ -265,6 +266,12 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             .clone_from(contract.invocation().make_include_bindings);
         target.native_kernel_sources_in_target_role =
             contract.invocation().kernel_compiler_role == Some("target");
+        target.native_configuration_inputs = contract
+            .invocation()
+            .inputs
+            .iter()
+            .map(|input| (input.path.clone(), input.sha256.to_string()))
+            .collect();
         target.generated_make_templates =
             aros_common::native_make_template::resolve_generated_make_templates(
                 &args.source_dir,
