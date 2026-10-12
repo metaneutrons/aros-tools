@@ -85,6 +85,25 @@ pub(super) fn emit_concrete_targets(
         if target.genmodule_only {
             writeln!(out, "    GENMODULE_ONLY").unwrap();
         }
+        let selected_client_builder =
+            graph
+                .native_selected_client_archives
+                .as_ref()
+                .is_some_and(|selected| {
+                    selected.contains(&format!("{}-linklib", target.mmake_name))
+                        || selected.contains(&format!("{}-linklib-rel", target.mmake_name))
+                });
+        let runtime_selected = graph
+            .native_selected_runtime_modules
+            .as_ref()
+            .is_some_and(|selected| selected.contains(&target.mmake_name));
+        if target.module_type == ModuleType::Library && selected_client_builder && !runtime_selected
+        {
+            // Keep the original source declaration (including generic and
+            // architecture client inputs), but let CMake materialise only its
+            // selected client archive lane rather than the runtime module.
+            writeln!(out, "    CLIENTS_ONLY").unwrap();
+        }
         if target.always_cxx_link {
             writeln!(out, "    ALWAYS_CXX_LINK").unwrap();
         }

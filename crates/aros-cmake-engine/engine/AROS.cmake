@@ -5040,9 +5040,26 @@ function(aros_add_module_headers)
 endfunction()
 
 # Macro: aros_add_library
+function(_aros_publish_library_client_aliases owner target linklib_name includes_target)
+    _aros_genmodule_alias("includes-${target}" "${owner}-includes")
+    _aros_genmodule_alias("includes-${target}_rel" "${owner}-includes")
+    foreach(name IN ITEMS "${target}" "${linklib_name}")
+        if(NOT name STREQUAL "")
+            if(TARGET "${owner}-linklib")
+                _aros_genmodule_alias("linklibs-${name}" "${owner}-linklib")
+            endif()
+            if(TARGET "${owner}-linklib-rel")
+                _aros_genmodule_alias("linklibs-${name}_rel" "${owner}-linklib-rel")
+            endif()
+        endif()
+    endforeach()
+    _aros_genmodule_alias(includes-all "${owner}-includes")
+    _aros_register_genmodule_public_includes("${includes_target}")
+endfunction()
+
 function(aros_add_library)
     set(options ALWAYS_CXX_LINK GENMODULE_ONLY GENMODULE_LINKLIBS NO_CLIENT_ARCHIVES
-        NO_NORMAL_CLIENT_ARCHIVE NO_RELATIVE_CLIENT_ARCHIVE)
+        NO_NORMAL_CLIENT_ARCHIVE NO_RELATIVE_CLIENT_ARCHIVE CLIENTS_ONLY)
     # DEFAULT_MODTYPE belongs here, and its absence was not harmless. It is
     # read at :4067, so it looked declared; it was not, so `DEFAULT_MODTYPE mcc`
     # from aros_add_mcc extended whatever multi-value argument came before it in
@@ -5061,6 +5078,17 @@ function(aros_add_library)
         ARCH_DEFINES ARCH_COMPILE_OPTIONS LINK_OPTIONS
         LINKLIB_SOURCES ARCH_LINKLIB_SOURCES LINKLIB_OBJECT_SOURCES KICKSTART_MEMBER)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    if(ARG_CLIENTS_ONLY)
+        _aros_native_source_selection_validated(_source_selected)
+        if(NOT _source_selected OR ARG_NO_CLIENT_ARCHIVES OR
+           (ARG_NO_NORMAL_CLIENT_ARCHIVE AND ARG_NO_RELATIVE_CLIENT_ARCHIVE) OR
+           (NOT ARG_GENMODULE_ONLY AND NOT ARG_GENMODULE_LINKLIBS AND NOT ARG_LINKLIB_NAME))
+            message(FATAL_ERROR "${ARG_MMAKE_ID}: CLIENTS_ONLY requires a source-selected client archive")
+        endif()
+        if(TARGET "${ARG_MMAKE_ID}")
+            message(FATAL_ERROR "${ARG_MMAKE_ID}: CLIENTS_ONLY cannot reuse a runtime target")
+        endif()
+    endif()
 
     if(ARG_ARCH_LINKLIB_SOURCES AND
        (ARG_GENMODULE_ONLY OR
@@ -5142,6 +5170,11 @@ function(aros_add_library)
             ARCH_DEFINES ${ARG_ARCH_DEFINES}
             ARCH_COMPILE_OPTIONS ${ARG_ARCH_COMPILE_OPTIONS})
         add_dependencies("${ARG_MMAKE_ID}-linklib" "${ARG_MMAKE_ID}-includes")
+        if(ARG_CLIENTS_ONLY)
+            _aros_publish_library_client_aliases("${ARG_MMAKE_ID}" "${ARG_TARGET}"
+                "${ARG_LINKLIB_NAME}" "${_gm_INCLUDES_TARGET}")
+            return()
+        endif()
 
         if(ARG_DEFAULT_INSTALL_DIR)
             set(_default_install_dir "${ARG_DEFAULT_INSTALL_DIR}")
@@ -5474,6 +5507,16 @@ function(aros_add_library)
         endif()
     endif()
 
+    if(ARG_CLIENTS_ONLY)
+        if(NOT _has_genmodule OR
+           (NOT TARGET "${ARG_MMAKE_ID}-linklib" AND NOT TARGET "${ARG_MMAKE_ID}-linklib-rel"))
+            message(FATAL_ERROR "${ARG_MMAKE_ID}: CLIENTS_ONLY produced no client archive")
+        endif()
+        _aros_publish_library_client_aliases("${ARG_MMAKE_ID}" "${ARG_TARGET}"
+            "${ARG_LINKLIB_NAME}" "${_gm_INCLUDES_TARGET}")
+        return()
+    endif()
+
     aros_resolve_source_lanes(RESOLVED_SOURCES "${ARG_DIRECTORY}"
         MMAKE_ID "${ARG_MMAKE_ID}"
         SOURCES ${ARG_SOURCES}
@@ -5615,30 +5658,8 @@ function(aros_add_library)
         endif()
 
         if(_has_genmodule)
-            _aros_genmodule_alias("includes-${ARG_TARGET}"
-                "${ARG_MMAKE_ID}-includes")
-            _aros_genmodule_alias("includes-${ARG_TARGET}_rel"
-                "${ARG_MMAKE_ID}-includes")
-            if(TARGET "${ARG_MMAKE_ID}-linklib")
-                _aros_genmodule_alias("linklibs-${ARG_TARGET}"
-                    "${ARG_MMAKE_ID}-linklib")
-            endif()
-            if(TARGET "${ARG_MMAKE_ID}-linklib-rel")
-                _aros_genmodule_alias("linklibs-${ARG_TARGET}_rel"
-                    "${ARG_MMAKE_ID}-linklib-rel")
-            endif()
-            if(ARG_LINKLIB_NAME)
-                if(TARGET "${ARG_MMAKE_ID}-linklib")
-                    _aros_genmodule_alias("linklibs-${ARG_LINKLIB_NAME}"
-                        "${ARG_MMAKE_ID}-linklib")
-                endif()
-                if(TARGET "${ARG_MMAKE_ID}-linklib-rel")
-                    _aros_genmodule_alias("linklibs-${ARG_LINKLIB_NAME}_rel"
-                        "${ARG_MMAKE_ID}-linklib-rel")
-                endif()
-            endif()
-            _aros_genmodule_alias(includes-all "${ARG_MMAKE_ID}-includes")
-            _aros_register_genmodule_public_includes("${_gm_INCLUDES_TARGET}")
+            _aros_publish_library_client_aliases("${ARG_MMAKE_ID}" "${ARG_TARGET}"
+                "${ARG_LINKLIB_NAME}" "${_gm_INCLUDES_TARGET}")
         endif()
     endif()
 endfunction()

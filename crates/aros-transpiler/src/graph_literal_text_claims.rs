@@ -193,7 +193,9 @@ impl DependencyGraph {
             {
                 let root = output_key(&rooted_build_output(root, "${AROS_BUILD_DIR}"));
                 if root.split('/').any(|component| component == "..") {
-                    return Err(format!("selected literal text output ownership cannot be proved across unresolved output root traversal in {owner}"));
+                    return Err(format!(
+                        "selected literal text output ownership cannot be proved across unresolved output root traversal in {owner}"
+                    ));
                 }
                 if output == root
                     || root.starts_with(&format!("{output}/"))

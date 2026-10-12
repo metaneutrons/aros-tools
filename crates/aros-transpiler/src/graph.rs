@@ -60,6 +60,10 @@ pub struct DependencyGraph {
     /// Selected client archive endpoints in their source declaration spelling,
     /// after concrete selector resolution. None keeps whole-tree export unchanged.
     pub native_selected_client_archives: Option<BTreeSet<String>>,
+    /// Runtime module owners selected for native generation. A client archive
+    /// endpoint can retain its declaration without selecting the runtime
+    /// producer; None keeps whole-tree export unchanged.
+    pub native_selected_runtime_modules: Option<BTreeSet<String>>,
     pub sdk_asset_rules: Vec<crate::sdk_asset_rules::SdkAssetRuleDecl>,
     pub sdk_program_outputs: Vec<SdkProgramOutput>,
     /// Native source-owned host-header aggregates, including exact mirror policy.

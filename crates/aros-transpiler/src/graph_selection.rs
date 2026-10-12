@@ -570,17 +570,25 @@ impl DependencyGraph {
                             .is_some_and(|metadata| metadata.enabled))
             {
                 add(&mut edges, &format!("{owner}-includes"), []);
-                let runtime = (target.module_type == ModuleType::Library)
-                    .then(|| owner.clone())
-                    .into_iter();
-                add(&mut edges, &format!("{owner}-linklib"), runtime.clone());
+                // Client archives are independent source endpoints. Their
+                // declaration may be retained without selecting the runtime
+                // module; source-written prerequisites are added below.
+                add(
+                    &mut edges,
+                    &format!("{owner}-linklib"),
+                    [format!("{owner}-includes")],
+                );
                 if !target.genmodule_only
                     && target
                         .genmodule_linklibs
                         .as_ref()
                         .is_some_and(|metadata| metadata.enabled && metadata.has_relative)
                 {
-                    add(&mut edges, &format!("{owner}-linklib-rel"), runtime);
+                    add(
+                        &mut edges,
+                        &format!("{owner}-linklib-rel"),
+                        [format!("{owner}-includes")],
+                    );
                 }
             }
             if !matches!(target.module_type, ModuleType::LinkLib | ModuleType::Abi) {
@@ -618,9 +626,8 @@ impl DependencyGraph {
                 target.dependencies.iter().chain(&target.link_libs).cloned(),
             );
             // Only aliases actually emitted by the CMake helper are endpoints.
-            // A full Library declaration also emits its runtime executable, so
-            // selecting one of its client archives must retain the runtime's
-            // dependencies. ABI aliases have no runtime module.
+            // The client archives are independent of the runtime module;
+            // preserve only source-written prerequisites through meta_targets.
             if target.genmodule_abi {
                 add(&mut edges, &format!("{owner}-includes"), []);
             }
@@ -636,17 +643,22 @@ impl DependencyGraph {
                 // source #MM declaration is not an unmodelled Make recipe
                 // when this exact helper already materialises its endpoint.
                 add(&mut edges, &format!("{owner}-includes"), []);
-                let runtime = (target.module_type == ModuleType::Library)
-                    .then(|| owner.clone())
-                    .into_iter();
-                add(&mut edges, &format!("{owner}-linklib"), runtime.clone());
+                add(
+                    &mut edges,
+                    &format!("{owner}-linklib"),
+                    [format!("{owner}-includes")],
+                );
                 if !target.genmodule_only
                     && target
                         .genmodule_linklibs
                         .as_ref()
                         .is_some_and(|metadata| metadata.enabled && metadata.has_relative)
                 {
-                    add(&mut edges, &format!("{owner}-linklib-rel"), runtime);
+                    add(
+                        &mut edges,
+                        &format!("{owner}-linklib-rel"),
+                        [format!("{owner}-includes")],
+                    );
                 }
             }
             if !matches!(target.module_type, ModuleType::LinkLib | ModuleType::Abi) {

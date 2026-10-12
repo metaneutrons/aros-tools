@@ -614,12 +614,125 @@ impl DependencyGraph {
                 }
             })
             .collect();
+        // A source-owned architecture object endpoint selects the runtime
+        // module; a source-owned architecture client archive endpoint does
+        // not. Keep these capabilities separate even though both retain the
+        // module declaration and its architecture source metadata.
+        let architecture_runtime_owners: BTreeSet<_> = self
+            .arch_endpoint_effects
+            .iter()
+            .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
+            .filter_map(|effect| match &effect.data {
+                crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects {
+                    mainmmake,
+                    ..
+                } => Some(mainmmake.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut runtime_modules: BTreeSet<_> = architecture_runtime_owners.clone();
+        runtime_modules.extend(self.targets.iter().filter_map(|(name, target)| {
+            let has_runtime = !matches!(
+                target.module_type,
+                ModuleType::Abi
+                    | ModuleType::ModuleHeaders
+                    | ModuleType::LinkLib
+                    | ModuleType::Package
+                    | ModuleType::Custom
+            );
+            (has_runtime
+                && (is_selected(name)
+                    || is_selected(&format!("{name}-kobj"))
+                    || is_selected(&format!("{name}-kobj-quick"))
+                    || architecture_runtime_owners.contains(name)))
+            .then(|| name.clone())
+        }));
+
+        // Select the ordinary client archive builders independently from
+        // runtime owners. Architecture client source leaves name the concrete
+        // source endpoint, but the builder remains the module's ordinary
+        // linklib (and, when declared, relative linklib) target.
+        let mut selected_clients = BTreeSet::new();
+        for target in self.targets.values() {
+            for suffix in ["-linklib", "-linklib-rel"] {
+                let raw = format!("{}{suffix}", target.mmake_name);
+                if selected.contains(&endpoint(&raw, context)?) {
+                    selected_clients.insert(raw);
+                }
+            }
+        }
+        for effect in self
+            .arch_endpoint_effects
+            .iter()
+            .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
+        {
+            let crate::arch_endpoint_effects::ArchEndpointEffectData::ArchClientLinklibSources {
+                mainmmake,
+                tag,
+                linklib_sources,
+                directory,
+                compiler,
+                ..
+            } = &effect.data
+            else {
+                continue;
+            };
+            if compiler != "target" {
+                continue;
+            }
+            let Some(target) = self.targets.get(mainmmake) else {
+                continue;
+            };
+            if target.module_type != ModuleType::Library {
+                continue;
+            }
+            let Some(linklibs) = target
+                .genmodule_linklibs
+                .as_ref()
+                .filter(|linklibs| linklibs.enabled)
+            else {
+                continue;
+            };
+            let source_pair = self.arch_sources.get(mainmmake).is_some_and(|sources| {
+                sources.iter().any(|source| {
+                    &source.tag == tag
+                        && &source.dir == directory
+                        && &source.linklib_files == linklib_sources
+                        && !source.files.is_empty()
+                })
+            });
+            if !source_pair {
+                continue;
+            }
+            selected_clients.insert(format!("{mainmmake}-linklib"));
+            if linklibs.has_relative {
+                selected_clients.insert(format!("{mainmmake}-linklib-rel"));
+            }
+        }
+        let client_archive_owners: BTreeSet<_> = selected_clients
+            .iter()
+            .filter_map(|name| {
+                name.strip_suffix("-linklib")
+                    .or_else(|| name.strip_suffix("-linklib-rel"))
+                    .map(str::to_owned)
+            })
+            .collect();
+        self.native_selected_runtime_modules = Some(runtime_modules.clone());
+        self.native_selected_client_archives = Some(selected_clients);
+
         let declaration_needed = |name: &str| {
             is_selected(name)
                 || architecture_owners.contains(name)
-                || ["-linklib", "-linklib-rel", "-includes", "-fd", "-kobj"]
-                    .iter()
-                    .any(|suffix| is_selected(&format!("{name}{suffix}")))
+                || [
+                    "-linklib",
+                    "-linklib-rel",
+                    "-includes",
+                    "-fd",
+                    "-kobj",
+                    "-kobj-quick",
+                ]
+                .iter()
+                .any(|suffix| is_selected(&format!("{name}{suffix}")))
         };
         self.targets.retain(|name, target| {
             declaration_needed(name)
@@ -633,18 +746,9 @@ impl DependencyGraph {
                         .filter_map(|source| std::path::Path::new(source).file_stem())
                         .any(|stem| is_selected(&format!("{name}-{}", stem.to_string_lossy())))
         });
-        // A module reached only through its generated includes or FD aliases
-        // is retained as a declaration, but it is not built: its runtime,
-        // client archive and KOBJ were not selected. Keep what the reach needs
-        // and drop what it does not, so the module's own link requests are not
-        // validated against providers nobody selected.
-        let runtime_selected = |name: &str| {
-            is_selected(name)
-                || architecture_owners.contains(name)
-                || ["-linklib", "-linklib-rel", "-kobj"]
-                    .iter()
-                    .any(|suffix| is_selected(&format!("{name}{suffix}")))
-        };
+        // A module reached only through generated includes/FD aliases is
+        // headers-only. A selected client archive retains the full declaration
+        // and its source metadata, but does not select the runtime owner.
         for (name, target) in &mut self.targets {
             if target.genmodule_abi
                 && matches!(
@@ -657,7 +761,8 @@ impl DependencyGraph {
                         | ModuleType::Gadget
                         | ModuleType::Mcc
                 )
-                && !runtime_selected(name)
+                && !runtime_modules.contains(name)
+                && !client_archive_owners.contains(name)
                 && ["-includes", "-fd"]
                     .iter()
                     .any(|suffix| is_selected(&format!("{name}{suffix}")))
@@ -832,71 +937,6 @@ impl DependencyGraph {
         });
         self.arch_sources.retain(|name, _| declaration_needed(name));
         self.pending_script_outputs.clear();
-        let mut selected_clients = BTreeSet::new();
-        for target in self.targets.values() {
-            for suffix in ["-linklib", "-linklib-rel"] {
-                let raw = format!("{}{suffix}", target.mmake_name);
-                if selected.contains(&endpoint(&raw, context)?) {
-                    selected_clients.insert(raw);
-                }
-            }
-        }
-        // A selected architecture client-linklib leaf is rooted at
-        // `<module>-<tag>-linklib`, not at the module's ordinary
-        // `<module>-linklib` archive alias. Keep the concrete archive builder
-        // enabled so the source-bound endpoint can bind its selected object
-        // inputs, without adding a graph edge back to that archive. The
-        // relative builder is retained only when genmodule metadata proves
-        // that the module actually has a relative archive.
-        for effect in self
-            .arch_endpoint_effects
-            .iter()
-            .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
-        {
-            let crate::arch_endpoint_effects::ArchEndpointEffectData::ArchClientLinklibSources {
-                mainmmake,
-                tag,
-                linklib_sources,
-                directory,
-                compiler,
-                ..
-            } = &effect.data
-            else {
-                continue;
-            };
-            if compiler != "target" {
-                continue;
-            }
-            let Some(target) = self.targets.get(mainmmake) else {
-                continue;
-            };
-            if target.module_type != ModuleType::Library {
-                continue;
-            }
-            let Some(linklibs) = target
-                .genmodule_linklibs
-                .as_ref()
-                .filter(|linklibs| linklibs.enabled)
-            else {
-                continue;
-            };
-            let source_pair = self.arch_sources.get(mainmmake).is_some_and(|sources| {
-                sources.iter().any(|source| {
-                    &source.tag == tag
-                        && &source.dir == directory
-                        && &source.linklib_files == linklib_sources
-                        && !source.files.is_empty()
-                })
-            });
-            if !source_pair {
-                continue;
-            }
-            selected_clients.insert(format!("{mainmmake}-linklib"));
-            if linklibs.has_relative {
-                selected_clients.insert(format!("{mainmmake}-linklib-rel"));
-            }
-        }
-        self.native_selected_client_archives = Some(selected_clients);
         // A selected source-owned %build_linklib with the default target
         // compiler/libdir installs its declared libname in the Developer SDK.
         // Publication cannot depend on a discovered in-tree -l consumer: an
