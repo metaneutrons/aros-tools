@@ -53,6 +53,30 @@ elseif(PROBE STREQUAL "build-bool-without-validation")
     aros_test_clear_native_build_validation()
     set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
 endif()
+if(PROBE STREQUAL "llvm-archive")
+    # This isolates archive-role/argv[0] behavior with real host AR/RANLIB;
+    # compiler ABI is deliberately outside this source-ownership fixture.
+    set(AROS_TOOLCHAIN llvm)
+    set(AROS_CROSS_TOOLCHAIN_ROOT "${CMAKE_BINARY_DIR}/toolchain")
+    set(_bin "${AROS_CROSS_TOOLCHAIN_ROOT}/bin")
+    file(MAKE_DIRECTORY "${_bin}")
+    set(_tool "${_bin}/archive-tool")
+    file(WRITE "${_tool}" "#!/bin/sh\ncase \"$0\" in\n"
+        "  */llvm-ranlib) exec '${CMAKE_RANLIB}' \"$@\" ;;\n"
+        "  *) exec '${CMAKE_AR}' \"$@\" ;;\nesac\n")
+    file(CHMOD "${_tool}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    file(SHA256 "${_tool}" _sha)
+    file(SIZE "${_tool}" _size)
+    file(CREATE_LINK archive-tool "${_bin}/llvm-ar" SYMBOLIC)
+    file(CREATE_LINK llvm-ar "${_bin}/llvm-ranlib" SYMBOLIC)
+    file(WRITE "${AROS_CROSS_TOOLCHAIN_ROOT}/toolchain-manifest.json"
+        "{\"files\":[{\"path\":\"bin/llvm-ar\",\"type\":\"symlink\",\"mode\":\"0777\",\"target\":\"archive-tool\"},"
+        "{\"path\":\"bin/llvm-ranlib\",\"type\":\"symlink\",\"mode\":\"0777\",\"target\":\"llvm-ar\"},"
+        "{\"path\":\"bin/archive-tool\",\"type\":\"file\",\"mode\":\"0755\",\"sha256\":\"${_sha}\",\"size\":${_size}}]}")
+    set(CMAKE_AR "${_bin}/llvm-ar")
+    set(CMAKE_RANLIB "${_bin}/llvm-ranlib")
+endif()
 set(AROS_GENINC_DIR "${CMAKE_BINARY_DIR}/GENINCDIR")
 set(AROS_DEVELOPER_INCLUDE_DIR "${CMAKE_BINARY_DIR}/SYS/Developer/include")
 aros_resolve_sdk_include_root(AROS_SDK_INCLUDE_DIR)
@@ -89,6 +113,8 @@ elseif(PROBE STREQUAL "file-collision")
     set_property(GLOBAL PROPERTY "AROS_SDK_FILE_COPY_OUTPUT_${key}" previous)
 elseif(PROBE STREQUAL "no-contract")
     aros_test_clear_native_build_validation()
+elseif(PROBE STREQUAL "unknown-family")
+    set(AROS_TOOLCHAIN unknown)
 elseif(PROBE STREQUAL "remove-member")
     set(objects "${one}")
 elseif(PROBE STREQUAL "interface-collision")
