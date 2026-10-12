@@ -43,6 +43,29 @@ fn implicit_uselib_consumers(target: &TargetDefinition) -> Vec<String> {
     }
 }
 
+/// Whether a retained full-library declaration is present only to produce a
+/// selected client archive, not its runtime module. The client archive is a
+/// static collection of its declared sources; runtime `uselibs`, `-l` flags,
+/// and relative-library requirements are not link inputs to that archive.
+fn selected_client_only_runtime_owner(graph: &DependencyGraph, target: &TargetDefinition) -> bool {
+    use crate::ast::ModuleMacroForm;
+
+    if target.module_type != ModuleType::Library
+        || target.module_macro != Some(ModuleMacroForm::Full)
+    {
+        return false;
+    }
+    let Some(runtime_modules) = graph.native_selected_runtime_modules.as_ref() else {
+        return false;
+    };
+    let Some(client_archives) = graph.native_selected_client_archives.as_ref() else {
+        return false;
+    };
+    !runtime_modules.contains(&target.mmake_name)
+        && (client_archives.contains(&format!("{}-linklib", target.mmake_name))
+            || client_archives.contains(&format!("{}-linklib-rel", target.mmake_name)))
+}
+
 impl DependencyGraph {
     pub fn add_packages(&mut self, decls: Vec<crate::packages::PackageDecl>) {
         self.packages.extend(decls);
@@ -83,6 +106,7 @@ impl DependencyGraph {
         let required_relative: std::collections::HashSet<String> = self
             .targets
             .values()
+            .filter(|target| !selected_client_only_runtime_owner(self, target))
             .flat_map(|target| {
                 target
                     .config_relative_libraries
@@ -210,7 +234,9 @@ impl DependencyGraph {
         let mut rejected_link_options = Vec::new();
         let mut resolved_typed_uselibs = Vec::new();
         for (mmake, target) in &self.targets {
-            if target.module_type == ModuleType::ModuleHeaders {
+            if target.module_type == ModuleType::ModuleHeaders
+                || selected_client_only_runtime_owner(self, target)
+            {
                 continue;
             }
             let mut ids = Vec::new();
