@@ -11,7 +11,7 @@ mod selected_closure;
 
 use super::{
     arch_compatible, arch_of, has_public_link_archive, inventory_has_public_link_archive,
-    inventory_runtime_name, target_runtime_name,
+    inventory_runtime_name, supports_genmodule_client_archives, target_runtime_name,
 };
 use crate::{DependencyGraph, ModuleType, TargetContext};
 use aros_common::native_build_contract::{
@@ -161,7 +161,7 @@ impl DependencyGraph {
             })
             .collect();
         for target in self.targets.values_mut() {
-            if target.module_type == ModuleType::Library
+            if supports_genmodule_client_archives(&target.module_type)
                 && required_relative.contains(&target.target_name)
             {
                 if let Some(metadata) = target.genmodule_linklibs.as_mut() {
@@ -172,7 +172,7 @@ impl DependencyGraph {
             }
         }
         for target in &mut self.inventory_targets {
-            if target.module_type == ModuleType::Library
+            if supports_genmodule_client_archives(&target.module_type)
                 && required_relative.contains(&target.target_name)
             {
                 if let Some(metadata) = target.genmodule_linklibs.as_mut() {
@@ -201,7 +201,7 @@ impl DependencyGraph {
         for declaration in &declarations {
             let owner = &declaration.mmake_name;
             let mut aliases = Vec::new();
-            match declaration.module_type {
+            match &declaration.module_type {
                 ModuleType::Abi => {
                     aliases.push((declaration.target_name.clone(), format!("{owner}-linklib")));
                     aliases.push((
@@ -212,7 +212,10 @@ impl DependencyGraph {
                 ModuleType::LinkLib => {
                     aliases.push((declaration.target_name.clone(), owner.clone()));
                 }
-                ModuleType::Library if inventory_has_public_link_archive(declaration) => {
+                module_type
+                    if supports_genmodule_client_archives(module_type)
+                        && inventory_has_public_link_archive(declaration) =>
+                {
                     for name in std::iter::once(&declaration.target_name)
                         .chain(declaration.linklib_name.iter())
                     {
@@ -562,7 +565,7 @@ impl DependencyGraph {
                 add(&mut edges, &format!("{owner}-includes"), []);
             }
             if target.module_type == ModuleType::Abi
-                || target.module_type == ModuleType::Library
+                || supports_genmodule_client_archives(&target.module_type)
                     && (target.genmodule_only
                         || target
                             .genmodule_linklibs
@@ -632,7 +635,7 @@ impl DependencyGraph {
                 add(&mut edges, &format!("{owner}-includes"), []);
             }
             if target.module_type == ModuleType::Abi
-                || target.module_type == ModuleType::Library
+                || supports_genmodule_client_archives(&target.module_type)
                     && (target.genmodule_only
                         || target
                             .genmodule_linklibs

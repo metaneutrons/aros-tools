@@ -32,6 +32,19 @@ pub use sdk_assets::SdkProgramOutput;
 pub(crate) use source_archives::private_source_object_owner;
 pub(crate) use source_headers::private_source_directory_owner;
 
+/// Module target kinds whose CMake macros forward to `aros_add_library` and
+/// therefore share its genmodule client-archive endpoints.
+///
+/// This is deliberately narrower than the full module family: devices,
+/// resources, and HIDDs have distinct runtime builders and do not expose the
+/// `CLIENTS_ONLY` archive projection.
+pub(crate) const fn supports_genmodule_client_archives(module_type: &ModuleType) -> bool {
+    matches!(
+        module_type,
+        ModuleType::Library | ModuleType::Datatype | ModuleType::Gadget | ModuleType::Mcc
+    )
+}
+
 /// A script-generated file bound to the targets that consume it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedScriptOutput {
@@ -226,7 +239,7 @@ fn arch_of(dir: &std::path::Path) -> Option<(String, String)> {
 }
 
 fn define_header_compile_targets(mmake: &str, target: &TargetDefinition) -> Vec<String> {
-    match target.module_type {
+    match &target.module_type {
         ModuleType::ProgramGroup => {
             let mut members = target
                 .source_files
@@ -244,7 +257,9 @@ fn define_header_compile_targets(mmake: &str, target: &TargetDefinition) -> Vec<
         // Despite having no declaration sources, this is a real compiler
         // target: aros_add_library(GENMODULE_ONLY) creates the runtime with
         // libentry plus the generated start/end sources under the mmake id.
-        ModuleType::Library if target.genmodule_only => vec![mmake.to_owned()],
+        module_type if supports_genmodule_client_archives(module_type) && target.genmodule_only => {
+            vec![mmake.to_owned()]
+        }
         // These declarations materialise only utility/package orchestration
         // under their mmake id. An ABI's compiling target is its generated
         // client archive and does not consume the declaration's `uselibs`.
@@ -431,9 +446,9 @@ fn declaration_runtime_name(
 }
 
 fn inventory_has_public_link_archive(target: &crate::ast::InventoryTargetIdentity) -> bool {
-    match target.module_type {
+    match &target.module_type {
         ModuleType::Abi => true,
-        ModuleType::Library => {
+        module_type if supports_genmodule_client_archives(module_type) => {
             target.linklib_output_dir.is_none()
                 && (target.genmodule_only
                     || target
@@ -456,9 +471,9 @@ fn inventory_has_public_link_archive(target: &crate::ast::InventoryTargetIdentit
 /// In-tree/private `libdir=` outputs are deliberately excluded: the direct
 /// AROS linker rule has no proven search path for them.
 fn has_public_link_archive(target: &TargetDefinition) -> bool {
-    match target.module_type {
+    match &target.module_type {
         ModuleType::Abi => true,
-        ModuleType::Library => {
+        module_type if supports_genmodule_client_archives(module_type) => {
             target.linklib_output_dir.is_none()
                 && (target.genmodule_only
                     || target

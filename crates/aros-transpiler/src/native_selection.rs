@@ -253,7 +253,13 @@ pub fn bind_architecture_effects(
                 {
                     let target = graph.targets.get(mainmmake);
                     let client_archives_exist = target.is_some_and(|target| {
-                        target.module_type == aros_transpiler::ast::ModuleType::Library
+                        matches!(
+                            &target.module_type,
+                            aros_transpiler::ast::ModuleType::Library
+                                | aros_transpiler::ast::ModuleType::Datatype
+                                | aros_transpiler::ast::ModuleType::Gadget
+                                | aros_transpiler::ast::ModuleType::Mcc
+                        )
                             && target
                                 .genmodule_linklibs
                                 .as_ref()

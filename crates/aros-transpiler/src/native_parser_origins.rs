@@ -13,6 +13,7 @@
 //! endpoint has no indexed parser input.
 
 use crate::ast::{InventoryTargetIdentity, ParsedMmakefile, TargetDefinition};
+use crate::graph::supports_genmodule_client_archives;
 use crate::parser::TargetContext;
 use crate::ModuleType;
 use std::collections::BTreeSet;
@@ -341,7 +342,7 @@ fn emits_client_linklib(
     linklibs: Option<&crate::ast::GenmoduleLinklibs>,
 ) -> bool {
     *module_type == ModuleType::Abi
-        || *module_type == ModuleType::Library
+        || supports_genmodule_client_archives(module_type)
             && (genmodule_only || linklibs.is_some_and(|metadata| metadata.enabled))
 }
 

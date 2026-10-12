@@ -3201,7 +3201,7 @@ fn non_library_module_needing_a_client_archive_is_reported() {
 }
 
 #[test]
-fn non_library_module_preserves_rellibs_from_explicit_config_and_override() {
+fn datatype_preserves_client_archive_metadata_and_rellibs_from_config_override() {
     let tree = TempTree::new();
     let module = tree.0.join("workbench/classes/datatypes/png");
     fs::create_dir_all(&module).unwrap();
@@ -3250,7 +3250,13 @@ fn non_library_module_preserves_rellibs_from_explicit_config_and_override() {
         target.config_override_file.as_deref(),
         Some("${AROS_SOURCE_DIR}/workbench/classes/datatypes/png/pngdt.override")
     );
-    assert!(target.genmodule_linklibs.is_none());
+    let metadata = target
+        .genmodule_linklibs
+        .as_ref()
+        .expect("datatype uses the library-backed genmodule client builder");
+    assert!(metadata.enabled && metadata.inputs_exact);
+    assert!(!metadata.has_relative);
+    assert_eq!(metadata.relative_libraries, ["png", "z1"]);
     assert!(parsed.skipped_client_archives.is_empty(), "{parsed:#?}");
 }
 
@@ -3312,7 +3318,13 @@ fn default_module_configs_merge_rellibs_from_confoverride() {
         .expect("datatype module using default png.conf");
     assert_eq!(datatype.config_file, None);
     assert_eq!(datatype.config_relative_libraries, ["png", "z1"]);
-    assert!(datatype.genmodule_linklibs.is_none());
+    let metadata = datatype
+        .genmodule_linklibs
+        .as_ref()
+        .expect("datatype client-link metadata");
+    assert!(metadata.enabled && metadata.inputs_exact);
+    assert!(!metadata.has_relative);
+    assert_eq!(metadata.relative_libraries, ["png", "z1"]);
 
     let library =
         super::parse_mmakefile_with_dirs_and_context(&library_mmake, &tree.0, &dirs, &context)

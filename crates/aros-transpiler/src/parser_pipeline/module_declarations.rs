@@ -14,6 +14,7 @@ use super::{
 };
 use crate::ast::ModuleMacroForm;
 use crate::capability::mesa::mesa26;
+use crate::graph::supports_genmodule_client_archives;
 use crate::module_paths::implicit_module_header_meta_rules;
 
 #[expect(
@@ -246,7 +247,7 @@ pub(super) fn collect_modules(inputs: DeclarationInputs<'_>, outputs: Declaratio
         // otherwise in the SDK library directory. A suffixed plug-in such as
         // MUI.MiamiPanel is not part of the SDK, and its archive must not take
         // the place of a real SDK library whose name differs only in case.
-        let linklib_output_dir = if matches!(module_type, ModuleType::Library) {
+        let linklib_output_dir = if supports_genmodule_client_archives(&module_type) {
             let requested = match macro_arg(rest, "libdir") {
                 Some(raw) if !raw.is_empty() => Some(raw),
                 _ => mod_suffix
@@ -496,14 +497,16 @@ pub(super) fn collect_modules(inputs: DeclarationInputs<'_>, outputs: Declaratio
             .map(|facts| facts.relative_libraries.clone())
             .unwrap_or_default();
         let genmodule_abi = inv.name != "build_module_library" && config_facts.is_some();
-        if !matches!(module_type, ModuleType::Library | ModuleType::ModuleHeaders) {
+        if !supports_genmodule_client_archives(&module_type)
+            && module_type != ModuleType::ModuleHeaders
+        {
             if let Some(facts) = config_facts.as_ref() {
                 if facts.forces_client_archive {
                     skipped_client_archives.push(format!(
                         "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} modtype={mod_type_owned}: \
                          config states `options stubs` or `options autoinit`, so upstream builds \
-                         lib{mod_name}.a; the generated client sources are only derived for \
-                         modtype=library",
+                        lib{mod_name}.a; the generated client sources are unsupported for \
+                         this module builder",
                         rel_dir.display(),
                         inv.line + 1,
                         inv.name
@@ -511,7 +514,7 @@ pub(super) fn collect_modules(inputs: DeclarationInputs<'_>, outputs: Declaratio
                 }
             }
         }
-        let genmodule_linklibs = if module_type == ModuleType::Library {
+        let genmodule_linklibs = if supports_genmodule_client_archives(&module_type) {
             config_facts.map(
                 |GenmoduleConfigFacts {
                      has_relative,
@@ -570,7 +573,7 @@ pub(super) fn collect_modules(inputs: DeclarationInputs<'_>, outputs: Declaratio
                     GenmoduleLinklibs {
                         enabled: linklib_name.is_some()
                             || forces_client_archive
-                            || module_type == ModuleType::Library
+                            || supports_genmodule_client_archives(&module_type)
                             || !source_files.is_empty()
                             || !object_sources.is_empty(),
                         has_relative,

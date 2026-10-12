@@ -1199,12 +1199,22 @@ fn consumer_rellib_links_only_the_relative_provider() {
         graph.targets["png-consumer"].config_relative_libraries,
         ["png"]
     );
-    assert!(graph.targets["png-consumer"].genmodule_linklibs.is_none());
+    let client = graph.targets["png-consumer"]
+        .genmodule_linklibs
+        .as_ref()
+        .unwrap();
+    assert!(client.enabled && client.inputs_exact);
+    assert!(!client.has_relative);
     assert_eq!(
         graph.targets["png-consumer"].link_libs,
         ["workbench-libs-png-linklib-rel"]
     );
-    assert!(graph.targets["plain-consumer"].genmodule_linklibs.is_none());
+    let client = graph.targets["plain-consumer"]
+        .genmodule_linklibs
+        .as_ref()
+        .unwrap();
+    assert!(client.enabled && client.inputs_exact);
+    assert!(!client.has_relative);
     assert!(graph.targets["plain-consumer"].link_libs.is_empty());
 
     let cmake = crate::generate_cmake(&graph);

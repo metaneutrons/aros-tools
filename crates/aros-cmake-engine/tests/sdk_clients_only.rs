@@ -43,7 +43,7 @@ endif()
 # real client archives below.
 function(_aros_generate_module_support out)
     cmake_parse_arguments(GM "ABI" "TARGET;MMAKE_ID;DIRECTORY;MODTYPE;MODSUFFIX" "" ${ARGN})
-    set(_gen "${CMAKE_CURRENT_BINARY_DIR}/gen/${GM.MMAKE_ID}")
+    set(_gen "${CMAKE_CURRENT_BINARY_DIR}/gen/${GM_MMAKE_ID}")
     set(_include "${_gen}/include")
     file(MAKE_DIRECTORY "${_gen}" "${_include}")
     file(WRITE "${_gen}/genmodule_normal_stub.c"
@@ -139,9 +139,13 @@ if(PROBE_MODE STREQUAL "no-validation")
 elseif(PROBE_MODE STREQUAL "both-archives-disabled")
     list(APPEND _client_arguments NO_NORMAL_CLIENT_ARCHIVE NO_RELATIVE_CLIENT_ARCHIVE)
 endif()
-aros_add_library(${_client_arguments})
+if(PROBE_MODE MATCHES "^(datatype|gadget|mcc)$")
+    cmake_language(CALL "aros_add_${PROBE_MODE}" ${_client_arguments})
+else()
+    aros_add_library(${_client_arguments})
+endif()
 
-if(PROBE_MODE STREQUAL "valid")
+if(PROBE_MODE MATCHES "^(valid|datatype|gadget|mcc)$")
     foreach(_target client-only-linklib client-only-linklib-rel
             client-only-includes client-only-genmodfiles
             includes-fixture includes-fixture_rel
@@ -207,12 +211,15 @@ impl Fixture {
         let aliases = extract_function(&source, "_aros_publish_library_client_aliases");
         let archive_claim = extract_function(&source, "_aros_claim_linklib_archive");
         let builder = extract_function(&source, "aros_add_library");
+        let wrappers = ["aros_add_datatype", "aros_add_gadget", "aros_add_mcc"]
+            .map(|name| extract_function(&source, name))
+            .join("\n");
         let script = FIXTURE
             .replace("@MODE@", mode)
             .replace("@ENGINE@", &engine.display().to_string())
             .replace(
                 "@PRODUCTION_FUNCTIONS@",
-                &format!("{aliases}\n{archive_claim}\n{builder}"),
+                &format!("{aliases}\n{archive_claim}\n{builder}\n{wrappers}"),
             );
         fs::write(self.project.join("CMakeLists.txt"), script).unwrap();
         Command::new("cmake")
@@ -312,6 +319,29 @@ fn clients_only_builds_source_and_genmodule_archives_without_runtime_resolution(
             2,
             "{members}"
         );
+    }
+}
+
+#[test]
+fn library_backed_module_wrappers_build_clients_without_runtime_sources() {
+    for mode in ["datatype", "gadget", "mcc"] {
+        let fixture = Fixture::new();
+        let configure = fixture.configure(mode);
+        assert!(
+            configure.status.success(),
+            "{mode}: {}",
+            output_text(&configure)
+        );
+        assert!(fixture.build.join("passed").is_file());
+        let build = Command::new("cmake")
+            .arg("--build")
+            .arg(&fixture.build)
+            .args(["--target", "client-only-linklib", "client-only-linklib-rel"])
+            .output()
+            .unwrap();
+        assert!(build.status.success(), "{mode}: {}", output_text(&build));
+        assert!(fixture.build.join("lib/libfixture.a").is_file());
+        assert!(fixture.build.join("lib/libfixture_rel.a").is_file());
     }
 }
 

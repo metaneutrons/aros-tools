@@ -444,9 +444,9 @@ fn a_library_reached_only_through_its_fd_alias_is_reduced_to_its_headers() {
 
 #[test]
 fn client_only_full_library_ignores_runtime_link_requirements_but_runtime_does_not() {
-    let make_graph = || {
+    let make_graph = |module_type| {
         let mut graph = DependencyGraph::new();
-        let mut client = target("client-owner", ModuleType::Library);
+        let mut client = target("client-owner", module_type);
         client.module_macro = Some(crate::ast::ModuleMacroForm::Full);
         client.genmodule_abi = true;
         client.use_libs = vec!["missing-runtime-uselib".into()];
@@ -472,43 +472,126 @@ fn client_only_full_library_ignores_runtime_link_requirements_but_runtime_does_n
         graph
     };
 
-    let mut client_only = make_graph();
-    client_only.native_selected_runtime_modules = Some(BTreeSet::new());
-    client_only.native_selected_client_archives =
-        Some(BTreeSet::from(["client-owner-linklib".into()]));
-    assert!(client_only.resolve_use_libs().is_empty());
-    assert!(
-        !client_only.targets["relative-provider"]
+    for module_type in [
+        ModuleType::Library,
+        ModuleType::Datatype,
+        ModuleType::Gadget,
+        ModuleType::Mcc,
+    ] {
+        let mut client_only = make_graph(module_type.clone());
+        client_only.native_selected_runtime_modules = Some(BTreeSet::new());
+        client_only.native_selected_client_archives =
+            Some(BTreeSet::from(["client-owner-linklib".into()]));
+        assert!(client_only.resolve_use_libs().is_empty());
+        assert!(
+            !client_only.targets["relative-provider"]
+                .genmodule_linklibs
+                .as_ref()
+                .unwrap()
+                .enabled
+        );
+        assert!(client_only.targets["client-owner"].link_libs.is_empty());
+        assert_eq!(
+            client_only.targets["client-owner"].link_options,
+            ["-lmissing-runtime-option"]
+        );
+
+        // Selecting the same owner as a runtime target restores ordinary
+        // strict validation, even when its client archive is selected too.
+        let mut runtime = make_graph(module_type);
+        runtime.native_selected_runtime_modules = Some(BTreeSet::from(["client-owner".into()]));
+        runtime.native_selected_client_archives =
+            Some(BTreeSet::from(["client-owner-linklib".into()]));
+        let unresolved = runtime.resolve_use_libs();
+        assert!(unresolved.iter().any(|item| {
+            item.contains("client-owner uselibs=missing-runtime-uselib has no link library")
+        }));
+        assert!(unresolved.iter().any(|item| {
+            item.contains("client-owner link option -lmissing-runtime-option has no link library")
+        }));
+        assert!(
+            runtime.targets["relative-provider"]
+                .genmodule_linklibs
+                .as_ref()
+                .unwrap()
+                .enabled
+        );
+    }
+}
+
+#[test]
+fn datatype_client_archive_selection_retains_client_sources_without_runtime_owner() {
+    let owner = "datatype-owner";
+    let mut graph = DependencyGraph::new();
+    let mut datatype = target(owner, ModuleType::Datatype);
+    datatype.module_macro = Some(crate::ast::ModuleMacroForm::Full);
+    datatype.genmodule_abi = true;
+    datatype.source_files = vec!["runtime.c".into()];
+    datatype.use_libs = vec!["missing-runtime-uselib".into()];
+    datatype.config_relative_libraries = vec!["missing-runtime-relative".into()];
+    datatype.genmodule_linklibs = Some(GenmoduleLinklibs {
+        enabled: true,
+        has_relative: true,
+        relative_libraries: vec!["missing-runtime-relative".into()],
+        source_files: vec!["client.c".into()],
+        ..GenmoduleLinklibs::default()
+    });
+    graph.targets.insert(owner.to_owned(), datatype);
+    graph.add_meta_rule(MetaTargetRule {
+        name: format!("{owner}-linklib"),
+        dependencies: vec![format!("{owner}-includes"), "client-prerequisite".into()],
+    });
+    graph.add_meta_rule(MetaTargetRule {
+        name: "client-prerequisite".into(),
+        dependencies: Vec::new(),
+    });
+
+    let selected = graph
+        .selected_dependency_closure(
+            &[format!("{owner}-linklib")],
+            &TargetContext::default(),
+            &[],
+        )
+        .unwrap();
+    assert!(!selected.contains(owner));
+    assert!(selected.contains("client-prerequisite"));
+    assert!(selected.contains(&format!("{owner}-includes")));
+
+    graph
+        .retain_native_selection(&selected, &TargetContext::default())
+        .unwrap();
+    assert!(graph
+        .native_selected_runtime_modules
+        .as_ref()
+        .unwrap()
+        .is_empty());
+    assert!(graph
+        .native_selected_client_archives
+        .as_ref()
+        .unwrap()
+        .contains(&format!("{owner}-linklib")));
+    assert!(graph.resolve_use_libs().is_empty());
+    assert_eq!(graph.targets[owner].module_type, ModuleType::Datatype);
+    assert_eq!(
+        graph.targets[owner].module_macro,
+        Some(crate::ast::ModuleMacroForm::Full)
+    );
+    assert_eq!(graph.targets[owner].source_files, ["runtime.c"]);
+    assert_eq!(
+        graph.targets[owner]
             .genmodule_linklibs
             .as_ref()
             .unwrap()
-            .enabled
-    );
-    assert!(client_only.targets["client-owner"].link_libs.is_empty());
-    assert_eq!(
-        client_only.targets["client-owner"].link_options,
-        ["-lmissing-runtime-option"]
+            .source_files,
+        ["client.c"]
     );
 
-    // Selecting the same owner as a runtime target restores ordinary strict
-    // validation, even when its client archive is selected as well.
-    let mut runtime = make_graph();
-    runtime.native_selected_runtime_modules = Some(BTreeSet::from(["client-owner".into()]));
-    runtime.native_selected_client_archives = Some(BTreeSet::from(["client-owner-linklib".into()]));
-    let unresolved = runtime.resolve_use_libs();
-    assert!(unresolved.iter().any(|item| {
-        item.contains("client-owner uselibs=missing-runtime-uselib has no link library")
-    }));
-    assert!(unresolved.iter().any(|item| {
-        item.contains("client-owner link option -lmissing-runtime-option has no link library")
-    }));
-    assert!(
-        runtime.targets["relative-provider"]
-            .genmodule_linklibs
-            .as_ref()
-            .unwrap()
-            .enabled
-    );
+    let generated = crate::generate_cmake(&graph);
+    assert!(generated.contains("aros_add_datatype("));
+    assert!(generated.contains("    CLIENTS_ONLY"));
+    assert!(generated.contains("    LINKLIB_SOURCES \"client.c\""));
+    assert!(generated.contains("client-prerequisite"));
+    assert!(!generated.contains("    NO_CLIENT_ARCHIVES"));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use super::{cmake_arg, cmake_literal_arg, emit_configure_builds};
 use crate::ast::ModuleType;
-use crate::graph::DependencyGraph;
+use crate::graph::{supports_genmodule_client_archives, DependencyGraph};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
@@ -97,7 +97,9 @@ pub(super) fn emit_concrete_targets(
             .native_selected_runtime_modules
             .as_ref()
             .is_some_and(|selected| selected.contains(&target.mmake_name));
-        if target.module_type == ModuleType::Library && selected_client_builder && !runtime_selected
+        if supports_genmodule_client_archives(&target.module_type)
+            && selected_client_builder
+            && !runtime_selected
         {
             // Keep the original source declaration (including generic and
             // architecture client inputs), but let CMake materialise only its
@@ -129,11 +131,9 @@ pub(super) fn emit_concrete_targets(
         if let Some(linklib_name) = &target.linklib_name {
             writeln!(out, "    LINKLIB_NAME {}", cmake_arg(linklib_name)).unwrap();
         }
-        if let Some(selected) = graph
-            .native_selected_client_archives
-            .as_ref()
-            .filter(|_| target.module_type == ModuleType::Library && !target.genmodule_only)
-        {
+        if let Some(selected) = graph.native_selected_client_archives.as_ref().filter(|_| {
+            supports_genmodule_client_archives(&target.module_type) && !target.genmodule_only
+        }) {
             // Public ABI headers are still needed by the runtime. Native
             // selection must not publish an unrequested client archive into
             // the same namespace as a selected implementation archive.
@@ -169,7 +169,7 @@ pub(super) fn emit_concrete_targets(
                 writeln!(out, "    LINKLIB_OBJECT_SOURCES {}", sources.join(" ")).unwrap();
             }
         }
-        if target.module_type == ModuleType::Library {
+        if supports_genmodule_client_archives(&target.module_type) {
             let arch_linklib_sources: Vec<_> = graph
                 .arch_sources
                 .get(&target.mmake_name)

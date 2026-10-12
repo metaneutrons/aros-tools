@@ -1,8 +1,9 @@
 //! Selected dependency closure and retained native selection.
 
 use super::{
-    add, endpoint, failure, ArosError, BTreeMap, BTreeSet, DependencyGraph, Diagnostic,
-    DiagnosticSet, Edges, ModuleType, Result, SelectionEdges, TargetContext,
+    add, endpoint, failure, supports_genmodule_client_archives, ArosError, BTreeMap, BTreeSet,
+    DependencyGraph, Diagnostic, DiagnosticSet, Edges, ModuleType, Result, SelectionEdges,
+    TargetContext,
 };
 
 impl DependencyGraph {
@@ -683,7 +684,7 @@ impl DependencyGraph {
             let Some(target) = self.targets.get(mainmmake) else {
                 continue;
             };
-            if target.module_type != ModuleType::Library {
+            if !supports_genmodule_client_archives(&target.module_type) {
                 continue;
             }
             let Some(linklibs) = target
