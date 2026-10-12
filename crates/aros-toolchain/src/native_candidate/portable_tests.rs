@@ -11,7 +11,7 @@ use aros_common::{sha256_bytes, Sha256Digest};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use super::tests::{package_request, Fixture};
+use super::tests::{package_request, package_request_for_release, Fixture};
 use super::{
     export_finished_package_measurement, package_finished_candidate,
     readback_finished_build_result, readback_finished_package_measurement,
@@ -26,7 +26,7 @@ use crate::recipe::GitObjectId;
 
 const BUILD_RESULT_FILE: &str = "build-result.json";
 
-pub(super) struct GuardedPackage {
+pub struct GuardedPackage {
     pub(super) fixture: Fixture,
     pub(super) candidate: FinishedCandidateReadback,
     pub(super) package_request: PackageRequest,
@@ -36,6 +36,16 @@ pub(super) struct GuardedPackage {
     pub(super) identity: Identity,
     _package_root: TempDir,
     _result_root: TempDir,
+}
+
+impl GuardedPackage {
+    pub(crate) fn verified_package(&self) -> &crate::package_verify::VerifiedPackage {
+        self.package.verified()
+    }
+
+    pub(crate) fn verification(&self) -> &PackageVerificationRequest {
+        &self.verification
+    }
 }
 
 fn guarded_package() -> GuardedPackage {
@@ -50,13 +60,61 @@ pub(super) fn guarded_gnu_package_for_host(host: &'static str) -> GuardedPackage
     guarded_package_from_fixture(Fixture::new_gnu_for_host(host))
 }
 
-fn guarded_package_from_fixture(mut fixture: Fixture) -> GuardedPackage {
+pub fn guarded_gnu_package_from_payload_for_host(
+    host: &'static str,
+    recipe_bytes: &[u8],
+    source_lock_bytes: &[u8],
+    profiles_bytes: &[u8],
+    profile_name: &str,
+    payload_root: &Path,
+    release_id: &str,
+) -> GuardedPackage {
+    let fixture = Fixture::new_gnu_for_host_with_payload(
+        host,
+        recipe_bytes,
+        source_lock_bytes,
+        profiles_bytes,
+        profile_name,
+        payload_root,
+    );
+    guarded_package_from_fixture_with_release(fixture, release_id)
+}
+
+pub fn guarded_llvm_package_from_payload_for_host(
+    host: &'static str,
+    recipe_bytes: &[u8],
+    source_lock_bytes: &[u8],
+    profiles_bytes: &[u8],
+    profile_name: &str,
+    payload_root: &Path,
+    release_id: &str,
+) -> GuardedPackage {
+    let fixture = Fixture::new_llvm_for_host_with_payload(
+        host,
+        recipe_bytes,
+        source_lock_bytes,
+        profiles_bytes,
+        profile_name,
+        payload_root,
+    );
+    guarded_package_from_fixture_with_release(fixture, release_id)
+}
+
+fn guarded_package_from_fixture(fixture: Fixture) -> GuardedPackage {
+    guarded_package_from_fixture_with_release(fixture, "finished-candidate-test")
+}
+
+fn guarded_package_from_fixture_with_release(
+    mut fixture: Fixture,
+    release_id: &str,
+) -> GuardedPackage {
     fixture.remove_old_compiler_checkpoint();
     fixture.persist();
 
     let local = fixture.readback().unwrap();
     let package_root = tempfile::tempdir().unwrap();
-    let selected_package = package_request(&fixture, package_root.path().join("package"));
+    let selected_package =
+        package_request_for_release(&fixture, package_root.path().join("package"), release_id);
     let result_root = tempfile::tempdir().unwrap();
     let result_path = result_root.path().join(BUILD_RESULT_FILE);
     let result_bytes = synthetic_build_result(&local, &fixture.identity);
@@ -405,8 +463,7 @@ fn rehashed_outer_records_do_not_replace_the_selected_inner_chain() {
                 valid,
                 6,
                 |document| {
-                    document["entry_count"] =
-                        json!(document["entry_count"].as_u64().unwrap() + 1);
+                    document["entry_count"] = json!(document["entry_count"].as_u64().unwrap() + 1);
                 },
                 true,
             ),
@@ -418,11 +475,11 @@ fn rehashed_outer_records_do_not_replace_the_selected_inner_chain() {
                 valid,
                 6,
                 |document| {
-                    document["payload_sha256"] = json!(sha256_bytes(b"synthetic published collector\n"));
+                    document["payload_sha256"] =
+                        json!(sha256_bytes(b"synthetic published collector\n"));
                     document["entry_count"] = json!(1);
-                    document["regular_file_bytes"] = json!(
-                        b"synthetic published collector\n".len()
-                    );
+                    document["regular_file_bytes"] =
+                        json!(b"synthetic published collector\n".len());
                 },
                 true,
             ),
@@ -430,12 +487,7 @@ fn rehashed_outer_records_do_not_replace_the_selected_inner_chain() {
         ),
         (
             "altered publish outputs",
-            mutate_retained_document(
-                valid,
-                7,
-                |document| document["outputs"] = json!([]),
-                false,
-            ),
+            mutate_retained_document(valid, 7, |document| document["outputs"] = json!([]), false),
             "portable build result outputs differ from publish receipt",
         ),
         (

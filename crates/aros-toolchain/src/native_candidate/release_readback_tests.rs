@@ -39,7 +39,7 @@ const INPUTS_NAME: &str = "toolchain-release-inputs-v2.json";
 const MANIFEST_SCHEMA_NAME: &str = "toolchain-manifest-v2.schema.json";
 const TREE_FIXTURE_NAME: &str = "tree-digest-v1.fixture.json";
 
-struct InputFixture {
+pub(super) struct InputFixture {
     inputs: ReleaseInputs,
     collection: Vec<u8>,
     documents: BTreeMap<String, Vec<u8>>,
@@ -54,7 +54,7 @@ struct ExpectedLane {
     comparison: Sha256Digest,
 }
 
-pub(super) struct PreparedRelease {
+pub struct PreparedRelease {
     _release_root: TempDir,
     _transport_root: TempDir,
     pub(super) packages: IndexedPackageReadbackRequestV2,
@@ -206,6 +206,79 @@ fn prepare_release_for_family(gnu: bool, with_sdk: bool) -> PreparedRelease {
     } else {
         input_fixture()
     };
+    prepare_release_from_input(gnu, with_sdk, input, None, None)
+}
+
+pub fn prepare_gnu_matrix_release(
+    collection: Vec<u8>,
+    documents: BTreeMap<String, Vec<u8>>,
+    sdk_identity: SdkIdentity,
+    packages_by_host: BTreeMap<String, (GuardedPackage, GuardedPackage)>,
+    generated_sdk: &crate::sdk_package::SdkPackageOutput,
+    generated_tree_sha256: &Sha256Digest,
+) -> PreparedRelease {
+    prepare_matrix_release(
+        true,
+        collection,
+        documents,
+        sdk_identity,
+        packages_by_host,
+        generated_sdk,
+        generated_tree_sha256,
+    )
+}
+
+pub fn prepare_llvm_matrix_release(
+    collection: Vec<u8>,
+    documents: BTreeMap<String, Vec<u8>>,
+    sdk_identity: SdkIdentity,
+    packages_by_host: BTreeMap<String, (GuardedPackage, GuardedPackage)>,
+    generated_sdk: &crate::sdk_package::SdkPackageOutput,
+    generated_tree_sha256: &Sha256Digest,
+) -> PreparedRelease {
+    prepare_matrix_release(
+        false,
+        collection,
+        documents,
+        sdk_identity,
+        packages_by_host,
+        generated_sdk,
+        generated_tree_sha256,
+    )
+}
+
+fn prepare_matrix_release(
+    gnu: bool,
+    collection: Vec<u8>,
+    documents: BTreeMap<String, Vec<u8>>,
+    sdk_identity: SdkIdentity,
+    packages_by_host: BTreeMap<String, (GuardedPackage, GuardedPackage)>,
+    generated_sdk: &crate::sdk_package::SdkPackageOutput,
+    generated_tree_sha256: &Sha256Digest,
+) -> PreparedRelease {
+    let inputs = ReleaseInputs::parse(&collection, &documents).unwrap();
+    let input = InputFixture {
+        inputs,
+        collection,
+        documents,
+        sdk_identity: Some(sdk_identity),
+    };
+    prepare_release_from_input(
+        gnu,
+        true,
+        input,
+        Some(packages_by_host),
+        Some((generated_sdk, generated_tree_sha256)),
+    )
+}
+
+fn prepare_release_from_input(
+    gnu: bool,
+    with_sdk: bool,
+    input: InputFixture,
+    mut packages_by_host: Option<BTreeMap<String, (GuardedPackage, GuardedPackage)>>,
+    generated_sdk: Option<(&crate::sdk_package::SdkPackageOutput, &Sha256Digest)>,
+) -> PreparedRelease {
     let release_root = tempfile::tempdir().unwrap();
     let release_dir = release_root.path().canonicalize().unwrap();
     for (name, bytes) in &input.documents {
@@ -239,22 +312,33 @@ fn prepare_release_for_family(gnu: bool, with_sdk: bool) -> PreparedRelease {
     let mut required_paths = BTreeMap::new();
 
     for (host_index, host) in ACTIVE_HOSTS.iter().copied().enumerate() {
-        let left = if gnu {
-            guarded_gnu_package_for_host(host)
-        } else {
-            guarded_package_for_host(host)
-        };
-        let right = if gnu {
-            guarded_gnu_package_for_host(host)
-        } else {
-            guarded_package_for_host(host)
-        };
-        let left = if with_sdk {
+        let (left, right, already_sdk_release) = packages_by_host.as_mut().map_or_else(
+            || {
+                let left = if gnu {
+                    guarded_gnu_package_for_host(host)
+                } else {
+                    guarded_package_for_host(host)
+                };
+                let right = if gnu {
+                    guarded_gnu_package_for_host(host)
+                } else {
+                    guarded_package_for_host(host)
+                };
+                (left, right, false)
+            },
+            |packages| {
+                let (left, right) = packages
+                    .remove(host)
+                    .unwrap_or_else(|| panic!("missing test package pair for {host}"));
+                (left, right, true)
+            },
+        );
+        let left = if with_sdk && !already_sdk_release {
             repackage_for_sdk_release(left, host_index, "left")
         } else {
             left
         };
-        let right = if with_sdk {
+        let right = if with_sdk && !already_sdk_release {
             repackage_for_sdk_release(right, host_index, "right")
         } else {
             right
@@ -366,16 +450,18 @@ fn prepare_release_for_family(gnu: bool, with_sdk: bool) -> PreparedRelease {
         owners.push(right);
     }
 
-    let sdk_packages = input
-        .sdk_identity
-        .as_ref()
-        .map(|identity| {
-            BTreeMap::from([(
-                identity.sdk_id.clone(),
-                prepare_sdk_package(identity, &release_dir, &transport_dir),
-            )])
-        })
-        .unwrap_or_default();
+    let sdk_packages = match (input.sdk_identity.as_ref(), generated_sdk) {
+        (Some(identity), Some((generated, tree_sha256))) => BTreeMap::from([(
+            identity.sdk_id.clone(),
+            prepare_generated_sdk_package(identity, generated, tree_sha256, &release_dir),
+        )]),
+        (Some(identity), None) => BTreeMap::from([(
+            identity.sdk_id.clone(),
+            prepare_sdk_package(identity, &release_dir, &transport_dir),
+        )]),
+        (None, None) => BTreeMap::new(),
+        (None, Some(_)) => panic!("generated SDK fixture requires an indexed SDK identity"),
+    };
 
     let measured_request = MeasuredReleaseIndexRequestV2 {
         sdk_packages: sdk_packages.clone(),
@@ -541,6 +627,40 @@ fn prepare_sdk_package(
         identity: identity.clone(),
         expected_tree_sha256: tree_sha256,
         expected_archive_sha256: output.archive_sha256,
+        expected_archive_size: output.archive_size,
+        forbidden_prefixes: Vec::new(),
+    }
+}
+
+fn prepare_generated_sdk_package(
+    identity: &SdkIdentity,
+    output: &crate::sdk_package::SdkPackageOutput,
+    tree_sha256: &Sha256Digest,
+    release_dir: &Path,
+) -> SdkVerificationRequest {
+    let generated = SdkVerificationRequest {
+        package_dir: output.output_dir.clone(),
+        identity: identity.clone(),
+        expected_tree_sha256: tree_sha256.clone(),
+        expected_archive_sha256: output.archive_sha256.clone(),
+        expected_archive_size: output.archive_size,
+        forbidden_prefixes: Vec::new(),
+    };
+    let asset = identity.asset_name().unwrap();
+    for (source, name) in [
+        (&output.archive, asset.clone()),
+        (&output.manifest, format!("{asset}.manifest.json")),
+        (&output.checksum, format!("{asset}.sha256")),
+    ] {
+        fs::copy(source, release_dir.join(name)).unwrap();
+    }
+    let spdx = build_measured_sdk_sbom(&generated).unwrap();
+    fs::write(release_dir.join(format!("{asset}.spdx.json")), spdx).unwrap();
+    SdkVerificationRequest {
+        package_dir: release_dir.to_path_buf(),
+        identity: identity.clone(),
+        expected_tree_sha256: tree_sha256.clone(),
+        expected_archive_sha256: output.archive_sha256.clone(),
         expected_archive_size: output.archive_size,
         forbidden_prefixes: Vec::new(),
     }

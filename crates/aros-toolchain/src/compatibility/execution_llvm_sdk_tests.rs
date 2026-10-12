@@ -22,14 +22,17 @@ use super::{
     execute_native_compatibility, export_retained_native_compatibility,
     readback_retained_native_compatibility, NativeCompatibilityRequest,
 };
-use crate::compatibility::{prepare, CompatibilityPreparationRequest};
+use crate::compatibility::{
+    native_compatibility_host_tools, prepare, prepare_host_tool_closure, CompatibilityHostTool,
+    CompatibilityPreparationRequest, HostToolClosureRequest,
+};
 use crate::compatibility_source::{
     materialize_engine_free_source, CommittedSourceIdentity, EngineFreeSourceRequest,
 };
 use crate::package_verify::VerifiedPackage;
 use crate::profiles::Profiles;
 use crate::recipe::GitObjectId;
-use crate::sdk_source::{verify_sdk_source, SdkSourceVerificationRequest};
+use crate::sdk_source::{verify_sdk_source, SdkSourceVerificationRequest, VerifiedSdkSource};
 
 const LLVM_VERSION: &str = "18.1.0";
 const LLVM_SDK_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v6";
@@ -290,6 +293,16 @@ pub(super) fn fixture(root: &Path, binding_mode: BindingMode, arch: &str, machin
     fixture_with_toolchain_profile(root, binding_mode, arch, machine, PROFILE_NAME)
 }
 
+pub(super) fn fixture_for_host(
+    root: &Path,
+    binding_mode: BindingMode,
+    arch: &str,
+    machine: u16,
+    host: &'static str,
+) -> Fixture {
+    fixture_for_host_with_toolchain_profile(root, binding_mode, arch, machine, PROFILE_NAME, host)
+}
+
 fn fixture_with_toolchain_profile(
     root: &Path,
     binding_mode: BindingMode,
@@ -297,7 +310,44 @@ fn fixture_with_toolchain_profile(
     machine: u16,
     toolchain_profile: &str,
 ) -> Fixture {
+    fixture_for_host_with_toolchain_profile(
+        root,
+        binding_mode,
+        arch,
+        machine,
+        toolchain_profile,
+        "linux-x86_64",
+    )
+}
+
+fn fixture_for_host_with_toolchain_profile(
+    root: &Path,
+    binding_mode: BindingMode,
+    arch: &str,
+    machine: u16,
+    toolchain_profile: &str,
+    host: &'static str,
+) -> Fixture {
     let mut llvm = super::llvm_v2_tests::llvm_v2_fixture(root);
+    llvm.request.host = host.to_owned();
+    let host_roles = native_compatibility_host_tools(host).unwrap();
+    let fallback = llvm.request.host_tools.tools["true"].program.clone();
+    llvm.request.host_tools = prepare_host_tool_closure(&HostToolClosureRequest {
+        output_root: root.join(format!("host-tools-{host}")),
+        tools: host_roles
+            .into_iter()
+            .map(|name| CompatibilityHostTool {
+                name: name.into(),
+                program: llvm
+                    .request
+                    .host_tools
+                    .tools
+                    .get(name)
+                    .map_or_else(|| fallback.clone(), |identity| identity.program.clone()),
+            })
+            .collect(),
+    })
+    .unwrap();
     let compiler_root = root;
     install_link_capable_drivers(&mut llvm.request, compiler_root);
 
@@ -374,6 +424,32 @@ fn fixture_with_toolchain_profile(
         cmake_log,
         binding_path,
     }
+}
+
+pub(super) fn bind_fixture_to_shared_source(fixture: &mut Fixture, source: &VerifiedSdkSource) {
+    let response_path = fixture
+        .cmake_log
+        .parent()
+        .expect("fixture CMake log has a root")
+        .join("sdk-source-binding-response.json");
+    let response = source_binding_response(source.materialized_source_root(), source.identity());
+    fs::write(&response_path, crate::canonical::bytes(&response).unwrap()).unwrap();
+    let helper_path = fixture.request.preparation.helpers["aros-transpiler"]
+        .path
+        .clone();
+    write_executable(
+        &helper_path,
+        format!(
+            "#!/bin/sh\nset -eu\n[ \"$PATH\" = /nonexistent ]\n[ -z \"${{HOME+x}}\" ]\n[ \"$1\" = --validate-native-consumer-only ]\n/bin/cat {}\n",
+            shell_quote(&response_path.to_string_lossy())
+        )
+        .as_bytes(),
+    );
+    fixture.request.preparation.source_root = source.materialized_source_root().to_path_buf();
+    fixture.request.preparation.source_tree_sha256 =
+        source.identity().source.content_sha256.clone();
+    fixture.request.llvm_sdk_source = Some(source.clone());
+    fixture.request.consumer_source_date_epoch = Some(source.identity().source_date_epoch);
 }
 
 fn generic_source(

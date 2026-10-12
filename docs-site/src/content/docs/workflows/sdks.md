@@ -28,6 +28,10 @@ for published artifacts and the
 [SDK artifact contract](https://github.com/metaneutrons/aros-tools/blob/main/docs/sdk-artifact-contract-v2.md)
 for the identity and release boundary.
 
+Before publication, each SDK must be generated with every selected compiler
+profile on all three build hosts. Its package bytes must match across hosts;
+the pipeline must also verify the original CI job for each generation.
+
 ## Acquire and install an explicitly selected SDK
 
 External release-lock operations require an independently selected SHA-256 of

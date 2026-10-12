@@ -468,6 +468,18 @@ SDK locks/packages through its complete readback. Its JSON exposes those
 measurements without claiming generation, authenticity or publication
 readiness. See the [release evidence selection contract](compiler-family-release-evidence-v2.md).
 
+On Unix, `sdk_generation_matrix::readback_sdk_generation_matrix` joins the
+complete indexed compiler A/B and compatibility closure to every SDK generation.
+Coverage comes from release inputs: each SDK/compiler-profile association on
+every active host. Each generation must reference its measured indexed compiler;
+all hosts must produce the same canonical indexed SDK package bytes. Records
+and compatibility receipts remain host-bound. Canonical, disjoint roots and
+repeated readbacks reject aliases and observed changes.
+
+The API reads existing bytes only. Its opaque result is not CI authentication,
+an atomic filesystem snapshot or release admission; SDK qualification still
+requires verified original owning-job provenance.
+
 `aros-sdk-lock-v2` selects an exact release tag, canonical credential-free
 HTTPS base URL, SDK identity, payload tree digest, archive SHA-256/size and
 manifest SHA-256/size. Its release version may differ from the SDK version:

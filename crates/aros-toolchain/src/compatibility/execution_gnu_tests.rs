@@ -23,9 +23,10 @@ use super::{
     helpers_root, validate_inputs, NativeCompatibilityRequest, OutputRoots,
 };
 use crate::compatibility::{
-    run_probe, run_probe_set, CompatibilityCommand, CompatibilityEnvironment, CompatibilityPhase,
-    CompatibilityProbeRequest, CompatibilityProbeSetRequest, TwoRootRelocation,
-    CXX_COLLECTOR_SYMBOL, C_COLLECTOR_SYMBOL,
+    native_compatibility_host_tools, prepare_host_tool_closure, run_probe, run_probe_set,
+    CompatibilityCommand, CompatibilityEnvironment, CompatibilityHostTool, CompatibilityPhase,
+    CompatibilityProbeRequest, CompatibilityProbeSetRequest, HostToolClosureRequest,
+    TwoRootRelocation, CXX_COLLECTOR_SYMBOL, C_COLLECTOR_SYMBOL,
 };
 use crate::package_extract::ExtractedPackage;
 use crate::package_verify::VerifiedPackage;
@@ -1514,7 +1515,34 @@ fn assert_rejected_before_cmake_with_message(
 }
 
 pub(super) fn gnu_fixture(root: &Path, width: u8, wrong_float_abi: bool) -> Fixture {
+    gnu_fixture_for_host(root, width, wrong_float_abi, "linux-x86_64")
+}
+
+pub(super) fn gnu_fixture_for_host(
+    root: &Path,
+    width: u8,
+    wrong_float_abi: bool,
+    host: &str,
+) -> Fixture {
     let (mut request, cmake_log, make_log) = super::tests::request(root);
+    request.host = host.to_owned();
+    let host_roles = native_compatibility_host_tools(host).unwrap();
+    let fallback = request.host_tools.tools["true"].program.clone();
+    request.host_tools = prepare_host_tool_closure(&HostToolClosureRequest {
+        output_root: root.join(format!("host-tools-{host}")),
+        tools: host_roles
+            .into_iter()
+            .map(|name| CompatibilityHostTool {
+                name: name.into(),
+                program: request
+                    .host_tools
+                    .tools
+                    .get(name)
+                    .map_or_else(|| fallback.clone(), |identity| identity.program.clone()),
+            })
+            .collect(),
+    })
+    .unwrap();
     amend_cmake_to_log_invocations(&request);
     amend_configure_to_log_arguments(&mut request);
     request.package_source_commit =
@@ -1617,7 +1645,11 @@ enum NativeSdkBindingMode {
 }
 
 fn gnu_native_sdk_fixture(root: &Path, mode: NativeSdkBindingMode) -> Fixture {
-    let mut fixture = gnu_fixture(root, 32, false);
+    gnu_native_sdk_fixture_for_host(root, mode, "linux-x86_64")
+}
+
+fn gnu_native_sdk_fixture_for_host(root: &Path, mode: NativeSdkBindingMode, host: &str) -> Fixture {
+    let mut fixture = gnu_fixture_for_host(root, 32, false, host);
     fixture.request.consumer_source_date_epoch = Some(946_684_800);
     let profile = fixture.request.profile.clone();
     let contract_path =
@@ -2139,7 +2171,7 @@ fn float_flags(abi: &str) -> u32 {
     }
 }
 
-fn gnu_profiles(upstream_commit: &str) -> Vec<u8> {
+pub(super) fn gnu_profiles(upstream_commit: &str) -> Vec<u8> {
     let rv32 = json!({
         "name": "rv32-compat",
         "configure_target": "fixture-rv32",

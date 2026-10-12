@@ -11,15 +11,31 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use aros_common::{sha256_bytes, ArosCompilerIdentity, ArosToolchainManifest, CancellationToken};
+use aros_common::{
+    sha256_bytes, ArosCompilerIdentity, ArosToolchainManifest, CancellationToken, Sha256Digest,
+};
 use serde_json::{json, Value};
 
 use super::llvm_sdk_tests::{self, BindingMode, Fixture as CompatibilityFixture};
-use crate::compatibility::NativeCompatibilityRequest;
+use crate::compatibility::{
+    NativeCompatibilityExpectedPackage, NativeCompatibilityRequest,
+    PortableNativeCompatibilityRequest, TwoRootRelocation,
+};
+use crate::native_candidate::{
+    guarded_llvm_package_from_payload_for_host, prepare_llvm_matrix_release,
+    with_llvm_matrix_complete_request, GuardedPackage, ReleaseCompatibilityReadbackRequestV2,
+};
+use crate::package_extract::ExtractedPackage;
+use crate::package_verify::VerifiedPackage;
 use crate::profiles::{Profile, Profiles};
 use crate::recipe::{GitObjectId, Recipe};
 use crate::sdk_generation::{self, SdkGenerationRequest};
+use crate::sdk_generation_lanes::ExpectedSdkGenerationLane;
+use crate::sdk_generation_matrix::{
+    readback_sdk_generation_matrix, SdkGenerationMatrixReadbackRequest,
+};
 use crate::sdk_package::SdkVerificationRequest;
+use crate::sdk_source::VerifiedSdkSource;
 
 struct GenerationFixture {
     _temporary: tempfile::TempDir,
@@ -592,12 +608,399 @@ fn downloaded_llvm_generation_readback_is_rootless_and_rejects_closed_record_and
     );
 }
 
+#[test]
+fn complete_llvm_sdk_generation_matrix_joins_three_synthetic_host_rows() {
+    const SDK_RELEASE_ID: &str = "v1.2.3";
+    const COMPILER_GROUP: &str = "llvm";
+
+    let source_lock = llvm_source_lock_bytes();
+    let mut shared_source = None;
+    let mut shared_upstream_source: Option<(PathBuf, GitObjectId)> = None;
+    let mut shared_ports_sources = None;
+    let mut canonical_recipe = None;
+    let mut canonical_profiles = None;
+    let mut canonical_collection = None;
+    let mut canonical_documents = None;
+    let mut sdk_identity = None;
+    let mut package_pairs = BTreeMap::<String, (GuardedPackage, GuardedPackage)>::new();
+    let mut rows = Vec::new();
+
+    for host in crate::release_inputs::ACTIVE_HOSTS.iter().copied() {
+        // The host labels exercise indexed rows in one process. They do not
+        // claim execution on Linux ARM64, Linux x86-64 or macOS ARM64 hosts.
+        let mut fixture = generation_fixture_for_host(host);
+        if let Some(source) = &shared_source {
+            bind_generation_fixture_to_shared_source(&mut fixture, source);
+            let (upstream_root, upstream_commit) = shared_upstream_source
+                .as_ref()
+                .expect("the first host row selects the shared upstream source");
+            bind_generation_fixture_to_shared_upstream_source(
+                &mut fixture,
+                upstream_root,
+                upstream_commit,
+                shared_ports_sources
+                    .as_ref()
+                    .expect("the first host row selects the shared port-source root"),
+            );
+        } else {
+            shared_source = Some(fixture.request.source.clone());
+            shared_upstream_source = Some((
+                fixture.request.compatibility.upstream_source_root.clone(),
+                fixture.request.compatibility.upstream_source_commit.clone(),
+            ));
+            shared_ports_sources = Some(fixture.request.compatibility.ports_sources.clone());
+        }
+
+        let profiles = llvm_profiles_bytes(
+            fixture
+                .request
+                .compatibility
+                .upstream_source_commit
+                .as_str(),
+        );
+        let parsed_profiles = Profiles::parse(&profiles)
+            .expect("shared upstream commit should parse into the selected profiles");
+        let compiler_profile = parsed_profiles
+            .select("pc-x86_64")
+            .expect("matrix generation selects pc-x86_64")
+            .clone();
+        fixture.request.profiles = parsed_profiles.clone();
+        fixture.compatibility.profiles = parsed_profiles;
+        fixture.request.compatibility.profile = compiler_profile.clone();
+        fixture.compatibility.request.profile = compiler_profile;
+        align_package_source_with_release_profiles(&mut fixture, &source_lock, &profiles);
+        let recipe =
+            generation_recipe_bytes(&fixture.request.compatibility, &source_lock, &profiles);
+
+        if let Some(expected) = &canonical_recipe {
+            assert_eq!(&recipe, expected, "host rows must share exact recipe bytes");
+            assert_eq!(
+                &profiles,
+                canonical_profiles.as_ref().unwrap(),
+                "host rows must share exact profile bytes"
+            );
+        } else {
+            canonical_recipe = Some(recipe.clone());
+            canonical_profiles = Some(profiles.clone());
+        }
+
+        let payload_root = fixture.request.compatibility.relocation.first.root.clone();
+        let left = guarded_llvm_package_from_payload_for_host(
+            host,
+            &recipe,
+            &source_lock,
+            &profiles,
+            "pc-x86_64",
+            &payload_root,
+            SDK_RELEASE_ID,
+        );
+        let right = guarded_llvm_package_from_payload_for_host(
+            host,
+            &recipe,
+            &source_lock,
+            &profiles,
+            "pc-x86_64",
+            &payload_root,
+            SDK_RELEASE_ID,
+        );
+        let left_extracted = crate::package_extract::verify_and_extract_with_format(
+            &crate::package_extract::PackageExtractionRequest {
+                verification: left.verification().clone(),
+                output_root: fixture
+                    .execution_root
+                    .join(format!("compiler-extracted-left-{host}")),
+            },
+            crate::package::PackageFormat::CompilerFamilyV2,
+        )
+        .expect("left LLVM compiler package should reverify and extract its exact archive");
+        let right_extracted = crate::package_extract::verify_and_extract_with_format(
+            &crate::package_extract::PackageExtractionRequest {
+                verification: right.verification().clone(),
+                output_root: fixture
+                    .execution_root
+                    .join(format!("compiler-extracted-right-{host}")),
+            },
+            crate::package::PackageFormat::CompilerFamilyV2,
+        )
+        .expect("right LLVM compiler package should reverify and extract its exact archive");
+        let compiler_package = left_extracted.verified.clone();
+        assert_eq!(compiler_package, right_extracted.verified);
+        assert_eq!(compiler_package, *right.verified_package());
+        assert_eq!(compiler_package.manifest.host, host);
+        let compiler_source_commit =
+            GitObjectId::try_from(compiler_package.manifest.source_commit.clone()).unwrap();
+
+        // Route actual extracted V2 package roots into native compatibility;
+        // retained package expectations are not edited after execution.
+        fixture.compatibility.request = fixture.request.compatibility.clone();
+        fixture.compatibility.request.relocation = TwoRootRelocation {
+            first: ExtractedPackage {
+                root: left_extracted.root,
+                verified: compiler_package.clone(),
+            },
+            second: ExtractedPackage {
+                root: right_extracted.root,
+                verified: compiler_package.clone(),
+            },
+        };
+        fixture.request.compatibility = fixture.compatibility.request.clone();
+
+        let (inputs, collection, documents) =
+            release_input_material_for_matrix_generation(&fixture.request, &source_lock, &profiles);
+        assert_eq!(inputs.expected_sdk_generation_lanes().len(), 3);
+        if let Some(expected) = &canonical_collection {
+            assert_eq!(
+                &collection, expected,
+                "all hosts must share one release input"
+            );
+            assert_eq!(
+                &documents,
+                canonical_documents.as_ref().unwrap(),
+                "all hosts must select the same release documents"
+            );
+        } else {
+            canonical_collection = Some(collection);
+            canonical_documents = Some(documents);
+            sdk_identity = Some(fixture.request.source.identity().clone());
+        }
+
+        let (completed, execution) =
+            sdk_generation::generate_with_export(&fixture.request, &CancellationToken::default())
+                .expect("each synthetic host row should execute LLVM generation and export");
+        let record_bytes = fs::read(completed.record_path()).unwrap();
+        let record_sha256 = completed.record_sha256().clone();
+        let sdk_tree_sha256 = completed.tree_sha256().clone();
+        let sdk_package = sdk_generation::package_generated(
+            &completed,
+            &fixture.package_output,
+            &[PathBuf::from("/sdk-generation-matrix-forbidden-prefix")],
+        )
+        .expect("the exact generated LLVM SDK should package for each host row");
+        let compatibility_directory = fixture
+            .execution_root
+            .join(format!("downloaded-compatibility-{host}"));
+        write_flat_files(
+            &compatibility_directory,
+            &execution
+                .evidence()
+                .files()
+                .map(|(name, bytes)| (name.to_owned(), bytes.to_vec()))
+                .collect(),
+        );
+
+        package_pairs.insert(host.to_owned(), (left, right));
+        rows.push(GeneratedLlvmMatrixLane {
+            host: host.to_owned(),
+            fixture,
+            compiler_package,
+            compiler_source_commit,
+            record_bytes,
+            record_sha256,
+            sdk_package,
+            sdk_tree_sha256,
+            execution,
+            compatibility_directory,
+        });
+    }
+
+    assert_eq!(rows.len(), crate::release_inputs::ACTIVE_HOSTS.len());
+    for row in rows.iter().skip(1) {
+        assert_eq!(
+            fs::read(&row.sdk_package.archive).unwrap(),
+            fs::read(&rows[0].sdk_package.archive).unwrap(),
+            "all hosts must generate identical SDK archive bytes"
+        );
+        assert_eq!(
+            fs::read(&row.sdk_package.manifest).unwrap(),
+            fs::read(&rows[0].sdk_package.manifest).unwrap(),
+            "all hosts must generate identical SDK manifest bytes"
+        );
+    }
+
+    let prepared = prepare_llvm_matrix_release(
+        canonical_collection.unwrap(),
+        canonical_documents.unwrap(),
+        sdk_identity.unwrap(),
+        package_pairs,
+        &rows[0].sdk_package,
+        &rows[0].sdk_tree_sha256,
+    );
+    with_llvm_matrix_complete_request(&prepared, |complete| {
+        let inputs = &complete.builds.packages.inputs;
+        let mut owned_selections = Vec::new();
+        for lane in inputs.expected_sdk_generation_lanes() {
+            let row = rows
+                .iter()
+                .find(|row| row.host == lane.host())
+                .expect("one independently generated row per selected host");
+            let compiler = row
+                .compiler_package
+                .manifest
+                .compiler
+                .as_ref()
+                .expect("LLVM package identity is present");
+            let expected_package = NativeCompatibilityExpectedPackage {
+                manifest: &row.compiler_package.manifest,
+                archive_sha256: &row.compiler_package.archive_sha256,
+                archive_size: row.compiler_package.archive_size,
+                compiler,
+                source_commit: &row.compiler_source_commit,
+                host: &row.host,
+            };
+            let expected = row
+                .execution
+                .inputs()
+                .expectations_with_llvm_sdk(
+                    expected_package,
+                    &row.fixture.request.profiles,
+                    &row.fixture.request.compatibility.profile,
+                    row.fixture.request.source.identity(),
+                )
+                .expect("exported expectations bind the exact host compiler and SDK source");
+            let compatibility = PortableNativeCompatibilityRequest {
+                directory: row.compatibility_directory.canonicalize().unwrap(),
+                manifest_sha256: row.execution.evidence().manifest_sha256().clone(),
+                expected,
+            };
+            let package = SdkVerificationRequest {
+                package_dir: row.sdk_package.output_dir.canonicalize().unwrap(),
+                identity: row.fixture.request.source.identity().clone(),
+                expected_tree_sha256: row.sdk_tree_sha256.clone(),
+                expected_archive_sha256: row.sdk_package.archive_sha256.clone(),
+                expected_archive_size: row.sdk_package.archive_size,
+                forbidden_prefixes: vec![PathBuf::from("/sdk-generation-matrix-forbidden-prefix")],
+            };
+            owned_selections.push(LlvmMatrixSelection {
+                lane,
+                package,
+                compatibility,
+                record_bytes: row.record_bytes.clone(),
+                record_sha256: row.record_sha256.clone(),
+            });
+        }
+
+        let generations = llvm_matrix_generation_requests(inputs, &owned_selections);
+        let matrix = readback_sdk_generation_matrix(&SdkGenerationMatrixReadbackRequest {
+            complete,
+            generations,
+        })
+        .expect("complete three-host LLVM generation rows should join the indexed release");
+        assert_eq!(matrix.generations().len(), 3);
+        for indexed in matrix.generations() {
+            assert_eq!(
+                indexed.lane().sdk_id(),
+                rows[0].fixture.request.source.identity().sdk_id.as_str()
+            );
+            assert_eq!(indexed.lane().group_id(), COMPILER_GROUP);
+            assert_eq!(indexed.lane().profile(), "pc-x86_64");
+            assert_eq!(
+                indexed.generation().package().archive_sha256,
+                rows.iter()
+                    .find(|row| row.host == indexed.lane().host())
+                    .unwrap()
+                    .sdk_package
+                    .archive_sha256
+            );
+        }
+
+        let mut missing_host = llvm_matrix_generation_requests(inputs, &owned_selections);
+        let missing_lane = missing_host.keys().next().unwrap().clone();
+        missing_host.remove(&missing_lane);
+        assert_llvm_matrix_rejected(
+            complete,
+            missing_host,
+            "SDK generation matrix lacks exact input-derived host/profile coverage",
+        );
+
+        let mut changed_record = owned_selections.clone();
+        let record = &mut changed_record[0];
+        let mut record_value: Value = serde_json::from_slice(&record.record_bytes).unwrap();
+        record_value["environment_sha256"] = json!(sha256_bytes(b"wrong LLVM SDK environment"));
+        record.record_bytes = crate::canonical::bytes(&record_value).unwrap();
+        record.record_sha256 = sha256_bytes(&record.record_bytes);
+        assert_llvm_matrix_rejected(
+            complete,
+            llvm_matrix_generation_requests(inputs, &changed_record),
+            "SDK generation record differs from its independent source/environment selection",
+        );
+    });
+}
+
+struct GeneratedLlvmMatrixLane {
+    host: String,
+    fixture: GenerationFixture,
+    compiler_package: VerifiedPackage,
+    compiler_source_commit: GitObjectId,
+    record_bytes: Vec<u8>,
+    record_sha256: Sha256Digest,
+    sdk_package: crate::sdk_package::SdkPackageOutput,
+    sdk_tree_sha256: Sha256Digest,
+    execution: crate::compatibility::NativeCompatibilityExecutionExport,
+    compatibility_directory: PathBuf,
+}
+
+#[derive(Clone)]
+struct LlvmMatrixSelection<'a> {
+    lane: ExpectedSdkGenerationLane,
+    package: crate::sdk_package::SdkVerificationRequest,
+    compatibility: PortableNativeCompatibilityRequest<'a>,
+    record_bytes: Vec<u8>,
+    record_sha256: Sha256Digest,
+}
+
+fn llvm_matrix_generation_requests<'a>(
+    inputs: &'a crate::release_inputs::ReleaseInputs,
+    selections: &'a [LlvmMatrixSelection<'a>],
+) -> BTreeMap<ExpectedSdkGenerationLane, crate::sdk_generation::SdkGenerationReadbackRequest<'a>> {
+    selections
+        .iter()
+        .map(|selection| {
+            (
+                selection.lane.clone(),
+                crate::sdk_generation::SdkGenerationReadbackRequest {
+                    inputs,
+                    sdk_id: selection.lane.sdk_id(),
+                    compiler_group_id: selection.lane.group_id(),
+                    record_bytes: &selection.record_bytes,
+                    record_sha256: &selection.record_sha256,
+                    package: &selection.package,
+                    compatibility: &selection.compatibility,
+                },
+            )
+        })
+        .collect()
+}
+
+fn assert_llvm_matrix_rejected<'e>(
+    complete: &ReleaseCompatibilityReadbackRequestV2<'e>,
+    generations: BTreeMap<
+        ExpectedSdkGenerationLane,
+        crate::sdk_generation::SdkGenerationReadbackRequest<'e>,
+    >,
+    expected_message: &str,
+) {
+    let error = readback_sdk_generation_matrix(&SdkGenerationMatrixReadbackRequest {
+        complete,
+        generations,
+    })
+    .expect_err("mutated LLVM matrix selection must be rejected");
+    assert!(
+        error.to_string().contains(expected_message),
+        "unexpected LLVM matrix rejection: {error}"
+    );
+}
+
 fn generation_fixture() -> GenerationFixture {
+    generation_fixture_for_host("linux-x86_64")
+}
+
+fn generation_fixture_for_host(host: &'static str) -> GenerationFixture {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
     let execution_root = root.join("execution");
     fs::create_dir(&execution_root).unwrap();
-    let compatibility = llvm_sdk_tests::fixture(&execution_root, BindingMode::Valid, "x86_64", 62);
+    let compatibility =
+        llvm_sdk_tests::fixture_for_host(&execution_root, BindingMode::Valid, "x86_64", 62, host);
     let source = compatibility
         .request
         .llvm_sdk_source
@@ -621,6 +1024,27 @@ fn generation_fixture() -> GenerationFixture {
         execution_root,
         package_output: package_root.join("sdk"),
     }
+}
+
+fn bind_generation_fixture_to_shared_source(
+    fixture: &mut GenerationFixture,
+    source: &VerifiedSdkSource,
+) {
+    llvm_sdk_tests::bind_fixture_to_shared_source(&mut fixture.compatibility, source);
+    fixture.request.source = source.clone();
+    fixture.request.compatibility = fixture.compatibility.request.clone();
+}
+
+fn bind_generation_fixture_to_shared_upstream_source(
+    fixture: &mut GenerationFixture,
+    upstream_root: &Path,
+    upstream_commit: &GitObjectId,
+    ports_sources: &crate::compatibility_ports::CompatibilityPortsSources,
+) {
+    fixture.compatibility.request.upstream_source_root = upstream_root.to_path_buf();
+    fixture.compatibility.request.upstream_source_commit = upstream_commit.clone();
+    fixture.compatibility.request.ports_sources = ports_sources.clone();
+    fixture.request.compatibility = fixture.compatibility.request.clone();
 }
 
 fn align_package_source_with_release_profiles(
@@ -671,6 +1095,31 @@ fn release_inputs_for_generation(
     source_lock: &[u8],
     profiles: &[u8],
 ) -> crate::release_inputs::ReleaseInputs {
+    release_input_material_for_generation(request, source_lock, profiles, true).0
+}
+
+fn release_input_material_for_matrix_generation(
+    request: &SdkGenerationRequest,
+    source_lock: &[u8],
+    profiles: &[u8],
+) -> (
+    crate::release_inputs::ReleaseInputs,
+    Vec<u8>,
+    BTreeMap<String, Vec<u8>>,
+) {
+    release_input_material_for_generation(request, source_lock, profiles, false)
+}
+
+fn release_input_material_for_generation(
+    request: &SdkGenerationRequest,
+    source_lock: &[u8],
+    profiles: &[u8],
+    include_alternate_sdk: bool,
+) -> (
+    crate::release_inputs::ReleaseInputs,
+    Vec<u8>,
+    BTreeMap<String, Vec<u8>>,
+) {
     let profile_matrix = Profiles::parse(profiles).unwrap();
     let package_commit = request
         .compatibility
@@ -696,6 +1145,9 @@ fn release_inputs_for_generation(
         ("sdk-identity.json", identity),
         ("other-sdk-identity.json", &alternate_identity),
     ] {
+        if filename == "other-sdk-identity.json" && !include_alternate_sdk {
+            continue;
+        }
         documents.insert(
             filename.to_owned(),
             crate::canonical::bytes(&serde_json::to_value(identity).unwrap()).unwrap(),
@@ -711,20 +1163,20 @@ fn release_inputs_for_generation(
         "group_id": "llvm",
         "profile": request.compatibility.profile.name(),
     }]);
-    let mut sdks = vec![
-        json!({
-            "id": identity.sdk_id,
-            "identity": document_ref("sdk-identity.json"),
-            "source_preset": request.source.source_profile().name,
-            "compiler_profiles": compiler_profiles,
-        }),
-        json!({
+    let mut sdks = vec![json!({
+        "id": identity.sdk_id,
+        "identity": document_ref("sdk-identity.json"),
+        "source_preset": request.source.source_profile().name,
+        "compiler_profiles": compiler_profiles,
+    })];
+    if include_alternate_sdk {
+        sdks.push(json!({
             "id": alternate_identity.sdk_id,
             "identity": document_ref("other-sdk-identity.json"),
             "source_preset": request.source.source_profile().name,
             "compiler_profiles": compiler_profiles,
-        }),
-    ];
+        }));
+    }
     sdks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
     let collection = crate::canonical::bytes(&json!({
         "schema": "aros-toolchain-release-inputs-v2",
@@ -740,7 +1192,8 @@ fn release_inputs_for_generation(
         "sdks": sdks,
     }))
     .unwrap();
-    crate::release_inputs::ReleaseInputs::parse(&collection, &documents).unwrap()
+    let inputs = crate::release_inputs::ReleaseInputs::parse(&collection, &documents).unwrap();
+    (inputs, collection, documents)
 }
 
 fn generation_recipe_bytes(

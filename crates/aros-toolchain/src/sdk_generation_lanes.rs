@@ -10,7 +10,7 @@ use crate::release_inputs::ReleaseInputs;
 ///
 /// Instances are projected from [`ReleaseInputs`]; fields remain private so a
 /// caller cannot deserialize or construct an arbitrary expected lane list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExpectedSdkGenerationLane {
     sdk_id: String,
     group_id: String,
