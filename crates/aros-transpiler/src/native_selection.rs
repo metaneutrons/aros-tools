@@ -161,13 +161,49 @@ pub fn bind_architecture_effects(
         .filter(|effect| effect.applies_to(context))
     {
         let mut proof = vec![effect.clone()];
-        if let ArchEndpointEffectData::ArchModuleObjects { mainmmake, tag, .. } = &effect.data {
-            proof.extend(candidates.iter().filter(|candidate| {
-                candidate.recipe == effect.recipe && candidate.line == effect.line
-                    && matches!(&candidate.data, ArchEndpointEffectData::EmptyLinklibAggregate {
-                        mainmmake: owner, tag: candidate_tag, ..
-                    } if owner == mainmmake && candidate_tag == tag)
-            }).cloned());
+        if let ArchEndpointEffectData::ArchModuleObjects {
+            mainmmake,
+            tag,
+            module_sources,
+            linklib_sources,
+            ..
+        } = &effect.data
+        {
+            proof.extend(
+                candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.recipe == effect.recipe
+                            && candidate.line == effect.line
+                            && match &candidate.data {
+                                ArchEndpointEffectData::EmptyLinklibAggregate {
+                                    mainmmake: owner,
+                                    tag: candidate_tag,
+                                    module_sources: candidate_sources,
+                                    ..
+                                } => {
+                                    linklib_sources.is_empty()
+                                        && owner == mainmmake
+                                        && candidate_tag == tag
+                                        && candidate_sources == module_sources
+                                }
+                                ArchEndpointEffectData::ArchClientLinklibSources {
+                                    mainmmake: owner,
+                                    tag: candidate_tag,
+                                    module_sources: candidate_sources,
+                                    linklib_sources: candidate_linklib_sources,
+                                    ..
+                                } => {
+                                    owner == mainmmake
+                                        && candidate_tag == tag
+                                        && candidate_sources == module_sources
+                                        && candidate_linklib_sources == linklib_sources
+                                }
+                                _ => false,
+                            }
+                    })
+                    .cloned(),
+            );
         }
         let verified = projection
             .verify_arch_endpoint_effects(root, &proof)
@@ -177,6 +213,7 @@ pub fn bind_architecture_effects(
                     tag,
                     directory,
                     module_sources,
+                    ..
                 } = &effect.data
                 {
                     let base = graph.targets.contains_key(mainmmake)
@@ -203,6 +240,41 @@ pub fn bind_architecture_effects(
                          arch={tag}, directory={directory}, source_count={})",
                         module_sources.len()
                     ));
+                    }
+                }
+                if let ArchEndpointEffectData::ArchClientLinklibSources {
+                    mainmmake,
+                    tag,
+                    linklib_sources,
+                    directory,
+                    compiler,
+                    ..
+                } = &effect.data
+                {
+                    let target = graph.targets.get(mainmmake);
+                    let client_archives_exist = target.is_some_and(|target| {
+                        target.module_type == aros_transpiler::ast::ModuleType::Library
+                            && target
+                                .genmodule_linklibs
+                                .as_ref()
+                                .is_some_and(|linklibs| linklibs.enabled)
+                    });
+                    let paired = graph.arch_sources.get(mainmmake).is_some_and(|sources| {
+                        sources.iter().any(|source| {
+                            &source.tag == tag
+                                && &source.dir == directory
+                                && &source.linklib_files == linklib_sources
+                                && !source.files.is_empty()
+                        })
+                    });
+                    if compiler != "target" || !client_archives_exist || !paired {
+                        return Err(format!(
+                            "architecture client-linklib sources lack their exact full-module/archive binding \
+                             (module={mainmmake}, target_has_archives={client_archives_exist}, \
+                             source_group_matches={paired}, compiler={compiler}, arch={tag}, \
+                             directory={directory}, source_count={})",
+                            linklib_sources.len()
+                        ));
                     }
                 }
                 Ok(())

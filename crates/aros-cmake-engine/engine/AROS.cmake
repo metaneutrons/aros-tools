@@ -4083,6 +4083,34 @@ function(aros_resolve_arch_sources out_sources out_dropped module_dir)
     set(${out_dropped} "${DROPPED}" PARENT_SCOPE)
 endfunction()
 
+# Client archives preserve the source order in config/make.tmpl: generic
+# linklibfiles not shadowed by an architecture object, then the architecture
+# linklib objects, then genmodule's generated client stubs. The ordinary
+# module-source resolver puts architecture sources first, so use its exact
+# selected architecture set and replacement names while ordering this lane
+# independently.
+function(aros_resolve_arch_linklib_sources out_sources out_dropped module_dir)
+    set(oneValueArgs)
+    set(multiValueArgs SOURCES ARCH_SOURCES)
+    cmake_parse_arguments(AL "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    aros_resolve_arch_sources(_unused_sources _dropped "${module_dir}"
+        OUT_ARCH _arch_sources
+        OUT_OVERRIDES _override_names
+        SOURCES ${AL_SOURCES}
+        ARCH_SOURCES ${AL_ARCH_SOURCES})
+
+    set(_kept_generic_sources "")
+    foreach(_source IN LISTS AL_SOURCES)
+        get_filename_component(_basename "${_source}" NAME_WE)
+        if(NOT _basename IN_LIST _override_names)
+            list(APPEND _kept_generic_sources "${_source}")
+        endif()
+    endforeach()
+    set(${out_sources} "${_kept_generic_sources};${_arch_sources}" PARENT_SCOPE)
+    set(${out_dropped} "${_dropped}" PARENT_SCOPE)
+endfunction()
+
 # aros_report_arch_override_gaps()
 #
 # Names an architecture declaration asked for that no applicable architecture
@@ -5031,8 +5059,15 @@ function(aros_add_library)
         LIBS USELIBS INCLUDES ARCH_INCLUDES
         DEFINES UNDEFINES COMPILE_OPTIONS ARCH_SOURCES
         ARCH_DEFINES ARCH_COMPILE_OPTIONS LINK_OPTIONS
-        LINKLIB_SOURCES LINKLIB_OBJECT_SOURCES KICKSTART_MEMBER)
+        LINKLIB_SOURCES ARCH_LINKLIB_SOURCES LINKLIB_OBJECT_SOURCES KICKSTART_MEMBER)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    if(ARG_ARCH_LINKLIB_SOURCES AND
+       (ARG_GENMODULE_ONLY OR
+        (NOT ARG_GENMODULE_LINKLIBS AND NOT ARG_LINKLIB_NAME)))
+        message(FATAL_ERROR
+            "${ARG_MMAKE_ID}: ARCH_LINKLIB_SOURCES requires sourceful client archives")
+    endif()
 
     # make.tmpl puts a module's client archives in its libdir=, or privately
     # below $(GENDIR)/$(CURDIR) when the module has a suffix, and only
@@ -5211,6 +5246,15 @@ function(aros_add_library)
         aros_resolve_source_lanes(_linklib_sources "${ARG_DIRECTORY}"
             MMAKE_ID "${ARG_MMAKE_ID}-linklib-inputs"
             SOURCES ${ARG_LINKLIB_SOURCES})
+        set(_generic_linklib_sources "${_linklib_sources}")
+        if(ARG_ARCH_LINKLIB_SOURCES)
+            aros_resolve_arch_linklib_sources(_arch_linklib_sources
+                _arch_linklib_dropped "${ARG_DIRECTORY}"
+                SOURCES ${_linklib_sources}
+                ARCH_SOURCES ${ARG_ARCH_LINKLIB_SOURCES})
+            set(_linklib_sources "${_arch_linklib_sources}")
+            list(REMOVE_ITEM _linklib_sources "")
+        endif()
         aros_resolve_source_lanes(_linklib_object_sources "${ARG_DIRECTORY}"
             MMAKE_ID "${ARG_MMAKE_ID}-linklib-object-inputs"
             SOURCES ${ARG_LINKLIB_OBJECT_SOURCES})
@@ -5276,8 +5320,9 @@ function(aros_add_library)
                 "${_linklib_object_target}")
         endif()
 
-        # make.tmpl archives declaration linklibfiles first, generated client
-        # stubs second, and precompiled linklibobjs last. CMake places
+        # make.tmpl archives generic linklibfiles that survive basename
+        # replacement first, architecture linklib objects second, generated
+        # client stubs next, and precompiled linklibobjs last. CMake places
         # $<TARGET_OBJECTS:...> before ordinary sources regardless of its
         # textual position, so linklibobjs are appended explicitly below.
         # Classic publishes linklibname as the primary archive, with the
@@ -5298,6 +5343,8 @@ function(aros_add_library)
             "${_client_archive_dir}" "${_client_archive_name}")
         add_library("${ARG_MMAKE_ID}-linklib" STATIC
             ${_normal_client_sources})
+        set_property(TARGET "${ARG_MMAKE_ID}-linklib" PROPERTY
+            AROS_GENERIC_LINKLIB_SOURCES "${_generic_linklib_sources}")
         set_target_properties("${ARG_MMAKE_ID}-linklib" PROPERTIES
             OUTPUT_NAME "${_client_archive_name}"
             ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
@@ -5321,6 +5368,8 @@ function(aros_add_library)
                 "${_client_archive_dir}" "${_client_archive_name}_rel")
             add_library("${ARG_MMAKE_ID}-linklib-rel" STATIC
                 ${_rel_client_sources})
+            set_property(TARGET "${ARG_MMAKE_ID}-linklib-rel" PROPERTY
+                AROS_GENERIC_LINKLIB_SOURCES "${_generic_linklib_sources}")
             set_target_properties("${ARG_MMAKE_ID}-linklib-rel" PROPERTIES
                 OUTPUT_NAME "${_client_archive_name}_rel"
                 ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"

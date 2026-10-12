@@ -104,6 +104,7 @@ fn sdk_group(owner: &str) -> crate::sdk_objects::SdkObjectGroupDecl {
         file: "compiler/example/mmakefile.src".into(),
         line: 1,
         objects: vec![crate::sdk_objects::SdkObjectDecl {
+            companion_cpu: None,
             source: "compiler/example/entry.c".into(),
             intermediate: "${AROS_BUILD_DIR}/gen/compiler/example/entry.o".into(),
             output: "${AROS_DEVELOPER_LIB_DIR}/entry.o".into(),
@@ -268,6 +269,7 @@ fn selected_architecture_objects_retain_their_module_declaration_without_a_back_
             mainmmake: "kernel-example".into(),
             tag: "riscv".into(),
             module_sources: vec!["entry".into()],
+            linklib_sources: Vec::new(),
             directory: "arch/riscv-all/example".into(),
         },
     });
@@ -284,6 +286,95 @@ fn selected_architecture_objects_retain_their_module_declaration_without_a_back_
     assert!(graph.arch_sources.contains_key("kernel-example"));
     assert!(!graph.arch_sources.contains_key("unrelated"));
     assert_eq!(graph.arch_endpoint_effects.len(), 1);
+}
+
+#[test]
+fn selected_architecture_client_linklib_retains_its_bound_module_without_a_back_edge() {
+    use crate::arch_endpoint_effects::{ArchEndpointEffect, ArchEndpointEffectData};
+    let mut graph = DependencyGraph::new();
+    let context = TargetContext {
+        cpu: Some("x86_64".into()),
+        platform: Some("pc".into()),
+        ..TargetContext::default()
+    };
+    let mut stdc = target("libstdc", ModuleType::Library);
+    stdc.genmodule_abi = true;
+    stdc.genmodule_linklibs = Some(GenmoduleLinklibs {
+        enabled: true,
+        ..GenmoduleLinklibs::default()
+    });
+    graph.targets.insert("libstdc".into(), stdc);
+    graph.add_meta_rule(MetaTargetRule {
+        name: "libstdc-x86_64-includes".into(),
+        dependencies: vec!["libstdc-includes".into()],
+    });
+    graph.arch_sources.insert(
+        "libstdc".into(),
+        vec![crate::arch_sources::ArchSourceDecl {
+            mainmmake: "libstdc".into(),
+            maindir: None,
+            modname: None,
+            tag: "x86_64".into(),
+            dir: "arch/x86_64-all/stdc".into(),
+            files: vec!["stdlib".into()],
+            linklib_files: vec!["mathinit".into()],
+            extra_quote_include: None,
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            compile_options: Vec::new(),
+            line: 1,
+        }],
+    );
+    graph.arch_endpoint_effects.push(ArchEndpointEffect {
+        recipe: "arch/x86_64-all/stdc/mmakefile.src".into(),
+        line: 1,
+        endpoint: "libstdc-x86_64-linklib".into(),
+        dependencies: vec!["libstdc-x86_64-includes".into()],
+        data: ArchEndpointEffectData::ArchClientLinklibSources {
+            mainmmake: "libstdc".into(),
+            tag: "x86_64".into(),
+            module_sources: vec!["stdlib".into()],
+            linklib_sources: vec!["mathinit".into()],
+            directory: "arch/x86_64-all/stdc".into(),
+            compiler: "target".into(),
+        },
+    });
+
+    let selected = graph
+        .selected_dependency_closure(&["libstdc-x86_64-linklib".into()], &context, &[])
+        .unwrap();
+    assert!(selected.contains("libstdc-x86_64-linklib"));
+    assert!(selected.contains("libstdc-x86_64-includes"));
+    assert!(!selected.contains("libstdc"));
+    graph.retain_native_selection(&selected, &context).unwrap();
+
+    assert!(graph.targets.contains_key("libstdc"));
+    assert_eq!(graph.arch_sources.len(), 1);
+    assert_eq!(graph.arch_sources["libstdc"][0].linklib_files, ["mathinit"]);
+    assert_eq!(
+        graph.native_selected_client_archives.as_ref().unwrap(),
+        &BTreeSet::from(["libstdc-linklib".to_owned()])
+    );
+    assert_eq!(graph.arch_endpoint_effects.len(), 1);
+
+    // The relative archive builder is retained only when genmodule proves
+    // that the selected module declares one.
+    graph
+        .targets
+        .get_mut("libstdc")
+        .unwrap()
+        .genmodule_linklibs
+        .as_mut()
+        .unwrap()
+        .has_relative = true;
+    graph.retain_native_selection(&selected, &context).unwrap();
+    assert_eq!(
+        graph.native_selected_client_archives.as_ref().unwrap(),
+        &BTreeSet::from([
+            "libstdc-linklib".to_owned(),
+            "libstdc-linklib-rel".to_owned()
+        ])
+    );
 }
 
 #[test]

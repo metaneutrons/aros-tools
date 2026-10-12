@@ -18,6 +18,9 @@ use walkdir::WalkDir;
 
 #[path = "native_arch_endpoint_effects.rs"]
 mod arch_endpoint_effects;
+#[path = "native_arch_lane_aliases.rs"]
+mod arch_lane_aliases;
+pub use arch_lane_aliases::VerifiedArchLaneAlias;
 #[path = "native_assembly_headers.rs"]
 mod assembly_headers;
 #[path = "native_meta_semantics.rs"]

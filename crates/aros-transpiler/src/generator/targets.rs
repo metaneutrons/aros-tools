@@ -150,6 +150,32 @@ pub(super) fn emit_concrete_targets(
                 writeln!(out, "    LINKLIB_OBJECT_SOURCES {}", sources.join(" ")).unwrap();
             }
         }
+        if target.module_type == ModuleType::Library {
+            let arch_linklib_sources: Vec<_> = graph
+                .arch_sources
+                .get(&target.mmake_name)
+                .into_iter()
+                .flatten()
+                .filter(|declaration| !declaration.linklib_files.is_empty())
+                .collect();
+            if !arch_linklib_sources.is_empty() {
+                // Client-linklib overrides are a separate lane from
+                // ARCH_SOURCES: the CMake library builder applies this list
+                // to both normal and relative archives only.
+                let entries: Vec<String> = arch_linklib_sources
+                    .iter()
+                    .map(|declaration| {
+                        cmake_arg(&format!(
+                            "{}|{}|{}",
+                            declaration.tag,
+                            declaration.dir,
+                            declaration.linklib_files.join(",")
+                        ))
+                    })
+                    .collect();
+                writeln!(out, "    ARCH_LINKLIB_SOURCES {}", entries.join(" ")).unwrap();
+            }
+        }
         if target.canonical_linklib_output {
             writeln!(out, "    CANONICAL_OUTPUT").unwrap();
         }

@@ -600,12 +600,18 @@ impl DependencyGraph {
             .arch_endpoint_effects
             .iter()
             .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
-            .filter_map(|effect| match &effect.data {
-                crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects {
-                    mainmmake,
-                    ..
-                } => Some(mainmmake.clone()),
-                _ => None,
+            .filter_map(|effect| {
+                match &effect.data {
+                    crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects {
+                        mainmmake,
+                        ..
+                    }
+                    | crate::arch_endpoint_effects::ArchEndpointEffectData::ArchClientLinklibSources {
+                        mainmmake,
+                        ..
+                    } => Some(mainmmake.clone()),
+                    _ => None,
+                }
             })
             .collect();
         let declaration_needed = |name: &str| {
@@ -833,6 +839,61 @@ impl DependencyGraph {
                 if selected.contains(&endpoint(&raw, context)?) {
                     selected_clients.insert(raw);
                 }
+            }
+        }
+        // A selected architecture client-linklib leaf is rooted at
+        // `<module>-<tag>-linklib`, not at the module's ordinary
+        // `<module>-linklib` archive alias. Keep the concrete archive builder
+        // enabled so the source-bound endpoint can bind its selected object
+        // inputs, without adding a graph edge back to that archive. The
+        // relative builder is retained only when genmodule metadata proves
+        // that the module actually has a relative archive.
+        for effect in self
+            .arch_endpoint_effects
+            .iter()
+            .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
+        {
+            let crate::arch_endpoint_effects::ArchEndpointEffectData::ArchClientLinklibSources {
+                mainmmake,
+                tag,
+                linklib_sources,
+                directory,
+                compiler,
+                ..
+            } = &effect.data
+            else {
+                continue;
+            };
+            if compiler != "target" {
+                continue;
+            }
+            let Some(target) = self.targets.get(mainmmake) else {
+                continue;
+            };
+            if target.module_type != ModuleType::Library {
+                continue;
+            }
+            let Some(linklibs) = target
+                .genmodule_linklibs
+                .as_ref()
+                .filter(|linklibs| linklibs.enabled)
+            else {
+                continue;
+            };
+            let source_pair = self.arch_sources.get(mainmmake).is_some_and(|sources| {
+                sources.iter().any(|source| {
+                    &source.tag == tag
+                        && &source.dir == directory
+                        && &source.linklib_files == linklib_sources
+                        && !source.files.is_empty()
+                })
+            });
+            if !source_pair {
+                continue;
+            }
+            selected_clients.insert(format!("{mainmmake}-linklib"));
+            if linklibs.has_relative {
+                selected_clients.insert(format!("{mainmmake}-linklib-rel"));
             }
         }
         self.native_selected_client_archives = Some(selected_clients);

@@ -39,7 +39,8 @@ impl Fixture {
             .join("engine")
             .join("ArchitectureEndpoints.cmake");
         let project = format!(
-            "cmake_minimum_required(VERSION 3.21)\nproject(ArchitectureEndpointFixture C)\ninclude({})\n{}\n",
+            "cmake_minimum_required(VERSION 3.22)\nproject(ArchitectureEndpointFixture C)\nset(ENGINE {})\ninclude({})\n{}\n",
+            cmake_quote(helper.parent().expect("engine directory")),
             cmake_quote(&helper),
             body
         );
@@ -62,6 +63,16 @@ impl Fixture {
             .arg("Ninja")
             .output()
             .expect("run CMake configure")
+    }
+
+    fn build(&self, target: &str) -> Output {
+        Command::new("cmake")
+            .arg("--build")
+            .arg(&self.build)
+            .arg("--target")
+            .arg(target)
+            .output()
+            .expect("run Ninja build")
     }
 }
 
@@ -97,9 +108,28 @@ fn assert_configure_rejected(body: &str, expected: &str) {
         "unexpected configure success:\n{text}"
     );
     assert!(
-        text.contains(expected),
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains(expected),
         "expected diagnostic {expected:?}, got:\n{text}"
     );
+}
+
+fn files_under(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .map(|entry| entry.expect("read fixture directory entry").path())
+        .flat_map(|path| {
+            if path.is_dir() {
+                files_under(&path)
+            } else {
+                vec![path]
+            }
+        })
+        .collect()
 }
 
 fn output_text(output: &Output) -> String {
@@ -230,6 +260,208 @@ target_link_libraries(owner PRIVATE late-interface)
         "-Wall",
     ] {
         assert!(command.contains(state), "missing {state} in {command}");
+    }
+}
+
+#[test]
+fn architecture_client_linklib_endpoint_binds_both_archive_variants() {
+    let body = r#"
+set(AROS_TARGET_CPU x86_64)
+set(AROS_TARGET_PLATFORM pc)
+set(AROS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+# This fixture tests source resolution and compiler-object dependencies only.
+# No bootstrap generation or complete SDK qualification is claimed.
+find_program(AROS_GENMODULE_BIN NAMES true PATHS /usr/bin /bin NO_DEFAULT_PATH REQUIRED)
+file(MAKE_DIRECTORY "${AROS_SOURCE_DIR}/compiler/include/asm" "${AROS_SOURCE_DIR}/compiler/startup"
+    "${AROS_SOURCE_DIR}/compiler/arossupport/include")
+file(WRITE "${AROS_SOURCE_DIR}/compiler/include/asm/cpu.h" "/* Fixture bootstrap header; not SDK evidence. */\n")
+file(WRITE "${AROS_SOURCE_DIR}/compiler/startup/startup.c" "int fixture_startup(void) { return 0; }\n")
+file(WRITE "${AROS_SOURCE_DIR}/compiler/startup/detach.c" "int fixture_detach(void) { return 0; }\n")
+include("${ENGINE}/AROS.cmake")
+set(AROS_ARCH_INCLUDE_TAGS x86_64)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/arch" "${CMAKE_CURRENT_SOURCE_DIR}/generic" "${CMAKE_CURRENT_SOURCE_DIR}/module")
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/arch/mathinit.c" "int mathinit_arch(void) { return 1; }\n")
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/generic/mathinit.c" "int mathinit_generic(void) { return 0; }\n")
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/generic/other.c" "int generic_other(void) { return 0; }\n")
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/generated.c" "int generated_stub(void) { return 0; }\n")
+aros_set_arch_source_options("x86_64|arch|mathinit|-DARCH_CLIENT_LINKLIB=1")
+aros_resolve_arch_linklib_sources(_resolved _dropped "${CMAKE_CURRENT_SOURCE_DIR}/module"
+    SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/generic/mathinit.c" "${CMAKE_CURRENT_SOURCE_DIR}/generic/other.c"
+    ARCH_SOURCES "x86_64|arch|mathinit")
+if(NOT _dropped STREQUAL "mathinit")
+    message(FATAL_ERROR "generic basename was not filtered: ${_dropped}")
+endif()
+set(_expected_sources
+    "${CMAKE_CURRENT_SOURCE_DIR}/generic/other.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/arch/mathinit.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/generated.c")
+list(APPEND _resolved "${CMAKE_CURRENT_SOURCE_DIR}/generated.c")
+if(NOT "${_resolved}" STREQUAL "${_expected_sources}")
+    message(FATAL_ERROR "client archive source order differs from make.tmpl: ${_resolved}")
+endif()
+add_custom_target(include-owner)
+add_library(owner-linklib STATIC ${_resolved})
+add_library(owner-linklib-rel STATIC ${_resolved})
+set_target_properties(owner-linklib owner-linklib-rel PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/archives")
+set_property(TARGET owner-linklib PROPERTY AROS_GENERIC_LINKLIB_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/generic/mathinit.c;${CMAKE_CURRENT_SOURCE_DIR}/generic/other.c")
+set_property(TARGET owner-linklib-rel PROPERTY AROS_GENERIC_LINKLIB_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/generic/mathinit.c;${CMAKE_CURRENT_SOURCE_DIR}/generic/other.c")
+aros_bind_arch_linklib_source_endpoint(
+    ENDPOINT arch-owner-linklib
+    INCLUDE_OWNER include-owner
+    DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/arch"
+    ARCHIVE_TARGETS owner-linklib owner-linklib-rel
+    BASENAMES mathinit)
+foreach(_archive IN ITEMS owner-linklib owner-linklib-rel)
+    get_target_property(_object_owner "${_archive}" AROS_ARCH_CLIENT_OBJECT_OWNER)
+    get_target_property(_sources "${_object_owner}" SOURCES)
+    if(NOT "${_sources}" STREQUAL "${_expected_sources}")
+        message(FATAL_ERROR "client source order differs on ${_archive}: ${_sources}")
+    endif()
+    if(NOT "${CMAKE_CURRENT_SOURCE_DIR}/arch/mathinit.c" IN_LIST _sources)
+        message(FATAL_ERROR "selected source missing from ${_archive}")
+    endif()
+    if("${CMAKE_CURRENT_SOURCE_DIR}/generic/mathinit.c" IN_LIST _sources)
+        message(FATAL_ERROR "generic source retained by ${_archive}")
+    endif()
+endforeach()
+get_source_file_property(_arch_options "${CMAKE_CURRENT_SOURCE_DIR}/arch/mathinit.c" COMPILE_OPTIONS)
+if(NOT "-DARCH_CLIENT_LINKLIB=1" IN_LIST _arch_options)
+    message(FATAL_ERROR "per-source architecture linklib option was lost: ${_arch_options}")
+endif()
+get_target_property(_dependencies arch-owner-linklib MANUALLY_ADDED_DEPENDENCIES)
+foreach(_required IN ITEMS include-owner)
+    if(NOT _required IN_LIST _dependencies)
+        message(FATAL_ERROR "missing endpoint dependency ${_required}")
+    endif()
+endforeach()
+foreach(_forbidden IN ITEMS owner-linklib owner-linklib-rel)
+    if(_forbidden IN_LIST _dependencies)
+        message(FATAL_ERROR "endpoint must not depend on whole archive ${_forbidden}")
+    endif()
+endforeach()
+add_dependencies(owner-linklib arch-owner-linklib)
+add_dependencies(owner-linklib-rel arch-owner-linklib)
+"#;
+    let fixture = Fixture::new(body);
+    let configured = fixture.configure();
+    assert!(
+        configured.status.success(),
+        "CMake configure failed:\n{}",
+        output_text(&configured)
+    );
+
+    let endpoint_build = fixture.build("arch-owner-linklib");
+    assert!(
+        endpoint_build.status.success(),
+        "architecture endpoint build failed:\n{}",
+        output_text(&endpoint_build)
+    );
+    assert!(!fixture.build.join("archives/libowner-linklib.a").exists());
+    assert!(!fixture
+        .build
+        .join("archives/libowner-linklib-rel.a")
+        .exists());
+    let target_objects = files_under(&fixture.build.join("CMakeFiles"))
+        .into_iter()
+        .filter(|path| {
+            let path_text = path.to_string_lossy();
+            path_text.contains("aros-arch-client-objects-")
+                && path.file_name().is_some_and(|name| name == "mathinit.c.o")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(target_objects.len(), 2, "{target_objects:?}");
+    let other_objects = files_under(&fixture.build.join("CMakeFiles"))
+        .into_iter()
+        .filter(|path| {
+            let path_text = path.to_string_lossy();
+            path_text.contains("aros-arch-client-objects-")
+                && path.extension().is_some_and(|extension| extension == "o")
+                && path.file_name().is_some_and(|name| name != "mathinit.c.o")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        other_objects.is_empty(),
+        "unexpected archive objects: {other_objects:?}"
+    );
+
+    for target in ["owner-linklib", "owner-linklib-rel"] {
+        let archive_build = fixture.build(target);
+        assert!(
+            archive_build.status.success(),
+            "main archive build failed for {target}:\n{}",
+            output_text(&archive_build)
+        );
+        assert!(fixture
+            .build
+            .join(format!("archives/lib{target}.a"))
+            .exists());
+        let members = Command::new("ar")
+            .arg("t")
+            .arg(fixture.build.join(format!("archives/lib{target}.a")))
+            .output()
+            .expect("inspect actual archive member order");
+        assert!(members.status.success(), "{}", output_text(&members));
+        assert_eq!(
+            String::from_utf8_lossy(&members.stdout)
+                .lines()
+                // BSD ar displays GNU symbol/name tables and trailing name
+                // separators. Neither is a compiler-object member.
+                .filter(|name| !matches!(
+                    *name,
+                    "/" | "//" | "/SYM64/" | "__.SYMDEF" | "__.SYMDEF SORTED"
+                ))
+                .map(|name| name.trim_end_matches('/'))
+                .collect::<Vec<_>>(),
+            ["other.c.o", "mathinit.c.o", "generated.c.o"]
+        );
+    }
+}
+
+#[test]
+fn architecture_client_linklib_endpoint_rejects_missing_or_unreplaced_sources() {
+    let prefix = r#"
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/arch" "${CMAKE_CURRENT_SOURCE_DIR}/generic")
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/arch/mathinit.c" "int mathinit_arch(void) { return 1; }\n")
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/generic/mathinit.c" "int mathinit_generic(void) { return 0; }\n")
+add_custom_target(include-owner)
+"#;
+    let missing = format!(
+        "{prefix}\nadd_library(owner-linklib STATIC \"${{CMAKE_CURRENT_SOURCE_DIR}}/owner.c\")\nset_property(TARGET owner-linklib PROPERTY AROS_GENERIC_LINKLIB_SOURCES \"${{CMAKE_CURRENT_SOURCE_DIR}}/generic/mathinit.c\")\naros_bind_arch_linklib_source_endpoint(ENDPOINT arch-owner-linklib INCLUDE_OWNER include-owner DIRECTORY \"${{CMAKE_CURRENT_SOURCE_DIR}}/arch\" ARCHIVE_TARGETS owner-linklib BASENAMES mathinit)"
+    );
+    assert_configure_rejected(&missing, "has no unique selected source");
+
+    let generic_retained = format!(
+        "{prefix}\nadd_library(owner-linklib STATIC \"${{CMAKE_CURRENT_SOURCE_DIR}}/arch/mathinit.c\" \"${{CMAKE_CURRENT_SOURCE_DIR}}/generic/mathinit.c\")\nset_property(TARGET owner-linklib PROPERTY AROS_GENERIC_LINKLIB_SOURCES \"${{CMAKE_CURRENT_SOURCE_DIR}}/generic/mathinit.c\")\naros_bind_arch_linklib_source_endpoint(ENDPOINT arch-owner-linklib INCLUDE_OWNER include-owner DIRECTORY \"${{CMAKE_CURRENT_SOURCE_DIR}}/arch\" ARCHIVE_TARGETS owner-linklib BASENAMES mathinit)"
+    );
+    assert_configure_rejected(&generic_retained, "generic mathinit was not replaced");
+}
+
+#[test]
+fn architecture_source_endpoint_preserves_nested_source_identity() {
+    let body = r#"
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/arch/math")
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/arch/math/value.c" "int arch_value(void) { return 1; }\n")
+add_library(owner STATIC "${CMAKE_CURRENT_SOURCE_DIR}/arch/math/value.c")
+add_custom_target(include-owner)
+aros_bind_arch_source_endpoint(ENDPOINT nested-arch OWNER owner INCLUDE_OWNER include-owner
+    DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/arch" BASENAMES math/value)
+"#;
+    let fixture = Fixture::new(body);
+    let configured = fixture.configure();
+    assert!(configured.status.success(), "{}", output_text(&configured));
+    let built = fixture.build("nested-arch");
+    assert!(built.status.success(), "{}", output_text(&built));
+    assert!(files_under(&fixture.build).iter().any(|path| path
+        .to_string_lossy()
+        .contains("nested-arch.dir/arch/math/value.c.o")));
+    for name in ["math/../value", "math//value", "/math/value", "math/."] {
+        assert_configure_rejected(
+            &body.replace("BASENAMES math/value", &format!("BASENAMES {name}")),
+            "Unsafe architecture source basename",
+        );
     }
 }
 

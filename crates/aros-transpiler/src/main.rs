@@ -227,6 +227,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     .iter()
     .any(|value| value.is_some())
     .then(|| TargetContext {
+        native_arch_lane_alias_endpoints: std::collections::BTreeSet::new(),
         native_arch_include_effects: Vec::new(),
         native_arch_include_errors: Vec::new(),
         native_arch_include_catalog_closed: false,
@@ -255,6 +256,9 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         load_native_selection(args, target.as_ref()).map_err(native_selection_input_error)?;
     if let (Some(contract), Some(target)) = (&native_contract, &mut target) {
         dirs.bind_native_target_tool_roles();
+        if let native_selection::LoadedNativeSelection::SdkConsumer(loaded) = contract {
+            dirs.bind_sdk_companion_roles(&loaded.contract.companion_roles);
+        }
         target
             .host_file_generators
             .clone_from(contract.invocation().host_file_generators);
@@ -1044,7 +1048,38 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // target defined elsewhere, so they too need the full parse first.
     // A lane whose `arch=` is a name rather than an architecture gets the tag of
     // the lane that pulls it in, before the overrides are resolved.
-    let arch_lane_attachments = graph.resolve_arch_lane_attachments();
+    let mut arch_lane_attachments = Vec::new();
+    if let (Some(projection), Some(context)) = (&native_owner_projection, &mut target) {
+        let aliases = projection
+            .verified_arch_lane_aliases(&args.source_dir, &graph.arch_endpoint_effects, context)
+            .map_err(|message| {
+                native_selection_input_error(ArosError::Configuration {
+                    file: "architecture lane routes".into(),
+                    message,
+                })
+            })?;
+        context.native_arch_lane_alias_endpoints.extend(
+            aliases
+                .iter()
+                .map(|alias| alias.original_endpoint().to_owned()),
+        );
+        bind_architecture_effects(
+            projection,
+            &args.source_dir,
+            context,
+            &mut graph,
+            &mut capability_errors,
+        )?;
+        arch_lane_attachments.extend(graph.apply_arch_lane_aliases(&aliases).map_err(
+            |message| {
+                native_selection_input_error(ArosError::Configuration {
+                    file: "architecture lane routes".into(),
+                    message,
+                })
+            },
+        )?);
+    }
+    arch_lane_attachments.extend(graph.resolve_arch_lane_attachments());
     let inherited_arch_sources = graph.resolve_arch_sources();
     // Catalog generators can emit a source/header adjacent to a module's
     // sources. CMake rehomes that output, so preserve the completed logical
@@ -1130,13 +1165,6 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                         .with_hint("fix the source contract or unsupported transpiler capability; no generated header is accepted as proof")),
                 }
             }
-            bind_architecture_effects(
-                projection,
-                &args.source_dir,
-                context,
-                &mut graph,
-                &mut capability_errors,
-            )?;
         } else if !graph.arch_endpoint_effects.is_empty() || !graph.assembly_headers.is_empty() {
             return Err(native_selection_input_error(ArosError::Configuration {
                 file: "architecture endpoint effects".into(),

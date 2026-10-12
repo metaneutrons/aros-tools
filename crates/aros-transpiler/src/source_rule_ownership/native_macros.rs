@@ -7,7 +7,7 @@ use super::{
 };
 use crate::dirs::DirVars;
 use crate::make_expr::{evaluate_make_expr, MakeExprContext};
-use crate::make_vars::VarScope;
+use crate::make_vars::{strip_make_comment, variable_assignment, VarScope};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(test)]
 use std::fs;
@@ -18,6 +18,19 @@ const BUILD_PROG_SHA256: &str = "e276e953080db3a15e844057a5d2454c0c537da800904c9
 
 pub(super) const COMPILE_MULTI_SHA256: &str =
     "a55875ba53ff3445e8083c15f07348e7c294cf08c42235b142caf6af9ee50bc7";
+
+pub(super) const BUILD_ARCHSPECIFIC_SHA256: &str =
+    "f3f12399d993765cff710f8f37caba7ffb0eb240f02ca1c93a6d619a208c7db8";
+
+const BUILDID_SHA256: &str = "687e8f395eaf67e61c8e982e3463c0ef1f4ea5560d43541fc62130aad7cd504b";
+
+const COMMON_SHA256: &str = "abe606c53628bc8e8cda94bc822d326ffeb78937e6a610dc2c7706031d478ead";
+
+const COMMON_MAKE_TAIL_SHA256: &str =
+    "a41f7759ce714a16dbf0627bc3e392f68b5ee70024a2a72d561f5e14bd895cf0";
+
+const COMMON_GENMODULE_DEPS_SHA256: &str =
+    "1107a4ed21b886f2d04decfcaca9c4b3e510f0f0340cdb03aad10ba6b750c653";
 
 const ASSEMBLE_MULTI_SHA256: &str =
     "b8718f311b850bb70a5c20a9ab5c703ee9e96858d15956b255bc065e7affeb36";
@@ -68,6 +81,7 @@ const STRIP_Q_SHA256: &str = "94bf874bbdf35a70dc73feaba1f3f562126f27c27a47bf46bf
 const TRUSTED_TEMPLATE_CLOSURE_REFERENCES: &[&str] = &[
     "add_compilerlinkflags",
     "assemble_q",
+    "buildid",
     "compile_q",
     "fileactionmsg",
     "gen_archspecificrules",
@@ -137,11 +151,22 @@ pub(super) struct MacroArgumentSpec {
 pub struct CompileMultiTemplateContract {
     compile_multi: MacroContract,
     include_deps: MacroContract,
+    build_archspecific: Result<MacroContract, String>,
+    build_archspecific_variable_effects: Result<Vec<TemplateVariableEffect>, String>,
+    common_variable_effects: Result<Vec<TemplateVariableEffect>, String>,
+}
+
+#[derive(Debug, Clone)]
+struct TemplateVariableEffect {
+    prefix: String,
+    dynamic_suffix: bool,
 }
 
 impl CompileMultiTemplateContract {
     /// Reads one bounded, no-follow native template set and verifies the exact
     /// compile-multi and dependency-include contracts plus the mkdep script.
+    /// Neighbor contracts are retained as deferred proof results so ordinary
+    /// compile-multi sources do not depend on unrelated arch/common macros.
     ///
     /// # Errors
     ///
@@ -171,10 +196,21 @@ impl CompileMultiTemplateContract {
             return Err("include_deps helper closure is not fully verified".to_owned());
         }
 
+        let (build_archspecific, build_archspecific_variable_effects) =
+            match verified_build_archspecific(&template, &definitions) {
+                Ok((contract, effects)) => (Ok(contract), Ok(effects)),
+                Err(error) => (Err(error.clone()), Err(error)),
+            };
+        let common_variable_effects =
+            verified_definition_effects(&template, &definitions, "common", COMMON_SHA256);
+
         verify_mkdep_script(&canonical_root)?;
         Ok(Self {
             compile_multi,
             include_deps,
+            build_archspecific,
+            build_archspecific_variable_effects,
+            common_variable_effects,
         })
     }
 
@@ -198,6 +234,97 @@ impl CompileMultiTemplateContract {
     /// missing required fields.
     pub(crate) fn include_arguments(&self, raw: &str) -> Result<BTreeMap<String, String>, String> {
         closed_contract_arguments(raw, &self.include_deps)
+    }
+
+    /// Parses the verified arch-specific build context without expanding its
+    /// values. The caller must bind every value at the physical invocation.
+    pub(crate) fn build_archspecific_arguments(
+        &self,
+        raw: &str,
+    ) -> Result<BTreeMap<String, String>, String> {
+        closed_contract_arguments(raw, self.build_archspecific.as_ref().map_err(Clone::clone)?)
+    }
+
+    /// Verifies the exact files included by `%common` and proves their
+    /// assignment names do not overlap the compile-multi namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either source file is missing, unsafe, oversized,
+    /// or differs from the reviewed bytes.
+    pub(crate) fn prove_common_namespace_disjoint(
+        &self,
+        root: &Path,
+        namespace: &str,
+        include_build_archspecific: bool,
+    ) -> Result<(), String> {
+        let make_tail = read_verified_raw_file(
+            root,
+            Path::new("config/make.tail"),
+            COMMON_MAKE_TAIL_SHA256,
+            MAX_TEMPLATE_BYTES,
+            "common make.tail",
+        )?;
+        let genmodule_deps = read_verified_raw_file(
+            root,
+            Path::new("tools/genmodule/Makefile.deps"),
+            COMMON_GENMODULE_DEPS_SHA256,
+            MAX_TEMPLATE_BYTES,
+            "common Makefile.deps",
+        )?;
+        let make_tail = std::str::from_utf8(&make_tail)
+            .map_err(|error| format!("common make.tail is not UTF-8: {error}"))?;
+        let genmodule_deps = std::str::from_utf8(&genmodule_deps)
+            .map_err(|error| format!("common Makefile.deps is not UTF-8: {error}"))?;
+        let mut effects = self
+            .common_variable_effects
+            .as_ref()
+            .map_err(Clone::clone)?
+            .clone();
+        if include_build_archspecific {
+            effects.extend(
+                self.build_archspecific_variable_effects
+                    .as_ref()
+                    .map_err(Clone::clone)?
+                    .iter()
+                    .cloned(),
+            );
+        }
+        effects.extend(template_variable_effects(
+            &make_tail.lines().map(str::to_owned).collect::<Vec<_>>(),
+        ));
+        effects.extend(template_variable_effects(
+            &genmodule_deps
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        ));
+        let compile_variables = compile_multi_variable_names(namespace);
+        let reserved_prefixes = reserved_variable_prefixes(&effects);
+        if let Some(prefix) = reserved_prefixes.iter().find(|prefix| {
+            compile_variables
+                .iter()
+                .any(|name| name.starts_with(&format!("{prefix}_")))
+        }) {
+            return Err(format!(
+                "compile-multi namespace overlaps verified common/build namespace {prefix}"
+            ));
+        }
+        if let Some(effect) = effects.iter().find(|effect| {
+            compile_variables.iter().any(|name| {
+                if effect.dynamic_suffix {
+                    name.starts_with(&effect.prefix)
+                } else {
+                    name == &effect.prefix
+                }
+            })
+        }) {
+            return Err(format!(
+                "compile-multi namespace overlaps verified common/build variables at {}",
+                effect.prefix
+            ));
+        }
+        Ok(())
     }
 
     /// GenMF scans raw source lines before Make comments/control are read.
@@ -238,6 +365,52 @@ fn closed_contract_arguments(
         .collect())
 }
 
+fn verified_build_archspecific(
+    template: &str,
+    definitions: &NativeMacroDefinitions,
+) -> Result<(MacroContract, Vec<TemplateVariableEffect>), String> {
+    let contract =
+        verified_macro_contract(template, "build_archspecific", BUILD_ARCHSPECIFIC_SHA256)
+            .ok_or_else(|| {
+                "build_archspecific does not match the trusted source contract".to_owned()
+            })?;
+    let closure = verified_macro_closure_members("build_archspecific", definitions)
+        .ok_or_else(|| "build_archspecific helper closure is not fully verified".to_owned())?;
+    let mut effects = Vec::new();
+    for name in closure {
+        let Some(matches) = definitions.get(&name) else {
+            return Err(format!(
+                "{name} helper is missing from the verified template set"
+            ));
+        };
+        if matches.len() != 1 {
+            return Err(format!("{name} has competing template definitions"));
+        }
+        effects.extend(template_variable_effects(&matches[0].body_lines));
+    }
+    Ok((contract, effects))
+}
+
+fn verified_definition_effects(
+    template: &str,
+    definitions: &NativeMacroDefinitions,
+    name: &str,
+    expected_sha256: &str,
+) -> Result<Vec<TemplateVariableEffect>, String> {
+    if !verified_macro_definition(template, name, expected_sha256) {
+        return Err(format!("{name} does not match the trusted source contract"));
+    }
+    let Some(matches) = definitions.get(name) else {
+        return Err(format!(
+            "{name} helper is missing from the verified template set"
+        ));
+    };
+    if matches.len() != 1 {
+        return Err(format!("{name} has competing template definitions"));
+    }
+    Ok(template_variable_effects(&matches[0].body_lines))
+}
+
 fn verify_mkdep_script(root: &Path) -> Result<(), String> {
     let path = root.join("scripts/mkdep");
     let mut file = aros_common::open_regular_file_nofollow(&path)
@@ -270,6 +443,141 @@ fn verify_mkdep_script(root: &Path) -> Result<(), String> {
         return Err("source mkdep script does not match its trusted raw hash".to_owned());
     }
     Ok(())
+}
+
+fn read_verified_raw_file(
+    root: &Path,
+    relative_path: &Path,
+    expected_sha256: &str,
+    max_bytes: usize,
+    description: &str,
+) -> Result<Vec<u8>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("could not resolve source root for {description}: {error}"))?;
+    let path = root.join(relative_path);
+    let mut file = aros_common::open_regular_file_nofollow(&path)
+        .map_err(|error| format!("{description} is unavailable or unsafe: {error}"))?;
+    let before = file
+        .metadata()
+        .map_err(|error| format!("could not inspect {description}: {error}"))?;
+    if !before.is_file() || before.len() > max_bytes as u64 {
+        return Err(format!("{description} is not a bounded regular file"));
+    }
+    let expected_len = usize::try_from(before.len())
+        .map_err(|_| format!("{description} size is outside the supported range"))?;
+    let mut bytes = Vec::with_capacity(expected_len);
+    file.by_ref()
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read {description}: {error}"))?;
+    let after = file
+        .metadata()
+        .map_err(|error| format!("could not recheck {description}: {error}"))?;
+    if bytes.len() > max_bytes
+        || bytes.len() != expected_len
+        || after.len() != before.len()
+        || !after.is_file()
+    {
+        return Err(format!("{description} changed or exceeded its byte limit"));
+    }
+    if aros_common::sha256_bytes(&bytes).as_str() != expected_sha256 {
+        return Err(format!("{description} does not match its trusted raw hash"));
+    }
+    Ok(bytes)
+}
+
+fn template_variable_effects(lines: &[String]) -> Vec<TemplateVariableEffect> {
+    let mut effects = BTreeSet::<(String, bool)>::new();
+    for raw in lines {
+        let line = strip_make_comment(raw).trim();
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with('%')
+            || ["ifeq", "ifneq", "ifdef", "ifndef", "else", "endif"]
+                .iter()
+                .any(|directive| line == *directive || line.starts_with(&format!("{directive} ")))
+        {
+            continue;
+        }
+        if let Some((_, target_specific)) = line.split_once(':') {
+            if let Some((name, _, _)) = variable_assignment(target_specific) {
+                effects.insert((name.to_owned(), false));
+                continue;
+            }
+        }
+        if let Some((name, _, _)) = variable_assignment(line) {
+            effects.insert((name.to_owned(), false));
+            continue;
+        }
+        let Some((at, _)) = assignment_operator(line) else {
+            continue;
+        };
+        let lhs = line[..at].trim();
+        let prefix = lhs
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })
+            .collect::<String>();
+        if !prefix.is_empty() {
+            effects.insert((prefix, true));
+        }
+    }
+    effects
+        .into_iter()
+        .map(|(prefix, dynamic_suffix)| TemplateVariableEffect {
+            prefix,
+            dynamic_suffix,
+        })
+        .collect()
+}
+
+fn assignment_operator(line: &str) -> Option<(usize, &'static str)> {
+    ["::=", ":=", "+=", "?=", "="]
+        .into_iter()
+        .filter_map(|operator| line.find(operator).map(|at| (at, operator)))
+        .min_by_key(|(at, _)| *at)
+}
+
+fn compile_multi_variable_names(namespace: &str) -> BTreeSet<String> {
+    let mut names = std::iter::once("CMD".to_owned()).collect::<BTreeSet<_>>();
+    for suffix in [
+        "MC_SRCWILDCARD",
+        "MC_TARGETS",
+        "MC_DTARGETS",
+        "MC_TGTWILDCARD",
+        "MC_SRCDIR",
+        "MC_BASEDIRS",
+        "MC_DIRS",
+        "MC_CPPFLAGS",
+        "MC_EXTRA_CPPFLAGS",
+        "CFLAGS",
+        "DFLAGS",
+        "LINK",
+        "LD_OPTS",
+        "LDFLAGS",
+        "STRIP",
+        "ASSEMBLER",
+        "IQUOTE",
+        "IQUOTE_END",
+    ] {
+        names.insert(format!("{namespace}_{suffix}"));
+    }
+    names
+}
+
+fn reserved_variable_prefixes(effects: &[TemplateVariableEffect]) -> BTreeSet<String> {
+    let mut dynamic_components = BTreeMap::<String, usize>::new();
+    for effect in effects.iter().filter(|effect| effect.dynamic_suffix) {
+        if let Some((prefix, _)) = effect.prefix.split_once('_') {
+            *dynamic_components.entry(prefix.to_owned()).or_default() += 1;
+        }
+    }
+    dynamic_components
+        .into_iter()
+        .filter_map(|(prefix, count)| (count >= 2).then_some(prefix))
+        .collect()
 }
 
 pub(super) fn verify_native_macros(root: &Path) -> VerifiedMacros {
@@ -464,10 +772,20 @@ fn native_define_name(line: &str) -> Option<&str> {
 }
 
 fn verified_macro_closure(root_name: &str, definitions: &NativeMacroDefinitions) -> bool {
+    verified_macro_closure_members(root_name, definitions).is_some()
+}
+
+fn verified_macro_closure_members(
+    root_name: &str,
+    definitions: &NativeMacroDefinitions,
+) -> Option<BTreeSet<String>> {
     let mut verifier = MacroClosureVerifier::new(definitions, |name| {
         trusted_template_hash(name).map(str::to_owned)
     });
-    verifier.visit(root_name, 0)
+    if !verifier.visit(root_name, 0) {
+        return None;
+    }
+    Some(verifier.visited)
 }
 
 #[cfg(test)]
@@ -638,6 +956,8 @@ fn trusted_template_hash(name: &str) -> Option<&'static str> {
     Some(match name {
         "add_compilerlinkflags" => ADD_COMPILERLINKFLAGS_SHA256,
         "assemble_q" => ASSEMBLE_Q_SHA256,
+        "build_archspecific" => BUILD_ARCHSPECIFIC_SHA256,
+        "buildid" => BUILDID_SHA256,
         "build_prog" => BUILD_PROG_SHA256,
         "compile_q" => COMPILE_Q_SHA256,
         "fileactionmsg" => FILEACTIONMSG_SHA256,
@@ -685,6 +1005,32 @@ fn verified_macro_contract(
         return None;
     }
     parse_macro_header(&lines, start, name)
+}
+
+fn verified_macro_definition(template: &str, name: &str, expected_sha256: &str) -> bool {
+    let lines = template.lines().collect::<Vec<_>>();
+    if lines.len() > MAX_LINES {
+        return false;
+    }
+    let mut matches = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| native_define_name(line) == Some(name));
+    let Some((start, _)) = matches.next() else {
+        return false;
+    };
+    if matches.next().is_some() {
+        return false;
+    }
+    let Some(end) = lines[start + 1..]
+        .iter()
+        .position(|line| line.starts_with("%end"))
+        .map(|offset| offset + start + 1)
+    else {
+        return false;
+    };
+    let body = lines[start..=end].join("\n");
+    aros_common::sha256_bytes(body.as_bytes()).as_str() == expected_sha256
 }
 
 fn parse_macro_header(lines: &[&str], start: usize, expected_name: &str) -> Option<MacroContract> {

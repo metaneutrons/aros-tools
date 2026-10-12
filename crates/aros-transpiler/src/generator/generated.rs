@@ -468,6 +468,9 @@ pub(super) fn emit_sdk_object_groups<'a>(
         ] {
             writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
         }
+        if let Some(cpu) = &object.companion_cpu {
+            writeln!(out, "    COMPANION_CPU {}", cmake_arg(cpu)).unwrap();
+        }
         for (key, values) in [
             ("DEFINES", &object.defines),
             ("UNDEFINES", &object.undefines),

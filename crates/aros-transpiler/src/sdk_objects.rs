@@ -17,10 +17,15 @@ use std::path::{Component, Path};
 #[path = "sdk_objects_native_scope.rs"]
 mod native_scope;
 pub(crate) use native_scope::{collect_with_native_configuration, SdkObjectSnapshot};
+#[path = "sdk_object_companion.rs"]
+mod companion;
+use companion::companion_compile_role;
 
 /// One exact source-derived compile and staging pair for a local SDK object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdkObjectDecl {
+    /// Explicit source-contract compiler role, never inferred from an output name.
+    pub companion_cpu: Option<String>,
     /// C or C++ source file below the configured CMake source root.
     pub source: String,
     /// Generated Make intermediate represented as a CMake path.
@@ -69,6 +74,7 @@ pub struct SdkObjectRejection {
 
 #[derive(Debug, Clone)]
 struct StagePattern {
+    library: String,
     line: usize,
     directory: String,
     recipe_valid: bool,
@@ -78,6 +84,8 @@ struct StagePattern {
 
 #[derive(Debug, Clone)]
 struct CompilePattern {
+    companion_cpu: Option<String>,
+    companion_library: Option<String>,
     line: usize,
     language: String,
     directory: Option<String>,
@@ -103,6 +111,7 @@ enum MacroAction {
 
 #[derive(Debug, Clone)]
 struct LaneCandidate {
+    companion_cpu: Option<String>,
     stage_line: usize,
     directory: String,
     language: String,
@@ -264,7 +273,7 @@ pub(crate) fn collect_from_snapshot(
         }
         for prerequisite in &aggregate.prerequisites {
             if let Ok(ObjectPath::Intermediate { path, .. }) =
-                parse_object_path(prerequisite, &configured_lib, &local_generated)
+                parse_selected_object_path(prerequisite, &configured_lib, &local_generated, dirs)
             {
                 // Ought-to-exist selection depends on each declared path even
                 // if a sibling prerequisite later makes this owner unsupported.
@@ -334,7 +343,7 @@ pub(crate) fn collect_from_snapshot(
         let object_paths = match aggregate
             .prerequisites
             .iter()
-            .map(|path| parse_object_path(path, &configured_lib, &local_generated))
+            .map(|path| parse_selected_object_path(path, &configured_lib, &local_generated, dirs))
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(objects) => objects,
@@ -379,8 +388,10 @@ pub(crate) fn collect_from_snapshot(
                         }
                     }
                 }
-                ObjectPath::Output { .. } => {
-                    let matching = choices.collect::<Vec<_>>();
+                ObjectPath::Output { path, .. } => {
+                    let matching = choices
+                        .filter(|candidate| candidate.output == *path)
+                        .collect::<Vec<_>>();
                     if matching.is_empty() {
                         failure = Some(format!(
                             "SDK output `{}` has no local source-declared compile/stage pair",
@@ -433,7 +444,7 @@ pub(crate) fn collect_from_snapshot(
                 continue;
             };
             if let Some(previous) =
-                lane_for_basename.insert(basename.clone(), candidate.intermediate.clone())
+                lane_for_basename.insert(candidate.output.clone(), candidate.intermediate.clone())
             {
                 if previous != candidate.intermediate {
                     failure = Some(format!(
@@ -459,6 +470,7 @@ pub(crate) fn collect_from_snapshot(
                 }
             };
             let declaration = SdkObjectDecl {
+                companion_cpu: candidate.companion_cpu.clone(),
                 source: candidate.source.clone(),
                 intermediate: candidate.intermediate.clone(),
                 output: candidate.output.clone(),
@@ -600,7 +612,7 @@ fn collect_stage_patterns(
         let Some((target, prerequisite)) = split_rule(plain) else {
             continue;
         };
-        if target.trim() != "$(AROS_LIB)/%.o" {
+        if !matches!(target.trim(), "$(AROS_LIB)/%.o" | "$(AROS_LIB32)/%.o") {
             continue;
         }
         let state = effective_line_state(line_states, controls, line_no);
@@ -612,7 +624,13 @@ fn collect_stage_patterns(
         else {
             continue;
         };
-        if rendered_target != format!("{configured_lib}/%.o") {
+        let library = rendered_target.strip_suffix("/%.o").unwrap_or("");
+        if library != configured_lib
+            && !dirs.sdk_companion_roles().iter().any(|role| {
+                dirs.expand("$(AROS_DEVELOPER)")
+                    .is_some_and(|root| library == format!("{root}/{}", role.library_dir))
+            })
+        {
             continue;
         }
         let Some(directory) = rendered_prerequisite.strip_suffix("/%.o") else {
@@ -633,6 +651,7 @@ fn collect_stage_patterns(
                 .is_some_and(|line| line.starts_with('\t'));
         let control_valid = controls.valid.get(line_no).copied().unwrap_or(false);
         stages.push(StagePattern {
+            library: library.to_owned(),
             line: line_no,
             directory: directory.to_owned(),
             recipe_valid,
@@ -686,9 +705,14 @@ fn collect_compile_patterns(
             evaluate_make_expr(raw, &context).ok()
         });
         let mut declaration_error = parse_error;
-        let allowed = ["basename", "targetdir", "compiler"]
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let companion = companion_compile_role(&arguments, scope, dirs, root, rel_dir, line_no);
+        let allowed = if companion.as_ref().is_ok_and(Option::is_some) {
+            vec!["basename", "targetdir", "compiler", "mmake", "cflags"]
+        } else {
+            vec!["basename", "targetdir", "compiler"]
+        }
+        .into_iter()
+        .collect::<BTreeSet<_>>();
         if declaration_error.is_none() {
             if let Some(unsupported) = arguments
                 .keys()
@@ -723,7 +747,7 @@ fn collect_compile_patterns(
                 format!("source-local `{name}` assignment replaces the compile macro default and is unsupported")
             });
         }
-        let flags = if declaration_error.is_none() {
+        let mut flags = if declaration_error.is_none() {
             collect_user_flags(
                 scope,
                 dirs,
@@ -737,7 +761,37 @@ fn collect_compile_patterns(
                 .clone()
                 .unwrap_or_else(|| "invalid compile macro".into()))
         };
+        let companion_cpu = match companion {
+            Ok(Some((cpu, extra))) => {
+                flags = flags.map(|mut flags| {
+                    flags.options.extend(extra.options);
+                    flags.defines.extend(extra.defines);
+                    flags.undefines.extend(extra.undefines);
+                    flags.includes.extend(extra.includes);
+                    flags
+                });
+                Some(cpu)
+            }
+            Ok(None) => None,
+            Err(reason) => {
+                declaration_error = Some(reason.clone());
+                flags = Err(reason);
+                None
+            }
+        };
         compiles.push(CompilePattern {
+            companion_library: companion_cpu
+                .as_ref()
+                .and_then(|cpu| {
+                    dirs.sdk_companion_roles()
+                        .iter()
+                        .find(|role| &role.selector_cpu == cpu)
+                })
+                .and_then(|role| {
+                    dirs.expand("$(AROS_DEVELOPER)")
+                        .map(|root| format!("{root}/{}", role.library_dir))
+                }),
+            companion_cpu,
             line: line_no,
             language: if invocation.name == "rule_compile_cxx" {
                 "CXX".into()
@@ -776,6 +830,14 @@ fn pair_candidates(
             .iter()
             .filter(|compile| compile.directory.as_deref() == Some(stage.directory.as_str()))
         {
+            if stage.library
+                != compile
+                    .companion_library
+                    .as_deref()
+                    .unwrap_or(configured_lib)
+            {
+                continue;
+            }
             let mut stage_error = None;
             if !stage.recipe_valid {
                 stage_error = Some(
@@ -807,8 +869,9 @@ fn pair_candidates(
             }
             let _ = lane;
             let intermediate = format!("{}/<object>.o", stage.directory);
-            let output = format!("{configured_lib}/<object>.o");
+            let output = format!("{}/<object>.o", stage.library);
             candidates.push(LaneCandidate {
+                companion_cpu: compile.companion_cpu.clone(),
                 stage_line: stage.line,
                 directory: stage.directory.clone(),
                 language: compile.language.clone(),
@@ -1098,6 +1161,29 @@ fn parse_object_path(
         });
     }
     Err(format!("object prerequisite `{path}` is outside the local generated or configured Developer library roots"))
+}
+
+fn parse_selected_object_path(
+    path: &str,
+    configured_lib: &str,
+    local_generated: &str,
+    dirs: &DirVars,
+) -> Result<ObjectPath, String> {
+    if let Ok(value) = parse_object_path(path, configured_lib, local_generated) {
+        return Ok(value);
+    }
+    if let Some(developer) = dirs.expand("$(AROS_DEVELOPER)") {
+        for role in dirs.sdk_companion_roles() {
+            if let Ok(value @ ObjectPath::Output { .. }) = parse_object_path(
+                path,
+                &format!("{developer}/{}", role.library_dir),
+                local_generated,
+            ) {
+                return Ok(value);
+            }
+        }
+    }
+    parse_object_path(path, configured_lib, local_generated)
 }
 
 fn object_path_text(path: &ObjectPath) -> &str {

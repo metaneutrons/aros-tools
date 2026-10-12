@@ -21,6 +21,9 @@ use crate::source_rule_ownership::CompileMultiTemplateContract;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
+#[path = "compile_multi_context.rs"]
+mod context;
+
 const SOURCE: &str = "${AROS_SOURCE_DIR}";
 const BUILD: &str = "${AROS_BUILD_DIR}";
 const GENERATED: &str = "${AROS_BUILD_DIR}/gen";
@@ -80,6 +83,34 @@ pub fn collect(
     let directory = recipe.parent().unwrap_or_else(|| Path::new(""));
     let lines: Vec<_> = physical.lines().collect();
     let effective_lines: Vec<_> = effective.lines().collect();
+    for (index, raw) in effective_lines.iter().enumerate() {
+        if CompileMultiTemplateContract::has_inline_reference(raw)
+            || raw.starts_with('\t') && !macro_invocations(raw).is_empty()
+        {
+            return refuse_snapshot("compile-multi scope contains an unproven inline GenMF macro");
+        }
+        if states.get(index) != Some(&ConditionalTruth::False) && !raw.starts_with('\t') {
+            let text = strip_make_comment(raw).trim();
+            if text == "export"
+                || text.starts_with("export ")
+                || text == "unexport"
+                || text.starts_with("unexport ")
+            {
+                return refuse_snapshot(
+                    "compile-multi scope has opaque controls or template/compiler mutations",
+                );
+            }
+            if variable_assignment(text).is_none()
+                && text
+                    .split_once(':')
+                    .is_some_and(|(_, rhs)| rhs.contains('='))
+            {
+                return refuse_snapshot(
+                    "compile-multi scope has inherited target-specific assignments",
+                );
+            }
+        }
+    }
     let contract = CompileMultiTemplateContract::read(root);
     let mut groups = Vec::new();
     let mut rejections = Vec::new();
@@ -123,16 +154,6 @@ pub fn collect(
             {
                 return Err("compile-multi namespace is not a safe variable prefix".into());
             }
-            check_scope(
-                &effective_lines,
-                &states,
-                &scope,
-                dirs,
-                root,
-                directory,
-                position,
-                &namespace,
-            )?;
             for other in invocations
                 .iter()
                 .filter(|other| other.name == "rule_compile_multi" && other.line != call.line)
@@ -332,6 +353,35 @@ pub fn collect(
                 dirs,
                 root,
                 directory,
+            )?;
+            let adjacent = context::prove(
+                &invocations,
+                &origins,
+                positions
+                    .as_deref()
+                    .ok_or("adjacent macro anchors are unavailable")?,
+                &states,
+                call,
+                &owner,
+                &namespace,
+                &objects,
+                &scope,
+                dirs,
+                root,
+                directory,
+                target,
+                contract,
+            )?;
+            check_scope(
+                &effective_lines,
+                &states,
+                &scope,
+                dirs,
+                root,
+                directory,
+                position,
+                &namespace,
+                &adjacent.effective_lines,
             )?;
             Ok(LiteralObjectGroupDecl {
                 owner: owner.clone(),
@@ -556,6 +606,7 @@ fn check_scope(
     directory: &Path,
     line: usize,
     namespace: &str,
+    proven_adjacent_lines: &BTreeSet<usize>,
 ) -> Result<(), String> {
     let mut bindings = BTreeMap::<&str, usize>::new();
     for (index, raw) in lines.iter().enumerate() {
@@ -568,10 +619,11 @@ fn check_scope(
         {
             return Err("compile-multi scope contains an unproven inline GenMF macro".into());
         }
-        if calls
-            .iter()
-            .any(|call| !matches!(call.name.as_str(), "rule_compile_multi" | "include_deps"))
-        {
+        if calls.iter().any(|call| {
+            !(matches!(call.name.as_str(), "rule_compile_multi" | "include_deps")
+                || proven_adjacent_lines.contains(&index)
+                    && matches!(call.name.as_str(), "build_archspecific" | "common"))
+        }) {
             return Err("compile-multi scope contains an unproven adjacent GenMF macro".into());
         }
         if states.get(index) == Some(&ConditionalTruth::False) || raw.starts_with('\t') {

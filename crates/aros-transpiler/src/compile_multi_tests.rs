@@ -20,6 +20,7 @@ impl Fixture {
         let recipe_dir = root.join("arch/example");
         fs::create_dir_all(&recipe_dir).expect("recipe directory");
         fs::create_dir_all(root.join("config")).expect("configuration directory");
+        fs::create_dir_all(root.join("tools/genmodule")).expect("common dependency directory");
         fs::create_dir_all(root.join("scripts")).expect("script directory");
         fs::write(
             root.join("config/make.cfg.in"),
@@ -45,8 +46,18 @@ impl Fixture {
         .expect("copy checked Make template");
         fs::copy(checked.join("scripts/mkdep"), root.join("scripts/mkdep"))
             .expect("copy checked mkdep script");
+        fs::copy(
+            checked.join("config/make.tail"),
+            root.join("config/make.tail"),
+        )
+        .expect("copy checked common make tail");
+        fs::copy(
+            checked.join("tools/genmodule/Makefile.deps"),
+            root.join("tools/genmodule/Makefile.deps"),
+        )
+        .expect("copy checked common generator dependencies");
 
-        for basename in ["unit", "other", "sub/unit"] {
+        for basename in ["unit", "other", "sub/unit", "setmem_avx", "setmem_sse"] {
             let source = recipe_dir.join(format!("{basename}.c"));
             fs::create_dir_all(source.parent().expect("source parent"))
                 .expect("source parent directory");
@@ -130,6 +141,51 @@ fn assert_rejected(source: &str, expected_reason: &str) {
             .any(|rejection| rejection.reason.contains(expected_reason)),
         "expected rejection containing {expected_reason:?}; got {rejections:#?}"
     );
+}
+
+fn avx_neighbor_source(owner: &str, namespace: &str, arch_files: &str) -> String {
+    let source = valid_source()
+        .replace(
+            "CFLAGS := -O2 -g -Wall -march=armv7-a -DC_ONLY=1",
+            "CFLAGS = $(ISA_FLAGS) -O2 -g -Wall -DC_ONLY=1",
+        )
+        .replace(CALL, "__COMPILE_MULTI_CALL__")
+        .replace(
+            "unit_ns_MC_EXTRA_CPPFLAGS",
+            &format!("{namespace}_MC_EXTRA_CPPFLAGS"),
+        )
+        .replace(
+            "object-owner: $(GENDIR)/objects/unit.o $(GENDIR)/objects/other.o",
+            "__PHYSICAL_OWNER_RULE__",
+        )
+        .replace(
+            "%include_deps depstargets=object-owner deps=\"$(GENDIR)/objects/unit.d $(GENDIR)/objects/other.d\"",
+            "__INCLUDE_DEPS__",
+        )
+        .replace(".PHONY: object-owner", &format!(".PHONY: {owner}"));
+    let call = CALL
+        .replace("unit_ns", namespace)
+        .replace("unit other", "setmem_avx")
+        .replace("$(GENDIR)/objects", "$(GENDIR_UTILITY_ARCH)");
+    let adjacent = format!(
+        concat!(
+            "FILES := {arch_files}\n",
+            "%build_archspecific mainmmake=kernel-utility modname=utility maindir=rom/utility arch=pc files=$(FILES)\n",
+            "ISA_FLAGS += -mavx\n",
+            "GENDIR_UTILITY_ARCH := $(GENDIR)/rom/utility/utility/arch\n",
+            "AVX_FILES := setmem_avx\n",
+            "AVX_OBJS := $(addprefix $(GENDIR_UTILITY_ARCH)/,$(addsuffix .o,$(AVX_FILES)))\n",
+            "AVX_DEPS := $(addprefix $(GENDIR_UTILITY_ARCH)/,$(addsuffix .d,$(AVX_FILES)))\n",
+        ),
+        arch_files = arch_files,
+    );
+    source
+        .replace("__COMPILE_MULTI_CALL__", &format!("{adjacent}{call}"))
+        .replace("__PHYSICAL_OWNER_RULE__", &format!("{owner}: $(AVX_OBJS)"))
+        .replace(
+            "__INCLUDE_DEPS__",
+            &format!("%include_deps depstargets={owner} deps=\"$(AVX_DEPS)\"\n%common"),
+        )
 }
 
 #[test]
@@ -728,5 +784,189 @@ fn rejects_duplicate_namespaces_additional_owner_recipes_and_target_specific_fla
             ".PHONY: object-owner\nobject-owner: CFLAGS := -DOVERRIDE=1\n",
         ),
         "compile-multi scope has inherited target-specific assignments",
+    );
+}
+
+#[test]
+fn accepts_the_canonical_avx_neighbor_with_disjoint_arch_outputs() {
+    let owner = "kernel-utility-pc-avx";
+    let fixture = Fixture::new();
+    let source = avx_neighbor_source(owner, owner, "setmem_sse");
+    let target = TargetContext {
+        make_variables: [("TARGET".to_owned(), owner.to_owned())].into(),
+        ..TargetContext::default()
+    };
+    let (groups, rejected) = fixture.collect_with_target(&source, &target);
+    assert!(rejected.is_empty(), "{rejected:#?}");
+    assert_eq!(groups.len(), 1, "{groups:#?}");
+    assert_eq!(groups[0].owner, owner);
+    assert!(
+        groups[0].objects[0]
+            .arguments
+            .iter()
+            .any(|argument| argument == "-mavx"),
+        "AVX flags were lost: {:#?}",
+        groups[0].objects[0].arguments
+    );
+}
+
+#[test]
+fn standalone_compile_multi_does_not_require_unrelated_neighbor_inputs() {
+    let fixture = Fixture::new();
+    let template = fixture.root.join("config/make.tmpl");
+    let original = fs::read_to_string(&template).unwrap();
+    fs::write(
+        &template,
+        original.replace(
+            "BD_OBJDIR$(BDID)  := $(BD_OBJROOT$(BDID))/arch",
+            "BD_OBJDIR$(BDID)  := $(BD_OBJROOT$(BDID))/changed",
+        ),
+    )
+    .unwrap();
+    fs::write(fixture.root.join("config/make.tail"), "changed\n").unwrap();
+
+    let (groups, rejected) = fixture.collect(&valid_source());
+    assert!(rejected.is_empty(), "{rejected:#?}");
+    assert_eq!(groups.len(), 1, "{groups:#?}");
+}
+
+#[test]
+fn rejects_changed_arch_helpers_and_overlapping_or_active_neighbor_contexts() {
+    let owner = "kernel-utility-pc-avx";
+    let source = avx_neighbor_source(owner, owner, "setmem_sse");
+    let target = TargetContext {
+        make_variables: [("TARGET".to_owned(), owner.to_owned())].into(),
+        ..TargetContext::default()
+    };
+
+    let fixture = Fixture::new();
+    let template = fixture.root.join("config/make.tmpl");
+    let original = fs::read_to_string(&template).unwrap();
+    fs::write(
+        &template,
+        original.replace(
+            "BD_OBJDIR$(BDID)  := $(BD_OBJROOT$(BDID))/arch",
+            "BD_OBJDIR$(BDID)  := $(BD_OBJROOT$(BDID))/changed",
+        ),
+    )
+    .unwrap();
+    assert_rejected_with_fixture(
+        &fixture,
+        &source,
+        "build_archspecific does not match the trusted source contract",
+    );
+
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("config/make.tail"), "changed\n").unwrap();
+    let (groups, rejected) = fixture.collect_with_target(&source, &target);
+    assert!(groups.is_empty(), "{groups:#?}");
+    assert!(
+        rejected.iter().any(|rejection| rejection
+            .reason
+            .contains("common make.tail does not match its trusted raw hash")),
+        "{rejected:#?}"
+    );
+
+    let fixture = Fixture::new();
+    let colliding = avx_neighbor_source(owner, owner, "setmem_avx");
+    let (groups, rejected) = fixture.collect_with_target(&colliding, &target);
+    assert!(groups.is_empty(), "{groups:#?}");
+    assert!(
+        rejected.iter().any(|rejection| rejection
+            .reason
+            .contains("build_archspecific outputs overlap")),
+        "{rejected:#?}"
+    );
+
+    let arch_owner = "kernel-utility-pc";
+    let fixture = Fixture::new();
+    let active_selector = avx_neighbor_source(arch_owner, arch_owner, "setmem_sse");
+    let target = TargetContext {
+        make_variables: [("TARGET".to_owned(), arch_owner.to_owned())].into(),
+        ..TargetContext::default()
+    };
+    let (groups, rejected) = fixture.collect_with_target(&active_selector, &target);
+    assert!(groups.is_empty(), "{groups:#?}");
+    assert!(
+        rejected.iter().any(|rejection| rejection
+            .reason
+            .contains("owner activates the build_archspecific target selector")),
+        "{rejected:#?}"
+    );
+
+    let fixture = Fixture::new();
+    let reserved_namespace = avx_neighbor_source(owner, "TMP", "setmem_sse");
+    let target = TargetContext {
+        make_variables: [("TARGET".to_owned(), owner.to_owned())].into(),
+        ..TargetContext::default()
+    };
+    let (groups, rejected) = fixture.collect_with_target(&reserved_namespace, &target);
+    assert!(groups.is_empty(), "{groups:#?}");
+    assert!(
+        rejected.iter().any(|rejection| rejection
+            .reason
+            .contains("namespace overlaps verified common/build variables at TMP_CFLAGS")),
+        "{rejected:#?}"
+    );
+
+    let fixture = Fixture::new();
+    let reserved_bd_namespace = avx_neighbor_source(owner, "BD", "setmem_sse");
+    let target = TargetContext {
+        make_variables: [("TARGET".to_owned(), owner.to_owned())].into(),
+        ..TargetContext::default()
+    };
+    let (groups, rejected) = fixture.collect_with_target(&reserved_bd_namespace, &target);
+    assert!(groups.is_empty(), "{groups:#?}");
+    assert!(
+        rejected.iter().any(|rejection| rejection
+            .reason
+            .contains("namespace overlaps verified common/build namespace BD")),
+        "{rejected:#?}"
+    );
+
+    let fixture = Fixture::new();
+    let drifting = source.replace(
+        "FILES := setmem_sse",
+        "TARGET := kernel-utility-pc\nFILES := setmem_sse",
+    );
+    let target = TargetContext {
+        make_variables: [("TARGET".to_owned(), owner.to_owned())].into(),
+        ..TargetContext::default()
+    };
+    let (groups, rejected) = fixture.collect_with_target(&drifting, &target);
+    assert!(groups.is_empty(), "{groups:#?}");
+    assert!(
+        rejected.iter().any(|rejection| rejection
+            .reason
+            .contains("source TARGET binding differs from the physical compile-multi owner")),
+        "{rejected:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_symlinked_common_make_tail_even_when_target_bytes_match() {
+    use std::os::unix::fs::symlink;
+
+    let owner = "kernel-utility-pc-avx";
+    let fixture = Fixture::new();
+    let source = avx_neighbor_source(owner, owner, "setmem_sse");
+    let target = TargetContext {
+        make_variables: [("TARGET".to_owned(), owner.to_owned())].into(),
+        ..TargetContext::default()
+    };
+    let make_tail = fixture.root.join("config/make.tail");
+    let copied = fixture.root.join("make-tail-copy");
+    fs::copy(&make_tail, &copied).unwrap();
+    fs::remove_file(&make_tail).unwrap();
+    symlink(&copied, &make_tail).unwrap();
+
+    let (groups, rejected) = fixture.collect_with_target(&source, &target);
+    assert!(groups.is_empty(), "{groups:#?}");
+    assert!(
+        rejected.iter().any(|rejection| rejection
+            .reason
+            .contains("common make.tail is unavailable or unsafe")),
+        "{rejected:#?}"
     );
 }

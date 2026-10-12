@@ -521,6 +521,10 @@ impl DependencyGraph {
                     .filter(|decl| decl.mainmmake == mainmmake && decl.tag == lane)
                     .map(|decl| ArchSourceDecl {
                         tag: puller.clone(),
+                        // A MetaMake lane attachment aliases module object
+                        // sources, not the separate client-linklib endpoint.
+                        // Do not invent a `<puller>-linklib` source owner.
+                        linklib_files: Vec::new(),
                         ..decl.clone()
                     })
                     .collect();
@@ -623,7 +627,7 @@ impl DependencyGraph {
                     // says must not have it, and after lane attachment two lanes
                     // with different flags share one tag.
                     for opt in &d.compile_options {
-                        for file in &d.files {
+                        for file in d.files.iter().chain(&d.linklib_files) {
                             let e = (d.tag.clone(), d.dir.clone(), file.clone(), opt.clone());
                             if !target.arch_source_options.contains(&e) {
                                 target.arch_source_options.push(e);

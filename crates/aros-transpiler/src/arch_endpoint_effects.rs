@@ -1,9 +1,10 @@
 //! Source-backed effects of architecture-specific Make endpoints.
 //!
-//! This module deliberately admits only three narrow effects:
+//! This module deliberately admits only four narrow effects:
 //!
 //! * `%build_archspecific`'s `-linklib` leaf when its module source list is
-//!   known and nonempty, and both linklib-object lists are provably empty;
+//!   known and nonempty, and `linklibobjs=` is provably empty. A nonempty
+//!   `linklibfiles=` lane is kept distinct from the module object lane;
 //! * `%set_archincludes` when its endpoint, output path, and include paths can
 //!   all be stated without guessing.
 //! * the corresponding target-compiler architecture object group, only with
@@ -41,6 +42,10 @@ pub enum ArchEndpointEffectData {
         mainmmake: String,
         tag: String,
         module_sources: Vec<String>,
+        /// Exact client-linklib lane from the same `%build_archspecific`
+        /// invocation; this is independently paired with its linklib effect.
+        #[serde(default)]
+        linklib_sources: Vec<String>,
         directory: String,
     },
     /// A valid arch-specific invocation with no objects in its linklib lane.
@@ -50,6 +55,17 @@ pub enum ArchEndpointEffectData {
         mainmmake: String,
         tag: String,
         module_sources: Vec<String>,
+        compiler: String,
+    },
+    /// Architecture-specific client archive sources from `linklibfiles=`.
+    /// These replace same-named generic client inputs and apply to both normal
+    /// and relative archives, but never become module object sources.
+    ArchClientLinklibSources {
+        mainmmake: String,
+        tag: String,
+        module_sources: Vec<String>,
+        linklib_sources: Vec<String>,
+        directory: String,
         compiler: String,
     },
     /// `%set_archincludes`' generated flag-file effect. The CMake projection
@@ -77,9 +93,30 @@ impl ArchEndpointEffect {
     /// Exact selector tags, never a CPU inferred from an endpoint spelling.
     #[must_use]
     pub fn applies_to(&self, context: &crate::TargetContext) -> bool {
+        if matches!(self.data, ArchEndpointEffectData::ArchModuleObjects { .. })
+            && context
+                .native_arch_lane_alias_endpoints
+                .contains(&self.endpoint)
+        {
+            return true;
+        }
+        if matches!(
+            self.data,
+            ArchEndpointEffectData::EmptyLinklibAggregate { .. }
+        ) && self
+            .endpoint
+            .strip_suffix("-linklib")
+            .is_some_and(|owner| context.native_arch_lane_alias_endpoints.contains(owner))
+        {
+            // Keep the separately source-proved empty client lane paired
+            // with the reused module-object effect. Never select a nonempty
+            // client archive or infer a companion compiler this way.
+            return true;
+        }
         let tag = match &self.data {
             ArchEndpointEffectData::ArchModuleObjects { tag, .. }
             | ArchEndpointEffectData::EmptyLinklibAggregate { tag, .. }
+            | ArchEndpointEffectData::ArchClientLinklibSources { tag, .. }
             | ArchEndpointEffectData::SetArchIncludes { tag, .. } => tag,
         };
         let (Some(cpu), Some(platform)) = (&context.cpu, &context.platform) else {
@@ -305,19 +342,38 @@ fn collect_arch_endpoint_effects_at_positions(
                     &body,
                 ));
             }
-            ConditionalTruth::True => match parse_empty_linklib(
+            ConditionalTruth::True => match parse_arch_linklib(
                 &body,
                 position.expect("active source position"),
                 scope,
                 recipe_dir,
             ) {
                 Ok(Some((endpoint, dependencies, data))) => {
-                    if let ArchEndpointEffectData::EmptyLinklibAggregate {
-                        mainmmake,
-                        tag,
-                        module_sources,
-                        compiler,
-                    } = &data
+                    let linklib_evidence = match &data {
+                        ArchEndpointEffectData::EmptyLinklibAggregate {
+                            mainmmake,
+                            tag,
+                            module_sources,
+                            compiler,
+                        } => Some((mainmmake, tag, module_sources, Vec::new(), compiler)),
+                        ArchEndpointEffectData::ArchClientLinklibSources {
+                            mainmmake,
+                            tag,
+                            module_sources,
+                            linklib_sources,
+                            compiler,
+                            ..
+                        } => Some((
+                            mainmmake,
+                            tag,
+                            module_sources,
+                            linklib_sources.clone(),
+                            compiler,
+                        )),
+                        _ => None,
+                    };
+                    if let Some((mainmmake, tag, module_sources, linklib_sources, compiler)) =
+                        linklib_evidence
                     {
                         // Kernel sources get an object group only when the
                         // source contract declares they build in the target
@@ -332,6 +388,7 @@ fn collect_arch_endpoint_effects_at_positions(
                                     mainmmake: mainmmake.clone(),
                                     tag: tag.clone(),
                                     module_sources: module_sources.clone(),
+                                    linklib_sources,
                                     directory: recipe_dir.to_owned(),
                                 },
                             });
@@ -542,7 +599,7 @@ fn parse_arguments(body: &str, directive: &str) -> Result<BTreeMap<String, Argum
     Ok(fields)
 }
 
-fn parse_empty_linklib(
+fn parse_arch_linklib(
     body: &str,
     line: usize,
     scope: &VarScope,
@@ -586,14 +643,29 @@ fn parse_empty_linklib(
         }
     }
 
-    for key in ["linklibfiles", "linklibobjs"] {
-        if let Some(argument) = fields.get(key) {
-            if !argument.value.trim().is_empty() {
-                return Err(format!(
-                    "{key}= is not a literal empty list; nonempty/variable linklib lanes are not modeled"
-                ));
-            }
-        }
+    let linklib_objects = fields
+        .get("linklibobjs")
+        .map(|argument| expand_source_names(&argument.value, scope, line))
+        .transpose()?
+        .unwrap_or_default();
+    if !linklib_objects.is_empty() {
+        return Err(
+            "linklibobjs= is not a literal empty list; nonempty/variable object lanes are not modeled"
+                .into(),
+        );
+    }
+
+    let mut linklib_sources = fields
+        .get("linklibfiles")
+        .map(|argument| expand_source_names(&argument.value, scope, line))
+        .transpose()?
+        .unwrap_or_default();
+    deduplicate(&mut linklib_sources);
+    if linklib_sources
+        .iter()
+        .any(|source| source.trim().is_empty())
+    {
+        return Err("linklibfiles= contains an empty source name".into());
     }
 
     // maindir= is a required build_archspecific argument. Its value names the
@@ -613,16 +685,24 @@ fn parse_empty_linklib(
 
     let endpoint = format!("{mainmmake}-{tag}-linklib");
     let dependencies = vec![format!("{mainmmake}-{tag}-includes")];
-    Ok(Some((
-        endpoint,
-        dependencies,
+    let data = if linklib_sources.is_empty() {
         ArchEndpointEffectData::EmptyLinklibAggregate {
             mainmmake,
             tag,
             module_sources,
             compiler,
-        },
-    )))
+        }
+    } else {
+        ArchEndpointEffectData::ArchClientLinklibSources {
+            mainmmake,
+            tag,
+            module_sources,
+            linklib_sources,
+            directory: recipe_dir.to_owned(),
+            compiler,
+        }
+    };
+    Ok(Some((endpoint, dependencies, data)))
 }
 
 fn parse_arch_includes(
@@ -1142,8 +1222,28 @@ mod tests {
     }
 
     #[test]
-    fn nonempty_linklib_object_lanes_are_not_admitted() {
-        for argument in ["linklibfiles=obj", "linklibobjs=obj.o"] {
+    fn nonempty_linklibfiles_are_source_effects_but_linklibobjs_are_not_modeled() {
+        let result = scan(
+            "%build_archspecific mainmmake=m arch=pc maindir=rom/module files=module linklibfiles=arch_init\n",
+            "arch/all-pc/module/mmakefile.src",
+        );
+        assert!(result.rejected.is_empty(), "{:?}", result.rejected);
+        assert_eq!(result.effects.len(), 2);
+        let endpoint = result
+            .effects
+            .iter()
+            .find(|effect| effect.endpoint == "m-pc-linklib")
+            .unwrap();
+        assert!(matches!(
+            &endpoint.data,
+            ArchEndpointEffectData::ArchClientLinklibSources {
+                linklib_sources,
+                directory,
+                ..
+            } if linklib_sources == &["arch_init"] && directory == "arch/all-pc/module"
+        ));
+
+        for argument in ["linklibobjs=obj.o", "linklibobjs=$(UNKNOWN_OBJECTS)"] {
             let input =
                 format!("%build_archspecific mainmmake=m arch=pc files=module {argument}\n");
             let result = scan(&input, "arch/all-pc/module/mmakefile.src");
@@ -1153,16 +1253,23 @@ mod tests {
     }
 
     #[test]
-    fn variable_linklib_empty_is_not_literal_empty_proof() {
-        let input = "EMPTY :=\n%build_archspecific mainmmake=m arch=pc files=module linklibfiles=$(EMPTY)\n";
+    fn known_empty_linklib_variables_are_admitted() {
+        let input = "EMPTY :=\n%build_archspecific mainmmake=m maindir=rom/module arch=pc files=module linklibfiles=$(EMPTY)\n";
         let result = scan(input, "arch/all-pc/module/mmakefile.src");
-        assert!(result.effects.is_empty());
-        assert_eq!(result.rejected.len(), 1);
-        assert!(
-            result.rejected[0].reason.contains("literal empty"),
-            "{:?}",
-            result.rejected
-        );
+        assert!(result.rejected.is_empty(), "{:?}", result.rejected);
+        assert!(result.effects.iter().any(|effect| matches!(
+            effect.data,
+            ArchEndpointEffectData::EmptyLinklibAggregate { .. }
+        )));
+
+        let input =
+            "EMPTY :=\n%build_archspecific mainmmake=m maindir=rom/module arch=pc files=module linklibobjs=$(EMPTY)\n";
+        let result = scan(input, "arch/all-pc/module/mmakefile.src");
+        assert!(result.rejected.is_empty(), "{:?}", result.rejected);
+        assert!(result.effects.iter().any(|effect| matches!(
+            effect.data,
+            ArchEndpointEffectData::EmptyLinklibAggregate { .. }
+        )));
     }
 
     #[test]
@@ -1177,11 +1284,7 @@ mod tests {
             let result = scan(&input, "arch/all-pc/module/mmakefile.src");
             assert!(result.effects.is_empty(), "{argument}");
             assert_eq!(result.rejected.len(), 1, "{argument}");
-            assert!(
-                result.rejected[0].reason.contains("literal empty"),
-                "{argument}: {:?}",
-                result.rejected
-            );
+            assert!(!result.rejected[0].reason.is_empty(), "{argument}");
         }
     }
 

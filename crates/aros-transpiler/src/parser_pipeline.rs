@@ -549,13 +549,15 @@ pub(super) fn parse_mmakefile_impl(
         ));
     }
     let (directory_setups, directory_setup_rejections) =
-        crate::directory_setup::collect_directory_setups_with_context(
+        crate::directory_setup::collect_native_directory_setups(
+            &content,
             &joined,
             &rel_dir,
             &scope,
             dirs,
             root,
             copy_directory_line_states,
+            target,
         );
     for rejection in directory_setup_rejections {
         native_graph_errors.push(capability_diagnostic_with_owner(

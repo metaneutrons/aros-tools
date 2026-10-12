@@ -168,6 +168,40 @@ pub(super) fn emit_arch_endpoint_effects(out: &mut String, graph: &DependencyGra
                 )
                 .unwrap();
             }
+            ArchEndpointEffectData::ArchClientLinklibSources {
+                mainmmake,
+                linklib_sources,
+                directory,
+                ..
+            } => {
+                writeln!(out, "aros_bind_arch_linklib_source_endpoint(").unwrap();
+                writeln!(out, "    ENDPOINT {}", cmake_arg(&effect.endpoint)).unwrap();
+                writeln!(
+                    out,
+                    "    INCLUDE_OWNER {}",
+                    cmake_arg(&effect.dependencies[0])
+                )
+                .unwrap();
+                writeln!(out, "    DIRECTORY \"${{AROS_SOURCE_DIR}}/{directory}\"").unwrap();
+                writeln!(
+                    out,
+                    "    ARCHIVE_TARGETS {} {}",
+                    cmake_arg(&format!("{mainmmake}-linklib")),
+                    cmake_arg(&format!("{mainmmake}-linklib-rel"))
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    BASENAMES {}",
+                    linklib_sources
+                        .iter()
+                        .map(|name| cmake_arg(name))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+                .unwrap();
+                writeln!(out, ")").unwrap();
+            }
             ArchEndpointEffectData::SetArchIncludes {
                 tag,
                 modname,

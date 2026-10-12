@@ -513,6 +513,9 @@ pub(crate) fn join_continuations_with_origins(content: &str) -> (String, Vec<usi
 /// context retain the conservative, target-agnostic parser behaviour.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TargetContext {
+    /// Original object endpoints selected through opaque, source-verified
+    /// handwritten lane routes. This never implies a companion compiler ABI.
+    pub native_arch_lane_alias_endpoints: std::collections::BTreeSet<String>,
     /// Source-derived architecture flag files for native header compilation.
     /// The native owner projection independently seals and replays these;
     /// neither generated flag files nor environment values are admitted.

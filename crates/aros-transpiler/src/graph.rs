@@ -16,6 +16,8 @@ use aros_common::{ArosError, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
+#[path = "graph_arch_lane_aliases.rs"]
+mod arch_lane_aliases;
 #[path = "graph_literal_text_claims.rs"]
 mod literal_text_claims;
 #[path = "graph_plain_headers.rs"]

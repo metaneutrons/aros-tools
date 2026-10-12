@@ -70,6 +70,18 @@ impl Fixture {
         Vec<super::SdkObjectGroupDecl>,
         Vec<super::SdkObjectRejection>,
     ) {
+        self.collect_native_roles(physical_source, target, &[])
+    }
+
+    fn collect_native_roles(
+        &self,
+        physical_source: &str,
+        target: Option<&TargetContext>,
+        roles: &[aros_common::SdkCompanionRole],
+    ) -> (
+        Vec<super::SdkObjectGroupDecl>,
+        Vec<super::SdkObjectRejection>,
+    ) {
         fs::write(
             self.root.join(&self.relative).join("mmakefile.src"),
             physical_source,
@@ -85,7 +97,8 @@ impl Fixture {
             text: &text,
             physical_positions: None,
         };
-        let dirs = DirVars::load(&self.root);
+        let mut dirs = DirVars::load(&self.root);
+        dirs.bind_sdk_companion_roles(roles);
         collect_with_native_configuration(
             legacy,
             physical_source,
@@ -118,6 +131,69 @@ impl Fixture {
             &text,
         )
     }
+}
+
+#[test]
+fn explicit_companion_preserves_same_basename_in_distinct_abi_libraries() {
+    let fixture = Fixture::new();
+    fixture.source("foo", "c");
+    fixture.write_native_config(
+        "config/make.cfg.in",
+        concat!(
+            "AROS_DEVELOPER := ${AROS_BUILD_DIR}/SYS/Developer\n",
+            "AROS_LIB := $(AROS_DEVELOPER)/lib\n",
+            "AROS_LIB32 := $(AROS_DEVELOPER)/lib32\n",
+        ),
+    );
+    fixture.write_native_config(
+        "config/native.mk",
+        concat!(
+            "SDK_INPUTS = $(AROS_LIB)/foo.o $(AROS_LIB32)/foo.o\n",
+            "TARGET_ISA_32_CFLAGS = $(NATIVE_TARGET_32_CFLAGS)\n",
+            "TARGET_CFLAGS = -O2 -fno-common\n",
+        ),
+    );
+    let target = Fixture::target_with_binding("config/native.mk");
+    let source = concat!(
+        "include $(SRCDIR)/config/aros.cfg\n",
+        "startup-objects: $(SDK_INPUTS)\n",
+        "$(AROS_LIB)/%.o : $(GENDIR)/$(CURDIR)/%.o\n",
+        "\t@$(CP) $< $@\n",
+        "%rule_compile basename=% targetdir=$(GENDIR)/$(CURDIR)\n",
+        "$(AROS_LIB32)/%.o : $(GENDIR)/$(CURDIR)/32bit/%.o\n",
+        "\t@$(CP) $< $@\n",
+        "%rule_compile mmake=companion basename=% targetdir=$(GENDIR)/$(CURDIR)/32bit cflags=\"$(strip $(TARGET_ISA_32_CFLAGS) $(TARGET_CFLAGS))\"\n",
+    );
+    let role: aros_common::SdkCompanionRole = serde_json::from_value(serde_json::json!({
+        "selector_cpu": "i386", "target": {"target_triple": "i386-unknown-aros", "abi": {
+            "source_cpu": "i386", "pointer_width": 32, "elf_class": 1, "elf_machine": 3, "endian": "little"
+        }}, "compiler_options": ["--target=i386-unknown-aros"], "library_dir": "lib32",
+        "required_runtime_library": "clang_rt.builtins-i386"
+    })).unwrap();
+    let (groups, rejected) =
+        fixture.collect_native_roles(source, Some(&target), std::slice::from_ref(&role));
+    assert!(rejected.is_empty(), "{rejected:#?}");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].objects.len(), 2);
+    let companion = groups[0]
+        .objects
+        .iter()
+        .find(|object| object.companion_cpu.is_some())
+        .unwrap();
+    assert_eq!(companion.companion_cpu.as_deref(), Some("i386"));
+    assert!(companion.output.ends_with("/lib32/foo.o"));
+    assert!(companion.options.contains(&"-O2".into()));
+    let (_, rejected) = fixture.collect_native(source, Some(&target));
+    assert!(
+        !rejected.is_empty(),
+        "CPU32/output spelling must not infer a role"
+    );
+    fixture.write_native_config(
+        "config/native.mk",
+        "SDK_INPUTS = $(AROS_LIB32)/foo.o\nTARGET_ISA_32_CFLAGS = -m32\nTARGET_CFLAGS = -O2\n",
+    );
+    let (_, rejected) = fixture.collect_native_roles(source, Some(&target), &[role]);
+    assert!(!rejected.is_empty(), "unbound source ABI flags must fail");
 }
 
 fn physical_recipe(compile_macro: &str) -> String {
