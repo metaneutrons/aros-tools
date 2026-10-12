@@ -61,7 +61,9 @@ match the same index-bound package identity and archive bytes; generation
 records and compatibility receipts are host-bound and need not be identical.
 This coverage and authenticated transport are not implemented by this command.
 
-Frontend parser and selection counterprobes establish rejection behavior only.
-A complete positive frontend replay against actual retained generation/package
-evidence remains a qualification gate; it must not be inferred from help output
-or package verification alone.
+The frontend was exercised against retained GNU compiler, SDK, generation and
+portable compatibility artifacts. A canonical isolated version substitution
+was rejected even after its selection hashes were updated. This establishes
+the GNU frontend byte join, not CI origin or release qualification. LLVM
+frontend replay and the complete newly selected CI generation matrix remain
+required; neither follows from help output or package verification alone.
