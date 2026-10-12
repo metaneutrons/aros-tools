@@ -53,6 +53,30 @@ pub(super) fn run(args: &ReleasePlanArgs) -> miette::Result<()> {
             })
         })
         .collect::<Vec<_>>();
+    let sdks = inputs
+        .sdks()
+        .iter()
+        .map(|sdk| {
+            serde_json::json!({
+                "id": sdk.id(),
+                "identity": {
+                    "file": sdk.identity_reference().file(),
+                    "sha256": sdk.identity_reference().sha256(),
+                },
+                "source_preset": sdk.source_preset(),
+                "compiler_profiles": sdk
+                    .compiler_profiles()
+                    .iter()
+                    .map(|profile| {
+                        serde_json::json!({
+                            "group_id": profile.group_id(),
+                            "profile": profile.profile(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
     let lanes = inputs
         .expected_lanes()
         .iter()
@@ -74,6 +98,8 @@ pub(super) fn run(args: &ReleasePlanArgs) -> miette::Result<()> {
         "tools_commit": inputs.tools_commit(),
         "hosts": inputs.hosts(),
         "groups": groups,
+        "sdk_count": sdks.len(),
+        "sdks": sdks,
         "lane_count": lanes.len(),
         "lanes": lanes,
     });
