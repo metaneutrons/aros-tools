@@ -145,6 +145,13 @@ Explicit expressions also require stable variable origins: ambient `?=`
 assignments, later overrides and unproved GenMF or Make effects are refused.
 Recognizing the archive recipe does not prove its object producers.
 
+Literal generated text has a separate source-owned capability. A nonvirtual
+`#MM` owner must name one direct file under its recipe's `gen/<directory>` lane,
+with that `mmakefile.src` as its prerequisite. Only directory creation and
+ordered, bounded `$(ECHO)` text writes with a proven `echo` binding are supported.
+Native configuration supplies values, not executable owners. Source and payload hashes are rechecked
+at build time; arbitrary shell commands and conflicting producers are rejected.
+
 With a sealed MetaMake invocation policy, native selection preserves reachable
 GenMF virtual aliases and their exact source dependencies. Aliases are metadata
 routes, not executable producers. Existing real providers remain mandatory.

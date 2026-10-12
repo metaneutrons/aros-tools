@@ -16,6 +16,8 @@ use aros_common::{ArosError, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
+#[path = "graph_literal_text_claims.rs"]
+mod literal_text_claims;
 #[path = "graph_plain_headers.rs"]
 mod plain_headers;
 #[path = "graph_sdk_assets.rs"]
@@ -79,6 +81,8 @@ pub struct DependencyGraph {
     pub source_text_rules: Vec<crate::source_text_rules::SourceTextRuleDecl>,
     /// Local source-value products, not guessed constants or shell execution.
     pub source_value_rules: Vec<crate::source_value_rules::SourceValueRuleDecl>,
+    /// Source-owned literal text outputs, never arbitrary shell recipes.
+    pub source_literal_text_rules: Vec<crate::source_literal_text_rules::SourceLiteralTextRuleDecl>,
     pub sdk_file_copies: Vec<crate::sdk_file_copies::SdkFileCopyDecl>,
     pub sdk_object_groups: Vec<crate::sdk_objects::SdkObjectGroupDecl>,
     pub literal_object_groups: Vec<crate::literal_objects::LiteralObjectGroupDecl>,

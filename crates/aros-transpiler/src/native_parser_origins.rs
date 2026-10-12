@@ -113,6 +113,12 @@ pub fn endpoints(parsed: &ParsedMmakefile, context: &TargetContext) -> BTreeSet<
             .map(|decl| decl.owner.clone()),
     );
     endpoints.extend(parsed.sdk_file_copies.iter().map(|decl| decl.owner.clone()));
+    endpoints.extend(
+        parsed
+            .source_literal_text_rules
+            .iter()
+            .map(|decl| decl.owner.clone()),
+    );
     endpoints.extend(parsed.sdk_asset_rules.iter().map(|decl| decl.owner.clone()));
     endpoints.extend(
         parsed

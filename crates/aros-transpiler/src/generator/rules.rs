@@ -164,6 +164,21 @@ pub(super) fn emit_genmodule_and_text_rules(out: &mut String, graph: &Dependency
 
 /// Emits source text/value rules and SDK file copies.
 pub(super) fn emit_source_text_and_copy_rules(out: &mut String, graph: &DependencyGraph) {
+    for declaration in &graph.source_literal_text_rules {
+        let text = cmake_literal_arg(&declaration.text)
+            .replace("\\${AROS_SOURCE_DIR}", "${AROS_SOURCE_DIR}")
+            .replace("\\${AROS_BUILD_DIR}", "${AROS_BUILD_DIR}");
+        writeln!(out, "aros_write_source_literal_text(").unwrap();
+        for (key, value) in [
+            ("NAME", declaration.owner.as_str()),
+            ("OUTPUT", declaration.output.as_str()),
+            ("FILE", declaration.file.as_str()),
+            ("FILE_SHA256", declaration.file_sha256.as_str()),
+        ] {
+            writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+        }
+        writeln!(out, "    TEXT {text}\n)\n").unwrap();
+    }
     for declaration in &graph.source_text_rules {
         for product in &declaration.outputs {
             writeln!(out, "aros_transform_source_text(").unwrap();

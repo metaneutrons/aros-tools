@@ -723,6 +723,9 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         graph.sfd_header_rules.extend(parsed.sfd_header_rules);
         graph.source_text_rules.extend(parsed.source_text_rules);
         graph.source_value_rules.extend(parsed.source_value_rules);
+        graph
+            .source_literal_text_rules
+            .extend(parsed.source_literal_text_rules);
         graph.sdk_file_copies.extend(parsed.sdk_file_copies);
         graph.sdk_asset_rules.extend(parsed.sdk_asset_rules);
         graph.sdk_program_outputs.extend(parsed.sdk_program_outputs);

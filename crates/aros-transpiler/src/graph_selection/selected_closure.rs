@@ -6,6 +6,72 @@ use super::{
 };
 
 impl DependencyGraph {
+    fn validate_literal_text_owner(&self, name: &str) -> Result<()> {
+        let owners = self
+            .source_literal_text_rules
+            .iter()
+            .filter(|rule| rule.owner == name)
+            .count();
+        if owners > 1
+            || owners == 1
+                && (self.non_literal_text_producer(name)
+                    || self.sdk_asset_rules.iter().any(|rule| rule.owner == name)
+                    || self
+                        .sdk_program_outputs
+                        .iter()
+                        .any(|rule| rule.owner == name)
+                    || self
+                        .genmodule_writefiles_rules
+                        .iter()
+                        .any(|rule| rule.owner == name)
+                    || self
+                        .host_file_generators
+                        .iter()
+                        .any(|rule| rule.owner == name)
+                    || self
+                        .arch_endpoint_effects
+                        .iter()
+                        .any(|effect| effect.endpoint == name)
+                    || self
+                        .assembly_headers
+                        .iter()
+                        .any(|header| header.owner == name || header.aggregate_owner == name))
+        {
+            return Err(failure(format!(
+                "selected literal text rule {name} has conflicting concrete producers"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_literal_text_outputs(
+        &self,
+        selected: &BTreeSet<String>,
+        context: &TargetContext,
+    ) -> Result<()> {
+        self.validate_literal_text_claims(selected, context)
+            .map_err(failure)?;
+        let mut outputs = BTreeMap::<String, String>::new();
+        let products = self
+            .source_literal_text_rules
+            .iter()
+            .map(|rule| (&rule.owner, &rule.output))
+            .chain(
+                self.source_value_rules
+                    .iter()
+                    .map(|rule| (&rule.owner, &rule.output)),
+            );
+        for (owner, output) in products.filter(|(owner, _)| selected.contains(*owner)) {
+            let key = output.to_ascii_lowercase();
+            if let Some(previous) = outputs.insert(key, owner.clone()) {
+                return Err(failure(format!(
+                    "selected source text/value rules {previous} and {owner} both produce {output}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Compute a deterministic, fail-closed dependency closure before pruning.
     ///
     /// # Errors
@@ -58,6 +124,7 @@ impl DependencyGraph {
         while let Some(raw) = pending.pop() {
             let name = endpoint(&raw, context)?;
             self.validate_selected_assembly_owner(&name)?;
+            self.validate_literal_text_owner(&name)?;
             if let Some((owner, _)) = self.targets.iter().find(|(owner, target)| {
                 target.module_type == ModuleType::ModuleHeaders
                     && [
@@ -426,21 +493,8 @@ impl DependencyGraph {
                 pending.push(dependency.clone());
             }
         }
-        let mut source_value_outputs = BTreeMap::<String, String>::new();
+        self.validate_literal_text_outputs(&selected, context)?;
         self.validate_selected_assembly_outputs(&selected)?;
-        for declaration in self
-            .source_value_rules
-            .iter()
-            .filter(|declaration| selected.contains(&declaration.owner))
-        {
-            let key = declaration.output.to_ascii_lowercase();
-            if let Some(previous) = source_value_outputs.insert(key, declaration.owner.clone()) {
-                return Err(failure(format!(
-                    "selected source value rules {previous} and {} both produce {}",
-                    declaration.owner, declaration.output
-                )));
-            }
-        }
         let mut sfd_output_owners = BTreeMap::<String, String>::new();
         for declaration in self
             .sfd_header_rules
@@ -680,6 +734,8 @@ impl DependencyGraph {
         self.source_text_rules
             .retain(|declaration| is_selected(&declaration.owner));
         self.source_value_rules
+            .retain(|declaration| is_selected(&declaration.owner));
+        self.source_literal_text_rules
             .retain(|declaration| is_selected(&declaration.owner));
         self.sdk_file_copies
             .retain(|declaration| is_selected(&declaration.owner));

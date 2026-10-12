@@ -630,6 +630,33 @@ pub(super) fn parse_mmakefile_impl(
             dirs,
             copy_directory_line_states,
         );
+    let (mut source_literal_text_rules, source_literal_text_rejections) =
+        crate::source_literal_text_scope::collect(
+            &content,
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+            target,
+            architecture_scope_positions(root, &relative_path, &content, &local_make_scan, &joined)
+                .as_deref(),
+        );
+    for rule in &mut source_literal_text_rules {
+        source_sha256.as_str().clone_into(&mut rule.file_sha256);
+    }
+    for rejection in source_literal_text_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "literal source text rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
     for rejection in source_text_rejections {
         native_graph_errors.push(capability_diagnostic_with_owner(
             &relative_path,
@@ -1612,6 +1639,7 @@ pub(super) fn parse_mmakefile_impl(
         sfd_header_rules: sfd_header_scan.declarations,
         source_text_rules,
         source_value_rules,
+        source_literal_text_rules,
         sdk_file_copies,
         sdk_asset_rules,
         sdk_program_outputs,

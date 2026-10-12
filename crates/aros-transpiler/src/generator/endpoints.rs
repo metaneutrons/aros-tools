@@ -36,6 +36,12 @@ pub(super) fn collect_endpoint_names(graph: &DependencyGraph) -> HashSet<String>
                     .map(|rule| rule.owner.clone()),
             )
             .chain(graph.sdk_file_copies.iter().map(|rule| rule.owner.clone()))
+            .chain(
+                graph
+                    .source_literal_text_rules
+                    .iter()
+                    .map(|rule| rule.owner.clone()),
+            )
             .chain(graph.sdk_asset_rules.iter().map(|rule| rule.owner.clone()))
             .chain(
                 graph

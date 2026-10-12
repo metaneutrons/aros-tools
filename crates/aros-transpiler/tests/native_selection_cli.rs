@@ -19,6 +19,9 @@ mod sdk_consumer;
 #[path = "native_selection/optional_owner_selectors.rs"]
 mod optional_owner_selectors;
 
+#[path = "native_selection/literal_text.rs"]
+mod literal_text;
+
 fn bind_optional_meta_edge(fixture: &mut Fixture, recipe: &str) {
     bind_optional_meta_contract_edge(
         fixture,

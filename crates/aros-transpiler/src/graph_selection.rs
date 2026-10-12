@@ -739,6 +739,9 @@ impl DependencyGraph {
         for declaration in &self.source_value_rules {
             add(&mut edges, &declaration.owner, []);
         }
+        for declaration in &self.source_literal_text_rules {
+            add(&mut edges, &declaration.owner, []);
+        }
         for declaration in &self.sdk_file_copies {
             add(
                 &mut edges,
@@ -963,6 +966,14 @@ impl DependencyGraph {
     }
 
     pub(super) fn writefiles_has_other_producer(&self, name: &str) -> bool {
+        self.non_literal_text_producer(name)
+            || self
+                .source_literal_text_rules
+                .iter()
+                .any(|rule| rule.owner == name)
+    }
+
+    pub(super) fn non_literal_text_producer(&self, name: &str) -> bool {
         self.source_archives
             .iter()
             .any(|archive| archive.declaration.owner == name || archive.provider_target() == name)

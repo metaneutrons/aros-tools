@@ -268,6 +268,7 @@ mod tests {
             "sdk-text",
             "source-text",
             "source-value",
+            "source-literal-text",
             "sfd-header",
             "header-copy",
             "package",

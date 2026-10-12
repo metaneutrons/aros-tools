@@ -143,6 +143,12 @@ pub fn validate(
             .map(|rule| rule.owner.clone()),
     );
     local_producers.extend(parsed.sdk_file_copies.iter().map(|rule| rule.owner.clone()));
+    local_producers.extend(
+        parsed
+            .source_literal_text_rules
+            .iter()
+            .map(|rule| rule.owner.clone()),
+    );
     local_producers.extend(parsed.sdk_asset_rules.iter().map(|rule| rule.owner.clone()));
     local_producers.extend(
         parsed

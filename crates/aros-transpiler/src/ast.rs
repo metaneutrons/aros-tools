@@ -673,6 +673,8 @@ pub struct ParsedMmakefile {
     pub source_text_rules: Vec<crate::source_text_rules::SourceTextRuleDecl>,
     /// Local source values extracted by closed literal recipe semantics.
     pub source_value_rules: Vec<crate::source_value_rules::SourceValueRuleDecl>,
+    /// Finite text files generated from a sealed physical source recipe.
+    pub source_literal_text_rules: Vec<crate::source_literal_text_rules::SourceLiteralTextRuleDecl>,
     pub sdk_file_copies: Vec<crate::sdk_file_copies::SdkFileCopyDecl>,
     pub sdk_asset_rules: Vec<crate::sdk_asset_rules::SdkAssetRuleDecl>,
     pub sdk_program_outputs: Vec<crate::graph::SdkProgramOutput>,

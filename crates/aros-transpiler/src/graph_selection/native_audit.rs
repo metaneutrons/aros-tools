@@ -297,6 +297,12 @@ impl DependencyGraph {
             self.sfd_header_rules.iter().map(|rule| rule.owner.as_str())
         );
         family!(
+            "source-literal-text",
+            self.source_literal_text_rules
+                .iter()
+                .map(|rule| rule.owner.as_str())
+        );
+        family!(
             "header-copy",
             self.copy_includes.iter().map(|rule| rule.name.as_str())
         );
