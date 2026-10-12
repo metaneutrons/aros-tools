@@ -138,7 +138,8 @@ endif()
 if(LITERAL_CASE STREQUAL "compiler-symlink")
     file(CREATE_LINK "${_fixture_real_c_compiler}" "${CMAKE_BINARY_DIR}/compiler-alias" SYMBOLIC)
     set(CMAKE_C_COMPILER "${CMAKE_BINARY_DIR}/compiler-alias")
-elseif(LITERAL_CASE STREQUAL "runtime-compiler-symlink")
+elseif(LITERAL_CASE STREQUAL "runtime-compiler-symlink" OR
+       LITERAL_CASE STREQUAL "runtime-compiler-bytes")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/selected-compiler-dir")
     file(COPY_FILE "${_fixture_real_c_compiler}"
         "${CMAKE_BINARY_DIR}/selected-compiler-dir/selected-compiler")
@@ -184,9 +185,11 @@ elseif(LITERAL_CASE STREQUAL "source-file-symlink" OR
        LITERAL_CASE STREQUAL "output-parent-symlink" OR
        LITERAL_CASE STREQUAL "compiler-symlink" OR
        LITERAL_CASE STREQUAL "runtime-compiler-symlink" OR
+       LITERAL_CASE STREQUAL "runtime-compiler-bytes" OR
        LITERAL_CASE STREQUAL "compiler-launcher")
     _add_c_object()
-    if(LITERAL_CASE STREQUAL "runtime-compiler-symlink")
+    if(LITERAL_CASE STREQUAL "runtime-compiler-symlink" OR
+       LITERAL_CASE STREQUAL "runtime-compiler-bytes")
         _add_cpp_object()
         aros_literal_object_group(NAME literal-objects OBJECTS "${_output}" "${_cpp_output}")
     endif()

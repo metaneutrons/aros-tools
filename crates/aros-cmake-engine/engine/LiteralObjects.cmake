@@ -1,6 +1,7 @@
 include_guard(GLOBAL)
 include("${CMAKE_CURRENT_LIST_DIR}/LiteralCompilerRole.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SdkCompanionRole.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/LiteralCompilerPath.cmake")
 
 # Compile a source whose Make recipe is an audited, finite compiler argv. This
 # deliberately bypasses CMake target compile options: ARGUMENTS are sent to
@@ -98,8 +99,7 @@ function(aros_compile_literal_object)
         message(FATAL_ERROR "Literal object: compiler driver must be an absolute regular file")
     endif()
     cmake_path(ABSOLUTE_PATH driver NORMALIZE OUTPUT_VARIABLE driver)
-    _aros_literal_check_absolute_chain("${driver}" "compiler driver")
-    _aros_literal_assert_regular("${driver}" "compiler driver" TRUE)
+    _aros_literal_resolve_compiler(driver driver_sha256 "${driver}")
 
     cmake_path(ABSOLUTE_PATH AROS_SOURCE_DIR NORMALIZE OUTPUT_VARIABLE source_root)
     cmake_path(ABSOLUTE_PATH AROS_BUILD_DIR NORMALIZE OUTPUT_VARIABLE build_root)
@@ -407,6 +407,7 @@ function(aros_compile_literal_object)
             "${source_dependency_output}")
     endif()
     _aros_literal_append_set(command_contents COMPILER "${driver}")
+    _aros_literal_append_set(command_contents COMPILER_SHA256 "${driver_sha256}")
     _aros_literal_append_set(command_contents LANGUAGE "${L_LANGUAGE}")
     _aros_literal_append_set(command_contents OUTPUT_MODE "${L_OUTPUT_MODE}")
     # Use the same resolved header roots as ordinary target compilation. A

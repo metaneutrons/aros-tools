@@ -179,6 +179,17 @@ _aros_literal_runner_assert_root("${SOURCE_ROOT}" "source root")
 _aros_literal_runner_assert_root("${BUILD_ROOT}" "build root")
 _aros_literal_runner_check_absolute_chain("${COMPILER}" "compiler driver")
 _aros_literal_runner_assert_regular("${COMPILER}" "compiler driver" TRUE)
+if(NOT DEFINED COMPILER_SHA256 OR NOT COMPILER_SHA256 MATCHES "^[0-9a-f]+$")
+    message(FATAL_ERROR "Literal object runner requires a compiler digest")
+endif()
+string(LENGTH "${COMPILER_SHA256}" compiler_sha_length)
+if(NOT compiler_sha_length EQUAL 64)
+    message(FATAL_ERROR "Literal object runner requires a complete compiler digest")
+endif()
+file(SHA256 "${COMPILER}" actual_compiler_sha256)
+if(NOT actual_compiler_sha256 STREQUAL COMPILER_SHA256)
+    message(FATAL_ERROR "Literal object runner: compiler driver bytes changed")
+endif()
 
 if(NOT IS_ABSOLUTE "${SOURCE}" OR NOT IS_ABSOLUTE "${OUTPUT}" OR
    NOT IS_ABSOLUTE "${COMPILER}" OR NOT IS_ABSOLUTE "${SOURCE_DIRECTORY}" OR

@@ -387,6 +387,11 @@ file(READ "${_dependency_command_file}" _tracker_failure_command_contents)
 string(REPLACE "set(COMPILER [==[${_clang}]==])"
     "set(COMPILER [==[${_tracker_failure_wrapper}]==])"
     _tracker_failure_command_contents "${_tracker_failure_command_contents}")
+file(SHA256 "${_clang}" _original_compiler_sha256)
+file(SHA256 "${_tracker_failure_wrapper}" _wrapper_compiler_sha256)
+string(REPLACE "set(COMPILER_SHA256 [==[${_original_compiler_sha256}]==])"
+    "set(COMPILER_SHA256 [==[${_wrapper_compiler_sha256}]==])"
+    _tracker_failure_command_contents "${_tracker_failure_command_contents}")
 if(NOT _tracker_failure_command_contents MATCHES "${_tracker_failure_wrapper}")
     message(FATAL_ERROR "could not prepare the tracker compiler failure fixture")
 endif()
