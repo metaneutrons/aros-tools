@@ -499,20 +499,26 @@ fn cache_entry_paths(root: &Path) -> Vec<PathBuf> {
 fn fixture_cargo_script(prologue: &str, configuration_suffix: &str, populate: bool) -> String {
     let package_manifest = b"[package]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\n";
     let package_source = b"pub fn value() {}\n";
+    let package_executable = b"#!/bin/sh\nexit 0\n";
     let payload = if populate {
         format!(
             r#"\
-    /bin/mkdir -p "$vendor/fixture-dependency-1.0.0/src"
+    /bin/mkdir -p "$vendor/fixture-dependency-1.0.0/src/bin"
     printf '%s' '[package]
 name = "fixture-dependency"
 version = "1.0.0"
 ' > "$vendor/fixture-dependency-1.0.0/Cargo.toml"
     printf '%s' 'pub fn value() {{}}
 ' > "$vendor/fixture-dependency-1.0.0/src/lib.rs"
-    printf '%s' '{{"files":{{"Cargo.toml":"{}","src/lib.rs":"{}"}},"package":"{}"}}' > "$vendor/fixture-dependency-1.0.0/.cargo-checksum.json"
+    printf '%s' '#!/bin/sh
+exit 0
+' > "$vendor/fixture-dependency-1.0.0/src/bin/fixture-tool"
+    /bin/chmod 755 "$vendor/fixture-dependency-1.0.0/src/bin/fixture-tool"
+    printf '%s' '{{"files":{{"Cargo.toml":"{}","src/lib.rs":"{}","src/bin/fixture-tool":"{}"}},"package":"{}"}}' > "$vendor/fixture-dependency-1.0.0/.cargo-checksum.json"
 "#,
             sha256_bytes(package_manifest),
             sha256_bytes(package_source),
+            sha256_bytes(package_executable),
             PACKAGE_CHECKSUM,
         )
     } else {
@@ -571,6 +577,46 @@ fn cancellation_never_publishes_a_partial_vendor_generation() {
     assert!(error.to_string().contains("cancelled"), "{error}");
     assert!(!generation.exists(), "cancelled generation was published");
     assert!(verify_vendor_generation(&fixture.request()).is_err());
+}
+
+#[test]
+fn vendor_receipt_binds_executable_file_mode_and_recovers_after_mode_restore() {
+    let fixture = VendorGenerationFixture::new();
+    let request = fixture.request();
+
+    let fetched = fetch_vendor_generation(&request, false, &CancellationToken::default()).unwrap();
+    let generation = fixture.generation();
+    let executable = generation.join("cargo-vendor/fixture-dependency-1.0.0/src/bin/fixture-tool");
+    let executable_metadata = fs::symlink_metadata(&executable).unwrap();
+    assert!(executable_metadata.file_type().is_file());
+    assert_eq!(executable_metadata.permissions().mode() & 0o777, 0o755);
+
+    let receipt_path = generation.join("receipt.json");
+    let original_receipt = fs::read(&receipt_path).unwrap();
+    let original_receipt_sha256 = sha256_bytes(&original_receipt);
+    assert_eq!(
+        verify_vendor_generation(&request)
+            .unwrap()
+            .vendor_tree_sha256,
+        fetched.vendor_tree_sha256
+    );
+
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o644)).unwrap();
+    let error = verify_vendor_generation(&request)
+        .expect_err("a mode-only vendor change must disagree with the measured receipt");
+    assert_eq!(
+        error.diagnostics().diagnostics[0].message,
+        "Cargo vendor generation receipt does not match its validated content"
+    );
+    assert_eq!(fs::read(&receipt_path).unwrap(), original_receipt);
+
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    let restored = verify_vendor_generation(&request)
+        .expect("restoring the original executable mode should recover verification");
+    assert_eq!(restored.vendor_tree_sha256, fetched.vendor_tree_sha256);
+    let restored_receipt = fs::read(&receipt_path).unwrap();
+    assert_eq!(restored_receipt, original_receipt);
+    assert_eq!(sha256_bytes(&restored_receipt), original_receipt_sha256);
 }
 
 #[test]
