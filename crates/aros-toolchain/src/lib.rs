@@ -48,12 +48,15 @@ pub mod preflight;
 pub mod producer_environment;
 pub mod profiles;
 pub mod python_environment;
+#[cfg(unix)]
+mod qualification_complete_v2;
 pub mod qualification_evidence;
 pub mod qualification_evidence_v2;
 #[cfg(unix)]
 pub mod qualification_readback_v2;
 #[cfg(unix)]
 pub mod qualification_recording_v2;
+pub mod qualification_sdk_v2;
 pub mod recipe;
 #[cfg(unix)]
 pub mod recipe_builder;

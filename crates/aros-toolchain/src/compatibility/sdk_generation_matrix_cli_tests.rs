@@ -69,6 +69,14 @@ pub(super) fn probe_if_configured(
         "CLI should report the exact complete fixture matrix count"
     );
 
+    super::sdk_qualification_cli_tests::probe(
+        &binary,
+        request,
+        &metadata_root,
+        &selection,
+        &arguments,
+    );
+
     let generation_rows = selection["sdk_generations"]
         .as_array_mut()
         .expect("selection should contain generation rows");

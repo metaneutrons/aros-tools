@@ -92,7 +92,8 @@ impl IndexedSdkGenerationReadback {
 /// Rejects incomplete tuple coverage, substituted input/compiler/SDK selections,
 /// aliased roots and changed generation/package/compatibility bytes. Complete
 /// cryptographic owning-job authentication remains an external mandatory gate.
-/// Existing SDK qualification/admission rejection is not changed by this API.
+/// Qualification callers must additionally match exact claims and authenticate
+/// original owning jobs. This result alone grants no qualification admission.
 pub fn readback_sdk_generation_matrix(
     request: &SdkGenerationMatrixReadbackRequest<'_, '_>,
 ) -> Result<SdkGenerationMatrixReadback, ContractError> {

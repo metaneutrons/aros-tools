@@ -271,19 +271,13 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             .iter()
             .map(aros_toolchain::release_inputs::BoundSdk::id),
     )?;
-    // SDK authority paths remain guarded by the existing qualification API.
-    // Only the read-only inspector acquires the new complete SDK byte matrix.
-    let expected_sdk_generations = if matches!(operation, Operation::Inspect) {
-        inputs.expected_sdk_generation_lanes()
-    } else {
-        Vec::new()
-    };
-    if matches!(operation, Operation::Inspect) {
-        release_evidence_selection::require_sdk_generation_lanes(
-            &selection,
-            &expected_sdk_generations,
-        )?;
-    }
+    // Every authority path must reacquire the same complete SDK byte matrix.
+    // These byte joins still grant no original-job or signature authentication.
+    let expected_sdk_generations = inputs.expected_sdk_generation_lanes();
+    release_evidence_selection::require_sdk_generation_lanes(
+        &selection,
+        &expected_sdk_generations,
+    )?;
     if let Some(selected) = operation.recovery() {
         require_independent_document(args, &selection, &selected.recovery_request)?;
     }
@@ -454,6 +448,11 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             )
         })
         .collect();
+    let sdk_request =
+        (!expected_sdk_generations.is_empty()).then_some(SdkGenerationMatrixReadbackRequest {
+            complete: &complete_request,
+            generations: sdk_requests,
+        });
     let mut recorded = None;
     let mut recovery_decision = None;
     let mut recovered_packages = None;
@@ -478,10 +477,11 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             signer: selected.attestation_signer.clone(),
             now: selected.created_at,
         };
-        let (evidence, complete) =
+        let (evidence, complete, generations) =
             record_qualification_bytes_v2(&QualificationRecordingRequestV2 {
                 index_bytes: &index_bytes,
                 complete: &complete_request,
+                sdk: sdk_request.as_ref(),
                 source_run,
                 policy,
                 created_at: selected.created_at,
@@ -490,12 +490,14 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             .map_err(|error| native_error(&error))?
             .into_parts();
         recorded = Some(evidence);
+        sdk_generations = generations;
         complete
     } else if let Some((bytes, policy)) = &selected_qualification {
         let request = QualificationByteReadbackRequestV2 {
             evidence_bytes: bytes,
             index_bytes: &index_bytes,
             complete: &complete_request,
+            sdk: sdk_request.as_ref(),
             policy,
         };
         if let Some(recovery) = &selected_recovery {
@@ -526,18 +528,18 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
                     .map_err(|error| native_error(&error))?,
                 );
             }
-            joined.into_complete()
+            let (complete, generations) = joined.into_parts();
+            sdk_generations = generations;
+            complete
         } else {
-            readback_qualification_bytes_v2(&request)
+            let (complete, generations) = readback_qualification_bytes_v2(&request)
                 .map_err(|error| native_error(&error))?
-                .into_complete()
+                .into_parts();
+            sdk_generations = generations;
+            complete
         }
-    } else if !expected_sdk_generations.is_empty() {
-        let (complete, generations) =
-            readback_sdk_generation_matrix(&SdkGenerationMatrixReadbackRequest {
-                complete: &complete_request,
-                generations: sdk_requests,
-            })
+    } else if let Some(sdk_request) = &sdk_request {
+        let (complete, generations) = readback_sdk_generation_matrix(sdk_request)
             .map_err(|error| native_error(&error))?
             .into_parts();
         sdk_generations = generations;

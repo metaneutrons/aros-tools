@@ -274,11 +274,15 @@ checks every selected A/B package and compatibility report/log/ELF closure,
 without executing builds or modifying files. Its result is not release admission.
 SDK-bearing inputs also require the exact `sdk_generations` host/profile matrix,
 with generation records, four-link evidence and cross-host SDK package equality.
+Recording, qualification verification and recovery require that same matrix;
+none accepts a compiler-only selection for an SDK-bearing release.
 
 `producer verify-qualification` adds `--qualification-evidence`,
 `--qualification-sha256`, `--policy` and `--policy-sha256` to those arguments.
 It requires complete V2 coverage and joins report claims to raw measured files,
-including the final checksum, subject-list and provenance bytes. A positive
+including the final checksum, subject-list and provenance bytes.
+SDK generation claims bind each product/compiler-profile/host tuple and its
+generation, compatibility and link-receipt digests to reacquired bytes. A positive
 run attempt is required but not authenticated here. The command is read-only;
 signatures, job/artifact origin and publication authorization remain separate.
 

@@ -590,6 +590,7 @@ fn recording_request<'a, 'e>(
     QualificationRecordingRequestV2 {
         index_bytes,
         complete,
+        sdk: None,
         source_run,
         policy,
         created_at,
@@ -635,6 +636,7 @@ fn assert_qualification_rejected_without_mutation(
         evidence_bytes,
         index_bytes,
         complete: request,
+        sdk: None,
         policy,
     }) else {
         panic!("qualification byte read-back accepted an invalid claim");
@@ -659,6 +661,7 @@ fn assert_lower_layer_rejected_without_mutation(
         evidence_bytes,
         index_bytes,
         complete: request,
+        sdk: None,
         policy,
     }) else {
         panic!("qualification byte read-back accepted changed compatibility bytes");
@@ -699,6 +702,7 @@ fn qualification_readback_joins_three_host_claims_to_complete_bytes_without_writ
         evidence_bytes: &evidence_bytes,
         index_bytes: &index_bytes,
         complete: &complete,
+        sdk: None,
         policy: &policy,
     })
     .unwrap();
@@ -958,6 +962,7 @@ fn qualification_recording_derives_claims_and_roundtrips_through_byte_readback_w
         evidence_bytes: &evidence_bytes,
         index_bytes: &index_bytes,
         complete: &complete,
+        sdk: None,
         policy: &policy,
     })
     .unwrap();
@@ -1540,6 +1545,7 @@ fn recovery_qualification_request<'a, 'e>(
         evidence_bytes,
         index_bytes: &fixture.index_bytes,
         complete,
+        sdk: None,
         policy,
     }
 }

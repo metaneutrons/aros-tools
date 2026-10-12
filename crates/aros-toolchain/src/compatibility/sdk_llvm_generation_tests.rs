@@ -889,6 +889,7 @@ fn complete_llvm_sdk_generation_matrix_joins_three_synthetic_host_rows() {
         let matrix = readback_sdk_generation_matrix(&matrix_request)
             .expect("complete three-host LLVM generation rows should join the indexed release");
         assert_eq!(matrix.generations().len(), 3);
+        crate::compatibility::sdk_qualification_tests::probe(&matrix_request);
         for indexed in matrix.generations() {
             assert_eq!(
                 indexed.lane().sdk_id(),
