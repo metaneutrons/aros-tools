@@ -43,6 +43,9 @@ endif()
 # real client archives below.
 function(_aros_generate_module_support out)
     cmake_parse_arguments(GM "ABI" "TARGET;MMAKE_ID;DIRECTORY;MODTYPE;MODSUFFIX" "" ${ARGN})
+    if(PROBE_MODE MATCHES "^(datatype|gadget|mcc)$" AND NOT GM_MODTYPE STREQUAL PROBE_MODE)
+        message(FATAL_ERROR "wrapper lost its source module type")
+    endif()
     set(_gen "${CMAKE_CURRENT_BINARY_DIR}/gen/${GM_MMAKE_ID}")
     set(_include "${_gen}/include")
     file(MAKE_DIRECTORY "${_gen}" "${_include}")
@@ -340,8 +343,16 @@ fn library_backed_module_wrappers_build_clients_without_runtime_sources() {
             .output()
             .unwrap();
         assert!(build.status.success(), "{mode}: {}", output_text(&build));
-        assert!(fixture.build.join("lib/libfixture.a").is_file());
-        assert!(fixture.build.join("lib/libfixture_rel.a").is_file());
+        assert!(fixture
+            .build
+            .join(format!("lib/libfixture.{mode}.a"))
+            .is_file());
+        assert!(fixture
+            .build
+            .join(format!("lib/libfixture_rel.{mode}.a"))
+            .is_file());
+        assert!(!fixture.build.join("lib/libfixture.a").exists());
+        assert!(!fixture.build.join("lib/libfixture_rel.a").exists());
     }
 }
 

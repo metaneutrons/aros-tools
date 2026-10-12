@@ -5102,6 +5102,15 @@ function(aros_add_library)
     # otherwise in the SDK library directory. The transpiler resolves that
     # rule and passes a private directory as OUTPUT_DIR.
     set(_client_archive_dir "${AROS_DEVELOPER_LIB_DIR}")
+    if(ARG_DEFAULT_MODTYPE)
+        set(_library_modtype "${ARG_DEFAULT_MODTYPE}")
+    else()
+        set(_library_modtype "library")
+    endif()
+    set(_client_libsuffix "")
+    if(NOT _library_modtype STREQUAL "library")
+        set(_client_libsuffix ".${_library_modtype}")
+    endif()
     if(ARG_OUTPUT_DIR)
         _aros_validate_linklib_output_directory(
             _client_archive_dir "${ARG_MMAKE_ID}" "${ARG_OUTPUT_DIR}")
@@ -5139,14 +5148,16 @@ function(aros_add_library)
             TARGET "${ARG_TARGET}"
             MMAKE_ID "${ARG_MMAKE_ID}"
             DIRECTORY "${ARG_DIRECTORY}"
-            MODTYPE library
+            MODTYPE "${_library_modtype}"
             MODSUFFIX "${ARG_MODSUFFIX}")
 
         _aros_genmodule_alias("${ARG_MMAKE_ID}-includes"
             "${_gm_INCLUDES_TARGET}")
+        _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
+            "${_client_archive_dir}" "${ARG_TARGET}${_client_libsuffix}")
         add_library("${ARG_MMAKE_ID}-linklib" STATIC ${_gm_STUB_SOURCES})
         set_target_properties("${ARG_MMAKE_ID}-linklib" PROPERTIES
-            OUTPUT_NAME "${ARG_TARGET}"
+            OUTPUT_NAME "${ARG_TARGET}${_client_libsuffix}"
             ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
             LINKER_LANGUAGE C)
         target_include_directories("${ARG_MMAKE_ID}-linklib" BEFORE PRIVATE
@@ -5261,7 +5272,7 @@ function(aros_add_library)
             TARGET "${ARG_TARGET}"
             MMAKE_ID "${ARG_MMAKE_ID}"
             DIRECTORY "${ARG_DIRECTORY}"
-            MODTYPE library
+            MODTYPE "${_library_modtype}"
             MODSUFFIX "${ARG_MODSUFFIX}")
         set(_has_genmodule TRUE)
 
@@ -5367,19 +5378,21 @@ function(aros_add_library)
         endif()
         string(TOLOWER "${_client_archive_name}" _client_archive_name_lower)
         string(TOLOWER "${ARG_TARGET}" _client_module_name_lower)
+        set(_normal_archive_name "${_client_archive_name}${_client_libsuffix}")
+        set(_relative_archive_name "${_client_archive_name}_rel${_client_libsuffix}")
         set(_client_link_targets "")
         if(NOT ARG_NO_NORMAL_CLIENT_ARCHIVE)
         set(_normal_client_sources
             ${_linklib_sources}
             ${_gm_NORMAL_LINKLIB_SOURCES})
         _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
-            "${_client_archive_dir}" "${_client_archive_name}")
+            "${_client_archive_dir}" "${_normal_archive_name}")
         add_library("${ARG_MMAKE_ID}-linklib" STATIC
             ${_normal_client_sources})
         set_property(TARGET "${ARG_MMAKE_ID}-linklib" PROPERTY
             AROS_GENERIC_LINKLIB_SOURCES "${_generic_linklib_sources}")
         set_target_properties("${ARG_MMAKE_ID}-linklib" PROPERTIES
-            OUTPUT_NAME "${_client_archive_name}"
+            OUTPUT_NAME "${_normal_archive_name}"
             ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
             LINKER_LANGUAGE C)
         list(APPEND _client_link_targets "${ARG_MMAKE_ID}-linklib")
@@ -5398,13 +5411,13 @@ function(aros_add_library)
                 ${_linklib_sources}
                 ${_gm_REL_LINKLIB_SOURCES})
             _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib-rel"
-                "${_client_archive_dir}" "${_client_archive_name}_rel")
+                "${_client_archive_dir}" "${_relative_archive_name}")
             add_library("${ARG_MMAKE_ID}-linklib-rel" STATIC
                 ${_rel_client_sources})
             set_property(TARGET "${ARG_MMAKE_ID}-linklib-rel" PROPERTY
                 AROS_GENERIC_LINKLIB_SOURCES "${_generic_linklib_sources}")
             set_target_properties("${ARG_MMAKE_ID}-linklib-rel" PROPERTIES
-                OUTPUT_NAME "${_client_archive_name}_rel"
+                OUTPUT_NAME "${_relative_archive_name}"
                 ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
                 LINKER_LANGUAGE C)
             list(APPEND _client_link_targets
@@ -5478,9 +5491,9 @@ function(aros_add_library)
         if(NOT _client_archive_name_lower STREQUAL _client_module_name_lower)
             if(TARGET "${ARG_MMAKE_ID}-linklib")
             _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
-                "${_client_archive_dir}" "${ARG_TARGET}")
+                "${_client_archive_dir}" "${ARG_TARGET}${_client_libsuffix}")
             set(_linklib_alias
-                "${_client_archive_dir}/lib${ARG_TARGET}.a")
+                "${_client_archive_dir}/lib${ARG_TARGET}${_client_libsuffix}.a")
             add_custom_command(TARGET "${ARG_MMAKE_ID}-linklib" POST_BUILD
                 BYPRODUCTS "${_linklib_alias}"
                 COMMAND "${CMAKE_COMMAND}" -E copy_if_different
@@ -5491,9 +5504,9 @@ function(aros_add_library)
             endif()
             if(TARGET "${ARG_MMAKE_ID}-linklib-rel")
                 _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib-rel"
-                    "${_client_archive_dir}" "${ARG_TARGET}_rel")
+                    "${_client_archive_dir}" "${ARG_TARGET}_rel${_client_libsuffix}")
                 set(_rel_linklib_alias
-                    "${_client_archive_dir}/lib${ARG_TARGET}_rel.a")
+                    "${_client_archive_dir}/lib${ARG_TARGET}_rel${_client_libsuffix}.a")
                 add_custom_command(
                     TARGET "${ARG_MMAKE_ID}-linklib-rel" POST_BUILD
                     BYPRODUCTS "${_rel_linklib_alias}"

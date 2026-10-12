@@ -242,14 +242,14 @@ pub(super) fn collect_modules(inputs: DeclarationInputs<'_>, outputs: Declaratio
                 continue;
             }
         };
-        // make.tmpl:2569 puts a library's client archives in its libdir=, or
-        // privately below $(GENDIR)/$(CURDIR) when it has a suffix, and only
-        // otherwise in the SDK library directory. A suffixed plug-in such as
-        // MUI.MiamiPanel is not part of the SDK, and its archive must not take
-        // the place of a real SDK library whose name differs only in case.
+        // make.tmpl:2562-2580 puts plain libraries in the SDK library
+        // directory, but non-library module types in $(GENDIR)/$(CURDIR) by
+        // default. A library with modsuffix= is private there as well; an
+        // explicit libdir= overrides either default.
         let linklib_output_dir = if supports_genmodule_client_archives(&module_type) {
             let requested = match macro_arg(rest, "libdir") {
                 Some(raw) if !raw.is_empty() => Some(raw),
+                _ if module_type != ModuleType::Library => Some("$(GENDIR)/$(CURDIR)".to_owned()),
                 _ => mod_suffix
                     .as_ref()
                     .map(|_| "$(GENDIR)/$(CURDIR)".to_owned()),
