@@ -9,6 +9,7 @@ use crate::dirs::DirVars;
 use crate::make_expr::{evaluate_make_expr, MakeExprContext};
 use crate::make_vars::VarScope;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -142,26 +143,7 @@ pub(super) fn verified_macro(template: &str, name: &str, expected_sha256: &str) 
 }
 
 fn read_native_make_template(root: &Path) -> Option<String> {
-    let path = root.join("config/make.tmpl");
-    // This is diagnostic attribution, but the hash-bound source read must
-    // still be bounded and must not accept a symlink in place of the template.
-    let metadata = fs::symlink_metadata(&path).ok()?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_TEMPLATE_BYTES as u64 {
-        return None;
-    }
-    let file = fs::File::open(path).ok()?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    if file
-        .take(MAX_TEMPLATE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .is_err()
-        || bytes.len() > MAX_TEMPLATE_BYTES
-    {
-        return None;
-    }
-    String::from_utf8(bytes)
-        .ok()
-        .map(|template| template.replace("\r\n", "\n"))
+    read_included_native_template(root, Path::new("make.tmpl"))
 }
 
 fn read_native_template_set(root: &Path) -> Option<(String, NativeMacroDefinitions)> {
@@ -214,32 +196,24 @@ fn read_included_native_template(root: &Path, relative_path: &Path) -> Option<St
     if !safe_template_relative_path(relative_path) {
         return None;
     }
-    let config = root.join("config");
-    let mut path = config.clone();
-    for component in relative_path.components() {
-        let std::path::Component::Normal(part) = component else {
-            return None;
-        };
-        path.push(part);
-        let metadata = fs::symlink_metadata(&path).ok()?;
-        let is_final = path == config.join(relative_path);
-        if is_final {
-            if !metadata.file_type().is_file() || metadata.len() > MAX_TEMPLATE_BYTES as u64 {
-                return None;
-            }
-        } else if !metadata.file_type().is_dir() {
-            return None;
-        }
+    // Resolve only the caller's source root (which may have a platform alias
+    // such as /var). Open every component below it without following links.
+    // A prior path metadata check followed by File::open is not sufficient:
+    // either the leaf or its config directory could be replaced in between.
+    let root = root.canonicalize().ok()?;
+    let file =
+        aros_common::open_regular_file_nofollow(&root.join("config").join(relative_path)).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_TEMPLATE_BYTES as u64 {
+        return None;
     }
-
-    let metadata = fs::symlink_metadata(&path).ok()?;
-    let file = fs::File::open(path).ok()?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     if file
         .take(MAX_TEMPLATE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .is_err()
         || bytes.len() > MAX_TEMPLATE_BYTES
+        || bytes.len() as u64 != metadata.len()
     {
         return None;
     }
@@ -762,4 +736,93 @@ pub(super) fn test_macro_contract(index: usize) -> Option<MacroContract> {
     let header = test_macro_header(index)?;
     let lines = header.lines().collect::<Vec<_>>();
     parse_macro_header(&lines, 0, macro_contract_identity(index)?.0)
+}
+
+#[cfg(test)]
+mod source_read_tests {
+    use super::*;
+
+    fn fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("config")).unwrap();
+        fs::write(
+            root.path().join("config/make.tmpl"),
+            "%include helper.tmpl\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("config/helper.tmpl"),
+            "%define helper name=/A\r\nvalue := %(name)\r\n%end\r\n",
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn reads_a_bounded_regular_template_closure() {
+        let root = fixture();
+        let (template, definitions) = read_native_template_set(root.path()).unwrap();
+        assert_eq!(template, "%include helper.tmpl\n");
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions["helper"].len(), 1);
+        assert_eq!(definitions["helper"][0].body_lines, ["value := %(name)"]);
+    }
+
+    #[test]
+    fn refuses_noncanonical_oversized_and_invalid_text_inputs() {
+        let root = fixture();
+        for relative in [
+            "../helper.tmpl",
+            "nested/../helper.tmpl",
+            "/helper.tmpl",
+            "helper.mk",
+        ] {
+            assert!(read_included_native_template(root.path(), Path::new(relative)).is_none());
+        }
+        fs::write(root.path().join("config/helper.tmpl"), [0xff]).unwrap();
+        assert!(read_native_template_set(root.path()).is_none());
+        fs::write(
+            root.path().join("config/helper.tmpl"),
+            vec![b' '; MAX_TEMPLATE_BYTES + 1],
+        )
+        .unwrap();
+        assert!(read_native_template_set(root.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_template_leaf_parent_and_config_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = fixture();
+        let config = root.path().join("config");
+        fs::rename(config.join("helper.tmpl"), root.path().join("helper.tmpl")).unwrap();
+        symlink("../helper.tmpl", config.join("helper.tmpl")).unwrap();
+        assert!(read_native_template_set(root.path()).is_none());
+        fs::remove_file(config.join("helper.tmpl")).unwrap();
+        fs::create_dir(root.path().join("templates")).unwrap();
+        fs::write(root.path().join("templates/helper.tmpl"), "").unwrap();
+        symlink("../templates", config.join("nested")).unwrap();
+        assert!(
+            read_included_native_template(root.path(), Path::new("nested/helper.tmpl")).is_none()
+        );
+        fs::rename(config.join("make.tmpl"), root.path().join("make.tmpl")).unwrap();
+        symlink("../make.tmpl", config.join("make.tmpl")).unwrap();
+        assert!(read_native_make_template(root.path()).is_none());
+        fs::rename(&config, root.path().join("real-config")).unwrap();
+        symlink("real-config", &config).unwrap();
+        assert!(read_native_make_template(root.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_fifo_instead_of_blocking_on_open() {
+        let root = fixture();
+        let path = root.path().join("config/fifo.tmpl");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(read_included_native_template(root.path(), Path::new("fifo.tmpl")).is_none());
+    }
 }
