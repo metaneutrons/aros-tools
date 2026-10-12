@@ -209,6 +209,12 @@ pub fn validate(
     );
     local_producers.extend(
         parsed
+            .script_output_aggregates
+            .iter()
+            .map(|rule| rule.owner.clone()),
+    );
+    local_producers.extend(
+        parsed
             .flexcat_sources
             .iter()
             .map(|declaration| declaration.owner.clone()),

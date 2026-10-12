@@ -233,8 +233,19 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         .unwrap();
     }
     redundant_abi_include_edges.extend(cycle_edges);
+    // These exact edges have their own source-proved aggregate binding below.
+    // Do not emit a second, conditional meta-target fallback for the same edge.
+    redundant_abi_include_edges.extend(graph.script_output_aggregates.iter().flat_map(
+        |aggregate| {
+            aggregate
+                .generators
+                .iter()
+                .map(|generator| (aggregate.owner.clone(), generator.clone()))
+        },
+    ));
 
     meta::emit_meta_declarations(&mut out, &all_targets, &meta_rules);
+    meta::emit_script_output_aggregates(&mut out, graph);
     meta::emit_assembly_header_rules(&mut out, graph);
     meta::emit_arch_endpoint_effects(&mut out, graph);
     meta::emit_meta_dependencies(

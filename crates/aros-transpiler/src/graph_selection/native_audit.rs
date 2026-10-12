@@ -418,6 +418,13 @@ impl DependencyGraph {
             self.script_outputs.iter().map(|rule| rule.owner.as_str())
         );
         family!(
+            "script-output-aggregate",
+            self.script_output_aggregates
+                .iter()
+                .filter(|rule| !rule.generators.is_empty())
+                .map(|rule| rule.owner.as_str())
+        );
+        family!(
             "define-header",
             self.define_headers.iter().map(|rule| rule.owner.as_str())
         );

@@ -166,6 +166,14 @@ ordered, bounded `$(ECHO)` text writes with a proven `echo` binding are supporte
 Native configuration supplies values, not executable owners. Source and payload hashes are rechecked
 at build time; arbitrary shell commands and conflicting producers are rejected.
 
+Source-local Python output aggregates require an explicit effective `.PHONY`
+declaration and a dependency-only `#MM` rule. Every prerequisite must bind to
+one exact script output in the same recipe. Bare `#MM` alone is insufficient:
+GNU Make can otherwise apply an implicit recipe. Unknown conditions, opaque
+commands, custom recipe prefixes and incomplete generator bindings are rejected.
+Generator target identities include the full output path, so equal basenames
+in different directories remain separate producers.
+
 With a sealed MetaMake invocation policy, native selection preserves reachable
 GenMF virtual aliases and their exact source dependencies. Aliases are metadata
 routes, not executable producers. Existing real providers remain mandatory.

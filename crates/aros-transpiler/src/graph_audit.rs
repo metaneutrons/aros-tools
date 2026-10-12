@@ -284,6 +284,7 @@ mod tests {
             "ahi-build",
             "python-output",
             "script-output",
+            "script-output-aggregate",
             "define-header",
             "header-transform",
             "flexcat-source",

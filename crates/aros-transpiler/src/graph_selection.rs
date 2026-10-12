@@ -847,6 +847,13 @@ impl DependencyGraph {
                 declaration.dependency_targets.clone(),
             );
         }
+        for aggregate in self
+            .script_output_aggregates
+            .iter()
+            .filter(|aggregate| !aggregate.generators.is_empty())
+        {
+            add(&mut edges, &aggregate.owner, aggregate.generators.clone());
+        }
         for declaration in &self.define_headers {
             consumer_edges(&mut edges, &declaration.owner, &declaration.consumers);
             add(
@@ -1006,6 +1013,10 @@ impl DependencyGraph {
                 .any(|rule| rule.owner == name)
             || self.python_outputs.iter().any(|rule| rule.owner == name)
             || self.script_outputs.iter().any(|rule| rule.owner == name)
+            || self
+                .script_output_aggregates
+                .iter()
+                .any(|rule| rule.owner == name && !rule.generators.is_empty())
             || self.flexcat_sources.iter().any(|rule| rule.owner == name)
             || self.flexcat_headers.iter().any(|rule| rule.owner == name)
             || self.ilbm_sources.iter().any(|rule| rule.owner == name)

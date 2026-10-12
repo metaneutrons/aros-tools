@@ -48,6 +48,7 @@ pub mod native_owner_projection;
 pub mod native_parser_origins;
 pub mod packages;
 pub mod parser;
+pub mod script_output_aggregates;
 pub mod sdk_asset_rules;
 pub mod sdk_file_copies;
 pub mod sdk_objects;

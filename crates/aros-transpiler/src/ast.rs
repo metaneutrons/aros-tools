@@ -780,6 +780,7 @@ pub struct ParsedMmakefile {
     /// for reporting.
     pub generated_file_rules: Vec<String>,
     pub script_outputs: Vec<crate::copy_includes::ScriptOutputDecl>,
+    pub script_output_aggregates: Vec<crate::script_output_aggregates::ScriptOutputAggregate>,
     pub skipped_script_outputs: Vec<String>,
     /// Build declarations whose kind the target model does not express yet.
     pub skipped_programs: Vec<String>,

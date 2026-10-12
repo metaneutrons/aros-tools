@@ -50,6 +50,42 @@ pub(super) fn emit_meta_declarations(
     writeln!(out).unwrap();
 }
 
+/// Binds proved dependency-only providers after their targets exist.
+pub(super) fn emit_script_output_aggregates(out: &mut String, graph: &DependencyGraph) {
+    for aggregate in &graph.script_output_aggregates {
+        if aggregate.generators.is_empty() {
+            writeln!(
+                out,
+                "message(FATAL_ERROR {})",
+                cmake_arg(&format!(
+                    "{}: script aggregate has no concrete generator",
+                    aggregate.owner
+                ))
+            )
+            .unwrap();
+            continue;
+        }
+        writeln!(
+            out,
+            "# Source script aggregate from {}:{}",
+            aggregate.file, aggregate.line
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "add_dependencies({} {})",
+            cmake_arg(&aggregate.owner),
+            aggregate
+                .generators
+                .iter()
+                .map(|owner| cmake_arg(owner))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .unwrap();
+    }
+}
+
 /// Emits assembly header rules.
 pub(super) fn emit_assembly_header_rules(out: &mut String, graph: &DependencyGraph) {
     for header in &graph.assembly_headers {

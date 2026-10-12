@@ -119,6 +119,7 @@ pub struct DependencyGraph {
     /// consumes its output. The script may be in-tree or materialised by a
     /// `%fetch`. Empty until `resolve_script_outputs` runs.
     pub script_outputs: Vec<ResolvedScriptOutput>,
+    pub script_output_aggregates: Vec<crate::script_output_aggregates::ScriptOutputAggregate>,
     /// The same declarations before they are bound to a consumer.
     pending_script_outputs: Vec<crate::copy_includes::ScriptOutputDecl>,
     /// `%make_hidd_stubs` declarations, in declaration order. They are the

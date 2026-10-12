@@ -825,6 +825,9 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         skipped_hidd_stubs.extend(parsed.skipped_hidd_stubs);
         graph.add_bison_outputs(parsed.bison_outputs);
         graph.add_script_outputs(parsed.script_outputs);
+        graph
+            .script_output_aggregates
+            .extend(parsed.script_output_aggregates);
         skipped_script_outputs.extend(parsed.skipped_script_outputs);
         skipped_host_generated_headers.extend(parsed.skipped_host_generated_headers);
         graph.add_binary_objects(parsed.binary_objects);
@@ -923,6 +926,24 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // Before uselibs, because a generated source has to be registered before
     // the target that names it is emitted.
     skipped_script_outputs.extend(graph.resolve_script_outputs());
+    for aggregate in graph
+        .script_output_aggregates
+        .iter()
+        .filter(|rule| rule.generators.is_empty())
+    {
+        capability_errors.push(
+            Diagnostic::error(
+                DiagnosticCode::CapabilityDrift,
+                DiagnosticStage::CapabilityValidation,
+                "source script aggregate has no complete concrete generator binding",
+            )
+            .with_location(SourceLocation::new(&aggregate.file).at(aggregate.line, None))
+            .with_context(aros_common::DiagnosticContext {
+                target: Some(aggregate.owner.clone()),
+                ..Default::default()
+            }),
+        );
+    }
     // Preserve the original invocation inputs across consumer-bound script
     // naming. Compare exact declared script/output identities, not guessed
     // recipe directories or generated target-name prefixes.

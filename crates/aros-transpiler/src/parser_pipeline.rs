@@ -1562,6 +1562,15 @@ pub(super) fn parse_mmakefile_impl(
     // This pass appends only handwritten #MM/#MM- declarations. Keep their
     // edge origin even when their dependencies duplicate generated aliases.
     let explicit_meta_rules = meta_rules[implicit_meta_rule_count..].to_vec();
+    let script_output_aggregates = crate::script_output_aggregates::collect(
+        &content,
+        &relative_path,
+        root,
+        dirs,
+        target,
+        &make_meta_providers,
+        &copy_scan.script_outputs,
+    );
     let sfd_header_scan = crate::sfd_header_rules::collect_sfd_header_rules_with_context(
         &joined,
         root,
@@ -1753,6 +1762,7 @@ pub(super) fn parse_mmakefile_impl(
         define_headers,
         generated_file_rules: copy_scan.generated_files,
         script_outputs: copy_scan.script_outputs,
+        script_output_aggregates,
         skipped_script_outputs: copy_scan.skipped_script_outputs,
         flags: flag_set,
         arch_sources,

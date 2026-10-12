@@ -754,6 +754,8 @@ impl DependencyGraph {
         });
         self.script_outputs
             .retain(|declaration| is_selected(&declaration.owner));
+        self.script_output_aggregates
+            .retain(|aggregate| is_selected(&aggregate.owner));
         self.define_headers
             .retain(|declaration| is_selected(&declaration.owner));
         self.header_transforms
