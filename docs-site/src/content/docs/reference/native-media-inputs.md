@@ -286,6 +286,20 @@ use that same root. Unsafe or unresolved paths, incompatible layouts and native
 Make overrides of the SDK root variables fail validation. Nonconsumer builds
 retain the internal `SDK/include` layout.
 
+LLVM SDK contracts may declare an explicit companion compiler role for a
+separate Developer library, such as x86-64's i386 `lib32`. `cpu32` alone does
+not authorize it. The source descriptor must bind the triple, ELF ABI,
+compiler options and required runtime. Companion objects use that context,
+not the primary target's inherited flags; staging checks their ELF identity
+and unchanged bytes on incremental builds too.
+
+Architecture client-linklib sources remain separate from runtime module
+sources. They replace matching generic client sources in both normal and
+relative archives. A source-owned linklib leaf builds its architecture
+objects, not the whole archive. Compile-multi neighbors require verified
+template effects, disjoint outputs and a physical owner; AVX flags are retained.
+These graph capabilities do not prove a complete SDK build or release.
+
 The engine passes the build directory to `aros-genmodule --output-root`, keeping
 the Developer includes, generated sources and symbol audit in one publication
 transaction. Every output must remain strictly below that root; symlinked
