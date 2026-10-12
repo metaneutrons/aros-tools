@@ -68,6 +68,10 @@ function(_aros_generate_module_support out)
     set(${out}_STUB_SOURCES "${_gen}/genmodule_source_free_stub.c" PARENT_SCOPE)
     set(${out}_LINKLIB_DEFINES "" PARENT_SCOPE)
     set(${out}_RUNTIME_DEFINES "" PARENT_SCOPE)
+    if(PROBE_MODE STREQUAL "empty-client")
+        set(${out}_NORMAL_LINKLIB_SOURCES "" PARENT_SCOPE)
+        set(${out}_REL_LINKLIB_SOURCES "" PARENT_SCOPE)
+    endif()
 endfunction()
 
 function(aros_resolve_source_lanes out directory)
@@ -137,6 +141,10 @@ else()
         SOURCES missing-runtime-source.c
         LIBS missing-runtime-library)
 endif()
+if(PROBE_MODE STREQUAL "empty-client")
+    list(REMOVE_ITEM _client_arguments LINKLIB_SOURCES generic_client.c)
+    list(APPEND _client_arguments LINKLIB_NAME explicit-alias)
+endif()
 if(PROBE_MODE STREQUAL "no-validation")
     # No sealed source-selection result is supplied by the metadata double.
 elseif(PROBE_MODE STREQUAL "both-archives-disabled")
@@ -148,7 +156,7 @@ else()
     aros_add_library(${_client_arguments})
 endif()
 
-if(PROBE_MODE MATCHES "^(valid|datatype|gadget|mcc)$")
+if(PROBE_MODE MATCHES "^(valid|datatype|gadget|mcc|empty-client)$")
     foreach(_target client-only-linklib client-only-linklib-rel
             client-only-includes client-only-genmodfiles
             includes-fixture includes-fixture_rel
@@ -323,6 +331,22 @@ fn clients_only_builds_source_and_genmodule_archives_without_runtime_resolution(
             "{members}"
         );
     }
+}
+
+#[test]
+fn empty_client_lists_keep_phony_endpoints_without_fabricating_archives() {
+    let fixture = Fixture::new();
+    let configure = fixture.configure("empty-client");
+    assert!(configure.status.success(), "{}", output_text(&configure));
+    assert!(fixture.build.join("passed").is_file());
+    let build = Command::new("cmake")
+        .arg("--build")
+        .arg(&fixture.build)
+        .args(["--target", "client-only-linklib", "client-only-linklib-rel"])
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{}", output_text(&build));
+    assert!(!fixture.build.join("lib").exists());
 }
 
 #[test]

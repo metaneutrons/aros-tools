@@ -5380,11 +5380,22 @@ function(aros_add_library)
         string(TOLOWER "${ARG_TARGET}" _client_module_name_lower)
         set(_normal_archive_name "${_client_archive_name}${_client_libsuffix}")
         set(_relative_archive_name "${_client_archive_name}_rel${_client_libsuffix}")
+        set(_normal_client_has_archive FALSE)
+        set(_relative_client_has_archive FALSE)
         set(_client_link_targets "")
         if(NOT ARG_NO_NORMAL_CLIENT_ARCHIVE)
         set(_normal_client_sources
             ${_linklib_sources}
             ${_gm_NORMAL_LINKLIB_SOURCES})
+        if(NOT _normal_client_sources AND NOT _linklib_object_sources)
+            # make.tmpl:2586 leaves LINKLIB empty when the source-owned
+            # client lists are empty. Its phony endpoint still orders ABI
+            # generation; it does not manufacture an empty SDK archive.
+            add_custom_target("${ARG_MMAKE_ID}-linklib")
+            add_dependencies("${ARG_MMAKE_ID}-linklib"
+                "${ARG_MMAKE_ID}-includes" "${_gm_GENMODFILES_TARGET}")
+        else()
+        set(_normal_client_has_archive TRUE)
         _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
             "${_client_archive_dir}" "${_normal_archive_name}")
         add_library("${ARG_MMAKE_ID}-linklib" STATIC
@@ -5396,6 +5407,7 @@ function(aros_add_library)
             ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
             LINKER_LANGUAGE C)
         list(APPEND _client_link_targets "${ARG_MMAKE_ID}-linklib")
+        endif()
         endif()
 
         set(_client_namespace_includes "")
@@ -5410,6 +5422,12 @@ function(aros_add_library)
             set(_rel_client_sources
                 ${_linklib_sources}
                 ${_gm_REL_LINKLIB_SOURCES})
+            if(NOT _rel_client_sources AND NOT _linklib_object_sources)
+                add_custom_target("${ARG_MMAKE_ID}-linklib-rel")
+                add_dependencies("${ARG_MMAKE_ID}-linklib-rel"
+                    "${ARG_MMAKE_ID}-includes" "${_gm_GENMODFILES_TARGET}")
+            else()
+            set(_relative_client_has_archive TRUE)
             _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib-rel"
                 "${_client_archive_dir}" "${_relative_archive_name}")
             add_library("${ARG_MMAKE_ID}-linklib-rel" STATIC
@@ -5422,6 +5440,7 @@ function(aros_add_library)
                 LINKER_LANGUAGE C)
             list(APPEND _client_link_targets
                 "${ARG_MMAKE_ID}-linklib-rel")
+            endif()
         endif()
 
         foreach(_client_target IN LISTS _client_link_targets)
@@ -5489,7 +5508,7 @@ function(aros_add_library)
         # Both required source spellings share one compilation owner per
         # variant. Never suppress the module spelling to conceal a collision.
         if(NOT _client_archive_name_lower STREQUAL _client_module_name_lower)
-            if(TARGET "${ARG_MMAKE_ID}-linklib")
+            if(_normal_client_has_archive)
             _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
                 "${_client_archive_dir}" "${ARG_TARGET}${_client_libsuffix}")
             set(_linklib_alias
@@ -5502,7 +5521,7 @@ function(aros_add_library)
                 COMMENT "Publishing ${ARG_TARGET} client link library"
                 VERBATIM)
             endif()
-            if(TARGET "${ARG_MMAKE_ID}-linklib-rel")
+            if(_relative_client_has_archive)
                 _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib-rel"
                     "${_client_archive_dir}" "${ARG_TARGET}_rel${_client_libsuffix}")
                 set(_rel_linklib_alias
