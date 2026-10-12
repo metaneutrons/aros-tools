@@ -133,6 +133,39 @@ fn assert_rejected(source: &str, expected_reason: &str) {
 }
 
 #[test]
+fn refuses_oversized_scopes_before_repeated_macro_context_work() {
+    let dirs = Fixture::new().dirs();
+    assert!(
+        super::flags(&"-DVALUE=".repeat(8193), &dirs, Path::new("arch/example"))
+            .unwrap_err()
+            .contains("flag vector exceeds its byte bound")
+    );
+    assert_rejected(
+        &format!("{}{}", "#".repeat(super::MAX_BYTES), valid_source()),
+        "source snapshot exceeds its byte bound",
+    );
+    assert_rejected(
+        &format!(
+            "{}{}",
+            format!("{CALL}\n").repeat(super::MAX_INVOCATIONS),
+            valid_source()
+        ),
+        "invocation set exceeds its work bound",
+    );
+    let large = CALL.replace(
+        "unit other",
+        &std::iter::repeat_n("unit", super::MAX_OBJECTS)
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let source = valid_source().replace(
+        CALL,
+        &format!("{large}\n{}", CALL.replace("unit_ns", "other_ns")),
+    );
+    assert_rejected(&source, "object set exceeds its shared work bound");
+}
+
+#[test]
 fn rejects_a_source_hidden_by_the_verified_vpath_search_order() {
     let fixture = Fixture::new();
     for source in ["z/foo.c", "a/bar.c", "a/foo.c"] {
@@ -198,6 +231,55 @@ fn refuses_adjacent_macro_effects_instead_of_borrowing_the_visible_flags() {
             .any(|rejection| rejection.reason.contains("unproven adjacent GenMF macro")),
         "{rejected:#?}"
     );
+}
+
+#[test]
+fn refuses_raw_inline_genmf_calls_in_prefix_comments_recipes_and_false_branches() {
+    for prefix in [
+        "prefix %rule_compile_multi mmake=shadow basenames=unit targetdir=shadow\n",
+        "TEXT := literal # %rule_compile_multi mmake=shadow basenames=unit targetdir=shadow\n",
+        "unrelated:\n\t%rule_compile_multi mmake=shadow basenames=unit targetdir=shadow\n",
+        "ifeq (no,yes)\nprefix %rule_compile_multi mmake=shadow basenames=unit targetdir=shadow\nendif\n",
+    ] {
+        assert_rejected(&format!("{prefix}{}", valid_source()), "unproven inline GenMF macro");
+    }
+    let source = format!(
+        "# %rule_compile_multi is a real column-zero GenMF comment\n{}",
+        valid_source()
+    );
+    let (groups, rejected) = Fixture::new().collect(&source);
+    assert!(rejected.is_empty(), "{rejected:#?}");
+    assert_eq!(groups.len(), 1);
+}
+
+#[test]
+fn orders_source_root_aliases_like_expanded_make_paths_not_cmake_symbols() {
+    let fixture = Fixture::new();
+    for source in [
+        "z/foo.c",
+        "arch/example/.hidden/bar.c",
+        "arch/example/.hidden/foo.c",
+    ] {
+        let path = fixture.root.join(source);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "int source_alias_lookup_fixture;\n").unwrap();
+    }
+    let source = valid_source()
+        .replace("unit other", "$(SRCDIR)/z/foo .hidden/bar")
+        .replace("objects/unit.", "objects/foo.")
+        .replace("objects/other.", "objects/bar.");
+    let (groups, rejected) = fixture.collect(&source);
+    assert!(groups.is_empty());
+    assert!(
+        rejected.iter().any(|rejection| rejection
+            .reason
+            .contains("vpath selects arch/example/.hidden/foo.c instead of declared z/foo.c")),
+        "{rejected:#?}"
+    );
+    fs::remove_file(fixture.root.join("arch/example/.hidden/foo.c")).unwrap();
+    let (groups, rejected) = fixture.collect(&source);
+    assert!(rejected.is_empty(), "{rejected:#?}");
+    assert_eq!(groups[0].objects[0].source, "${AROS_SOURCE_DIR}/z/foo.c");
 }
 
 #[test]

@@ -199,6 +199,12 @@ impl CompileMultiTemplateContract {
     pub(crate) fn include_arguments(&self, raw: &str) -> Result<BTreeMap<String, String>, String> {
         closed_contract_arguments(raw, &self.include_deps)
     }
+
+    /// GenMF scans raw source lines before Make comments/control are read.
+    /// Unknown inline forms are refused rather than treated as inert text.
+    pub(crate) fn has_inline_reference(line: &str) -> bool {
+        has_inline_genmf_template_reference(line, None)
+    }
 }
 
 fn closed_contract_arguments(

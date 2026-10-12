@@ -26,6 +26,7 @@ const BUILD: &str = "${AROS_BUILD_DIR}";
 const GENERATED: &str = "${AROS_BUILD_DIR}/gen";
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_OBJECTS: usize = 4096;
+const MAX_INVOCATIONS: usize = 128;
 
 /// Admit only source-written invocations and owners; inserted configuration
 /// may supply values but may not manufacture a physical producer declaration.
@@ -36,12 +37,34 @@ pub fn collect(
     dirs: &DirVars,
     target: Option<&TargetContext>,
 ) -> (Vec<LiteralObjectGroupDecl>, Vec<LiteralObjectRejection>) {
+    let refuse_snapshot = |reason: &str| {
+        (
+            Vec::new(),
+            vec![LiteralObjectRejection {
+                owner: "<unknown>".into(),
+                file: recipe.to_string_lossy().into_owned(),
+                line: 1,
+                reason: reason.into(),
+            }],
+        )
+    };
+    if content.len() > MAX_BYTES {
+        return refuse_snapshot("compile-multi source snapshot exceeds its byte bound");
+    }
     let invocations = macro_invocations(&join_continuations(content));
     if !invocations
         .iter()
         .any(|call| call.name == "rule_compile_multi")
     {
         return (Vec::new(), Vec::new());
+    }
+    if invocations
+        .iter()
+        .filter(|call| call.name == "rule_compile_multi")
+        .count()
+        > MAX_INVOCATIONS
+    {
+        return refuse_snapshot("compile-multi invocation set exceeds its work bound");
     }
     let configuration = crate::local_make_includes::inline_native_make_configuration_for_selection(
         content,
@@ -60,6 +83,8 @@ pub fn collect(
     let contract = CompileMultiTemplateContract::read(root);
     let mut groups = Vec::new();
     let mut rejections = Vec::new();
+    let mut object_work = 0usize;
+    let mut object_work_exhausted = false;
     for call in invocations
         .iter()
         .filter(|call| call.name == "rule_compile_multi")
@@ -175,6 +200,13 @@ pub fn collect(
             let basenames: Vec<_> = values["basenames"].split_whitespace().collect();
             if basenames.is_empty() || basenames.len() > MAX_OBJECTS {
                 return Err("compile-multi basenames must be finite and nonempty".into());
+            }
+            object_work = object_work
+                .checked_add(basenames.len())
+                .ok_or("compile-multi object work accounting overflow")?;
+            if object_work > MAX_OBJECTS {
+                object_work_exhausted = true;
+                return Err("compile-multi object set exceeds its shared work bound".into());
             }
             let mut objects = Vec::new();
             let mut unique = BTreeSet::new();
@@ -324,6 +356,10 @@ pub fn collect(
         .map(|rejection| rejection.owner.as_str())
         .collect();
     groups.retain(|group| !refused.contains(group.owner.as_str()));
+    if object_work_exhausted {
+        // An incomplete global scope cannot admit an earlier partial group.
+        groups.clear();
+    }
     let mut claims = BTreeMap::<String, usize>::new();
     let mut conflicts = BTreeSet::new();
     for (index, group) in groups.iter().enumerate() {
@@ -442,6 +478,9 @@ fn include_path(value: &str, directory: &Path) -> Result<String, String> {
 }
 
 fn flags(raw: &str, dirs: &DirVars, directory: &Path) -> Result<Vec<String>, String> {
+    if raw.len() > 64 * 1024 {
+        return Err("compile-multi flag vector exceeds its byte bound".into());
+    }
     let words: Vec<_> = raw.split_whitespace().map(str::to_owned).collect();
     if words.len() > 512 {
         return Err("compile-multi flag vector exceeds its word bound".into());
@@ -520,16 +559,25 @@ fn check_scope(
 ) -> Result<(), String> {
     let mut bindings = BTreeMap::<&str, usize>::new();
     for (index, raw) in lines.iter().enumerate() {
-        if states.get(index) == Some(&ConditionalTruth::False) || raw.starts_with('\t') {
-            continue;
+        // GenMF expands raw lines before Make interprets recipes/comments.
+        // An inline or recipe-position call can introduce global rules even
+        // when the prefix would otherwise look like inert Make text.
+        let calls = macro_invocations(raw);
+        if CompileMultiTemplateContract::has_inline_reference(raw)
+            || raw.starts_with('\t') && !calls.is_empty()
+        {
+            return Err("compile-multi scope contains an unproven inline GenMF macro".into());
         }
-        let text = strip_make_comment(raw).trim();
-        if macro_invocations(text)
+        if calls
             .iter()
             .any(|call| !matches!(call.name.as_str(), "rule_compile_multi" | "include_deps"))
         {
             return Err("compile-multi scope contains an unproven adjacent GenMF macro".into());
         }
+        if states.get(index) == Some(&ConditionalTruth::False) || raw.starts_with('\t') {
+            continue;
+        }
+        let text = strip_make_comment(raw).trim();
         if text.contains(".RECIPEPREFIX")
             || text.contains(".SECONDEXPANSION")
             || text.contains(".EXPORT_ALL_VARIABLES")
@@ -675,6 +723,13 @@ fn source_search_directories(
     contract: &CompileMultiTemplateContract,
 ) -> Result<Vec<String>, String> {
     let mut search = Vec::new();
+    let physical_root = root.canonicalize().map_err(|error| error.to_string())?;
+    let physical_root = physical_root
+        .to_str()
+        .ok_or("compile-multi source root is not UTF-8")?;
+    if physical_root.chars().any(char::is_whitespace) || physical_root.contains('\\') {
+        return Err("compile-multi source root is outside the closed Make path-word model".into());
+    }
     for call in calls
         .iter()
         .filter(|call| call.name == "rule_compile_multi")
@@ -733,9 +788,14 @@ fn source_search_directories(
                 .ok_or("source basename has no parent")?
                 .to_string_lossy()
                 .into_owned();
-            let make_parent = basename
+            let mut make_parent = basename
                 .rsplit_once('/')
                 .map_or_else(|| "./".to_owned(), |(parent, _)| format!("{parent}/"));
+            if let Some(tail) = make_parent.strip_prefix(SOURCE) {
+                // GNU Make sorts expanded physical directory words, not the
+                // deferred CMake alias. '.' versus '/' ordering matters.
+                make_parent = format!("{physical_root}{tail}");
+            }
             sorted.insert(make_parent, parent);
         }
         search.extend(sorted.into_values());
