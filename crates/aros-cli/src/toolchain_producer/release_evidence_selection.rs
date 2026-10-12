@@ -25,6 +25,10 @@ pub(super) struct Selection {
     /// against the independently selected release inputs before acquisition.
     #[serde(default)]
     pub sdk_packages: BTreeMap<String, SdkPackageSelection>,
+    /// Independently selected SDK generation evidence, not generation or
+    /// origin proof. Omission preserves compiler-only selections.
+    #[serde(default)]
+    pub sdk_generations: Vec<SdkGenerationSelection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +37,18 @@ pub(super) struct SdkPackageSelection {
     pub tree_sha256: Sha256Digest,
     pub archive_sha256: Sha256Digest,
     pub archive_size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SdkGenerationSelection {
+    pub sdk_id: String,
+    pub group_id: String,
+    pub target_profile: String,
+    pub host: String,
+    pub package_dir: PathBuf,
+    pub record: SelectedFile,
+    pub compatibility: Compatibility,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -132,7 +148,118 @@ pub(super) fn parse(bytes: &[u8]) -> miette::Result<Selection> {
         }
     }
 
+    let mut sdk_generation_lanes = std::collections::BTreeSet::new();
+    for generation in &selection.sdk_generations {
+        validate_sdk_generation_selector(&generation.sdk_id, "SDK ID", safe_sdk_id)?;
+        validate_sdk_generation_selector(&generation.group_id, "compiler group ID", safe_group_id)?;
+        validate_sdk_generation_selector(
+            &generation.target_profile,
+            "target profile ID",
+            safe_source_preset,
+        )?;
+        validate_sdk_generation_selector(&generation.host, "host ID", safe_source_preset)?;
+        if !sdk_generation_lanes.insert((
+            generation.sdk_id.as_str(),
+            generation.group_id.as_str(),
+            generation.target_profile.as_str(),
+            generation.host.as_str(),
+        )) {
+            return Err(miette::miette!(
+                "SDK generation selection contains a duplicate lane"
+            ));
+        }
+        validate_selected_path(&generation.package_dir)?;
+        validate_selected_path(&generation.record.path)?;
+        validate_selected_path(&generation.compatibility.directory)?;
+        validate_selected_path(&generation.compatibility.inputs.path)?;
+    }
+
     Ok(selection)
+}
+
+fn validate_sdk_generation_selector(
+    value: &str,
+    description: &str,
+    grammar: fn(&str) -> bool,
+) -> miette::Result<()> {
+    if !grammar(value) || PortableOutputName::new(value).is_err() {
+        return Err(miette::miette!("SDK generation {description} is unsafe"));
+    }
+    Ok(())
+}
+
+fn safe_sdk_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_.+".contains(&byte)
+        })
+}
+
+fn safe_group_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value
+            .bytes()
+            .next_back()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
+fn safe_source_preset(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte))
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .next_back()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+}
+
+/// Require exact SDK generation lane coverage from independently bound
+/// release inputs. The order of selected metadata is not significant.
+pub(super) fn require_sdk_generation_lanes(
+    selection: &Selection,
+    expected: &[aros_toolchain::sdk_generation_lanes::ExpectedSdkGenerationLane],
+) -> miette::Result<()> {
+    let actual = selection
+        .sdk_generations
+        .iter()
+        .map(|generation| {
+            (
+                generation.sdk_id.as_str(),
+                generation.group_id.as_str(),
+                generation.target_profile.as_str(),
+                generation.host.as_str(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let required = expected
+        .iter()
+        .map(|lane| (lane.sdk_id(), lane.group_id(), lane.profile(), lane.host()))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    if actual.len() != selection.sdk_generations.len()
+        || required.len() != expected.len()
+        || actual != required
+    {
+        return Err(miette::miette!(
+            "SDK generation selection must exactly cover the independently selected release lanes"
+        ));
+    }
+    Ok(())
 }
 
 /// Selection metadata cannot choose which SDK products belong to a release.
@@ -154,7 +281,12 @@ pub(super) fn require_sdk_package_ids<'a>(
 }
 
 fn validate_selected_path(path: &Path) -> miette::Result<()> {
+    let mut normalized = PathBuf::new();
+    for part in path.components() {
+        normalized.push(part.as_os_str());
+    }
     if !path.is_absolute()
+        || normalized.as_os_str() != path.as_os_str()
         || path
             .components()
             .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
@@ -236,9 +368,15 @@ impl<'de> Deserialize<'de> for UniqueJson {
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use aros_common::sha256_bytes;
     use serde_json::{json, Value};
 
-    use super::{parse, require_sdk_package_ids, MAX_SELECTION_BYTES, SELECTION_SCHEMA};
+    use super::{
+        parse, require_sdk_generation_lanes, require_sdk_package_ids, MAX_SELECTION_BYTES,
+        SELECTION_SCHEMA,
+    };
 
     fn valid_selection() -> Value {
         let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -272,6 +410,149 @@ mod tests {
         })
     }
 
+    fn valid_sdk_generation() -> Value {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        json!({
+            "sdk_id":"core-sdk",
+            "group_id":"gnu-rv32",
+            "target_profile":"rv32-aros",
+            "host":"linux-x86_64",
+            "package_dir":"/tmp/release-evidence/sdk-package-core-sdk",
+            "record":{"path":"/tmp/release-evidence/sdk-generation-record.json","sha256":digest},
+            "compatibility":{
+                "directory":"/tmp/release-evidence/sdk-compatibility",
+                "inputs":{"path":"/tmp/release-evidence/sdk-compatibility-inputs.json","sha256":digest},
+                "manifest_sha256":digest,
+                "native_sdk_required":true
+            }
+        })
+    }
+
+    fn sdk_generation_input_fixture() -> aros_toolchain::release_inputs::ReleaseInputs {
+        const PRODUCER_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const TOOLS_COMMIT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let source_lock = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-source-lock-v3",
+            "family":"gnu",
+            "version":"16.2.0",
+            "sources":[
+                {
+                    "component":"gcc","version":"16.2.0","purpose":"toolchain-component",
+                    "filename":"gcc.tar.xz","url":"https://example.invalid/gcc.tar.xz",
+                    "sha256":"1".repeat(64),"size":1
+                },
+                {
+                    "component":"binutils","version":"2.47","purpose":"toolchain-component",
+                    "filename":"binutils.tar.xz","url":"https://example.invalid/binutils.tar.xz",
+                    "sha256":"2".repeat(64),"size":1
+                }
+            ],
+            "host_python_packages":[{
+                "name":"mako","version":"1.3.10","filename":"mako.tar.gz",
+                "url":"https://example.invalid/mako.tar.gz","sha256":"3".repeat(64),
+                "size":1,"source_root":"mako","python_path":"."
+            }]
+        }))
+        .unwrap();
+        let profile = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-profiles-v2",
+            "family":"gnu",
+            "upstream_commit":"1111111111111111111111111111111111111111",
+            "profiles":[{
+                "name":"rv32-aros","configure_target":"riscv-aros",
+                "upstream_output_target":"riscv-aros","target_triple":"riscv-aros",
+                "cpu":"riscv","platform":"fixture","float_abi":"ilp32f",
+                "capabilities":["c","libgcc","standalone-collector"],
+                "target":{
+                    "schema":"aros-riscv-target-v1","isa":"rv32imafc","abi":"ilp32f",
+                    "code_model":"medany","architecture":"rv32i2p1_m2p0_a2p1_f2p2_c2p0",
+                    "unaligned_access":false,"atomic_abi":0,"x3_reg_usage":0
+                }
+            }]
+        }))
+        .unwrap();
+        let mut recipe = json!({
+            "schema":"aros-toolchain-recipe-v2",
+            "source_commit":"1111111111111111111111111111111111111111",
+            "source_tree":"7".repeat(40),
+            "producer_commit":PRODUCER_COMMIT,
+            "producer_tree":"e".repeat(40),
+            "tools_commit":TOOLS_COMMIT,
+            "tools_tree":"f".repeat(40),
+            "source_date_epoch":0,
+            "source_lock_sha256":sha256_bytes(&source_lock),
+            "profiles_sha256":sha256_bytes(&profile),
+            "patches":[]
+        });
+        recipe["recipe_sha256"] = json!(sha256_bytes(
+            &aros_toolchain::canonical::bytes(&recipe).unwrap()
+        ));
+        let recipe = serde_json::to_vec(&recipe).unwrap();
+        let identity = serde_json::to_vec(&json!({
+            "sdk_id":"core-sdk",
+            "version":"1.2.3",
+            "target":{
+                "target_triple":"i686-unknown-aros",
+                "abi":{"target_triple":"i686-unknown-aros","data_model":"ilp32"}
+            },
+            "source":{
+                "commit":"0000000000000000000000000000000000000003",
+                "git_tree":"000000000000000000000000000000000000000d",
+                "content_sha256":"0000000000000000000000000000000000000000000000000000000000000017",
+                "contract_sha256":"0000000000000000000000000000000000000000000000000000000000000021"
+            },
+            "source_date_epoch":1234
+        }))
+        .unwrap();
+        let reference =
+            |file: &str, bytes: &[u8]| json!({"file":file,"sha256":sha256_bytes(bytes)});
+        let documents = BTreeMap::from([
+            ("gnu-rv32-recipe.json".to_owned(), recipe.clone()),
+            ("gnu-rv32-source-lock.json".to_owned(), source_lock.clone()),
+            ("gnu-rv32-profiles.json".to_owned(), profile.clone()),
+            ("core-sdk-identity.json".to_owned(), identity.clone()),
+        ]);
+        let collection = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-release-inputs-v2",
+            "producer_commit":PRODUCER_COMMIT,
+            "tools_commit":TOOLS_COMMIT,
+            "hosts":aros_toolchain::release_inputs::ACTIVE_HOSTS,
+            "groups":[{
+                "id":"gnu-rv32",
+                "recipe":reference("gnu-rv32-recipe.json", &recipe),
+                "source_lock":reference("gnu-rv32-source-lock.json", &source_lock),
+                "profiles":reference("gnu-rv32-profiles.json", &profile)
+            }],
+            "sdks":[{
+                "id":"core-sdk",
+                "identity":reference("core-sdk-identity.json", &identity),
+                "source_preset":"aros-sdk-source-v1",
+                "compiler_profiles":[{"group_id":"gnu-rv32","profile":"rv32-aros"}]
+            }]
+        }))
+        .unwrap();
+        aros_toolchain::release_inputs::ReleaseInputs::parse(&collection, &documents).unwrap()
+    }
+
+    fn sdk_generation_selection_for_expected_inputs() -> Value {
+        let inputs = sdk_generation_input_fixture();
+        let generations = inputs
+            .expected_sdk_generation_lanes()
+            .iter()
+            .map(|lane| {
+                let mut generation = valid_sdk_generation();
+                generation["sdk_id"] = json!(lane.sdk_id());
+                generation["group_id"] = json!(lane.group_id());
+                generation["target_profile"] = json!(lane.profile());
+                generation["host"] = json!(lane.host());
+                generation
+            })
+            .collect::<Vec<_>>();
+        let mut selection = valid_selection();
+        selection["sdk_generations"] = json!(generations);
+        selection
+    }
+
     #[test]
     fn parses_closed_selection_with_variable_lane_count_without_opening_paths() {
         let mut value = valid_selection();
@@ -287,6 +568,140 @@ mod tests {
             selection.lanes["llvm-pc-x86_64-linux.tar.xz"].builds.len(),
             2
         );
+        assert!(selection.sdk_generations.is_empty());
+    }
+
+    #[test]
+    fn parses_closed_sdk_generation_selection() {
+        let mut value = valid_selection();
+        value["sdk_generations"] = json!([valid_sdk_generation()]);
+        let selection = parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+
+        assert_eq!(selection.sdk_generations.len(), 1);
+        let generation = &selection.sdk_generations[0];
+        assert_eq!(generation.sdk_id, "core-sdk");
+        assert_eq!(generation.group_id, "gnu-rv32");
+        assert_eq!(generation.target_profile, "rv32-aros");
+        assert_eq!(generation.host, "linux-x86_64");
+        assert!(generation.compatibility.native_sdk_required);
+    }
+
+    #[test]
+    fn requires_order_independent_exact_sdk_generation_lane_coverage() {
+        let inputs = sdk_generation_input_fixture();
+        let expected = inputs.expected_sdk_generation_lanes();
+        let mut value = sdk_generation_selection_for_expected_inputs();
+        value["sdk_generations"].as_array_mut().unwrap().reverse();
+        let selection = parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+
+        require_sdk_generation_lanes(&selection, &expected).unwrap();
+    }
+
+    #[test]
+    fn rejects_missing_extra_and_changed_sdk_generation_lanes() {
+        let inputs = sdk_generation_input_fixture();
+        let expected = inputs.expected_sdk_generation_lanes();
+
+        let mut missing = sdk_generation_selection_for_expected_inputs();
+        missing["sdk_generations"].as_array_mut().unwrap().pop();
+        let selection = parse(&serde_json::to_vec(&missing).unwrap()).unwrap();
+        assert!(require_sdk_generation_lanes(&selection, &expected).is_err());
+
+        let mut extra = sdk_generation_selection_for_expected_inputs();
+        let mut generation = valid_sdk_generation();
+        generation["host"] = json!("linux-extra");
+        extra["sdk_generations"]
+            .as_array_mut()
+            .unwrap()
+            .push(generation);
+        let selection = parse(&serde_json::to_vec(&extra).unwrap()).unwrap();
+        assert!(require_sdk_generation_lanes(&selection, &expected).is_err());
+
+        let mut changed = sdk_generation_selection_for_expected_inputs();
+        changed["sdk_generations"][0]["target_profile"] = json!("other-profile");
+        let selection = parse(&serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(require_sdk_generation_lanes(&selection, &expected).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_sdk_generation_lane_tuples() {
+        let mut value = sdk_generation_selection_for_expected_inputs();
+        let duplicate = value["sdk_generations"][0].clone();
+        value["sdk_generations"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn requires_explicit_sdk_generation_native_sdk_policy() {
+        let mut value = valid_selection();
+        value["sdk_generations"] = json!([valid_sdk_generation()]);
+        assert!(
+            parse(&serde_json::to_vec(&value).unwrap())
+                .unwrap()
+                .sdk_generations[0]
+                .compatibility
+                .native_sdk_required
+        );
+
+        value["sdk_generations"][0]["compatibility"]["native_sdk_required"] = json!(false);
+        assert!(
+            !parse(&serde_json::to_vec(&value).unwrap())
+                .unwrap()
+                .sdk_generations[0]
+                .compatibility
+                .native_sdk_required
+        );
+
+        value["sdk_generations"][0]["compatibility"]
+            .as_object_mut()
+            .unwrap()
+            .remove("native_sdk_required");
+        assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+
+        value["sdk_generations"][0]["compatibility"]["native_sdk_required"] = json!("false");
+        assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_and_unsafe_sdk_generation_selectors_or_paths() {
+        let mut value = valid_selection();
+        value["sdk_generations"] = json!([valid_sdk_generation()]);
+        value["sdk_generations"][0]["unexpected"] = json!(true);
+        assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+
+        for (field, unsafe_value) in [
+            ("sdk_id", "../escape"),
+            ("group_id", "Uppercase"),
+            ("target_profile", "../profile"),
+            ("host", "not/a/host"),
+            ("package_dir", "relative/package"),
+            ("record", "relative/record.json"),
+            ("compatibility.directory", "/tmp/sdk/../other"),
+            ("compatibility.inputs", "relative/inputs.json"),
+        ] {
+            let mut value = valid_selection();
+            value["sdk_generations"] = json!([valid_sdk_generation()]);
+            match field {
+                "compatibility.directory" => {
+                    value["sdk_generations"][0]["compatibility"]["directory"] = json!(unsafe_value);
+                }
+                "compatibility.inputs" => {
+                    value["sdk_generations"][0]["compatibility"]["inputs"]["path"] =
+                        json!(unsafe_value);
+                }
+                "record" => {
+                    value["sdk_generations"][0]["record"]["path"] = json!(unsafe_value);
+                }
+                _ => value["sdk_generations"][0][field] = json!(unsafe_value),
+            }
+            assert!(
+                parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

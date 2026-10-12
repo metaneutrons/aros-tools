@@ -131,6 +131,12 @@ rebuilds the SDK or reopens paths recorded on the original build host. It checks
 byte consistency, not the identity of the CI job that produced the files.
 An authenticated release pipeline must establish that origin separately.
 
+For a complete release, `aros toolchain producer verify-release-evidence`
+requires every SDK/group/profile/host tuple in its external `sdk_generations`
+selection. It joins generation records and link evidence to indexed compilers
+and requires identical SDK package bytes across hosts. This is byte verification;
+original-job authentication remains a release gate.
+
 The source-owned CMake contract selects the generated SDK path and link
 probes. `AROS_SDK_INCLUDE_DIR` is a source-build output, not an installed-SDK
 selector. A completed local build still needs the authenticated shared

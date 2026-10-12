@@ -5,6 +5,8 @@
 
 #![cfg(unix)]
 
+use crate::compatibility::sdk_generation_matrix_cli_tests;
+
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -880,11 +882,12 @@ fn complete_llvm_sdk_generation_matrix_joins_three_synthetic_host_rows() {
         }
 
         let generations = llvm_matrix_generation_requests(inputs, &owned_selections);
-        let matrix = readback_sdk_generation_matrix(&SdkGenerationMatrixReadbackRequest {
+        let matrix_request = SdkGenerationMatrixReadbackRequest {
             complete,
             generations,
-        })
-        .expect("complete three-host LLVM generation rows should join the indexed release");
+        };
+        let matrix = readback_sdk_generation_matrix(&matrix_request)
+            .expect("complete three-host LLVM generation rows should join the indexed release");
         assert_eq!(matrix.generations().len(), 3);
         for indexed in matrix.generations() {
             assert_eq!(
@@ -902,6 +905,27 @@ fn complete_llvm_sdk_generation_matrix_joins_three_synthetic_host_rows() {
                     .archive_sha256
             );
         }
+
+        let cli_generation_inputs = owned_selections
+            .iter()
+            .map(|selection| {
+                let row = rows
+                    .iter()
+                    .find(|row| row.host == selection.lane.host())
+                    .expect("one generated input observation per selected host");
+                (
+                    selection.lane.clone(),
+                    (
+                        row.execution.inputs().bytes(),
+                        row.execution.inputs().sha256(),
+                    ),
+                )
+            })
+            .collect();
+        sdk_generation_matrix_cli_tests::probe_if_configured(
+            &matrix_request,
+            &cli_generation_inputs,
+        );
 
         let mut missing_host = llvm_matrix_generation_requests(inputs, &owned_selections);
         let missing_lane = missing_host.keys().next().unwrap().clone();

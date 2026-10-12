@@ -45,6 +45,8 @@ mod native_sdk_links;
 mod native_sdk_portable;
 mod native_sdk_relocation;
 mod relocation;
+#[cfg(all(test, unix))]
+mod sdk_generation_matrix_cli_tests;
 mod standalone;
 pub use environment::{CompatibilityEnvironment, CompatibilityHostToolReport};
 pub use environment_plan::{

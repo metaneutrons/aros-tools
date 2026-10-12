@@ -43,6 +43,17 @@ impl SdkGenerationMatrixReadback {
     pub fn generations(&self) -> &[IndexedSdkGenerationReadback] {
         &self.generations
     }
+
+    /// Consume the measured join without granting execution or origin authority.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        ReleaseCompatibilityReadbackV2,
+        Vec<IndexedSdkGenerationReadback>,
+    ) {
+        (self.complete, self.generations)
+    }
 }
 
 /// One complete generation whose compiler and SDK equal indexed measurements.

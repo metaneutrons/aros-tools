@@ -465,8 +465,10 @@ The release-evidence collector accepts an independent `sdk_packages` map with
 exact product-ID coverage and tree/archive digests plus archive sizes. It
 derives identities only from the selected release inputs and retains verified
 SDK locks/packages through its complete readback. Its JSON exposes those
-measurements without claiming generation, authenticity or publication
-readiness. See the [release evidence selection contract](compiler-family-release-evidence-v2.md).
+measurements without claiming authenticity or publication readiness.
+SDK-bearing inspections also require the exact `sdk_generations` tuple matrix
+and join its generation records and four-link evidence to these indexed packages.
+See the [release evidence selection contract](compiler-family-release-evidence-v2.md).
 
 On Unix, `sdk_generation_matrix::readback_sdk_generation_matrix` joins the
 complete indexed compiler A/B and compatibility closure to every SDK generation.

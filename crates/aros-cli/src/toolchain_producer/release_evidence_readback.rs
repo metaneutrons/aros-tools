@@ -33,18 +33,24 @@ use aros_toolchain::recovery_v2::{
 };
 use aros_toolchain::release_index_v2::{NativeReleaseIndexV2, INDEX_NAME};
 use aros_toolchain::release_index_v2_readback::{
-    readback_indexed_packages, IndexedPackageReadbackRequestV2,
+    readback_indexed_packages, IndexedPackageReadbackRequestV2, IndexedPackageReadbackV2,
 };
 use aros_toolchain::release_inputs::{ReleaseInputs, ACTIVE_HOSTS};
 use aros_toolchain::repackage_v2::{
     repackage_verified_package_v2, VerifiedPackageRepackageRequestV2,
 };
+use aros_toolchain::sdk_generation::SdkGenerationReadbackRequest;
+use aros_toolchain::sdk_generation_lanes::ExpectedSdkGenerationLane;
+use aros_toolchain::sdk_generation_matrix::{
+    readback_sdk_generation_matrix, SdkGenerationMatrixReadbackRequest,
+};
 use aros_toolchain::sdk_package::SdkVerificationRequest;
+use aros_toolchain::source_lock::CompilerFamily;
 
 use super::qualification_bytes::QualificationArgs;
 use super::recovery_family::RecoveryArgs;
 use super::release_evidence::EvidenceArgs;
-use super::release_evidence_selection::{self, Selection};
+use super::release_evidence_selection::{self, SdkGenerationSelection, Selection};
 use super::{native_error, print_json, RecordQualificationArgs, RepackageArgs, ResultFormat};
 
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
@@ -119,6 +125,102 @@ fn required<'a, T>(value: Option<&'a T>, name: &str) -> miette::Result<&'a T> {
     value.ok_or_else(|| miette::miette!("family-v2 recording requires {name}"))
 }
 
+fn select_sdk_generations<'a>(
+    selection: &'a Selection,
+    expected: &[ExpectedSdkGenerationLane],
+) -> miette::Result<BTreeMap<ExpectedSdkGenerationLane, &'a SdkGenerationSelection>> {
+    expected
+        .iter()
+        .map(|lane| {
+            let selected = selection
+                .sdk_generations
+                .iter()
+                .find(|selected| {
+                    selected.sdk_id == lane.sdk_id()
+                        && selected.group_id == lane.group_id()
+                        && selected.target_profile == lane.profile()
+                        && selected.host == lane.host()
+                })
+                .ok_or_else(|| {
+                    miette::miette!("SDK generation has no exact independent selection")
+                })?;
+            Ok((lane.clone(), selected))
+        })
+        .collect()
+}
+
+fn read_sdk_generation_records(
+    selections: &BTreeMap<ExpectedSdkGenerationLane, &SdkGenerationSelection>,
+) -> miette::Result<BTreeMap<ExpectedSdkGenerationLane, Vec<u8>>> {
+    selections
+        .iter()
+        .map(|(lane, selected)| {
+            Ok((
+                lane.clone(),
+                read_selected(&selected.record.path, &selected.record.sha256)?,
+            ))
+        })
+        .collect()
+}
+
+fn sdk_generation_packages(
+    packages: &IndexedPackageReadbackRequestV2,
+    selections: &BTreeMap<ExpectedSdkGenerationLane, &SdkGenerationSelection>,
+) -> miette::Result<BTreeMap<ExpectedSdkGenerationLane, SdkVerificationRequest>> {
+    selections
+        .iter()
+        .map(|(lane, selected)| {
+            let mut package = packages
+                .sdk_packages
+                .get(lane.sdk_id())
+                .ok_or_else(|| {
+                    miette::miette!("SDK generation lacks a selected canonical package")
+                })?
+                .clone();
+            package.package_dir.clone_from(&selected.package_dir);
+            Ok((lane.clone(), package))
+        })
+        .collect()
+}
+
+fn sdk_compatibility_requests<'a>(
+    packages: &'a IndexedPackageReadbackRequestV2,
+    measured: &'a IndexedPackageReadbackV2,
+    selections: &BTreeMap<ExpectedSdkGenerationLane, &SdkGenerationSelection>,
+    claims: &'a BTreeMap<ExpectedSdkGenerationLane, NativeCompatibilityInputClaims>,
+) -> miette::Result<BTreeMap<ExpectedSdkGenerationLane, PortableNativeCompatibilityRequest<'a>>> {
+    selections.iter().map(|(lane, selected)| {
+        let target_profile = lane.profile();
+        let artifact = packages.index.artifacts().iter().find(|artifact| {
+            artifact.group_id() == lane.group_id() && artifact.target_profile() == target_profile
+                && artifact.host() == lane.host()
+        }).ok_or_else(|| miette::miette!("SDK generation lacks an exact indexed compiler lane"))?;
+        let package = measured.packages().iter().find(|package| package.asset() == artifact.asset())
+            .ok_or_else(|| miette::miette!("SDK generation lacks a measured indexed compiler"))?.package();
+        let group = packages.inputs.groups().iter().find(|group| group.id() == lane.group_id())
+            .ok_or_else(|| miette::miette!("SDK generation lacks an input-derived compiler group"))?;
+        let profile = group.profiles().select(target_profile).map_err(|error| native_error(&error))?;
+        let sdk = packages.inputs.sdks().iter().find(|sdk| sdk.id() == lane.sdk_id())
+            .ok_or_else(|| miette::miette!("SDK generation lacks an input-derived product identity"))?;
+        if selected.compatibility.native_sdk_required != (group.source_lock().family() == CompilerFamily::Gnu) {
+            return Err(miette::miette!("SDK generation native policy differs from its independently selected compiler family"));
+        }
+        let expected_package = NativeCompatibilityExpectedPackage {
+            manifest: &package.manifest, archive_sha256: &package.archive_sha256,
+            archive_size: package.archive_size, compiler: artifact.compiler(),
+            source_commit: artifact.source_commit(), host: artifact.host(),
+        };
+        let expected = match group.source_lock().family() {
+            CompilerFamily::Gnu => claims[lane].expectations(expected_package, group.profiles(), profile, true),
+            CompilerFamily::Llvm => claims[lane].expectations_with_llvm_sdk(expected_package, group.profiles(), profile, sdk.identity()),
+        }.map_err(|error| native_error(&error))?;
+        Ok((lane.clone(), PortableNativeCompatibilityRequest {
+            directory: selected.compatibility.directory.clone(),
+            manifest_sha256: selected.compatibility.manifest_sha256.clone(), expected,
+        }))
+    }).collect()
+}
+
 fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result<()> {
     let qualification = match operation {
         Operation::Verify(selected) => Some(selected),
@@ -169,6 +271,19 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             .iter()
             .map(aros_toolchain::release_inputs::BoundSdk::id),
     )?;
+    // SDK authority paths remain guarded by the existing qualification API.
+    // Only the read-only inspector acquires the new complete SDK byte matrix.
+    let expected_sdk_generations = if matches!(operation, Operation::Inspect) {
+        inputs.expected_sdk_generation_lanes()
+    } else {
+        Vec::new()
+    };
+    if matches!(operation, Operation::Inspect) {
+        release_evidence_selection::require_sdk_generation_lanes(
+            &selection,
+            &expected_sdk_generations,
+        )?;
+    }
     if let Some(selected) = operation.recovery() {
         require_independent_document(args, &selection, &selected.recovery_request)?;
     }
@@ -300,9 +415,49 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         builds: &builds,
         lanes,
     };
+    // Independent selection chooses byte expectations only. Product membership,
+    // compiler references and host coverage come exclusively from release inputs.
+    let sdk_selections = select_sdk_generations(&selection, &expected_sdk_generations)?;
+    let sdk_records = read_sdk_generation_records(&sdk_selections)?;
+    let sdk_claims = sdk_selections
+        .iter()
+        .map(|(lane, selected)| {
+            let bytes = read_selected(
+                &selected.compatibility.inputs.path,
+                &selected.compatibility.inputs.sha256,
+            )?;
+            let claims = NativeCompatibilityInputClaims::parse(
+                &bytes,
+                &selected.compatibility.inputs.sha256,
+            )
+            .map_err(|error| native_error(&error))?;
+            Ok((lane.clone(), claims))
+        })
+        .collect::<miette::Result<BTreeMap<_, _>>>()?;
+    let sdk_packages = sdk_generation_packages(&packages, &sdk_selections)?;
+    let sdk_compatibility =
+        sdk_compatibility_requests(&packages, &measured, &sdk_selections, &sdk_claims)?;
+    let sdk_requests = expected_sdk_generations
+        .iter()
+        .map(|lane| {
+            (
+                lane.clone(),
+                SdkGenerationReadbackRequest {
+                    inputs: &packages.inputs,
+                    sdk_id: lane.sdk_id(),
+                    compiler_group_id: lane.group_id(),
+                    record_bytes: &sdk_records[lane],
+                    record_sha256: &sdk_selections[lane].record.sha256,
+                    package: &sdk_packages[lane],
+                    compatibility: &sdk_compatibility[lane],
+                },
+            )
+        })
+        .collect();
     let mut recorded = None;
     let mut recovery_decision = None;
     let mut recovered_packages = None;
+    let mut sdk_generations = Vec::new();
     let readback = if let Operation::Record(selected) = operation {
         let producer_commit =
             super::parse_git_object(&selected.source_tag_commit, "source tag commit")?;
@@ -377,6 +532,16 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
                 .map_err(|error| native_error(&error))?
                 .into_complete()
         }
+    } else if !expected_sdk_generations.is_empty() {
+        let (complete, generations) =
+            readback_sdk_generation_matrix(&SdkGenerationMatrixReadbackRequest {
+                complete: &complete_request,
+                generations: sdk_requests,
+            })
+            .map_err(|error| native_error(&error))?
+            .into_parts();
+        sdk_generations = generations;
+        complete
     } else {
         readback_release_compatibility_v2(&complete_request)
             .map_err(|error| native_error(&error))?
@@ -388,6 +553,13 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         read_selected(
             &lane.compatibility.inputs.path,
             &lane.compatibility.inputs.sha256,
+        )?;
+    }
+    for selected in &selection.sdk_generations {
+        read_selected(&selected.record.path, &selected.record.sha256)?;
+        read_selected(
+            &selected.compatibility.inputs.path,
+            &selected.compatibility.inputs.sha256,
         )?;
     }
     if let Some(selected) = qualification {
@@ -441,6 +613,24 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         "lanes": lanes,
     });
     let sdk_packages = readback.builds().sdk_packages();
+    if !sdk_generations.is_empty() {
+        result["sdk_generation_count"] = serde_json::json!(sdk_generations.len());
+        result["sdk_generations"] = serde_json::json!(sdk_generations
+            .iter()
+            .map(|joined| {
+                let lane = joined.lane();
+                let generation = joined.generation();
+                serde_json::json!({
+                    "sdk_id":lane.sdk_id(), "group_id":lane.group_id(),
+                    "target_profile":lane.profile(), "host":lane.host(),
+                    "generation_record_sha256":generation.record_sha256(),
+                    "compatibility_manifest_sha256":generation.compatibility_manifest_sha256(),
+                    "compatibility_receipt_sha256":generation.compatibility_receipt_sha256(),
+                    "sdk_link_receipt_sha256":generation.sdk_link_receipt_sha256(),
+                })
+            })
+            .collect::<Vec<_>>());
+    }
     if !sdk_packages.is_empty() {
         // These are measured shared packages, not SDK-generation receipts or
         // authenticated owning-job evidence. Compiler-only result bytes stay
@@ -640,6 +830,14 @@ fn selected_evidence_paths<'a>(args: &'a EvidenceArgs, selection: &'a Selection)
                     build.measurement.path.as_path(),
                 ]
             }))
+        }))
+        .chain(selection.sdk_generations.iter().flat_map(|sdk| {
+            [
+                sdk.package_dir.as_path(),
+                sdk.record.path.as_path(),
+                sdk.compatibility.directory.as_path(),
+                sdk.compatibility.inputs.path.as_path(),
+            ]
         }));
     protected.collect()
 }
@@ -747,6 +945,12 @@ fn validate_selection(
                 selected.qualification_evidence.as_path(),
                 selected.policy.as_path(),
             ]
+        }))
+        .chain(selection.sdk_generations.iter().flat_map(|sdk| {
+            [
+                sdk.record.path.as_path(),
+                sdk.compatibility.inputs.path.as_path(),
+            ]
         }));
     for document in documents {
         require_independent_document(args, selection, document)?;
@@ -760,14 +964,19 @@ fn require_independent_document(
     document: &Path,
 ) -> miette::Result<()> {
     // Transport expectations must not hide among the inventory they select.
-    let roots = std::iter::once(args.directory.as_path()).chain(selection.lanes.values().flat_map(
-        |lane| {
+    let roots = std::iter::once(args.directory.as_path())
+        .chain(selection.lanes.values().flat_map(|lane| {
             lane.builds
                 .iter()
                 .map(|build| build.package_dir.as_path())
                 .chain(std::iter::once(lane.compatibility.directory.as_path()))
-        },
-    ));
+        }))
+        .chain(selection.sdk_generations.iter().flat_map(|sdk| {
+            [
+                sdk.package_dir.as_path(),
+                sdk.compatibility.directory.as_path(),
+            ]
+        }));
     for root in roots {
         if super::compatibility_export::filesystem_overlap(document, root)? {
             return Err(miette::miette!("independent evidence inputs must remain outside all selected release, package and compatibility roots"));

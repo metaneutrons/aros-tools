@@ -43,6 +43,11 @@ The external selection is bounded to 16 MiB and uses the closed JSON schema
 | `sdk_packages[id].tree_sha256` | Independently retained normalized SDK payload-tree digest |
 | `sdk_packages[id].archive_sha256` | Independently retained raw SDK archive digest |
 | `sdk_packages[id].archive_size` | Positive raw SDK archive byte count |
+| `sdk_generations` | Exact input-derived SDK/group/profile/host tuple set; omission is valid only for compiler-only inputs |
+| `sdk_generations[n].sdk_id`, `group_id`, `target_profile`, `host` | Explicit tuple selectors, checked against release inputs |
+| `sdk_generations[n].package_dir` | Separate canonical directory containing that host's SDK package |
+| `sdk_generations[n].record` | Selected-file record for the original closed generation record |
+| `sdk_generations[n].compatibility` | Same closed selector as compiler lanes; explicit `native_sdk_required` is true for GNU and false for LLVM, whose SDK identity is bound separately from release inputs |
 
 The selection cannot supply an SDK identity or choose additional SDK products.
 Identity, source/ABI, product version and required compiler-profile references
@@ -52,6 +57,12 @@ deterministic SPDX are verified against the indexed SDK locks. SDK package
 measurements remain available through both attestation subject verification
 and the complete release-build readback; they are not discarded after checking
 the inventory. Final checksums and repeated package observations still apply.
+
+SDK-bearing inputs additionally require every selected host's generation record
+and six-phase/four-link evidence. Each generation is joined to its indexed
+compiler; its SDK package must equal the canonical indexed SDK package in full.
+Missing or extra host/profile/product tuples fail. Generation records and input
+observations remain outside all selected package and compatibility roots.
 
 Unknown or duplicate object keys are rejected at every nesting depth, including
 environment objects. Selected paths must be absolute and free of parent
@@ -84,7 +95,9 @@ self-digests are labeled separately from raw file digests.
 For SDK-bearing selections, JSON also returns `sdk_count` and an ID-sorted
 `sdks` array with source-owned identity and measured tree, archive and manifest
 digests/sizes. Compiler-only selections omit these fields. These are package
-byte measurements, not SDK generation or owning-job evidence. Qualification,
+byte measurements. `sdk_generation_count` and `sdk_generations` additionally
+report the complete generation-record and compatibility/link receipt byte join.
+These measurements do not authenticate their original jobs. Qualification,
 recording and recovery still reject SDK-bearing releases until that separate
 authenticated generation join is implemented.
 
