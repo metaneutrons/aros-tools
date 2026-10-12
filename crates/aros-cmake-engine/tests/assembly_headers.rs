@@ -282,7 +282,7 @@ fn mock_compiler_script(
          while [ \"$#\" -gt 0 ]; do\n\
              case \"$1\" in\n\
                  -MF) shift; depfile=$1 ;;\n\
-                 -MT) shift; target=$1 ;;\n\
+                 -MQ) shift; target=$1 ;;\n\
                  -o) shift; output=$1 ;;\n\
                  *.c) source=$1 ;;\n\
              esac\n\
@@ -411,7 +411,7 @@ fn assembly_header_build_uses_exact_arguments_and_cpu_aggregate_dependencies() {
     assert_eq!(runtime[1], "-MF");
     assert!(runtime[2].starts_with(&format!("{}.d.literal-", fixture.assembly.display())));
     assert!(path_has_extension(&runtime[2], "tmp"));
-    assert_eq!(runtime[3], "-MT");
+    assert_eq!(runtime[3], "-MQ");
     assert_eq!(runtime[4], fixture.assembly.to_string_lossy());
     assert_eq!(runtime[5], "-S");
     assert_eq!(runtime[6], fixture.source_file.to_string_lossy());
@@ -630,7 +630,7 @@ fn changed_c_source_reruns_assembly_and_header_generation() {
     assert_eq!(&trace_lines[..9], original_lines.as_slice());
     assert_eq!(&trace_lines[9], "-MD");
     assert_eq!(&trace_lines[10], "-MF");
-    assert_eq!(&trace_lines[12], "-MT");
+    assert_eq!(&trace_lines[12], "-MQ");
     assert_eq!(
         &trace_lines[13],
         fixture.assembly.to_string_lossy().as_ref()

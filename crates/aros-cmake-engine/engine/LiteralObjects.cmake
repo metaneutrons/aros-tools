@@ -6,7 +6,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/LiteralCompilerRole.cmake")
 # the selected compiler in their declared order, followed only by the validated
 # compiler-role options and private dependency/output arguments owned here.
 function(aros_compile_literal_object)
-    cmake_parse_arguments(PARSE_ARGV 0 L "" "NAME;SOURCE;OUTPUT;LANGUAGE;OUTPUT_MODE" "ARGUMENTS")
+    cmake_parse_arguments(PARSE_ARGV 0 L "" "NAME;SOURCE;OUTPUT;LANGUAGE;OUTPUT_MODE;DEPENDENCY_TARGET_OUTPUT" "ARGUMENTS")
     if(L_UNPARSED_ARGUMENTS OR L_KEYWORDS_MISSING_VALUES)
         message(FATAL_ERROR "Literal object: invalid or incomplete arguments")
     endif()
@@ -29,8 +29,22 @@ function(aros_compile_literal_object)
         set(output_extension "o")
     elseif(L_OUTPUT_MODE STREQUAL "ASSEMBLY" AND L_LANGUAGE STREQUAL "C")
         set(output_extension "s")
+    elseif(L_OUTPUT_MODE STREQUAL "DEPENDENCIES")
+        set(output_extension "d")
+        if(NOT DEFINED L_DEPENDENCY_TARGET_OUTPUT OR
+           "${L_DEPENDENCY_TARGET_OUTPUT}" STREQUAL "")
+            message(FATAL_ERROR
+                "Literal object: DEPENDENCIES requires DEPENDENCY_TARGET_OUTPUT")
+        endif()
     else()
-        message(FATAL_ERROR "Literal object: output mode must be OBJECT or C ASSEMBLY")
+        message(FATAL_ERROR
+            "Literal object: output mode must be OBJECT, C ASSEMBLY, or DEPENDENCIES")
+    endif()
+    if(NOT L_OUTPUT_MODE STREQUAL "DEPENDENCIES" AND
+       DEFINED L_DEPENDENCY_TARGET_OUTPUT AND
+       NOT "${L_DEPENDENCY_TARGET_OUTPUT}" STREQUAL "")
+        message(FATAL_ERROR
+            "Literal object: DEPENDENCY_TARGET_OUTPUT is only valid for DEPENDENCIES")
     endif()
     if(NOT DEFINED AROS_SOURCE_DIR OR NOT DEFINED AROS_BUILD_DIR OR
        "${AROS_SOURCE_DIR}" STREQUAL "" OR "${AROS_BUILD_DIR}" STREQUAL "")
@@ -38,6 +52,7 @@ function(aros_compile_literal_object)
     endif()
 
     foreach(value IN ITEMS "${L_NAME}" "${L_SOURCE}" "${L_OUTPUT}"
+            "${L_DEPENDENCY_TARGET_OUTPUT}"
             "${AROS_SOURCE_DIR}" "${AROS_BUILD_DIR}")
         _aros_literal_reject_control_text("${value}" "path or owner")
     endforeach()
@@ -103,9 +118,38 @@ function(aros_compile_literal_object)
     _aros_literal_check_path_chain("${output}" "${build_root}" "output")
     _aros_literal_check_optional_regular("${output}" "object output")
 
-    set(depfile "${output}.d")
-    _aros_literal_check_path_chain("${depfile}" "${build_root}" "dependency output")
-    _aros_literal_check_optional_regular("${depfile}" "dependency output")
+    if(L_OUTPUT_MODE STREQUAL "DEPENDENCIES")
+        if(NOT IS_ABSOLUTE "${L_DEPENDENCY_TARGET_OUTPUT}")
+            message(FATAL_ERROR
+                "Literal object: dependency target output must be an absolute path")
+        endif()
+        cmake_path(ABSOLUTE_PATH L_DEPENDENCY_TARGET_OUTPUT NORMALIZE
+            OUTPUT_VARIABLE dependency_target_output)
+        cmake_path(IS_PREFIX gen_root "${dependency_target_output}" NORMALIZE
+            dependency_target_inside)
+        cmake_path(GET output PARENT_PATH dependency_output_parent)
+        cmake_path(GET dependency_target_output PARENT_PATH dependency_target_parent)
+        cmake_path(GET output FILENAME dependency_output_name)
+        cmake_path(GET dependency_target_output FILENAME dependency_target_name)
+        string(REGEX REPLACE "[.]d$" ".o" expected_dependency_target_name
+            "${dependency_output_name}")
+        if(NOT dependency_target_inside OR dependency_target_output STREQUAL gen_root OR
+           NOT dependency_target_name MATCHES "^[A-Za-z0-9][A-Za-z0-9_.+-]*[.]o$" OR
+           NOT dependency_output_parent STREQUAL dependency_target_parent OR
+           NOT dependency_target_name STREQUAL expected_dependency_target_name)
+            message(FATAL_ERROR
+                "Literal object: dependency output must be a .d sibling of its matching gen/*.o target")
+        endif()
+        _aros_literal_check_path_chain(
+            "${dependency_target_output}" "${build_root}" "dependency target output")
+        _aros_literal_check_optional_regular(
+            "${dependency_target_output}" "dependency target output")
+        set(depfile "")
+    else()
+        set(depfile "${output}.d")
+        _aros_literal_check_path_chain("${depfile}" "${build_root}" "dependency output")
+        _aros_literal_check_optional_regular("${depfile}" "dependency output")
+    endif()
 
     set(_aros_literal_optimization_flags
         -O0 -O1 -O2 -O3 -O4 -O5 -O6 -O7 -Os -Og -Oz -Ofast)
@@ -210,9 +254,26 @@ function(aros_compile_literal_object)
     if(prior_owner)
         message(FATAL_ERROR "Literal object: output already owned by ${prior_owner}")
     endif()
+    if(NOT L_OUTPUT_MODE STREQUAL "DEPENDENCIES")
+        string(TOLOWER "${depfile}" folded_private_depfile)
+        string(SHA256 private_depfile_key "${folded_private_depfile}")
+        get_property(prior_private_depfile_owner GLOBAL PROPERTY
+            "AROS_SDK_OBJECT_${private_depfile_key}")
+        if(prior_private_depfile_owner)
+            message(FATAL_ERROR
+                "Literal object: private dependency output already owned by ${prior_private_depfile_owner}")
+        endif()
+    endif()
     set_property(GLOBAL PROPERTY "AROS_SDK_OBJECT_${output_key}" "${L_NAME}")
+    if(NOT L_OUTPUT_MODE STREQUAL "DEPENDENCIES")
+        set_property(GLOBAL PROPERTY "AROS_SDK_OBJECT_${private_depfile_key}"
+            "${L_NAME} private dependency output")
+    endif()
     if(L_OUTPUT_MODE STREQUAL "OBJECT")
         set_property(GLOBAL PROPERTY "AROS_LITERAL_OBJECT_${output_key}" "${L_NAME}")
+    elseif(L_OUTPUT_MODE STREQUAL "DEPENDENCIES")
+        set_property(GLOBAL PROPERTY
+            "AROS_LITERAL_DEPENDENCY_FILE_${output_key}" "${L_NAME}")
     endif()
 
     string(SHA256 command_key "${output}")
@@ -229,7 +290,13 @@ function(aros_compile_literal_object)
     _aros_literal_append_set(command_contents BUILD_ROOT "${build_root}")
     _aros_literal_append_set(command_contents SOURCE_DIRECTORY "${source_directory}")
     _aros_literal_append_set(command_contents OUTPUT "${output}")
-    _aros_literal_append_set(command_contents DEPFILE "${depfile}")
+    if(NOT L_OUTPUT_MODE STREQUAL "DEPENDENCIES")
+        _aros_literal_append_set(command_contents DEPFILE "${depfile}")
+    endif()
+    if(L_OUTPUT_MODE STREQUAL "DEPENDENCIES")
+        _aros_literal_append_set(command_contents DEPENDENCY_TARGET_OUTPUT
+            "${dependency_target_output}")
+    endif()
     _aros_literal_append_set(command_contents COMPILER "${driver}")
     _aros_literal_append_set(command_contents LANGUAGE "${L_LANGUAGE}")
     _aros_literal_append_set(command_contents OUTPUT_MODE "${L_OUTPUT_MODE}")
@@ -296,24 +363,75 @@ function(aros_compile_literal_object)
             -P "${runner}"
         COMMENT "Checking literal object paths for ${output_name}"
         VERBATIM)
-    add_custom_command(OUTPUT "${output}"
-        COMMAND "${CMAKE_COMMAND}"
-            "-DCOMMAND_FILE=${command_file}"
-            "-DCOMMAND_ROOT=${command_root}"
-            "-DCOMMAND_SHA256=${command_sha256}"
-            -DVERIFY_ONLY=OFF
-            -P "${runner}"
-        DEPENDS "${source}" "${driver}" "${runner}" "${command_file}"
-        DEPFILE "${depfile}"
-        COMMENT "Compiling literal object ${output_name}"
-        VERBATIM)
+    if(L_OUTPUT_MODE STREQUAL "DEPENDENCIES")
+        add_custom_command(OUTPUT "${output}"
+            COMMAND "${CMAKE_COMMAND}"
+                "-DCOMMAND_FILE=${command_file}"
+                "-DCOMMAND_ROOT=${command_root}"
+                "-DCOMMAND_SHA256=${command_sha256}"
+                -DVERIFY_ONLY=OFF
+                -P "${runner}"
+            DEPENDS "${source}" "${driver}" "${runner}" "${command_file}"
+            COMMENT "Generating literal dependencies ${output_name}"
+            VERBATIM)
+    else()
+        add_custom_command(OUTPUT "${output}"
+            COMMAND "${CMAKE_COMMAND}"
+                "-DCOMMAND_FILE=${command_file}"
+                "-DCOMMAND_ROOT=${command_root}"
+                "-DCOMMAND_SHA256=${command_sha256}"
+                -DVERIFY_ONLY=OFF
+                -P "${runner}"
+            DEPENDS "${source}" "${driver}" "${runner}" "${command_file}"
+            DEPFILE "${depfile}"
+            COMMENT "Compiling literal object ${output_name}"
+            VERBATIM)
+    endif()
     add_custom_target("${compile_target}" DEPENDS "${output}")
     add_dependencies("${compile_target}" "${check_target}")
     add_custom_target("${L_NAME}")
     add_dependencies("${L_NAME}" "${compile_target}")
-    set_property(TARGET "${compile_target}" PROPERTY AROS_LITERAL_OBJECT_OUTPUT "${output}")
-    set_property(TARGET "${L_NAME}" PROPERTY AROS_LITERAL_OBJECT_COMPILE_TARGETS
-        "${compile_target}")
+    if(L_OUTPUT_MODE STREQUAL "DEPENDENCIES")
+        set_property(TARGET "${compile_target}" PROPERTY
+            AROS_LITERAL_DEPENDENCY_OUTPUT "${output}")
+        set_property(TARGET "${compile_target}" PROPERTY
+            AROS_LITERAL_DEPENDENCY_TARGET_OUTPUT "${dependency_target_output}")
+        set_property(TARGET "${L_NAME}" PROPERTY
+            AROS_LITERAL_DEPENDENCY_OUTPUT "${output}")
+        set_property(TARGET "${L_NAME}" PROPERTY
+            AROS_LITERAL_DEPENDENCY_GENERATE_TARGETS "${compile_target}")
+    else()
+        set_property(TARGET "${compile_target}" PROPERTY AROS_LITERAL_OBJECT_OUTPUT "${output}")
+        set_property(TARGET "${L_NAME}" PROPERTY AROS_LITERAL_OBJECT_COMPILE_TARGETS
+            "${compile_target}")
+    endif()
+endfunction()
+
+# Generate a source-declared make dependency file using the compiler's -M
+# mode. This is independent of an object's private -MD dependency file.
+function(aros_generate_literal_dependencies)
+    cmake_parse_arguments(PARSE_ARGV 0 D ""
+        "NAME;SOURCE;OUTPUT;OBJECT_OUTPUT;LANGUAGE" "ARGUMENTS")
+    if(D_UNPARSED_ARGUMENTS OR D_KEYWORDS_MISSING_VALUES)
+        message(FATAL_ERROR "Literal dependencies: invalid or incomplete arguments")
+    endif()
+    foreach(key NAME SOURCE OUTPUT OBJECT_OUTPUT LANGUAGE)
+        if(NOT DEFINED D_${key} OR "${D_${key}}" STREQUAL "")
+            message(FATAL_ERROR "Literal dependencies: missing ${key}")
+        endif()
+    endforeach()
+    set(dependency_arguments)
+    if(D_ARGUMENTS)
+        list(APPEND dependency_arguments ARGUMENTS ${D_ARGUMENTS})
+    endif()
+    aros_compile_literal_object(
+        NAME "${D_NAME}"
+        SOURCE "${D_SOURCE}"
+        OUTPUT "${D_OUTPUT}"
+        LANGUAGE "${D_LANGUAGE}"
+        OUTPUT_MODE DEPENDENCIES
+        DEPENDENCY_TARGET_OUTPUT "${D_OBJECT_OUTPUT}"
+        ${dependency_arguments})
 endfunction()
 
 # Bind a finite Make aggregate only to object declarations registered above.

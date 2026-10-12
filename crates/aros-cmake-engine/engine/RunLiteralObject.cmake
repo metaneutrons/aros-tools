@@ -120,7 +120,7 @@ if(NOT actual_command_sha256 STREQUAL COMMAND_SHA256)
 endif()
 include("${command_file}")
 
-foreach(key SOURCE SOURCE_ROOT BUILD_ROOT SOURCE_DIRECTORY OUTPUT DEPFILE COMPILER LANGUAGE)
+foreach(key SOURCE SOURCE_ROOT BUILD_ROOT SOURCE_DIRECTORY OUTPUT COMPILER LANGUAGE)
     if(NOT DEFINED ${key} OR "${${key}}" STREQUAL "" OR
        "${${key}}" MATCHES "[;\n\r$]")
         message(FATAL_ERROR "Literal object runner requires one safe ${key}")
@@ -138,8 +138,20 @@ if(OUTPUT_MODE STREQUAL "OBJECT")
 elseif(OUTPUT_MODE STREQUAL "ASSEMBLY" AND LANGUAGE STREQUAL "C")
     set(output_extension "s")
     set(compile_mode "-S")
+elseif(OUTPUT_MODE STREQUAL "DEPENDENCIES")
+    set(output_extension "d")
+    if(NOT DEFINED DEPENDENCY_TARGET_OUTPUT OR
+       "${DEPENDENCY_TARGET_OUTPUT}" STREQUAL "" OR DEFINED DEPFILE)
+        message(FATAL_ERROR
+            "Literal object runner: dependency mode requires only DEPENDENCY_TARGET_OUTPUT")
+    endif()
 else()
     message(FATAL_ERROR "Literal object runner received invalid output mode")
+endif()
+if(NOT OUTPUT_MODE STREQUAL "DEPENDENCIES" AND
+   (NOT DEFINED DEPFILE OR "${DEPFILE}" STREQUAL "" OR
+    DEFINED DEPENDENCY_TARGET_OUTPUT))
+    message(FATAL_ERROR "Literal object runner requires one ordinary DEPFILE")
 endif()
 
 _aros_literal_runner_assert_root("${SOURCE_ROOT}" "source root")
@@ -148,18 +160,27 @@ _aros_literal_runner_check_absolute_chain("${COMPILER}" "compiler driver")
 _aros_literal_runner_assert_regular("${COMPILER}" "compiler driver" TRUE)
 
 if(NOT IS_ABSOLUTE "${SOURCE}" OR NOT IS_ABSOLUTE "${OUTPUT}" OR
-   NOT IS_ABSOLUTE "${DEPFILE}" OR NOT IS_ABSOLUTE "${COMPILER}" OR
-   NOT IS_ABSOLUTE "${SOURCE_DIRECTORY}")
+   NOT IS_ABSOLUTE "${COMPILER}" OR NOT IS_ABSOLUTE "${SOURCE_DIRECTORY}" OR
+   (NOT OUTPUT_MODE STREQUAL "DEPENDENCIES" AND NOT IS_ABSOLUTE "${DEPFILE}") OR
+   (OUTPUT_MODE STREQUAL "DEPENDENCIES" AND
+    NOT IS_ABSOLUTE "${DEPENDENCY_TARGET_OUTPUT}"))
     message(FATAL_ERROR "Literal object runner paths must be absolute")
 endif()
 cmake_path(ABSOLUTE_PATH SOURCE NORMALIZE OUTPUT_VARIABLE SOURCE)
 cmake_path(ABSOLUTE_PATH OUTPUT NORMALIZE OUTPUT_VARIABLE OUTPUT)
-cmake_path(ABSOLUTE_PATH DEPFILE NORMALIZE OUTPUT_VARIABLE DEPFILE)
+if(NOT OUTPUT_MODE STREQUAL "DEPENDENCIES")
+    cmake_path(ABSOLUTE_PATH DEPFILE NORMALIZE OUTPUT_VARIABLE DEPFILE)
+else()
+    cmake_path(ABSOLUTE_PATH DEPENDENCY_TARGET_OUTPUT NORMALIZE
+        OUTPUT_VARIABLE DEPENDENCY_TARGET_OUTPUT)
+endif()
 cmake_path(ABSOLUTE_PATH SOURCE_DIRECTORY NORMALIZE OUTPUT_VARIABLE SOURCE_DIRECTORY)
 cmake_path(IS_PREFIX SOURCE_ROOT "${SOURCE}" NORMALIZE source_inside)
 cmake_path(IS_PREFIX SOURCE_ROOT "${SOURCE_DIRECTORY}" NORMALIZE workdir_inside)
 cmake_path(IS_PREFIX BUILD_ROOT "${OUTPUT}" NORMALIZE output_in_build)
-cmake_path(IS_PREFIX BUILD_ROOT "${DEPFILE}" NORMALIZE depfile_in_build)
+if(NOT OUTPUT_MODE STREQUAL "DEPENDENCIES")
+    cmake_path(IS_PREFIX BUILD_ROOT "${DEPFILE}" NORMALIZE depfile_in_build)
+endif()
 cmake_path(GET SOURCE FILENAME source_name)
 cmake_path(GET SOURCE PARENT_PATH source_parent)
 cmake_path(GET OUTPUT FILENAME output_name)
@@ -169,17 +190,48 @@ if(NOT source_inside OR SOURCE STREQUAL SOURCE_ROOT OR NOT workdir_inside OR
    NOT SOURCE_DIRECTORY STREQUAL source_parent OR
    NOT source_name MATCHES "\.(c|cpp)$" OR
    NOT output_in_build OR NOT output_in_gen OR OUTPUT STREQUAL gen_root OR
-   NOT output_name MATCHES "^[A-Za-z0-9][A-Za-z0-9_.+-]*\.${output_extension}$" OR
-   NOT depfile_in_build OR NOT DEPFILE STREQUAL "${OUTPUT}.d")
+   NOT output_name MATCHES "^[A-Za-z0-9][A-Za-z0-9_.+-]*\.${output_extension}$")
     message(FATAL_ERROR "Literal object runner received invalid source/output roles")
+endif()
+if(OUTPUT_MODE STREQUAL "DEPENDENCIES")
+    cmake_path(IS_PREFIX BUILD_ROOT "${DEPENDENCY_TARGET_OUTPUT}" NORMALIZE
+        dependency_target_in_build)
+    cmake_path(IS_PREFIX gen_root "${DEPENDENCY_TARGET_OUTPUT}" NORMALIZE
+        dependency_target_in_gen)
+    cmake_path(GET OUTPUT PARENT_PATH dependency_output_parent)
+    cmake_path(GET DEPENDENCY_TARGET_OUTPUT PARENT_PATH dependency_target_parent)
+    cmake_path(GET DEPENDENCY_TARGET_OUTPUT FILENAME dependency_target_name)
+    string(REGEX REPLACE "[.]d$" ".o" expected_dependency_target_name
+        "${output_name}")
+    if(NOT dependency_target_in_build OR NOT dependency_target_in_gen OR
+       DEPENDENCY_TARGET_OUTPUT STREQUAL gen_root OR
+       NOT dependency_target_name MATCHES "^[A-Za-z0-9][A-Za-z0-9_.+-]*[.]o$" OR
+       NOT dependency_output_parent STREQUAL dependency_target_parent OR
+       NOT dependency_target_name STREQUAL expected_dependency_target_name)
+        message(FATAL_ERROR
+            "Literal object runner received an invalid dependency output/target pair")
+    endif()
+else()
+    if(NOT depfile_in_build OR NOT DEPFILE STREQUAL "${OUTPUT}.d")
+        message(FATAL_ERROR "Literal object runner received invalid dependency output role")
+    endif()
 endif()
 
 _aros_literal_runner_check_path("${SOURCE}" "${SOURCE_ROOT}" "source")
 _aros_literal_runner_assert_regular("${SOURCE}" "source" FALSE)
-_aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "object output")
-_aros_literal_runner_check_path("${DEPFILE}" "${BUILD_ROOT}" "dependency output")
-_aros_literal_runner_optional_regular("${OUTPUT}" "object output")
-_aros_literal_runner_optional_regular("${DEPFILE}" "dependency output")
+if(OUTPUT_MODE STREQUAL "DEPENDENCIES")
+    _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "dependency output")
+    _aros_literal_runner_check_path("${DEPENDENCY_TARGET_OUTPUT}" "${BUILD_ROOT}"
+        "dependency target output")
+    _aros_literal_runner_optional_regular("${OUTPUT}" "dependency output")
+    _aros_literal_runner_optional_regular("${DEPENDENCY_TARGET_OUTPUT}"
+        "dependency target output")
+else()
+    _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "object output")
+    _aros_literal_runner_check_path("${DEPFILE}" "${BUILD_ROOT}" "dependency output")
+    _aros_literal_runner_optional_regular("${OUTPUT}" "object output")
+    _aros_literal_runner_optional_regular("${DEPFILE}" "dependency output")
+endif()
 
 set(expect_path_for "")
 foreach(argument IN LISTS ARGUMENTS)
@@ -206,10 +258,52 @@ endif()
 
 cmake_path(GET OUTPUT PARENT_PATH output_parent)
 file(MAKE_DIRECTORY "${output_parent}")
-_aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "object output")
-_aros_literal_runner_check_path("${DEPFILE}" "${BUILD_ROOT}" "dependency output")
+if(OUTPUT_MODE STREQUAL "DEPENDENCIES")
+    _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "dependency output")
+    _aros_literal_runner_check_path("${DEPENDENCY_TARGET_OUTPUT}" "${BUILD_ROOT}"
+        "dependency target output")
+else()
+    _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "object output")
+    _aros_literal_runner_check_path("${DEPFILE}" "${BUILD_ROOT}" "dependency output")
+endif()
 
 string(RANDOM LENGTH 20 ALPHABET 0123456789abcdef suffix)
+if(OUTPUT_MODE STREQUAL "DEPENDENCIES")
+    set(temporary_output "${OUTPUT}.literal-${suffix}.tmp")
+    _aros_literal_runner_check_path("${temporary_output}" "${BUILD_ROOT}"
+        "temporary dependency output")
+    if(EXISTS "${temporary_output}" OR IS_SYMLINK "${temporary_output}")
+        message(FATAL_ERROR "Literal object runner found a temporary output collision")
+    endif()
+    execute_process(
+        COMMAND "${COMPILER}" ${ARGUMENTS}
+            -M -MF "${temporary_output}" -MQ "${DEPENDENCY_TARGET_OUTPUT}" "${SOURCE}"
+        WORKING_DIRECTORY "${SOURCE_DIRECTORY}"
+        RESULT_VARIABLE compiler_result
+        OUTPUT_VARIABLE compiler_stdout
+        ERROR_VARIABLE compiler_stderr)
+    if(NOT compiler_result EQUAL 0)
+        file(REMOVE "${temporary_output}")
+        message(FATAL_ERROR
+            "Literal dependency compiler failed (${compiler_result}) for ${SOURCE}\n"
+            "${compiler_stdout}${compiler_stderr}")
+    endif()
+    _aros_literal_runner_check_path("${temporary_output}" "${BUILD_ROOT}"
+        "temporary dependency output")
+    _aros_literal_runner_assert_regular("${temporary_output}"
+        "compiler dependency output" FALSE)
+    _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "dependency output")
+    file(RENAME "${temporary_output}" "${OUTPUT}" RESULT rename_result)
+    if(NOT rename_result STREQUAL "0")
+        file(REMOVE "${temporary_output}")
+        message(FATAL_ERROR
+            "Literal object runner could not publish dependency file: ${rename_result}")
+    endif()
+    _aros_literal_runner_check_path("${OUTPUT}" "${BUILD_ROOT}" "dependency output")
+    _aros_literal_runner_assert_regular("${OUTPUT}" "compiler dependency output" FALSE)
+    return()
+endif()
+
 set(temporary_object "${OUTPUT}.literal-${suffix}.tmp")
 set(temporary_depfile "${DEPFILE}.literal-${suffix}.tmp")
 _aros_literal_runner_check_path("${temporary_object}" "${BUILD_ROOT}" "temporary object")
@@ -221,7 +315,7 @@ endif()
 
 execute_process(
     COMMAND "${COMPILER}" ${ARGUMENTS}
-        -MD -MF "${temporary_depfile}" -MT "${OUTPUT}"
+        -MD -MF "${temporary_depfile}" -MQ "${OUTPUT}"
         ${compile_mode} "${SOURCE}" -o "${temporary_object}"
     WORKING_DIRECTORY "${SOURCE_DIRECTORY}"
     RESULT_VARIABLE compiler_result

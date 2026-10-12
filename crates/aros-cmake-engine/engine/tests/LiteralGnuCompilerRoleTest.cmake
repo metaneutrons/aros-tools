@@ -202,6 +202,21 @@ aros_compile_literal_object(NAME literal-role-cxx
     ARGUMENTS ${_source_arguments})
 aros_literal_object_group(NAME literal-role-objects
     OBJECTS "${_c_object}" "${_cxx_object}")
+aros_generate_literal_dependencies(NAME literal-role-c-dependencies
+    SOURCE "${AROS_SOURCE_DIR}/src/role.c"
+    OUTPUT "${AROS_BUILD_DIR}/gen/literal/role-c.d"
+    OBJECT_OUTPUT "${_c_object}"
+    LANGUAGE C
+    ARGUMENTS ${_source_arguments})
+aros_generate_literal_dependencies(NAME literal-role-cxx-dependencies
+    SOURCE "${AROS_SOURCE_DIR}/src/role.cpp"
+    OUTPUT "${AROS_BUILD_DIR}/gen/literal/role-cxx.d"
+    OBJECT_OUTPUT "${_cxx_object}"
+    LANGUAGE CXX
+    ARGUMENTS ${_source_arguments})
+add_custom_target(literal-role-dependencies)
+add_dependencies(literal-role-dependencies
+    literal-role-c-dependencies literal-role-cxx-dependencies)
 ]=])
 
 file(WRITE "${_fixture}/declared-source/src/role.c" [=[
@@ -348,6 +363,30 @@ function(_literal_gnu_positive_mode mode)
     endif()
 
     execute_process(
+        COMMAND "${CMAKE_COMMAND}" --build "${_build}" --target literal-role-dependencies --parallel 2
+        RESULT_VARIABLE _dependency_result
+        OUTPUT_VARIABLE _dependency_stdout
+        ERROR_VARIABLE _dependency_stderr
+        TIMEOUT 120)
+    if(NOT _dependency_result STREQUAL "0")
+        message(FATAL_ERROR
+            "GNU ${mode} literal dependency build failed\n${_dependency_stdout}${_dependency_stderr}")
+    endif()
+    foreach(_stem IN ITEMS role-c role-cxx)
+        set(_object "${_build}/declared-build/gen/literal/${_stem}.o")
+        set(_depfile "${_build}/declared-build/gen/literal/${_stem}.d")
+        if(EXISTS "${_object}" OR EXISTS "${_object}.d" OR
+           NOT EXISTS "${_depfile}" OR IS_SYMLINK "${_depfile}")
+            message(FATAL_ERROR "GNU ${mode} dependency mode produced invalid output roles")
+        endif()
+        file(READ "${_depfile}" _dependencies)
+        string(FIND "${_dependencies}" "${_object}:" _target_position)
+        if(NOT _target_position EQUAL 0)
+            message(FATAL_ERROR "GNU ${mode} dependency file does not name its exact object")
+        endif()
+    endforeach()
+
+    execute_process(
         COMMAND "${CMAKE_COMMAND}" --build "${_build}" --target literal-role-objects --parallel 2
         RESULT_VARIABLE _build_result
         OUTPUT_VARIABLE _build_stdout
@@ -368,9 +407,9 @@ function(_literal_gnu_positive_mode mode)
 
     file(GLOB _commands "${_build}/CMakeFiles/aros-literal-object-*.cmake")
     list(LENGTH _commands _command_count)
-    if(NOT _command_count EQUAL 2)
+    if(NOT _command_count EQUAL 4)
         message(FATAL_ERROR
-            "GNU ${mode} fixture must emit exactly two serialized literal command files; got ${_command_count}")
+            "GNU ${mode} fixture must emit exactly four serialized literal command files; got ${_command_count}")
     endif()
     foreach(_command IN LISTS _commands)
         _literal_gnu_verify_command_file(
@@ -417,4 +456,4 @@ endif()
 _literal_gnu_expect_elf("${_counter_object}" ELF64 double "GNU RV64 double-float counter object")
 
 message(STATUS
-    "Literal GNU compiler-role engine: consumer and native-build RV32 ELF/argv checks passed; RV64 counter discriminated")
+    "Literal GNU compiler-role engine: consumer and native-build RV32 dependency/ELF/argv checks passed; RV64 counter discriminated")

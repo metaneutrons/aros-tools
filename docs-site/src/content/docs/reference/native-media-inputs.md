@@ -143,6 +143,11 @@ validated SDK ABI options separately from those source arguments. A conflicting
 target, ABI or Developer sysroot is rejected; arbitrary `CMAKE_<LANG>_FLAGS`
 are not imported.
 
+The engine can generate a separate source-declared `.d` file with its own
+ordered arguments. It names the associated object and does not replace that
+object's private Ninja depfile. This primitive alone does not admit a
+`%rule_compile_multi` owner; its complete source contract must still be proved.
+
 Archive, HIDD-compile and layered-header projections may appear in the graph
 audit before their full producer contracts are implemented. These partial
 records do not admit targets. Header recipes with unevaluated conditional

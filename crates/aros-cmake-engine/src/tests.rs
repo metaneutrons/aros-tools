@@ -862,6 +862,11 @@ fn literal_objects_preserve_selected_cross_compiler_roles() {
 }
 
 #[test]
+fn literal_dependency_files_preserve_separate_argv_and_atomic_outputs() {
+    run_embedded_kobj_contract_test("LiteralDependencyFilesTest.cmake");
+}
+
+#[test]
 fn demos_images_are_generated_before_their_consumer_compiles() {
     let directory = tempfile::tempdir().expect("temp dir");
     let engine = directory.path().join("engine");
