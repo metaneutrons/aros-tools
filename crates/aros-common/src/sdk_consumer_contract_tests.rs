@@ -27,6 +27,10 @@ struct FixtureTarget<'a> {
 }
 
 fn make_fixture(target: FixtureTarget<'_>) -> Fixture {
+    make_fixture_with_cpu32(target, "")
+}
+
+fn make_fixture_with_cpu32(target: FixtureTarget<'_>, cpu32: &str) -> Fixture {
     let FixtureTarget {
         name,
         arch,
@@ -45,7 +49,7 @@ fn make_fixture(target: FixtureTarget<'_>) -> Fixture {
         writeln!(profile_text, "float_abi = {float_abi:?}").unwrap();
     }
     write!(profile_text,
-        "\n[targets.transpiler]\nfamily = \"\"\nvariant = \"\"\ntoolchain = {toolchain:?}\ncpu32 = \"\"\nuse_mmu = {use_mmu}\n"
+        "\n[targets.transpiler]\nfamily = \"\"\nvariant = \"\"\ntoolchain = {toolchain:?}\ncpu32 = {cpu32:?}\nuse_mmu = {use_mmu}\n"
     ).unwrap();
     if let Some((flavour, platform_smp)) = bootstrap {
         write!(
@@ -359,6 +363,59 @@ fn sdk_contract_rejects_wrong_seals_changed_bytes_and_duplicate_abi_keys() {
         symlink_input["inputs"][2]["path"] = json!("alias.c");
         assert!(load(&fresh, &symlink_input).is_err());
     }
+}
+
+#[test]
+fn sdk_companion_roles_are_optional_but_never_inferred_from_cpu32() {
+    let fixture = make_fixture_with_cpu32(
+        FixtureTarget {
+            name: "pc-x86_64",
+            arch: "x86_64",
+            source_cpu: "x86_64",
+            target_triple: "x86_64-unknown-aros",
+            toolchain: "llvm",
+            float_abi: None,
+            bootstrap: Some(("standalone", true)),
+            use_mmu: true,
+        },
+        "i386",
+    );
+    let loaded = load(&fixture, &fixture.document).unwrap();
+    assert!(loaded.contract.companion_roles.is_empty());
+
+    let mut declared = fixture.document.clone();
+    declared["companion_roles"] = json!([{
+        "selector_cpu": "i386",
+        "target": {
+            "target_triple": "i386-unknown-aros",
+            "abi": {
+                "source_cpu": "i386",
+                "pointer_width": 32,
+                "elf_class": 1,
+                "elf_machine": 3,
+                "endian": "little"
+            }
+        },
+        "compiler_options": ["--target=i386-unknown-aros"],
+        "library_dir": "lib32",
+        "required_runtime_library": "clang_rt.builtins-i386"
+    }]);
+    let loaded = load(&fixture, &declared).unwrap();
+    assert_eq!(loaded.contract.companion_roles.len(), 1);
+    assert_eq!(loaded.contract.companion_roles[0].selector_cpu, "i386");
+
+    let mut unknown_role_field = declared.clone();
+    unknown_role_field["companion_roles"][0]["compiler_path"] = json!("/usr/bin/clang");
+    assert!(load(&fixture, &unknown_role_field).is_err());
+
+    let mut wrong_selector = declared.clone();
+    wrong_selector["companion_roles"][0]["selector_cpu"] = json!("arm");
+    assert!(load(&fixture, &wrong_selector).is_err());
+
+    let role = declared["companion_roles"][0].clone();
+    let mut excessive = fixture.document.clone();
+    excessive["companion_roles"] = Value::Array(vec![role; 2]);
+    assert!(load(&fixture, &excessive).is_err());
 }
 
 #[test]

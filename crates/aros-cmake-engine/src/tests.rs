@@ -838,6 +838,11 @@ fn source_declared_sdk_objects_compile_stage_and_refuse_unsafe_outputs() {
 }
 
 #[test]
+fn explicit_sdk_companion_objects_preserve_abi_and_refuse_primary_fallback() {
+    run_embedded_kobj_contract_test("SdkCompanionObjectsTest.cmake");
+}
+
+#[test]
 fn runtime_header_namespace_precedence_is_verified_by_real_compiles() {
     let directory = tempfile::tempdir().expect("runtime header namespace fixture");
     let engine = directory.path().join("engine");

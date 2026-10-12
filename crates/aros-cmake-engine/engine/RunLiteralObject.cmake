@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/VerifySdkCompanionElf.cmake")
 
 function(_aros_literal_runner_assert_regular path label executable)
     find_program(_literal_runner_test_program NAMES test PATHS /usr/bin /bin NO_DEFAULT_PATH NO_CACHE REQUIRED)
@@ -311,6 +312,9 @@ if(NOT expect_path_for STREQUAL "")
 endif()
 
 if(VERIFY_ONLY)
+    if(DEFINED EXPECTED_ELF_CLASS AND EXISTS "${OUTPUT}")
+        verify_sdk_companion_elf("${OUTPUT}")
+    endif()
     return()
 endif()
 
@@ -443,6 +447,16 @@ if(NOT compiler_result EQUAL 0)
     message(FATAL_ERROR
         "Literal object compiler failed (${compiler_result}) for ${SOURCE}\n"
         "${compiler_stdout}${compiler_stderr}")
+endif()
+
+if(DEFINED EXPECTED_ELF_CLASS OR DEFINED EXPECTED_ELF_MACHINE)
+    if(NOT OUTPUT_MODE STREQUAL "OBJECT" OR NOT EXPECTED_ELF_CLASS MATCHES "^[12]$" OR
+       NOT EXPECTED_ELF_MACHINE MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR "Literal object runner: invalid companion ELF contract")
+    endif()
+    _aros_literal_runner_check_path("${temporary_object}" "${BUILD_ROOT}" "companion object")
+    _aros_literal_runner_assert_regular("${temporary_object}" "companion object" FALSE)
+    verify_sdk_companion_elf("${temporary_object}")
 endif()
 
 _aros_literal_runner_check_path("${temporary_object}" "${BUILD_ROOT}" "temporary object")

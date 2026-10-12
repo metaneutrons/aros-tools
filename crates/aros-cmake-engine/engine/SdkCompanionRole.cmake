@@ -1,0 +1,72 @@
+include_guard(GLOBAL)
+
+# Read only the explicit companion descriptor already authenticated by the
+# source-contract validator. CPU32 alone never authorizes a compiler role.
+function(_aros_sdk_companion_role out_options out_library out_class out_machine cpu language source_arguments)
+    aros_validate_native_consumer_compiler_target()
+    _aros_literal_validate_compiler_metadata("${language}")
+    get_property(schema GLOBAL PROPERTY AROS_NATIVE_CONSUMER_VALIDATED_SCHEMA)
+    if(NOT schema STREQUAL "aros-sdk-consumer-validation-v1" OR
+       NOT CMAKE_${language}_COMPILER_ID STREQUAL "Clang" OR
+       NOT "${cpu}" STREQUAL "${AROS_TARGET_CPU32}" OR "${cpu}" STREQUAL "")
+        message(FATAL_ERROR "SDK companion: explicit SDK/Clang/CPU32 binding required")
+    endif()
+    get_property(json GLOBAL PROPERTY AROS_NATIVE_CONSUMER_BINDING_JSON)
+    string(JSON count ERROR_VARIABLE error LENGTH "${json}" companion_roles)
+    if(NOT error STREQUAL "NOTFOUND" OR NOT count EQUAL 1)
+        message(FATAL_ERROR "SDK companion: exactly one validated role is required")
+    endif()
+    string(JSON role GET "${json}" companion_roles 0)
+    _aros_native_require_object_members("${role}" "SDK companion"
+        "selector_cpu;target;compiler_options;library_dir;required_runtime_library")
+    _aros_native_get_string(selected "${role}" "SDK companion" selector_cpu)
+    _aros_native_get_string(library "${role}" "SDK companion" library_dir)
+    string(JSON target GET "${role}" target)
+    _aros_native_get_string(triple "${target}" "SDK companion" target_triple)
+    if(NOT selected STREQUAL cpu OR NOT library MATCHES "^[A-Za-z0-9][A-Za-z0-9_.+-]*$" OR
+       library MATCHES "^[.][.]?$" OR NOT triple MATCHES "^[A-Za-z0-9][A-Za-z0-9_.+-]*-aros$")
+        message(FATAL_ERROR "SDK companion: descriptor differs from the selected role")
+    endif()
+    string(JSON class GET "${role}" target abi elf_class)
+    string(JSON machine GET "${role}" target abi elf_machine)
+    string(JSON endian GET "${role}" target abi endian)
+    if(NOT class MATCHES "^[12]$" OR NOT machine MATCHES "^[1-9][0-9]*$" OR
+       NOT endian STREQUAL "little")
+        message(FATAL_ERROR "SDK companion: unsupported or incomplete object ABI")
+    endif()
+    string(JSON count LENGTH "${role}" compiler_options)
+    if(count LESS 1 OR count GREATER 32)
+        message(FATAL_ERROR "SDK companion: compiler options exceed closed bounds")
+    endif()
+    set(options)
+    math(EXPR last "${count} - 1")
+    foreach(index RANGE 0 ${last})
+        string(JSON option GET "${role}" compiler_options ${index})
+        if(NOT option STREQUAL "--target=${triple}" AND
+           NOT option MATCHES "^-m(arch|cpu|fpu|float-abi|cmodel)=[A-Za-z0-9_.+-]+$" AND
+           NOT option MATCHES "^-m(no-)?red-zone$" AND
+           NOT option MATCHES "^-f(no-)?(pic|PIC|pie|PIE)$")
+            message(FATAL_ERROR "SDK companion: unsupported compiler option")
+        endif()
+        list(APPEND options "${option}")
+    endforeach()
+    if(NOT "--target=${triple}" IN_LIST options)
+        message(FATAL_ERROR "SDK companion: explicit driver triple required")
+    endif()
+    _aros_literal_validate_native_target_arguments("${language}" "${source_arguments}")
+    foreach(option IN LISTS source_arguments)
+        if(option MATCHES "^-m(arch|abi|cpu|fpu|float-abi|cmodel|soft-float|hard-float)(=|$)" OR
+           option MATCHES "^-m(no-)?(red-zone|strict-align)$" OR
+           option MATCHES "^-f(no-)?(pic|PIC|pie|PIE)$")
+            if(NOT option IN_LIST options)
+                message(FATAL_ERROR "SDK companion: source ABI option contradicts explicit role")
+            endif()
+        endif()
+    endforeach()
+    _aros_literal_native_sysroot_arguments(sysroot "${source_arguments}")
+    list(APPEND options ${sysroot})
+    set(${out_options} "${options}" PARENT_SCOPE)
+    set(${out_library} "${library}" PARENT_SCOPE)
+    set(${out_class} "${class}" PARENT_SCOPE)
+    set(${out_machine} "${machine}" PARENT_SCOPE)
+endfunction()

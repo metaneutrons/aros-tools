@@ -1,5 +1,6 @@
 include_guard(GLOBAL)
 include("${CMAKE_CURRENT_LIST_DIR}/LiteralCompilerRole.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SdkCompanionRole.cmake")
 
 # Compile a source whose Make recipe is an audited, finite compiler argv. This
 # deliberately bypasses CMake target compile options: ARGUMENTS are sent to
@@ -10,7 +11,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/LiteralCompilerRole.cmake")
 # compiler depfile while retaining both compilation contexts.
 function(aros_compile_literal_object)
     cmake_parse_arguments(PARSE_ARGV 0 L ""
-        "NAME;SOURCE;OUTPUT;LANGUAGE;OUTPUT_MODE;DEPENDENCY_TARGET_OUTPUT;SOURCE_DEPENDENCY_OUTPUT"
+        "NAME;SOURCE;OUTPUT;LANGUAGE;OUTPUT_MODE;DEPENDENCY_TARGET_OUTPUT;SOURCE_DEPENDENCY_OUTPUT;COMPANION_CPU"
         "ARGUMENTS")
     if(L_UNPARSED_ARGUMENTS OR L_KEYWORDS_MISSING_VALUES)
         message(FATAL_ERROR "Literal object: invalid or incomplete arguments")
@@ -420,8 +421,18 @@ function(aros_compile_literal_object)
         message(FATAL_ERROR
             "Literal object: native source selection validator is required")
     endif()
-    _aros_literal_compiler_role_arguments(_compiler_role_arguments
-        "${L_LANGUAGE}" "${L_ARGUMENTS}" "${_native_source_selected}")
+    if(DEFINED L_COMPANION_CPU)
+        if(NOT _native_source_selected OR NOT L_OUTPUT_MODE STREQUAL "OBJECT")
+            message(FATAL_ERROR "Literal object: companion role requires a native SDK object")
+        endif()
+        _aros_sdk_companion_role(_compiler_role_arguments _companion_library _elf_class _elf_machine
+            "${L_COMPANION_CPU}" "${L_LANGUAGE}" "${L_ARGUMENTS}")
+        _aros_literal_append_set(command_contents EXPECTED_ELF_CLASS "${_elf_class}")
+        _aros_literal_append_set(command_contents EXPECTED_ELF_MACHINE "${_elf_machine}")
+    else()
+        _aros_literal_compiler_role_arguments(_compiler_role_arguments
+            "${L_LANGUAGE}" "${L_ARGUMENTS}" "${_native_source_selected}")
+    endif()
     list(APPEND command_arguments ${_compiler_role_arguments})
     if(_native_source_selected)
         foreach(_include IN ITEMS AROS_GENINC_DIR AROS_SDK_INCLUDE_DIR)
