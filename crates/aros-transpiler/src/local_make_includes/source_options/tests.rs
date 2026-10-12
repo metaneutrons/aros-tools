@@ -662,3 +662,92 @@ fn options_before_non_options_in_multi_file_include_cannot_disappear() {
         );
     }
 }
+
+#[test]
+fn rejected_variable_with_non_options_suffix_cannot_hide_options_list() {
+    let (tree, context) = fixture();
+    let text = concat!(
+        "BASE := $(SRCDIR)/arch/x86_64-all/utility/make.opts $(SRCDIR)/arch/x86_64-all/utility/base\n",
+        "include $(BASE).mk\n",
+        "%build_linklib mmake=unit libname=unit files=unit\n");
+    let result = scan(tree.path(), &context, text);
+    assert!(!result.issues.is_empty());
+    assert!(result.fragments.is_empty());
+    assert!(super::contains_options(&result));
+    fs::write(tree.path().join(RECIPE), text).unwrap();
+    let parsed = crate::parse_mmakefile_with_dirs_and_context(
+        &tree.path().join(RECIPE),
+        tree.path(),
+        &crate::dirs::DirVars::default(),
+        &context,
+    )
+    .unwrap();
+    assert!(parsed
+        .native_graph_errors
+        .iter()
+        .any(|error| error.message.contains("source configuration is incomplete")));
+}
+
+#[test]
+fn sealed_generated_include_path_is_not_misclassified_as_source_options() {
+    let (tree, mut context) = fixture();
+    seal(
+        tree.path(),
+        &mut context,
+        "config/make.cfg.in",
+        "GENDIR := $(TOP)/gen\n",
+    );
+    let text = "-include $(GENDIR)/$(CURDIR)/unit.entrypoints\n";
+    let result = scan(tree.path(), &context, text);
+    assert!(!result.issues.is_empty()); // This belongs to the generated-header capability.
+    assert!(!super::contains_options(&result));
+    fs::write(
+        tree.path().join("config/make.cfg.in"),
+        "GENDIR := $(SRCDIR)/other\n",
+    )
+    .unwrap();
+    let corrupt = scan(tree.path(), &context, text);
+    assert!(!corrupt.issues.is_empty());
+    assert!(corrupt
+        .issues
+        .iter()
+        .any(|issue| issue.detail.contains("bytes changed")));
+    let unknown = scan(tree.path(), &context, "include $(UNKNOWN).mk\n");
+    assert!(!unknown.issues.is_empty());
+    assert!(super::contains_options(&unknown));
+}
+
+#[test]
+fn sealed_directory_snapshot_consumes_the_shared_read_budget() {
+    let (tree, mut context) = fixture();
+    seal(
+        tree.path(),
+        &mut context,
+        "config/make.cfg.in",
+        "GENDIR := $(TOP)/gen\n",
+    );
+    let result = inline_native_make_configuration_for_context(
+        "include $(SRCDIR)/arch/x86_64-all/utility/make.opts\n",
+        tree.path(),
+        Path::new(RECIPE),
+        LocalMakeIncludeLimits {
+            files: 1,
+            ..LocalMakeIncludeLimits::default()
+        },
+        &context,
+    );
+    assert!(!result.issues.is_empty());
+    assert!(result.fragments.is_empty());
+    let result = inline_native_make_configuration_for_context(
+        "include $(SRCDIR)/arch/x86_64-all/utility/make.opts\n",
+        tree.path(),
+        Path::new(RECIPE),
+        LocalMakeIncludeLimits {
+            bytes: 4,
+            ..LocalMakeIncludeLimits::default()
+        },
+        &context,
+    );
+    assert!(!result.issues.is_empty());
+    assert!(result.fragments.is_empty());
+}

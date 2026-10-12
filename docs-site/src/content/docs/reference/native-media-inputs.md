@@ -95,6 +95,10 @@ build owners. Native parsing does not glob other architectures' option files.
 Existing plain source inventories and declaration-proved fetched-port/header
 scopes keep their own provenance rules; global native configuration does not
 replace them. If they consume source options, the sealed native path applies.
+Directory expressions use `config/make.cfg.in` only when it is a sealed input;
+its bounded, no-follow snapshot shares the include read budget. An unresolved
+variable can hide an options path even with a `.mk` suffix and remains an error.
+Fully resolved generated paths retain their separate capability ownership.
 
 `generated_make_templates` reconstructs a generated Make include from a sealed
 `.in` template, its literal `AC_CONFIG_FILES` declaration and explicit profile

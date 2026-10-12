@@ -14,6 +14,11 @@ pub(super) enum Resolution {
     Present(String),
 }
 
+pub(super) struct ResolutionError {
+    pub issue: LocalMakeIncludeIssue,
+    pub options_possible: bool,
+}
+
 pub(super) fn is_candidate(raw: &str) -> bool {
     let raw = raw.trim();
     raw.split_whitespace()
@@ -28,7 +33,7 @@ pub(super) fn is_options_path(path: &Path) -> bool {
 
 pub(super) fn potential_options_path(raw: &str) -> bool {
     raw.split_whitespace()
-        .any(|word| is_options_path(Path::new(word)) || word.ends_with([')', '}']))
+        .any(|word| is_options_path(Path::new(word)) || word.contains('$'))
 }
 
 pub const fn contains_options(scan: &LocalMakeIncludeScan) -> bool {
@@ -41,9 +46,12 @@ pub(super) fn resolve(
     physical: &str,
     source: &Path,
     line: usize,
-    state: &ExpansionState,
-) -> Result<Resolution, LocalMakeIncludeIssue> {
-    let fail = |kind, detail: String| issue(source, line, kind, include.path, detail);
+    state: &mut ExpansionState,
+) -> Result<Resolution, ResolutionError> {
+    let fail = |kind, detail: String| ResolutionError {
+        issue: issue(source, line, kind, include.path, detail),
+        options_possible: potential_options_path(include.path),
+    };
     let context = state
         .native_context
         .as_ref()
@@ -88,7 +96,19 @@ pub(super) fn resolve(
                 .into(),
         ));
     }
-    let dirs = crate::dirs::DirVars::default();
+    if state.native_dirs.is_none() {
+        let (dirs, measured_bytes) = source_dirs(state)
+            .map_err(|detail| fail(LocalMakeIncludeIssueKind::UnsafeSyntax, detail))?;
+        if let Some(bytes) = measured_bytes {
+            state.files_read += 1;
+            state.bytes_read += bytes;
+        }
+        state.native_dirs = Some(dirs);
+    }
+    let dirs = state
+        .native_dirs
+        .as_ref()
+        .expect("source directory snapshot initialized");
     let guard = |name: &str| {
         (scope.path_is_conditional_at(name, position)
             || matches!(name, "SRCDIR" | "CURDIR") && scope.is_known_local(name))
@@ -101,11 +121,20 @@ pub(super) fn resolve(
         ));
     }
     let expression =
-        crate::MakeExprContext::new(&scope, &dirs, position, &state.root, &state.curdir)
+        crate::MakeExprContext::new(&scope, dirs, position, &state.root, &state.curdir)
             .with_guard(&guard)
             .without_filesystem();
     let expanded = crate::evaluate_make_expr(raw, &expression)
         .map_err(|error| fail(LocalMakeIncludeIssueKind::UnresolvedPath, error.to_string()))?;
+    // After complete expansion, classify the actual tokens. A generated
+    // entrypoints include is not source options; a variable-expanded list
+    // containing an options file remains an error even with a .mk suffix.
+    let fail = |kind, detail: String| ResolutionError {
+        issue: issue(source, line, kind, include.path, detail),
+        options_possible: expanded
+            .split_whitespace()
+            .any(|word| is_options_path(Path::new(word))),
+    };
     // The expression evaluator intentionally retains SRCDIR as an opaque
     // CMake root even with filesystem access disabled. Materialize that one
     // proven leading root here; no other deferred path becomes a local input.
@@ -159,6 +188,40 @@ pub(super) fn resolve(
         return Ok(Resolution::Absent(relative));
     }
     Ok(Resolution::Present(relative.to_string_lossy().into_owned()))
+}
+
+fn source_dirs(state: &ExpansionState) -> Result<(crate::dirs::DirVars, Option<usize>), String> {
+    let context = state
+        .native_context
+        .as_ref()
+        .expect("native context checked");
+    let path = "config/make.cfg.in";
+    let Some(expected) = context.native_configuration_inputs.get(path) else {
+        return Ok((crate::dirs::DirVars::default(), None));
+    };
+    if state.files_read >= state.limits.files {
+        return Err("sealed directory configuration exceeds its file limit".into());
+    }
+    if prove_path(&state.root, Path::new(path))? {
+        return Err("sealed directory configuration is missing".into());
+    }
+    let absolute = state.root.join(path);
+    let (_, bytes) = aros_common::publication::measure_regular_file_bounded(
+        &absolute,
+        state.limits.bytes.saturating_sub(state.bytes_read) as u64,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "sealed directory configuration disappeared".to_owned())?;
+    if bytes.len() > state.limits.bytes.saturating_sub(state.bytes_read)
+        || aros_common::sha256_bytes(&bytes).as_str() != expected
+    {
+        return Err("sealed directory configuration bytes changed".into());
+    }
+    let measured = bytes.len();
+    Ok((
+        crate::dirs::DirVars::from_config_text(&aros_common::decode_source_bytes(bytes)),
+        Some(measured),
+    ))
 }
 
 fn inside_define(prefix: &str) -> bool {

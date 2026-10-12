@@ -457,6 +457,7 @@ fn inline_make_includes(
         bindings: bindings.clone(),
         templates: templates.clone(),
         native_context: selected.cloned(),
+        native_dirs: None,
         native_prefix: String::new(),
         option_directives: 0,
         options_scope_required: false,
@@ -471,6 +472,7 @@ fn inline_make_includes(
 }
 
 struct ExpansionState {
+    native_dirs: Option<crate::dirs::DirVars>,
     options_scope_required: bool,
     option_directives: usize,
     native_context: Option<crate::TargetContext>,
@@ -565,9 +567,8 @@ fn expand_text(
                     resolved_options = Some(path);
                 }
                 Err(problem) => {
-                    state.options_scope_required |=
-                        source_options::potential_options_path(include.path);
-                    output.issues.push(problem);
+                    state.options_scope_required |= problem.options_possible;
+                    output.issues.push(problem.issue);
                     output.fatal |= inside_fragment;
                     continue;
                 }
