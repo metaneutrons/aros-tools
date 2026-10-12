@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -15,6 +16,7 @@ struct Fixture {
     compiler: PathBuf,
     trace: PathBuf,
     source_file: PathBuf,
+    assembly_fixture_data: PathBuf,
     assembly: PathBuf,
     header: PathBuf,
 }
@@ -97,11 +99,14 @@ impl Fixture {
             "int assembly_header_fixture(void) { return 0; }\n",
         )
         .expect("write C input");
+        let assembly_fixture_data = source.join("assembly-output.s");
+        fs::write(&assembly_fixture_data, assembly_text).expect("write mock assembly output");
 
         let compiler = root.join("mock-cc");
         let trace = root.join("compiler-argv.txt");
         fs::write(&trace, "").expect("initialize compiler argv trace");
-        let compiler_script = mock_compiler_script(&trace, &build, assembly_text, require_markers);
+        let compiler_script =
+            mock_compiler_script(&trace, &build, &assembly_fixture_data, require_markers);
         fs::write(&compiler, compiler_script).expect("write mock compiler");
         let mut permissions = fs::metadata(&compiler)
             .expect("read mock compiler permissions")
@@ -118,6 +123,7 @@ impl Fixture {
             compiler,
             trace,
             source_file,
+            assembly_fixture_data,
             assembly,
             header,
         }
@@ -168,19 +174,18 @@ impl Fixture {
             .expect("build CMake target")
     }
 
-    fn change_compiler_output(&self, contents: &str) {
-        let compiler_script = mock_compiler_script(&self.trace, &self.build, contents, false);
-        fs::write(&self.compiler, compiler_script).expect("change mock compiler output");
+    fn change_source_and_mock_assembly(&self, contents: &str) {
+        fs::write(&self.assembly_fixture_data, contents).expect("change mock assembly output");
         fs::write(
             &self.source_file,
             "int assembly_header_fixture(void) { return 1; }\n",
         )
         .expect("modify C source");
         let modified = SystemTime::now() + Duration::from_secs(10);
-        fs::File::open(&self.compiler)
-            .expect("open updated mock compiler")
+        fs::File::open(&self.assembly_fixture_data)
+            .expect("open updated mock assembly output")
             .set_times(fs::FileTimes::new().set_modified(modified))
-            .expect("advance compiler timestamp");
+            .expect("advance mock assembly output timestamp");
         fs::File::open(&self.source_file)
             .expect("open updated C source")
             .set_times(fs::FileTimes::new().set_modified(modified))
@@ -257,7 +262,7 @@ fn project_body(
 fn mock_compiler_script(
     trace: &Path,
     build: &Path,
-    assembly_text: &str,
+    assembly_fixture_data: &Path,
     require_markers: bool,
 ) -> String {
     let marker_check = if require_markers {
@@ -273,6 +278,7 @@ fn mock_compiler_script(
         "#!/bin/sh\n\
          set -eu\n\
          trace={}\n\
+         assembly_fixture_data={}\n\
          for argument do printf '%s\\n' \"$argument\" >> \"$trace\"; done\n\
          {}\
          depfile=\n\
@@ -293,11 +299,11 @@ fn mock_compiler_script(
          test -n \"$source\"\n\
          test -n \"$output\"\n\
          mkdir -p \"$(dirname \"$output\")\"\n\
-         printf '%s' {} > \"$output\"\n\
+         cat \"$assembly_fixture_data\" > \"$output\"\n\
          printf '%s: %s\\n' \"$target\" \"$source\" > \"$depfile\"\n",
         shell_quote(&trace.to_string_lossy()),
+        shell_quote(&assembly_fixture_data.to_string_lossy()),
         marker_check,
-        shell_quote(assembly_text)
     )
 }
 
@@ -567,7 +573,7 @@ fn stale_header_does_not_hide_empty_extraction_and_is_preserved_on_failure() {
     );
     assert_eq!(fs::read_to_string(&fixture.header).unwrap(), "initial\n");
 
-    fixture.change_compiler_output(".asciz \"not-selected$\"\n");
+    fixture.change_source_and_mock_assembly(".asciz \"not-selected$\"\n");
     let failed_build = fixture.build_target("cpu-owner");
     let text = output_text(&failed_build);
     assert!(
@@ -580,6 +586,52 @@ fn stale_header_does_not_hide_empty_extraction_and_is_preserved_on_failure() {
         "unexpected build error:\n{text}"
     );
     assert_eq!(fs::read_to_string(&fixture.header).unwrap(), "initial\n");
+}
+
+#[test]
+fn assembly_header_rejects_compiler_bytes_changed_after_configure() {
+    let fixture = Fixture::new(".ascii \"protected$\"\n", false);
+    let declaration = render_declaration(HeaderRequest::for_fixture(
+        &fixture,
+        "cpu-owner",
+        "aggregate-owner",
+    ));
+    let body = project_body(&declaration, false, false, false);
+    let configure = fixture.configure(&body, "GNU");
+    assert!(configure.status.success(), "{}", output_text(&configure));
+
+    let first_build = fixture.build_target("cpu-owner");
+    assert!(
+        first_build.status.success(),
+        "{}",
+        output_text(&first_build)
+    );
+    let original_header = fs::read(&fixture.header).expect("read generated header");
+
+    let mut compiler = fs::OpenOptions::new()
+        .append(true)
+        .open(&fixture.compiler)
+        .expect("open compiler for byte-change probe");
+    compiler
+        .write_all(b"\n")
+        .expect("change mock compiler bytes");
+    drop(compiler);
+    fs::File::open(&fixture.compiler)
+        .expect("open changed mock compiler")
+        .set_times(fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(10)))
+        .expect("advance changed compiler timestamp");
+
+    let failed_build = fixture.build_target("cpu-owner");
+    let text = output_text(&failed_build);
+    assert!(
+        !failed_build.status.success(),
+        "changed compiler bytes were accepted:\n{text}"
+    );
+    assert!(
+        text.contains("compiler driver bytes changed"),
+        "unexpected build error:\n{text}"
+    );
+    assert_eq!(fs::read(&fixture.header).unwrap(), original_header);
 }
 
 #[test]
@@ -602,7 +654,7 @@ fn changed_c_source_reruns_assembly_and_header_generation() {
     let original_invocation = fs::read_to_string(&fixture.trace).expect("read initial argv");
     assert_eq!(fs::read_to_string(&fixture.header).unwrap(), "before\n");
 
-    fixture.change_compiler_output(".ascii \"after$\"\n");
+    fixture.change_source_and_mock_assembly(".ascii \"after$\"\n");
     let second_build = fixture.build_target("cpu-owner");
     assert!(
         second_build.status.success(),

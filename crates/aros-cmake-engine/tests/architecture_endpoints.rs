@@ -54,15 +54,39 @@ impl Fixture {
     }
 
     fn configure(&self) -> Output {
-        Command::new("cmake")
+        self.configure_with_args(&[])
+    }
+
+    fn configure_with_clang(&self) -> Output {
+        let clang = Command::new("clang")
+            .arg("--version")
+            .output()
+            .expect("find Clang for architecture client linklib fixture");
+        assert!(
+            clang.status.success(),
+            "Clang is unavailable for architecture client linklib fixture:\n{}",
+            output_text(&clang)
+        );
+        self.configure_with_args(&[
+            "-DCMAKE_C_COMPILER=clang",
+            "-DCMAKE_SYSTEM_NAME=Linux",
+            "-DCMAKE_SYSTEM_PROCESSOR=x86_64",
+            "-DCMAKE_C_COMPILER_TARGET=x86_64-unknown-elf",
+            "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
+        ])
+    }
+
+    fn configure_with_args(&self, cmake_args: &[&str]) -> Output {
+        let mut command = Command::new("cmake");
+        command
             .arg("-S")
             .arg(&self.source)
             .arg("-B")
             .arg(&self.build)
             .arg("-G")
-            .arg("Ninja")
-            .output()
-            .expect("run CMake configure")
+            .arg("Ninja");
+        command.args(cmake_args);
+        command.output().expect("run CMake configure")
     }
 
     fn build(&self, target: &str) -> Output {
@@ -346,7 +370,7 @@ add_dependencies(owner-linklib arch-owner-linklib)
 add_dependencies(owner-linklib-rel arch-owner-linklib)
 "#;
     let fixture = Fixture::new(body);
-    let configured = fixture.configure();
+    let configured = fixture.configure_with_clang();
     assert!(
         configured.status.success(),
         "CMake configure failed:\n{}",
