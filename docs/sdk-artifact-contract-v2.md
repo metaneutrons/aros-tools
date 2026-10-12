@@ -145,6 +145,16 @@ physical source locations even after local fragments are inserted. Incomplete
 native scopes do not fall back to legacy values; unsupported staging roots
 remain errors. This scope projection does not qualify a complete SDK graph.
 
+Standalone source `%rule_compile_multi` projection additionally binds the
+verified template/helper closure and `mkdep` script, a physical phony aggregate
+with the complete ordered object list, and one exact dependency include list.
+The namespace is not an aggregate owner. Compile and dependency arguments stay
+independent, including source `SAFETY_CFLAGS` and `mkdep` filtering semantics.
+Each source must match the first file in the template's ordered `vpath` search.
+Unproven adjacent macro/environment effects and multi-batch/multi-owner forms
+remain refused. The public `.d` and both private tracking contexts are not
+additional SDK archive members or SDK qualification evidence.
+
 Source boolean `compiler_red_zone`, `compiler_pic` and `compiler_pie` facts
 select the corresponding enabled or disabled driver switches for both SDK
 generation and all four application links. An absent fact adds no switch.

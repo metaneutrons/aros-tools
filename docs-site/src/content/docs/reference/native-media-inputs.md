@@ -143,10 +143,17 @@ validated SDK ABI options separately from those source arguments. A conflicting
 target, ABI or Developer sysroot is rejected; arbitrary `CMAKE_<LANG>_FLAGS`
 are not imported.
 
-The engine can generate a separate source-declared `.d` file with its own
-ordered arguments. It names the associated object and does not replace that
-object's private Ninja depfile. This primitive alone does not admit a
-`%rule_compile_multi` owner; its complete source contract must still be proved.
+Standalone C `%rule_compile_multi` calls require verified GenMF templates and
+`mkdep`, bound compiler roles, one physical phony owner with the complete object
+list, and its exact `%include_deps` list. The `mmake` argument is a variable
+namespace, not an owner. Source lookup follows the template's ordered `vpath`
+search; shadowing sources, Make exports and unproven adjacent macros are rejected.
+Multi-batch and multi-owner forms remain unsupported, as do host/kernel compiler
+selection and custom source-tree layouts.
+
+The source `.d` file retains its separate dependency flags and names its object.
+A private Ninja tracker regenerates it when its headers change; the object's
+private depfile combines both contexts. This does not qualify a complete SDK.
 
 Archive, HIDD-compile and layered-header projections may appear in the graph
 audit before their full producer contracts are implemented. These partial
