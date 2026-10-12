@@ -11,3 +11,6 @@
 *.zip binary
 *.xz binary
 *.gz binary
+
+# This hash-verified upstream input intentionally preserves its final blank line.
+crates/aros-transpiler/tests/fixtures/compile-multi-contract/config/make.tail whitespace=-blank-at-eof
