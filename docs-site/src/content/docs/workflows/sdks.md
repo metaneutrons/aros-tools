@@ -119,6 +119,14 @@ for all selectors and the [producer workflow](/aros-tools/workflows/toolchain-pr
 for preparation. `--evidence-dir` retains the portable local checks alongside
 the generation record; neither output authorizes publication.
 
+`aros sdk verify-generation` reads an existing generation record, compiler
+package, SDK package and complete portable compatibility evidence. The release
+input collection selects the product and compiler; a separate digest-bound
+selection supplies the expected bytes and local paths. This command never
+rebuilds the SDK or reopens paths recorded on the original build host. It checks
+byte consistency, not the identity of the CI job that produced the files.
+An authenticated release pipeline must establish that origin separately.
+
 The source-owned CMake contract selects the generated SDK path and link
 probes. `AROS_SDK_INCLUDE_DIR` is a source-build output, not an installed-SDK
 selector. A completed local build still needs the authenticated shared

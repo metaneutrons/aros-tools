@@ -26,6 +26,8 @@ pub enum SdkCommand {
     Package(PackageArgs),
     /// Verify a complete local SDK package against explicit identity and digests
     VerifyPackage(VerifyArgs),
+    /// Read back a source-selected SDK generation and its complete link evidence
+    VerifyGeneration(Box<crate::sdk_generation_readback::VerifyGenerationArgs>),
     /// Write deterministic SPDX metadata for a verified SDK into a separate stage
     Sbom(SbomArgs),
     /// Verify and extract one SDK into an absent directory; not managed installation
@@ -56,6 +58,7 @@ impl SdkCommand {
             Self::Build(_) => "sdk.build",
             Self::Package(_) => "sdk.package",
             Self::VerifyPackage(_) => "sdk.verify-package",
+            Self::VerifyGeneration(_) => "sdk.verify-generation",
             Self::Sbom(_) => "sdk.sbom",
             Self::Extract(_) => "sdk.extract",
             Self::Download(_) => "sdk.download",
@@ -214,6 +217,7 @@ pub async fn run(command: SdkCommand) -> Result<()> {
     match command {
         SdkCommand::VerifySource(args) => verify_source(&args),
         SdkCommand::Build(args) => build(*args).await,
+        SdkCommand::VerifyGeneration(args) => crate::sdk_generation_readback::run(&args),
         SdkCommand::Download(args) => crate::sdk_managed::download(args).await,
         SdkCommand::Install(args) => crate::sdk_managed::install(args).await,
         SdkCommand::List(args) => crate::sdk_managed::list(args),

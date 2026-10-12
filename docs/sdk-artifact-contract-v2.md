@@ -23,6 +23,9 @@ including initialized submodule material. It is not a digest of an arbitrary
 checkout or of the generated SDK payload.
 
 The caller must select the identity document and its raw SHA-256 independently.
+For readback of an existing generation rather than package bytes alone, see
+the [SDK generation CLI boundary](sdk-generation-readback-cli-v1.md). Its
+byte-consistency result still requires separate authenticated job provenance.
 Packaging does not derive a version from the installed compiler or manufacture
 a released source identity from an uncommitted tree. `aros-tools` builds and
 manages SDKs; `aros-toolchains` distributes SDK and compiler artifacts together
