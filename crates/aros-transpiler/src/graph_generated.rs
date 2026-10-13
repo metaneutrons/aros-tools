@@ -79,6 +79,29 @@ impl DependencyGraph {
         for decl in pending {
             let mut declared_outputs = vec![decl.output.clone()];
             declared_outputs.extend(decl.additional_outputs.iter().cloned());
+            let aggregate_indices: Vec<_> = self
+                .script_output_aggregates
+                .iter()
+                .enumerate()
+                .filter(|(_, aggregate)| {
+                    Path::new(&aggregate.file)
+                        .parent()
+                        .is_some_and(|directory| {
+                            directory.to_string_lossy().replace('\\', "/") == decl.directory
+                        })
+                        && aggregate.outputs.iter().any(|output| {
+                            declared_outputs.iter().any(|candidate| {
+                                crate::script_output_aggregates::canonical_output(candidate)
+                                    == *output
+                            })
+                        })
+                })
+                .map(|(index, _)| index)
+                .collect();
+            let aggregate_names: Vec<_> = aggregate_indices
+                .iter()
+                .map(|index| self.script_output_aggregates[*index].owner.clone())
+                .collect();
             let wanted: Vec<String> = declared_outputs
                 .iter()
                 .map(|output| normalise(output))
@@ -131,6 +154,12 @@ impl DependencyGraph {
                             wanted.iter().any(|output| normalise(dependency) == *output)
                         })
                     })
+                    .filter(|(name, _)| {
+                        !self
+                            .script_output_aggregates
+                            .iter()
+                            .any(|aggregate| &aggregate.owner == *name)
+                    })
                     .map(|(name, _)| name.clone()),
             );
             consumers.extend(
@@ -141,7 +170,10 @@ impl DependencyGraph {
             );
             consumers.sort();
             consumers.dedup();
-            if consumers.is_empty() && decl.consumer_targets.is_empty() {
+            if consumers.is_empty()
+                && decl.consumer_targets.is_empty()
+                && aggregate_names.is_empty()
+            {
                 // GNU Make may carry generator recipes for several upstream
                 // versions in one mmakefile. A rule whose output is absent
                 // from both the selected source inventory and every aggregate
@@ -156,11 +188,25 @@ impl DependencyGraph {
                 .chars()
                 .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
                 .collect::<String>();
-            let Some(owner_prefix) = consumers.first().or_else(|| decl.consumer_targets.first())
+            let Some(owner_prefix) = consumers
+                .first()
+                .or_else(|| decl.consumer_targets.first())
+                .or_else(|| aggregate_names.first())
             else {
                 continue;
             };
-            let owner = format!("{owner_prefix}-{output_stem}-generated");
+            // Basenames (and their sanitized spelling) are not identities:
+            // two generators in different subdirectories can both emit unit.c.
+            // Bind the internal target name to the exact canonical output path.
+            let output_identity = aros_common::sha256_bytes(
+                crate::script_output_aggregates::canonical_output(&decl.output).as_bytes(),
+            );
+            let owner = format!("{owner_prefix}-{output_stem}-{output_identity}-generated");
+            for index in aggregate_indices {
+                self.script_output_aggregates[index]
+                    .generators
+                    .push(owner.clone());
+            }
             for consumer in &decl.consumer_targets {
                 if !self.targets.contains_key(consumer) {
                     self.meta_targets
@@ -216,6 +262,34 @@ impl DependencyGraph {
                 dependency_targets: dependency_targets.into_iter().collect(),
                 consumers,
             });
+        }
+        for aggregate in &mut self.script_output_aggregates {
+            aggregate.generators.sort();
+            aggregate.generators.dedup();
+            if !aggregate.outputs.iter().all(|output| {
+                self.script_outputs.iter().any(|generator| {
+                    aggregate.generators.contains(&generator.owner)
+                        && generator.outputs.iter().any(|candidate| {
+                            crate::script_output_aggregates::canonical_output(candidate) == *output
+                        })
+                })
+            }) {
+                aggregate.generators.clear();
+            }
+            if !aggregate.generators.is_empty() {
+                let dependencies = self
+                    .meta_targets
+                    .entry(aggregate.owner.clone())
+                    .or_default();
+                dependencies.retain(|dependency| {
+                    !aggregate
+                        .outputs
+                        .contains(&crate::script_output_aggregates::canonical_output(
+                            dependency,
+                        ))
+                });
+                dependencies.extend(aggregate.generators.iter().cloned());
+            }
         }
         reports
     }
@@ -447,6 +521,10 @@ impl DependencyGraph {
                     .filter(|decl| decl.mainmmake == mainmmake && decl.tag == lane)
                     .map(|decl| ArchSourceDecl {
                         tag: puller.clone(),
+                        // A MetaMake lane attachment aliases module object
+                        // sources, not the separate client-linklib endpoint.
+                        // Do not invent a `<puller>-linklib` source owner.
+                        linklib_files: Vec::new(),
                         ..decl.clone()
                     })
                     .collect();
@@ -549,7 +627,7 @@ impl DependencyGraph {
                     // says must not have it, and after lane attachment two lanes
                     // with different flags share one tag.
                     for opt in &d.compile_options {
-                        for file in &d.files {
+                        for file in d.files.iter().chain(&d.linklib_files) {
                             let e = (d.tag.clone(), d.dir.clone(), file.clone(), opt.clone());
                             if !target.arch_source_options.contains(&e) {
                                 target.arch_source_options.push(e);

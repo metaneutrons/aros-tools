@@ -13,8 +13,8 @@ to ship together in `aros-toolchains` releases. SDKs are target/ABI-specific,
 not host-specific. This distribution model does not mean an SDK is already
 published; check [release status](/aros-tools/reference/release-status/).
 
-See [SDK management](/aros-tools/reference/cli/#developer-sdk-artifacts-and-management)
-for the explicit release/project lock requirements. Matching hashes and
+See [build and manage SDKs](/aros-tools/workflows/sdks/)
+for installation, project selection and the explicit lock requirements. Matching hashes and
 successful links do not prove binary compatibility with a Vanilla AROS runtime.
 
 ## Prepare matching inputs

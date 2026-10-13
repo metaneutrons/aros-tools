@@ -46,6 +46,7 @@ mod repo;
 mod sdk;
 #[cfg(unix)]
 mod sdk_acquisition;
+mod sdk_generation_readback;
 mod sdk_managed;
 mod source;
 mod toolchain;

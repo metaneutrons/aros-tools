@@ -59,7 +59,82 @@ impl Fixture {
         Self::new_for_compiler_family(host, true)
     }
 
+    /// Build a test-only finished candidate around the same executable GNU
+    /// payload consumed by a compatibility fixture. The exact selected input
+    /// documents are parsed before the candidate receipt chain is written.
+    pub(super) fn new_gnu_for_host_with_payload(
+        host: &'static str,
+        recipe_bytes: &[u8],
+        source_lock_bytes: &[u8],
+        profiles_bytes: &[u8],
+        profile_name: &str,
+        payload_root: &Path,
+    ) -> Self {
+        Self::new_for_compiler_family_with_inputs(
+            host,
+            true,
+            recipe_bytes,
+            source_lock_bytes,
+            profiles_bytes,
+            profile_name,
+            Some(payload_root),
+        )
+    }
+
+    /// Build a test-only finished LLVM candidate around the same executable
+    /// payload consumed by a compatibility fixture. The exact selected input
+    /// documents are parsed before the candidate receipt chain is written.
+    pub(super) fn new_llvm_for_host_with_payload(
+        host: &'static str,
+        recipe_bytes: &[u8],
+        source_lock_bytes: &[u8],
+        profiles_bytes: &[u8],
+        profile_name: &str,
+        payload_root: &Path,
+    ) -> Self {
+        Self::new_for_compiler_family_with_inputs(
+            host,
+            false,
+            recipe_bytes,
+            source_lock_bytes,
+            profiles_bytes,
+            profile_name,
+            Some(payload_root),
+        )
+    }
+
     fn new_for_compiler_family(host: &'static str, gnu: bool) -> Self {
+        let source_lock_bytes = if gnu {
+            fixture_gnu_source_lock()
+        } else {
+            fixture_source_lock()
+        };
+        let profiles_bytes = if gnu {
+            fixture_gnu_profiles()
+        } else {
+            fixture_profiles()
+        };
+        let recipe_bytes = fixture_recipe(&source_lock_bytes, &profiles_bytes);
+        Self::new_for_compiler_family_with_inputs(
+            host,
+            gnu,
+            &recipe_bytes,
+            &source_lock_bytes,
+            &profiles_bytes,
+            if gnu { "rv32-aros" } else { "pc-x86_64" },
+            None,
+        )
+    }
+
+    fn new_for_compiler_family_with_inputs(
+        host: &'static str,
+        gnu: bool,
+        recipe_bytes: &[u8],
+        source_lock_bytes: &[u8],
+        profiles_bytes: &[u8],
+        profile_name: &str,
+        payload_root: Option<&Path>,
+    ) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let work = create_canonical_dir(&temporary.path().join("work"));
         let output = create_canonical_dir(&temporary.path().join("output"));
@@ -71,21 +146,11 @@ impl Fixture {
         fs::create_dir(&receipts).unwrap();
         fs::create_dir(&stage).unwrap();
 
-        let source_lock_bytes = if gnu {
-            fixture_gnu_source_lock()
-        } else {
-            fixture_source_lock()
-        };
-        let profiles_bytes = if gnu {
-            fixture_gnu_profiles()
-        } else {
-            fixture_profiles()
-        };
-        let recipe = Recipe::parse(&fixture_recipe(&source_lock_bytes, &profiles_bytes)).unwrap();
-        let source_lock = SourceLock::parse(&source_lock_bytes).unwrap();
-        let profile = Profiles::parse(&profiles_bytes)
+        let recipe = Recipe::parse(recipe_bytes).unwrap();
+        let source_lock = SourceLock::parse(source_lock_bytes).unwrap();
+        let profile = Profiles::parse(profiles_bytes)
             .unwrap()
-            .select(if gnu { "rv32-aros" } else { "pc-x86_64" })
+            .select(profile_name)
             .unwrap()
             .clone();
         let (compiler_checkpoint_receipt_path, compiler_checkpoint_bytes) = if gnu {
@@ -103,12 +168,30 @@ impl Fixture {
         let compiler_checkpoint = stage.join(&compiler_checkpoint_receipt_path);
         fs::create_dir_all(compiler_checkpoint.parent().unwrap()).unwrap();
         fs::write(&compiler_checkpoint, compiler_checkpoint_bytes).unwrap();
-        if gnu {
+        if let Some(payload_root) = payload_root {
+            let snapshot = aros_common::measure_tree_content_cas(payload_root).unwrap();
+            // `copy_tree_from_snapshot_nofollow` copies into an existing empty
+            // staging directory; the ordinary candidate writers create this
+            // root as part of their setup.
+            create_canonical_dir(&candidate);
+            copy_tree_from_snapshot_nofollow(
+                payload_root,
+                &candidate,
+                &snapshot,
+                super::payload_limits(),
+            )
+            .unwrap();
+            if gnu {
+                add_native_gnu_collector_outputs(&candidate, &source_lock, &profile);
+            } else {
+                add_native_llvm_collector_outputs(&candidate, &profile);
+            }
+        } else if gnu {
             write_gnu_candidate(&candidate, &source_lock, &profile);
         } else {
             write_candidate(&candidate);
         }
-        let tools_commit = git_id(TOOLS_COMMIT);
+        let tools_commit = recipe.tools().0.clone();
         let identity = Identity {
             recipe_sha256: recipe.sha256().clone(),
             source_commit: recipe.source().0.clone(),
@@ -570,10 +653,18 @@ fn assert_finished_v2_package(package: &FinishedCandidatePackage) {
 }
 
 pub(super) fn package_request(fixture: &Fixture, output_dir: PathBuf) -> PackageRequest {
+    package_request_for_release(fixture, output_dir, "finished-candidate-test")
+}
+
+pub(super) fn package_request_for_release(
+    fixture: &Fixture,
+    output_dir: PathBuf,
+    release_id: &str,
+) -> PackageRequest {
     PackageRequest {
         candidate_root: fixture.candidate(),
         output_dir,
-        release_id: "finished-candidate-test".into(),
+        release_id: release_id.into(),
         host: fixture.identity.host.into(),
         recipe: fixture.recipe.clone(),
         source_lock: fixture.source_lock.clone(),
@@ -681,6 +772,57 @@ fn write_gnu_candidate(candidate: &Path, source_lock: &SourceLock, profile: &Pro
         let path = candidate.join(&relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"synthetic GNU collector output; never execute\n").unwrap();
+    }
+}
+
+fn add_native_gnu_collector_outputs(candidate: &Path, source_lock: &SourceLock, profile: &Profile) {
+    let compiler = crate::package_identity::compiler_identity_for_format(
+        source_lock,
+        profile,
+        crate::package::PackageFormat::CompilerFamilyV2,
+    )
+    .unwrap();
+    for relative in [
+        "bin/fixture-c",
+        "bin/fixture-cxx",
+        "bin/fixture-ld",
+        "bin/fixture-ar",
+        "bin/fixture-ranlib",
+        "bin/fixture-strip",
+        "libexec/fixture-collect",
+    ] {
+        let path = candidate.join(relative);
+        if !path.exists() {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            write_file(candidate, relative, b"#!/bin/sh\nexit 0\n", 0o755);
+        }
+    }
+    for relative in crate::native_family::collector_outputs(profile) {
+        if relative == "toolchain-tools.json" {
+            continue;
+        }
+        let path = candidate.join(&relative);
+        if !path.exists() {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"synthetic collector output\n").unwrap();
+        }
+    }
+    // Keep the compiler identity in the shipped layout exactly bound to the
+    // selected source lock/profile; the compatibility fixture's v3 roles are
+    // retained so generation uses the same executable wrappers as packaging.
+    let layout_path = candidate.join(aros_common::toolchain_layout::TOOLCHAIN_TOOLS_FILE);
+    let mut layout: Value = serde_json::from_slice(&fs::read(&layout_path).unwrap()).unwrap();
+    layout["compiler"] = serde_json::to_value(compiler).unwrap();
+    fs::write(layout_path, serde_json::to_vec(&layout).unwrap()).unwrap();
+}
+
+fn add_native_llvm_collector_outputs(candidate: &Path, profile: &Profile) {
+    for relative in crate::native_family::collector_outputs(profile) {
+        let path = candidate.join(&relative);
+        if !path.exists() {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            write_file(candidate, &relative, b"#!/bin/sh\nexit 0\n", 0o755);
+        }
     }
 }
 

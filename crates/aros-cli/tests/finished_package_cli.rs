@@ -195,13 +195,23 @@ impl Fixture {
     }
 
     fn verify_package_command(&self) -> Command {
+        self.verify_package_command_with_options(Some("family-v2"), &[])
+    }
+
+    fn verify_package_command_with_options(
+        &self,
+        package_format: Option<&str>,
+        options: &[(&str, &str)],
+    ) -> Command {
         let mut command = self.producer_command("verify-package");
-        command.arg("--input-dir").arg(&self.package_dir).args([
-            "--package-format",
-            "family-v2",
-            "--format",
-            "json",
-        ]);
+        command.arg("--input-dir").arg(&self.package_dir);
+        if let Some(package_format) = package_format {
+            command.arg("--package-format").arg(package_format);
+        }
+        command.args(["--format", "json"]);
+        for (option, value) in options {
+            command.arg(option).arg(value);
+        }
         command
     }
 
@@ -410,6 +420,317 @@ fn rejects_finished_package_counterprobes_without_touching_source_inputs() {
             "{counterprobe} changed source receipts or candidate inputs"
         );
     }
+}
+
+#[test]
+fn portable_readback_verifies_the_retained_export_after_original_build_trees_are_removed() {
+    let fixture = Fixture::new();
+    let package_result = output_json(
+        &fixture
+            .package_command(&fixture.build_result_sha256, &fixture.work)
+            .output()
+            .unwrap(),
+    );
+    let portable_bytes = package_result["finished_candidate"]["portable_measurement"]
+        .as_str()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let selected_measurement_sha256 = sha256_bytes(&portable_bytes);
+    assert_eq!(
+        package_result["finished_candidate"]["portable_measurement_sha256"],
+        selected_measurement_sha256.as_str()
+    );
+    let manifest_path = PathBuf::from(package_result["manifest"].as_str().unwrap());
+    let package_manifest: Value =
+        serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    let measurement_path = fixture.root.join("portable-measurement.json");
+    fs::write(&measurement_path, &portable_bytes).unwrap();
+
+    // The portable reader receives the exact owner export and independently
+    // selected synthetic executor digests. It must not need the owner's live
+    // candidate, work/output roots, or standalone build-result file.
+    fs::remove_dir_all(&fixture.work).unwrap();
+    fs::remove_dir_all(&fixture.output).unwrap();
+    fs::remove_file(&fixture.build_result_path).unwrap();
+    assert!(!fixture.candidate.exists());
+    assert!(!fixture.work.exists());
+    assert!(!fixture.output.exists());
+    assert!(!fixture.build_result_path.exists());
+
+    let contract_sha256 = sha256_bytes(b"synthetic producer contract");
+    let binary_sha256 = sha256_bytes(b"synthetic frontend observation");
+    let before = inventory(&fixture.root);
+    let output = fixture
+        .verify_package_command_with_options(
+            Some("family-v2"),
+            &[
+                ("--package-measurement", measurement_path.to_str().unwrap()),
+                (
+                    "--package-measurement-sha256",
+                    selected_measurement_sha256.as_str(),
+                ),
+                ("--executor-contract-sha256", contract_sha256.as_str()),
+                ("--executor-binary-sha256", binary_sha256.as_str()),
+            ],
+        )
+        .output()
+        .unwrap();
+    let verified = output_json(&output);
+    assert_eq!(verified["operation"], "verify-package");
+    assert_eq!(verified["sha256"], package_result["sha256"]);
+
+    let proof = &verified["finished_candidate"];
+    assert_eq!(proof.as_object().unwrap().len(), 7);
+    assert_eq!(
+        proof["schema"],
+        "aros-toolchain-portable-package-readback-v2"
+    );
+    assert_eq!(proof["assurance"], "portable-byte-readback-only");
+    assert_eq!(
+        proof["measurement_sha256"],
+        selected_measurement_sha256.as_str()
+    );
+    assert_eq!(
+        proof["build_result_sha256"],
+        fixture.build_result_sha256.as_str()
+    );
+    assert_eq!(
+        proof["package_tree_sha256"],
+        package_manifest["tree_sha256"]
+    );
+    assert_eq!(
+        proof["finished_receipt_sha256"],
+        fixture.candidate_receipt_sha256.as_str()
+    );
+    assert_eq!(
+        proof["raw_payload_sha256"],
+        fixture.candidate_payload_sha256.as_str()
+    );
+    assert!(proof.get("execution_authenticated").is_none());
+    assert!(proof.get("release_qualified").is_none());
+    assert_eq!(inventory(&fixture.root), before);
+}
+
+#[test]
+fn rejects_portable_readback_counterprobes_without_mutating_inputs() {
+    let fixture = Fixture::new();
+    let package_result = output_json(
+        &fixture
+            .package_command(&fixture.build_result_sha256, &fixture.work)
+            .output()
+            .unwrap(),
+    );
+    let valid_bytes = package_result["finished_candidate"]["portable_measurement"]
+        .as_str()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let measurement_path = fixture.root.join("portable-measurement.json");
+    fs::write(&measurement_path, &valid_bytes).unwrap();
+    let selected_measurement_sha256 = sha256_bytes(&valid_bytes);
+    let contract_sha256 = sha256_bytes(b"synthetic producer contract");
+    let binary_sha256 = sha256_bytes(b"synthetic frontend observation");
+    let wrong_contract_sha256 = sha256_bytes(b"different synthetic contract");
+    let wrong_binary_sha256 = sha256_bytes(b"different synthetic frontend");
+
+    let stale_result = mutate_transport(&valid_bytes, |measurement| {
+        let result_text = measurement["documents"][7]["content"].as_str().unwrap();
+        let mut result: Value = serde_json::from_str(result_text).unwrap();
+        result["identity"]["executor"]["binary_sha256"] = json!(wrong_binary_sha256.as_str());
+        let mut bytes = serde_json::to_vec_pretty(&result).unwrap();
+        bytes.push(b'\n');
+        measurement["documents"][7]["content"] = json!(String::from_utf8(bytes).unwrap());
+    });
+    let stale_receipt = mutate_transport(&valid_bytes, |measurement| {
+        let receipt_text = measurement["documents"][0]["content"].as_str().unwrap();
+        let mut receipt: Value = serde_json::from_str(receipt_text).unwrap();
+        receipt["input_sha256"] = json!(sha256_bytes(b"stale native phase receipt").as_str());
+        measurement["documents"][0]["content"] =
+            json!(String::from_utf8(serde_json::to_vec(&receipt).unwrap()).unwrap());
+    });
+    let unknown_field = mutate_transport(&valid_bytes, |measurement| {
+        measurement["unknown_future_field"] = json!(true);
+    });
+
+    let cases = [
+        (
+            "wrong raw measurement digest",
+            valid_bytes.as_slice(),
+            sha256_bytes(b"different selected raw bytes"),
+            contract_sha256.clone(),
+            binary_sha256.clone(),
+            Some("portable package measurement differs from selected raw bytes"),
+        ),
+        (
+            "wrong executor contract selection",
+            valid_bytes.as_slice(),
+            selected_measurement_sha256.clone(),
+            wrong_contract_sha256,
+            binary_sha256.clone(),
+            Some("portable package build result differs from selected executor or lane"),
+        ),
+        (
+            "wrong executor binary selection",
+            valid_bytes.as_slice(),
+            selected_measurement_sha256.clone(),
+            contract_sha256.clone(),
+            wrong_binary_sha256,
+            Some("portable package build result differs from selected executor or lane"),
+        ),
+        (
+            "stale build result with remeasured export",
+            stale_result.as_slice(),
+            sha256_bytes(&stale_result),
+            contract_sha256.clone(),
+            binary_sha256.clone(),
+            Some("portable package build result differs from selected executor or lane"),
+        ),
+        (
+            "stale receipt with remeasured export",
+            stale_receipt.as_slice(),
+            sha256_bytes(&stale_receipt),
+            contract_sha256.clone(),
+            binary_sha256.clone(),
+            None,
+        ),
+        (
+            "unknown field with remeasured export",
+            unknown_field.as_slice(),
+            sha256_bytes(&unknown_field),
+            contract_sha256.clone(),
+            binary_sha256.clone(),
+            Some("portable package measurement violates its closed schema"),
+        ),
+    ];
+
+    for (label, bytes, measurement_sha256, contract, binary, message) in cases {
+        fs::write(&measurement_path, bytes).unwrap();
+        let before = inventory(&fixture.root);
+        let output = fixture
+            .verify_package_command_with_options(
+                Some("family-v2"),
+                &[
+                    ("--package-measurement", measurement_path.to_str().unwrap()),
+                    ("--package-measurement-sha256", measurement_sha256.as_str()),
+                    ("--executor-contract-sha256", contract.as_str()),
+                    ("--executor-binary-sha256", binary.as_str()),
+                ],
+            )
+            .output()
+            .unwrap();
+        assert_cli_diagnostic_failure(&output, message, label);
+        assert_eq!(inventory(&fixture.root), before, "{label} mutated inputs");
+    }
+
+    let archive = PathBuf::from(package_result["archive"].as_str().unwrap());
+    let mut archive_bytes = fs::read(&archive).unwrap();
+    archive_bytes.push(b'!');
+    fs::write(&archive, archive_bytes).unwrap();
+    fs::write(&measurement_path, &valid_bytes).unwrap();
+    let before = inventory(&fixture.root);
+    let output = fixture
+        .verify_package_command_with_options(
+            Some("family-v2"),
+            &[
+                ("--package-measurement", measurement_path.to_str().unwrap()),
+                (
+                    "--package-measurement-sha256",
+                    selected_measurement_sha256.as_str(),
+                ),
+                ("--executor-contract-sha256", contract_sha256.as_str()),
+                ("--executor-binary-sha256", binary_sha256.as_str()),
+            ],
+        )
+        .output()
+        .unwrap();
+    assert_cli_diagnostic_failure(&output, None, "changed package bytes");
+    assert_eq!(
+        inventory(&fixture.root),
+        before,
+        "changed package input was mutated"
+    );
+}
+
+#[test]
+fn portable_readback_flags_are_all_required_and_family_v2_only() {
+    let fixture = Fixture::new();
+    let measurement = fixture.root.join("not-opened.json");
+    let digest = sha256_bytes(b"synthetic measurement");
+    let contract = sha256_bytes(b"synthetic contract");
+    let binary = sha256_bytes(b"synthetic binary");
+
+    let incomplete_sets = [
+        (
+            "missing executor binary digest",
+            Some("family-v2"),
+            vec![
+                ("--package-measurement", measurement.to_str().unwrap()),
+                ("--package-measurement-sha256", digest.as_str()),
+                ("--executor-contract-sha256", contract.as_str()),
+            ],
+        ),
+        (
+            "missing explicit package format",
+            None,
+            vec![
+                ("--package-measurement", measurement.to_str().unwrap()),
+                ("--package-measurement-sha256", digest.as_str()),
+                ("--executor-contract-sha256", contract.as_str()),
+                ("--executor-binary-sha256", binary.as_str()),
+            ],
+        ),
+    ];
+    for (label, format, options) in incomplete_sets {
+        let before = inventory(&fixture.root);
+        let output = fixture
+            .verify_package_command_with_options(format, &options)
+            .output()
+            .unwrap();
+        assert_cli_parse_failure(&output, label);
+        assert_eq!(inventory(&fixture.root), before, "{label} mutated inputs");
+    }
+
+    let package_result = output_json(
+        &fixture
+            .package_command(&fixture.build_result_sha256, &fixture.work)
+            .output()
+            .unwrap(),
+    );
+    let portable_bytes = package_result["finished_candidate"]["portable_measurement"]
+        .as_str()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let measurement_path = fixture.root.join("portable-measurement.json");
+    fs::write(&measurement_path, &portable_bytes).unwrap();
+    let selected_measurement_sha256 = sha256_bytes(&portable_bytes);
+    let contract_sha256 = contract_sha256_fixture();
+    let binary_sha256 = binary_sha256_fixture();
+    let options = [
+        ("--package-measurement", measurement_path.to_str().unwrap()),
+        (
+            "--package-measurement-sha256",
+            selected_measurement_sha256.as_str(),
+        ),
+        ("--executor-contract-sha256", contract_sha256.as_str()),
+        ("--executor-binary-sha256", binary_sha256.as_str()),
+    ];
+    let before = inventory(&fixture.root);
+    let output = fixture
+        .verify_package_command_with_options(Some("legacy-v1"), &options)
+        .output()
+        .unwrap();
+    assert_cli_diagnostic_failure(
+        &output,
+        Some("portable original-build readback requires --package-format family-v2"),
+        "legacy package format",
+    );
+    assert_eq!(
+        inventory(&fixture.root),
+        before,
+        "wrong format mutated inputs"
+    );
 }
 
 fn fixture_source_lock() -> Vec<u8> {
@@ -632,6 +953,51 @@ fn assert_failure(output: &Output, code: &str, expected_message: &str) {
             .contains(expected_message),
         "unexpected diagnostic: {diagnostic}"
     );
+}
+
+fn assert_cli_diagnostic_failure(output: &Output, expected_message: Option<&str>, label: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{label}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty(), "{label} wrote success output");
+    let diagnostic: Value = serde_json::from_slice(&output.stderr)
+        .unwrap_or_else(|error| panic!("{label}: invalid structured diagnostic: {error}"));
+    assert_eq!(diagnostic["schema"], "aros-tool-diagnostics-v1", "{label}");
+    let diagnostics = diagnostic["diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 1, "{label}");
+    let message = diagnostics[0]["message"].as_str().unwrap();
+    if let Some(expected_message) = expected_message {
+        assert!(
+            message.contains(expected_message),
+            "{label}: expected {expected_message:?}, got {message:?}"
+        );
+    }
+}
+
+fn assert_cli_parse_failure(output: &Output, label: &str) {
+    assert_ne!(output.status.code(), Some(0), "{label} was accepted");
+    assert!(output.stdout.is_empty(), "{label} wrote success output");
+    assert!(
+        !output.stderr.is_empty(),
+        "{label} did not explain the rejected argument set"
+    );
+}
+
+fn mutate_transport(bytes: &[u8], mutate: impl FnOnce(&mut Value)) -> Vec<u8> {
+    let mut document: Value = serde_json::from_slice(bytes).unwrap();
+    mutate(&mut document);
+    serde_json::to_vec(&document).unwrap()
+}
+
+fn contract_sha256_fixture() -> Sha256Digest {
+    sha256_bytes(b"synthetic producer contract")
+}
+
+fn binary_sha256_fixture() -> Sha256Digest {
+    sha256_bytes(b"synthetic frontend observation")
 }
 
 type Inventory = Vec<(PathBuf, u32, &'static str, Vec<u8>)>;

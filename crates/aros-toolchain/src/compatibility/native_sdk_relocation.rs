@@ -22,10 +22,12 @@ const SDK_TREE_LIMITS: TreeTraversalLimits = TreeTraversalLimits {
 const MAX_INVENTORY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INVENTORY_DEPTH: usize = 128;
 
-/// A fresh byte-for-byte copy of one canonical native SDK tree.
+/// A validated pair of byte-for-byte matching canonical native SDK trees.
 ///
 /// The inventories include every entry, including an embedded
-/// `toolchain-manifest.json`; this is ordinary input to this operation.
+/// `toolchain-manifest.json`; this is ordinary input to this operation. The
+/// `prepare` constructor creates the relocated tree, while `readback` adopts
+/// two existing trees only after independently measuring their equality.
 pub(super) struct RelocatedSdk {
     pub(super) original: PathBuf,
     pub(super) relocated: PathBuf,
@@ -114,6 +116,92 @@ impl RelocatedSdk {
             || root_identity(&relocated)? != relocated_root
         {
             return Err(failure("native SDK root changed during relocation"));
+        }
+
+        Ok(Self {
+            original,
+            relocated,
+            inventory_sha256,
+            inventory: source_inventory,
+            original_snapshot,
+            relocated_snapshot,
+            original_root,
+            relocated_root,
+        })
+    }
+
+    /// Read back two existing, canonical SDK trees without changing either.
+    ///
+    /// Both roots must already be real directories with canonical absolute
+    /// spellings. Their complete bounded inventories, content digests, file
+    /// and root modes, and relative-link targets must match. A final snapshot
+    /// check rejects changes observed during inspection. No root is copied,
+    /// created, repaired, or removed.
+    pub(super) fn readback(original: &Path, relocated: &Path) -> Result<Self, ContractError> {
+        let original_arg = original;
+        let original = checked_real_root(original, "native SDK source")?;
+        if original.as_os_str() != original_arg.as_os_str() {
+            return Err(failure("native SDK source root is not canonically named"));
+        }
+        let relocated_arg = relocated;
+        let relocated = checked_real_root(relocated, "native SDK relocation")?;
+        if relocated.as_os_str() != relocated_arg.as_os_str() {
+            return Err(failure(
+                "native SDK relocation root is not canonically named",
+            ));
+        }
+        if roots_overlap(&original, &relocated) {
+            return Err(failure(
+                "native SDK source and relocation roots must be distinct and non-overlapping",
+            ));
+        }
+
+        let original_root = root_identity(&original)?;
+        let relocated_root = root_identity(&relocated)?;
+        if original_root.device == relocated_root.device
+            && original_root.inode == relocated_root.inode
+        {
+            return Err(failure(
+                "native SDK source and relocation roots refer to the same directory",
+            ));
+        }
+        if original_root.mode != relocated_root.mode {
+            return Err(failure("native SDK root modes differ"));
+        }
+
+        let original_snapshot = measure(&original, "native SDK source")?;
+        let relocated_snapshot = measure(&relocated, "native SDK relocation")?;
+        if original_snapshot.payload_digest_excluding(None)
+            != relocated_snapshot.payload_digest_excluding(None)
+        {
+            return Err(failure(
+                "native SDK source and relocation differ in bytes or modes",
+            ));
+        }
+
+        let (inventory_sha256, source_inventory) = inventory(&original, "native SDK source")?;
+        let (relocated_inventory_sha256, relocated_inventory) =
+            inventory(&relocated, "native SDK relocation")?;
+        validate_relative_symlinks(&original, &source_inventory)?;
+        validate_relative_symlinks(&relocated, &relocated_inventory)?;
+        if relocated_inventory_sha256 != inventory_sha256 || relocated_inventory != source_inventory
+        {
+            return Err(failure(
+                "native SDK relocation inventory differs from its source",
+            ));
+        }
+
+        if measure(&original, "native SDK source")? != original_snapshot
+            || measure(&relocated, "native SDK relocation")? != relocated_snapshot
+        {
+            return Err(failure(
+                "native SDK changed while its retained inventory was checked",
+            ));
+        }
+        if root_identity(&original)? != original_root
+            || root_identity(&relocated)? != relocated_root
+        {
+            return Err(failure("native SDK root changed during retained readback"));
         }
 
         Ok(Self {
@@ -412,6 +500,11 @@ fn collect_inventory(
                 target: None,
             }
         } else if metadata.is_file() {
+            if metadata.nlink() != 1 {
+                return Err(failure(format!(
+                    "{label} inventory contains a hard-linked regular file"
+                )));
+            }
             let remaining_bytes = SDK_TREE_LIMITS
                 .max_regular_file_bytes
                 .saturating_sub(budget.regular_file_bytes);
@@ -422,6 +515,7 @@ fn collect_inventory(
                 .map_err(|_| failure(format!("cannot recheck {label} inventory file")))?;
             if !after.is_file()
                 || after.file_type().is_symlink()
+                || after.nlink() != 1
                 || identity.device() != after.dev()
                 || identity.inode() != after.ino()
                 || measured.size != after.len()
@@ -576,6 +670,97 @@ mod tests {
     fn write_file(path: &Path, contents: &[u8], mode: u32) {
         fs::write(path, contents).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn matching_pair() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let (temporary, original, destination) = fixture();
+        write_file(&original.join("tool"), b"sdk bytes", 0o755);
+        write_file(&original.join("target"), b"link target", 0o644);
+        symlink("tool", original.join("current")).unwrap();
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o750)).unwrap();
+        RelocatedSdk::prepare(&original, &destination).unwrap();
+        (temporary, original, destination)
+    }
+
+    #[test]
+    fn reads_back_existing_sdk_trees_without_writing_them() {
+        let (_temporary, original, destination) = matching_pair();
+        let original_before = measure(&original, "test source").unwrap();
+        let relocated_before = measure(&destination, "test relocation").unwrap();
+        let original_root_before = root_identity(&original).unwrap();
+        let relocated_root_before = root_identity(&destination).unwrap();
+
+        let proof = RelocatedSdk::readback(&original, &destination).unwrap();
+
+        assert_eq!(proof.original, original);
+        assert_eq!(proof.relocated, destination);
+        assert_eq!(proof.original_snapshot, original_before);
+        assert_eq!(proof.relocated_snapshot, relocated_before);
+        assert_eq!(root_identity(&original).unwrap(), original_root_before);
+        assert_eq!(root_identity(&destination).unwrap(), relocated_root_before);
+        assert_eq!(measure(&original, "test source").unwrap(), original_before);
+        assert_eq!(
+            measure(&destination, "test relocation").unwrap(),
+            relocated_before
+        );
+        proof.revalidate().unwrap();
+    }
+
+    #[test]
+    fn readback_rejects_divergent_bytes_file_modes_and_symlinks() {
+        {
+            let (_temporary, original, destination) = matching_pair();
+            write_file(&destination.join("tool"), b"different bytes", 0o755);
+            assert!(RelocatedSdk::readback(&original, &destination).is_err());
+        }
+        {
+            let (_temporary, original, destination) = matching_pair();
+            fs::set_permissions(destination.join("tool"), fs::Permissions::from_mode(0o700))
+                .unwrap();
+            assert!(RelocatedSdk::readback(&original, &destination).is_err());
+        }
+        {
+            let (_temporary, original, destination) = matching_pair();
+            fs::remove_file(destination.join("current")).unwrap();
+            symlink("target", destination.join("current")).unwrap();
+            assert!(RelocatedSdk::readback(&original, &destination).is_err());
+        }
+        {
+            let (_temporary, original, destination) = matching_pair();
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(RelocatedSdk::readback(&original, &destination).is_err());
+        }
+    }
+
+    #[test]
+    fn readback_rejects_hardlinks_root_aliases_and_missing_roots() {
+        {
+            let (_temporary, original, destination) = matching_pair();
+            fs::hard_link(original.join("tool"), original.join("tool-alias")).unwrap();
+            fs::hard_link(destination.join("tool"), destination.join("tool-alias")).unwrap();
+            assert!(RelocatedSdk::readback(&original, &destination).is_err());
+        }
+        {
+            let (temporary, original, destination) = matching_pair();
+            assert!(RelocatedSdk::readback(&original, &original).is_err());
+            let alias = temporary.path().join("sdk-alias");
+            symlink(&destination, &alias).unwrap();
+            assert!(RelocatedSdk::readback(&original, &alias).is_err());
+        }
+        {
+            let (_temporary, original, destination) = fixture();
+            write_file(&original.join("tool"), b"sdk bytes", 0o755);
+            assert!(RelocatedSdk::readback(&original, &destination).is_err());
+            assert!(!destination.exists());
+        }
+    }
+
+    #[test]
+    fn readback_revalidation_rejects_later_tree_tampering() {
+        let (_temporary, original, destination) = matching_pair();
+        let proof = RelocatedSdk::readback(&original, &destination).unwrap();
+        write_file(&destination.join("tool"), b"tampered", 0o755);
+        assert!(proof.revalidate().is_err());
     }
 
     #[test]

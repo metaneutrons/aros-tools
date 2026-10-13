@@ -31,6 +31,11 @@ use std::fs;
 use std::process::Command;
 
 #[test]
+fn literal_objects_bind_independent_source_dependencies_and_incremental_headers() {
+    run_embedded_kobj_contract_test("LiteralDependencyBindingsTest.cmake");
+}
+
+#[test]
 fn mesa26_runtime_publication_respects_verified_sdk_consumer_authority() {
     let directory = tempfile::tempdir().expect("Mesa26 runtime authority fixture");
     let engine = directory.path().join("engine");
@@ -833,6 +838,11 @@ fn source_declared_sdk_objects_compile_stage_and_refuse_unsafe_outputs() {
 }
 
 #[test]
+fn explicit_sdk_companion_objects_preserve_abi_and_refuse_primary_fallback() {
+    run_embedded_kobj_contract_test("SdkCompanionObjectsTest.cmake");
+}
+
+#[test]
 fn runtime_header_namespace_precedence_is_verified_by_real_compiles() {
     let directory = tempfile::tempdir().expect("runtime header namespace fixture");
     let engine = directory.path().join("engine");
@@ -854,6 +864,16 @@ fn runtime_header_namespace_precedence_is_verified_by_real_compiles() {
 #[test]
 fn literal_objects_preserve_command_order_and_refuse_unsafe_outputs() {
     run_embedded_kobj_contract_test("LiteralObjectsTest.cmake");
+}
+
+#[test]
+fn literal_objects_preserve_selected_cross_compiler_roles() {
+    run_embedded_kobj_contract_test("LiteralCompilerRoleTest.cmake");
+}
+
+#[test]
+fn literal_dependency_files_preserve_separate_argv_and_atomic_outputs() {
+    run_embedded_kobj_contract_test("LiteralDependencyFilesTest.cmake");
 }
 
 #[test]

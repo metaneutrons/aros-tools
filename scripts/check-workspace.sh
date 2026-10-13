@@ -148,6 +148,16 @@ run_quality() {
 # If CI keeps failing on those two after this, the containment is wrong and
 # should be reverted rather than widened.
 run_lock_binaries_serially() {
+    # Run the SDK matrix's process-boundary probes against this checkout's CLI,
+    # never an installed release or a binary left by an earlier test run.
+    cargo build --locked -p aros-cli --all-features --bin aros
+    local sdk_cli_target_root=${CARGO_TARGET_DIR:-"$repository_root/target"}
+    if [[ "$sdk_cli_target_root" != /* ]]; then
+        sdk_cli_target_root="$repository_root/$sdk_cli_target_root"
+    fi
+    local -x AROS_TEST_SDK_MATRIX_CLI
+    AROS_TEST_SDK_MATRIX_CLI="$(cd -- "$sdk_cli_target_root/debug" && pwd -P)/aros"
+    [[ -f "$AROS_TEST_SDK_MATRIX_CLI" && -x "$AROS_TEST_SDK_MATRIX_CLI" ]]
     cargo test --locked -p aros-common --all-features --lib -- --test-threads=1
     cargo test --locked -p aros-toolchain --all-features --lib -- --test-threads=1
     cargo test --locked -p aros-cli --all-features --bin aros -- --test-threads=1

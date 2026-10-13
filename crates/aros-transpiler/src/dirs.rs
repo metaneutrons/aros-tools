@@ -158,6 +158,8 @@ const SEEDS: &[(&str, &str)] = &[
 /// Directory variables resolved to CMake expressions.
 #[derive(Default)]
 pub struct DirVars {
+    /// Explicit SDK companion roles from the independently validated source contract.
+    sdk_companion_roles: Vec<aros_common::SdkCompanionRole>,
     resolved: HashMap<String, String>,
     /// Make-flavoured source values: recursive assignments retain their text,
     /// while simple assignments capture the expansion available at that line.
@@ -199,6 +201,21 @@ pub struct DirVars {
 }
 
 impl DirVars {
+    /// Bind source-declared companion ABIs; absence never infers a 32-bit role.
+    pub fn bind_sdk_companion_roles(&mut self, roles: &[aros_common::SdkCompanionRole]) {
+        self.sdk_companion_roles = roles.to_vec();
+        if let [role] = roles {
+            let value = role.compiler_options.join(" ");
+            self.resolved
+                .insert("NATIVE_TARGET_32_CFLAGS".into(), value.clone());
+            self.source_proven_resolved
+                .insert("NATIVE_TARGET_32_CFLAGS".into(), value);
+        }
+    }
+
+    pub(crate) fn sdk_companion_roles(&self) -> &[aros_common::SdkCompanionRole] {
+        &self.sdk_companion_roles
+    }
     /// Makes admitted target-tool roles available to an explicitly bound
     /// native Make configuration. These are not ambient Make defaults and
     /// must never be enabled for an ordinary unqualified tree export.
@@ -242,6 +259,7 @@ impl DirVars {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect::<HashMap<_, _>>();
         let mut me = Self {
+            sdk_companion_roles: Vec::new(),
             resolved: seeds.clone(),
             source_proven_resolved: seeds,
             unproven_variables: BTreeSet::new(),
@@ -1627,6 +1645,7 @@ mod tests {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect::<std::collections::HashMap<_, _>>();
         let mut d = DirVars {
+            sdk_companion_roles: Vec::new(),
             resolved: resolved.clone(),
             source_proven_resolved: resolved,
             unproven_variables: std::collections::BTreeSet::new(),

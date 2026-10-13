@@ -112,6 +112,7 @@ fn fixture_with_wrappers(
         output: OBJECT_OUTPUT.into(),
         language: "C".into(),
         arguments: Vec::new(),
+        dependency: None,
         line: 8,
     };
     let compile_group = SourceCompileGroupDecl {

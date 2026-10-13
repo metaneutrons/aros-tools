@@ -1613,9 +1613,9 @@ fn sdk_selected_release_rejects_fully_covered_compiler_only_qualification() {
         )
         .unwrap_err();
     assert!(
-        error.to_string().contains(
-            "SDK-selected release requires complete authenticated SDK qualification, not compiler-only lanes"
-        ),
+        error
+            .to_string()
+            .contains("SDK qualification claims lack exact input-derived tuple coverage"),
         "the complete compiler matrix must fail specifically at the SDK qualification gate: {error}"
     );
 }

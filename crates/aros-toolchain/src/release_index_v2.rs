@@ -529,8 +529,9 @@ pub(crate) fn expected_inventory_for_assets<'a>(
     Ok(exact_names)
 }
 
-// SDK byte measurement is distinct from authenticated execution. Qualification
-// remains compiler-only until the SDK generation/job-origin join exists.
+// Non-Unix builds cannot acquire SDK package bytes through the Unix verifier.
+// Reject those inputs rather than treating declarations as package evidence.
+#[cfg(not(unix))]
 pub(crate) fn require_compiler_only_inputs(inputs: &ReleaseInputs) -> Result<(), ContractError> {
     if !inputs.sdks().is_empty() {
         return Err(index_error(

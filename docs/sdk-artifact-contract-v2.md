@@ -23,6 +23,9 @@ including initialized submodule material. It is not a digest of an arbitrary
 checkout or of the generated SDK payload.
 
 The caller must select the identity document and its raw SHA-256 independently.
+For readback of an existing generation rather than package bytes alone, see
+the [SDK generation CLI boundary](sdk-generation-readback-cli-v1.md). Its
+byte-consistency result still requires separate authenticated job provenance.
 Packaging does not derive a version from the installed compiler or manufacture
 a released source identity from an uncommitted tree. `aros-tools` builds and
 manages SDKs; `aros-toolchains` distributes SDK and compiler artifacts together
@@ -81,18 +84,181 @@ authenticated CI evidence or release admission.
 
 The owned CMake engine admits the generic response only for LLVM. Execution
 requires explicit source `flavour` and `platform_smp` facts in addition to CPU,
-pointer width and MMU selection. After compiler detection it checks both Clang
-driver target triples, pointer width and the selected ARM float ABI flags. A
+pointer width and MMU selection. Before compiler ABI detection, language-rule
+hooks apply the sealed `compiler_arch` or `compiler_cpu`, `compiler_fpu`,
+`compiler_code_model` and
+ARM `float_abi` options to C, C++ and Assembly. Unrelated environment and
+initial flags remain intact; explicit flags are not reconstructed. Repeated
+configuration must not duplicate selected options. After compiler detection
+it checks all three driver targets, pointer width and selected options. A
 target/sysroot override, conflicting configuration flag or changed binding
 fails without publishing a current consumer binding. The source-derived
 Developer include root is shared by bootstrap and target producers.
+Generic SDK compiler flags cannot use response files, Clang frontend/backend
+forwarding or external driver configuration files. These opaque inputs could
+change source-selected options. Registration rejects caller environment,
+general and configuration flags before `project()` can invoke compiler-ID
+probes. Language hooks recheck toolchain/platform initialization flags before
+ABI detection. Harmless direct environment and initialization options remain
+preserved.
 
 These graph and configured-compiler checks are not native SDK generation or
 ordinary application-link qualification. GNU/RV32 execution still uses its
 existing native-consumer-v2 contract; a generic GNU descriptor is not admitted
 by the LLVM CMake adapter.
-`aros sdk build` explicitly rejects this generic schema before compatibility
-preparation until the family-specific link and evidence adapters are implemented.
+The additive `compatibility::inspect_llvm_sdk_drivers` API measures both
+payload-owned Clang drivers and queries their exact selected version and AROS
+triple. A bounded compiler-tree snapshot includes executable bytes and aliases;
+revalidation rejects subsequent changes. It neither authenticates the package
+nor proves the scalar ABI facts, SDK completeness or ordinary application links.
+The caller must independently verify its selected compiler package.
+The production LLVM CMake toolchain accepts both legacy schema-1 manifests
+and family-v2 schema-2 manifests. Schema 2 requires the closed LLVM compiler
+descriptor; mixed schema fields, a different compiler family, and runtime
+archives from a different declared LLVM version are rejected. Schema 1 retains
+its existing numeric version grammar. This admission check does not replace
+package verification, authenticated CI evidence or release qualification.
+The additive `compatibility::plan_llvm_sdk_application_links` API binds four
+ordinary driver commands to that measured compiler, the sealed source probes,
+and equal, disjoint original/relocated SDK trees. It performs no build, link,
+copy or filesystem write. Commands preserve startup and standard-library
+defaults; additional library arguments are bounded names from the sealed
+contract, not arbitrary compiler or linker options.
+
+This planner requires explicit unsigned `pointer_width` (32 or 64),
+`elf_machine` (1–65535), `elf_flags_mask` and `elf_flags_value` (32-bit values,
+with no value bit outside the mask) in the source target's ABI map. Its ELF
+check uses those facts, AROS OSABI/ABI-version marking and the collector symbol;
+there is no CPU-to-machine table. Optional `float_abi` selects exactly one
+driver flag. Optional `compiler_arch`, `compiler_cpu`, `compiler_fpu` and
+`compiler_code_model` text facts select `-march`, `-mcpu`, `-mfpu` and
+`-mcmodel`; each is a bounded ASCII token, not a
+board name inferred by the tools. Architecture and CPU selections are explicit
+alternatives: declaring both is rejected rather than depending on flag order.
+The SDK build and all original/relocated application commands must use those
+same source-owned selections. ARM selections require an explicit float ABI.
+No code model is inferred from the architecture or board. An absent fact adds
+no option; a declared model is applied once and conflicting or per-configuration
+overrides fail before a consumer binding is published.
+
+Physical SDK compile/stage aggregates consume explicitly bound native Make
+configuration. Included configuration can supply values but cannot own rules
+or compile macros. Successful declarations and refusal diagnostics retain
+physical source locations even after local fragments are inserted. Incomplete
+native scopes do not fall back to legacy values; unsupported staging roots
+remain errors. This scope projection does not qualify a complete SDK graph.
+
+Standalone source `%rule_compile_multi` projection additionally binds the
+verified template/helper closure and `mkdep` script, a physical phony aggregate
+with the complete ordered object list, and one exact dependency include list.
+The namespace is not an aggregate owner. Compile and dependency arguments stay
+independent, including source `SAFETY_CFLAGS` and `mkdep` filtering semantics.
+Each source must match the first file in the template's ordered `vpath` search.
+Unproven adjacent macro/environment effects and multi-batch/multi-owner forms
+remain refused. The public `.d` and both private tracking contexts are not
+additional SDK archive members or SDK qualification evidence.
+
+Source boolean `compiler_red_zone`, `compiler_pic` and `compiler_pie` facts
+select the corresponding enabled or disabled driver switches for both SDK
+generation and all four application links. An absent fact adds no switch.
+Wrong types, duplicate/opposite general flags and configuration overrides fail;
+the engine never supplies these policies from a CPU or board name. This binds
+selected compiler arguments, not runtime behavior or complete ABI compatibility.
+
+ELF32 ARM selections additionally require explicit unsigned `arm_cpu_arch`,
+`arm_cpu_profile`, `arm_fp_arch`, `arm_simd_arch` and `arm_vfp_args` facts.
+Optional `arm_arm_isa` and `arm_thumb_isa` facts select further checks.
+These keys refer to standardized aeabi file-attribute tags, not a CPU capability
+table. The reader compares each selected value with the produced
+`.ARM.attributes` bytes, rejects ambiguous scopes and unknown mandatory tags,
+and uses standardized omitted-zero defaults only without `Tag_nodefaults`.
+Identical ELF flags cannot substitute for these measurements. ARM attribute
+facts are rejected for non-ARM selections, and the VFP argument convention must
+agree with the declared float ABI.
+
+These structural checks do not establish full ABI compatibility,
+C++ initialization, SDK completeness or which invocation produced an ELF.
+The additive `compatibility::execute_llvm_sdk_links` API executes that four-link
+selection through the shared supervised runner. It copies the complete SDK,
+uses a private temporary directory and a closed environment, and requires
+byte-identical original/relocated C and C++ outputs. Every traced input must
+resolve inside the SDK or authenticated compiler tree, except the direct
+short-lived Clang object derived from the sealed probe name. The trace is the
+used-input list; maps are bounded retained evidence checked for original-SDK
+leakage, not a second input-list parser.
+
+An opaque completed handle revalidates source, compiler, both SDK trees,
+commands, reports, logs, maps, outputs and the closed receipt without rerunning
+or repairing anything. Only exact empty lock sidecars from atomic publication
+are admitted; extra members fail. Cancelled, expired or failed execution cannot
+return a completed handle. Filesystem validation is not preemptible, so the
+elapsed-time budget is not a hard limit on filesystem I/O.
+
+Its `aros-llvm-sdk-link-receipt-v1` is local link evidence, not SDK generation,
+full ABI qualification, C++ execution or authenticated owning-job evidence.
+Synthetic positive and tampering tests do not qualify a real compiler. The
+generation owner must still connect these links to the generated SDK and an
+independently authenticated portable export.
+
+`compatibility::readback_llvm_sdk_links` reconstructs an existing local proof
+from independent source/compiler selections and the execution owner's expected
+receipt digest. It remeasures both SDK trees and derives the commands from the
+sealed probes; it never links applications again, copies an SDK, creates output
+or repairs evidence. Read-only source audits and compiler-tree remeasurement
+still run; the reader does not repeat driver queries. Missing, extra or altered
+receipt, inventory, report, log, map and ELF members fail; the prior in-memory
+completed handle is not required.
+
+`compatibility::bind_llvm_sdk_generated_root` validates the retained CMake
+consumer binding against the exact committed source and a fresh response from
+the measured transpiler. The source validator derives the SDK include/root path
+from sealed source configuration; Rust does not assume a conventional directory.
+The opaque result retains the exact binding bytes and complete SDK tree and
+rejects changed selection/content on readback. It does not prove that a build
+completed or that the SDK is complete.
+
+`compatibility::execute_llvm_sdk_build_links` runs the four ordinary links only
+against that source-selected build SDK, never a separately supplied candidate.
+`compatibility::readback_llvm_sdk_build_links` joins retained links to the same
+source/CMake selection and independently expected binding and receipt digests.
+Neither local reader is rootless portable evidence or remote-job authentication.
+Proof outputs must be outside the entire CMake build tree. One elapsed budget
+covers source binding, links and final helper revalidation; filesystem I/O and
+existing bounded Git/source audits are not preempted. Expiry prevents a
+successful result; it is not a hard return-time guarantee. The generation owner
+still needs independently authenticated portable job export before package
+admission.
+
+`compatibility::execute_native_compatibility` accepts an explicit verified
+generic LLVM SDK source selection for family-v2 packages. It requires the exact
+projected source, compiler target/profile and SDK epoch before creating outputs,
+including the source preset's explicit compiler-profile mapping. All execution
+outputs must be disjoint from both the committed and projected source trees.
+It configures from the source's selectors and scalar bootstrap ABI, builds only
+the declared SDK roots, then runs the six compatibility phases and four ordinary
+C/C++ links. Its local v6 receipt binds the complete SDK identity, source/CMake
+binding, link receipt and inventory digests. Legacy LLVM v2/v4 and GNU v3/v5
+receipts keep their original shape. The retained/portable owning-job adapter
+selects the generic SDK identity, source-validator response, sealed probes and
+measured compiler roles before execution. Its closed LLVM namespace retains
+22 files: the CMake binding, independently measured compiler inventory, link
+receipt, SDK inventory, four ELF outputs, four maps, two reports and eight logs.
+Rootless readback reconstructs the exact ordinary commands, resolves traced
+inputs against the selected inventories and checks byte-identical relocation
+without opening the original runner paths. The v6 aggregate joins the resulting
+proof to the independently selected SDK product/source/ABI identity.
+
+The SDK inventory is a claim about payload bytes, not proof of an SDK archive.
+The local receipt's full retained-tree digest cannot be reconstructed from this
+subset because the relocated SDK payload is not exported. Neither that field
+nor a matching hash authenticates the external job or admits a release. Owning
+origin, complete generated payload and package admission remain separate gates.
+Input-claim readers require an explicit generic LLVM SDK identity; the legacy
+GNU/no-SDK reader rejects such claims instead of silently dropping the policy.
+
+`aros sdk build` uses this generic schema only with a family-v2 LLVM compiler
+matching the sealed source profile. A native-consumer-v2 contract selects GNU;
+mixed source schemas and compiler families are rejected before preparation.
 
 The identity's epoch is explicit selection, not proof that generation consumed
 it. Source verification alone cannot qualify or publish an SDK.
@@ -103,8 +269,9 @@ it. Source verification alone cannot qualify or publish an SDK.
 selected native compatibility request and recipe-bound compiler profiles. It
 requires the exact projected source, preset, content digest and explicit SDK
 epoch before execution. The compiler package's source identity remains separate
-from the SDK source identity. A family-v2 GNU compiler and source-v2 ordinary
-SDK links are mandatory.
+from the SDK source identity. Native-consumer-v2 generation uses a family-v2 GNU
+compiler; generic SDK-consumer-v1 generation uses a family-v2 LLVM compiler.
+Both require ordinary original/relocated SDK application links.
 
 The adapter runs all six compatibility phases and four original/relocated
 ordinary C/C++ links, then reads back their complete retained evidence. It
@@ -112,8 +279,10 @@ derives the generated SDK root from the validated CMake source binding, never
 from a caller-supplied candidate path. An absent record outside the protected
 source and execution roots binds the SDK identity, source profile, generation
 environment, compatibility/link receipt digests and complete SDK inventory.
-The record uses `aros-sdk-generation-record-v1`; its schema version is independent
-of the SDK artifact version.
+GNU retains `aros-sdk-generation-record-v1`. LLVM uses the separate
+`aros-llvm-sdk-generation-record-v1` and additionally binds the source-derived
+CMake SDK binding digest. Record schema versions are independent of SDK product
+versions. Local generation and packaging do not qualify the release matrix.
 
 Only successful execution returns an opaque `CompletedSdkGeneration`.
 `package_generated` accepts that value, an absent output and forbidden prefixes;
@@ -128,8 +297,10 @@ This orchestration boundary has assurance
 source selection before preparing execution roots, derives the epoch from its
 identity, and runs generation and packaging in one process. It accepts no
 independent candidate or SDK tree digest. The current generation executor
-requires a family-v2 GNU compiler matching the source preset's compiler profile;
-unsupported families fail before preparation. The separate local CLI stages below
+requires a family-v2 compiler matching the source preset's compiler profile and
+family: GNU uses the native consumer contract, LLVM the generic SDK consumer
+contract. Unsupported or mismatched selections fail before preparation.
+The separate local CLI stages below
 retain their byte-consistency claims. Public producer integration, authenticated
 owning-job evidence, release index and full release qualification remain required;
 neither this record nor its self-hash grants publication rights.
@@ -146,6 +317,32 @@ generation record, package output and every selected input/execution root. Its
 `inputs.json` and `evidence/` are published together without clobbering existing
 outputs. Failure retains diagnostic roots and any completed local package;
 neither a portable export nor its digests authenticate an external owning job.
+
+### Downloaded generation readback
+
+The library `sdk_generation::readback_generation` checks one downloaded SDK
+generation closure without opening recorded source, compiler or runner roots.
+It requires an independently selected release-input collection, SDK ID,
+compiler group, raw generation-record digest, SDK package expectations and
+complete portable compatibility selection. The selected compiler group fixes
+the record schema; metadata cannot choose another family or source preset.
+
+The compiler manifest must match the selected group's compiler versions/ABI,
+recipe, source-lock and profile digests, source/producer/tools commits and epoch.
+Those expectations are derived from the release inputs, not the evidence itself.
+The closed canonical record must match the selected SDK identity, source
+projection/contract, compiler profile and environment expectation. Its payload
+tree and entry count must equal both the freshly verified SDK package and the
+four-link proof. Compatibility, SDK-link and LLVM binding digests must match
+the downloaded evidence. Package and compatibility bytes are observed again
+before returning measured results. The operation writes nothing.
+
+This is a byte-consistency join, not SDK generation execution. The current
+unreleased explicit family-v2 path requires the full input-derived generation
+matrix on the same compiler request; compiler-only evidence fails. Other
+compiler profiles/hosts and the final shared release inventory must also be
+covered. Owning-job and signature authentication and production qualification
+remain separate gates.
 
 ## Complete local package
 
@@ -261,10 +458,30 @@ construction and readback verify independently selected SDK packages, exact
 identity documents and deterministic SPDX. Final checksum/attestation stages
 include all selected SDK members; archive and manifest hashes/sizes must equal
 the indexed locks even if a checksum document is freshly regenerated.
-Qualification still rejects SDK-bearing releases until authenticated generation
-and owning-job evidence are joined. Compiler-only lanes cannot qualify a release
-which selects SDKs. A selected ABI descriptor or compiler profile is not proof
-of binary compatibility.
+The explicit family-v2 qualification path requires the complete input-derived
+generation matrix joined to the same complete compiler readback; compiler-only
+evidence fails. A selected ABI descriptor or compiler profile is not proof of
+binary compatibility.
+
+The release-evidence collector accepts an independent `sdk_packages` map with
+exact product-ID coverage and tree/archive digests plus archive sizes. It
+derives identities only from the selected release inputs and retains verified
+SDK locks/packages through its complete readback. Its JSON exposes those
+measurements without claiming authenticity or publication readiness.
+SDK-bearing inspections also require the exact `sdk_generations` tuple matrix
+and join its generation records and four-link evidence to these indexed packages.
+See the [release evidence selection contract](compiler-family-release-evidence-v2.md).
+
+On Unix, `sdk_generation_matrix::readback_sdk_generation_matrix` joins the
+complete indexed compiler A/B and compatibility closure to every SDK generation.
+Coverage comes from release inputs: each SDK/compiler-profile association on
+every active host. Each generation must reference its measured indexed compiler;
+all hosts must produce the same canonical indexed SDK package bytes. Records
+and compatibility receipts remain host-bound. Canonical, disjoint roots and
+repeated readbacks reject aliases and observed changes.
+
+The API reads existing bytes only; external owning-job authentication remains
+separate.
 
 `aros-sdk-lock-v2` selects an exact release tag, canonical credential-free
 HTTPS base URL, SDK identity, payload tree digest, archive SHA-256/size and

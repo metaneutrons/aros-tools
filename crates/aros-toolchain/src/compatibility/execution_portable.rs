@@ -29,6 +29,7 @@ use crate::ContractError;
 pub const PORTABLE_NATIVE_COMPATIBILITY_MANIFEST: &str = "compatibility-measurement.json";
 const SCHEMA: &str = "aros-toolchain-compatibility-measurement-v2";
 const SDK_SCHEMA: &str = "aros-toolchain-compatibility-measurement-v3";
+const LLVM_SDK_SCHEMA: &str = "aros-toolchain-compatibility-measurement-v4";
 const MAX_ELF_BYTES: usize = super::super::standalone::MAX_STANDALONE_ARTIFACT_BYTES as usize;
 
 /// Independently retained expectations for one compatibility lane.
@@ -52,6 +53,9 @@ pub struct NativeCompatibilityReceiptExpectations<'a> {
     /// Exact SDK requirement and probe/compiler/path identities measured from
     /// the selected source contract before any compatibility phase executes.
     pub native_sdk: Option<&'a crate::compatibility::NativeSdkLinkSelection>,
+    /// Generic LLVM SDK source/driver/path selection made before execution.
+    /// It must never be copied from an aggregate receipt being audited.
+    pub llvm_sdk: Option<&'a crate::compatibility::LlvmSdkLinkSelection>,
     /// Independently measured engine-free SDK consumer source tree.
     pub sdk_consumer_source_tree_sha256: &'a Sha256Digest,
     /// Selected tools engine API version.
@@ -82,6 +86,7 @@ impl NativeCompatibilityReceiptExpectations<'_> {
         logs: &BTreeMap<CompatibilityPhase, Vec<NativeCompatibilityCommandLogs>>,
         standalone: &StandaloneOutputReport,
         native_sdk: Option<&crate::compatibility::NativeSdkPortableProof>,
+        llvm_sdk: Option<&crate::compatibility::LlvmSdkPortableProof>,
     ) -> Result<NativeCompatibilityReceiptReadback, ContractError> {
         readback_native_compatibility_receipt(&NativeCompatibilityReceiptReadbackRequest {
             receipt_bytes: receipt,
@@ -94,6 +99,10 @@ impl NativeCompatibilityReceiptExpectations<'_> {
             cmake_build_required: self.cmake_build_required,
             native_sdk_required: self.native_sdk.is_some(),
             native_sdk,
+            llvm_sdk_identity: self
+                .llvm_sdk
+                .map(crate::compatibility::LlvmSdkLinkSelection::identity),
+            llvm_sdk,
             sdk_consumer_source_tree_sha256: self.sdk_consumer_source_tree_sha256,
             engine_api_version: self.engine_api_version,
             engine_sha256: self.engine_sha256,
@@ -162,6 +171,7 @@ pub struct PortableNativeCompatibilityReadback {
     readback: NativeCompatibilityReceiptReadback,
     standalone: StandaloneOutputReport,
     native_sdk: Option<crate::compatibility::NativeSdkPortableProof>,
+    llvm_sdk: Option<crate::compatibility::LlvmSdkPortableProof>,
 }
 
 impl PortableNativeCompatibilityReadback {
@@ -188,6 +198,12 @@ impl PortableNativeCompatibilityReadback {
     #[must_use]
     pub const fn native_sdk(&self) -> Option<&crate::compatibility::NativeSdkPortableProof> {
         self.native_sdk.as_ref()
+    }
+
+    /// Independently checked generic LLVM SDK links; not origin authentication.
+    #[must_use]
+    pub const fn llvm_sdk(&self) -> Option<&crate::compatibility::LlvmSdkPortableProof> {
+        self.llvm_sdk.as_ref()
     }
 }
 
@@ -251,7 +267,15 @@ pub(super) fn export_with_expectations(
     let standalone = verify_standalone_outputs_with_compilers(&shape.standalone, &shape.compilers)?;
     verify_snapshot_elf_identities(&files, &shape, &standalone)?;
     let native_sdk = readback_sdk_snapshot(&files, &expected)?;
-    let joined = readback_snapshot(&files, &shape, &expected, &standalone, native_sdk.as_ref())?;
+    let llvm_sdk = readback_llvm_sdk_snapshot(&files, &expected)?;
+    let joined = readback_snapshot(
+        &files,
+        &shape,
+        &expected,
+        &standalone,
+        native_sdk.as_ref(),
+        llvm_sdk.as_ref(),
+    )?;
     if local != joined || prepared.readback(request, profiles)? != joined {
         return Err(error(
             "retained compatibility changed during portable export",
@@ -345,12 +369,14 @@ pub fn readback_portable_native_compatibility(
     let standalone = verify_standalone_outputs_with_compilers(&shape.standalone, &shape.compilers)?;
     verify_snapshot_elf_identities(&files, &shape, &standalone)?;
     let native_sdk = readback_sdk_snapshot(&files, &request.expected)?;
+    let llvm_sdk = readback_llvm_sdk_snapshot(&files, &request.expected)?;
     let joined = readback_snapshot(
         &files,
         &shape,
         &request.expected,
         &standalone,
         native_sdk.as_ref(),
+        llvm_sdk.as_ref(),
     )?;
     validate_root(&request.directory)?;
     require_inventory(&request.directory, &expected_inventory)?;
@@ -378,11 +404,13 @@ pub fn readback_portable_native_compatibility(
         readback: joined,
         standalone,
         native_sdk,
+        llvm_sdk,
     })
 }
 
 struct Shape {
     members: BTreeMap<String, (PathBuf, usize)>,
+    selected_bytes: BTreeMap<String, Vec<u8>>,
     phases: BTreeMap<CompatibilityPhase, super::super::ProbeReportPaths>,
     standalone: StandaloneOutputRequest,
     compilers: BTreeMap<String, aros_common::ArosCompilerIdentity>,
@@ -413,6 +441,7 @@ impl Shape {
             .collect();
         let mut shape = Self {
             members: BTreeMap::new(),
+            selected_bytes: BTreeMap::new(),
             phases: BTreeMap::new(),
             standalone: StandaloneOutputRequest {
                 output_root: outputs.into(),
@@ -462,6 +491,38 @@ impl Shape {
                 }
             }
         }
+        if let Some(selection) = expected.llvm_sdk {
+            if expected.native_sdk.is_some() {
+                return Err(error(
+                    "portable compatibility mixes GNU and LLVM SDK selections",
+                ));
+            }
+            for (name, (relative, limit)) in
+                crate::compatibility::llvm_sdk_portable::expected_members()
+            {
+                let path = if reports == outputs {
+                    reports.join(&name)
+                } else if name == "llvm-sdk-aros-native-consumer-binding.json" {
+                    selection.binding_path()
+                } else if name == "llvm-sdk-compiler-inventory.json" {
+                    let bytes = selection.compiler_inventory_bytes();
+                    if bytes.is_empty() || bytes.len() > limit {
+                        return Err(error(
+                            "owning LLVM compiler inventory was not measured before execution",
+                        ));
+                    }
+                    shape.selected_bytes.insert(name.clone(), bytes.to_vec());
+                    // This path is never opened: these bytes were measured
+                    // before execution, not manufactured from the reports.
+                    reports.join(&name)
+                } else {
+                    reports.join("llvm-sdk-links").join(relative)
+                };
+                if shape.members.insert(name, (path, limit)).is_some() {
+                    return Err(error("LLVM SDK and compatibility filenames collide"));
+                }
+            }
+        }
         Ok(shape)
     }
 
@@ -486,7 +547,11 @@ fn acquire_members(
         .members
         .iter()
         .map(|(name, (path, limit))| {
-            let bytes = read_member(path, *limit, &mut identities)?;
+            let bytes = if let Some(bytes) = shape.selected_bytes.get(name) {
+                bytes.clone()
+            } else {
+                read_member(path, *limit, &mut identities)?
+            };
             if let Some(document) = document {
                 let identity = document
                     .files
@@ -515,7 +580,12 @@ fn verify_members_unchanged(
         let selected = files
             .get(name)
             .ok_or_else(|| error("portable compatibility snapshot is incomplete"))?;
-        if read_member(path, *limit, &mut identities)? != *selected {
+        let unchanged = if let Some(bytes) = shape.selected_bytes.get(name) {
+            bytes == selected
+        } else {
+            read_member(path, *limit, &mut identities)? == *selected
+        };
+        if !unchanged {
             return Err(error(
                 "portable compatibility evidence bytes changed during read-back",
             ));
@@ -530,6 +600,7 @@ fn readback_snapshot(
     expected: &NativeCompatibilityReceiptExpectations<'_>,
     standalone: &StandaloneOutputReport,
     native_sdk: Option<&crate::compatibility::NativeSdkPortableProof>,
+    llvm_sdk: Option<&crate::compatibility::LlvmSdkPortableProof>,
 ) -> Result<NativeCompatibilityReceiptReadback, ContractError> {
     let mut reports = BTreeMap::new();
     let mut logs = BTreeMap::new();
@@ -557,15 +628,74 @@ fn readback_snapshot(
         &logs,
         standalone,
         native_sdk,
+        llvm_sdk,
     )
 }
 
 const fn measurement_schema(expected: &NativeCompatibilityReceiptExpectations<'_>) -> &'static str {
-    if expected.native_sdk.is_some() {
+    if expected.llvm_sdk.is_some() {
+        LLVM_SDK_SCHEMA
+    } else if expected.native_sdk.is_some() {
         SDK_SCHEMA
     } else {
         SCHEMA
     }
+}
+
+fn readback_llvm_sdk_snapshot(
+    files: &BTreeMap<String, Vec<u8>>,
+    expected: &NativeCompatibilityReceiptExpectations<'_>,
+) -> Result<Option<crate::compatibility::LlvmSdkPortableProof>, ContractError> {
+    let Some(selection) = expected.llvm_sdk else {
+        return Ok(None);
+    };
+    if selection.identity().source.content_sha256 != *expected.sdk_consumer_source_tree_sha256
+        || selection.identity().target.target_triple != expected.profile.target_triple()
+        || selection.toolchain_profile() != expected.profile.name()
+        || selection.compiler() != expected.package.compiler
+    {
+        return Err(error(
+            "portable LLVM SDK selection differs from independent package/source inputs",
+        ));
+    }
+    let sdk_files = files
+        .iter()
+        .filter(|(name, _)| name.starts_with("llvm-sdk-"))
+        .map(|(name, bytes)| (name.clone(), bytes.as_slice()))
+        .collect();
+    crate::compatibility::llvm_sdk_portable::readback(
+        &sdk_files,
+        selection,
+        &crate::compatibility::llvm_sdk_portable::LlvmSdkPortableExpectations {
+            engine_api_version: expected.engine_api_version,
+            engine_sha256: expected.engine_sha256,
+            helpers: expected.helpers,
+        },
+    )
+    .map(Some)
+}
+
+pub(super) fn read_llvm_sdk_members(
+    request: &NativeCompatibilityRequest,
+    selection: &crate::compatibility::LlvmSdkLinkSelection,
+) -> Result<BTreeMap<String, Vec<u8>>, ContractError> {
+    let mut aliases = BTreeSet::new();
+    crate::compatibility::llvm_sdk_portable::expected_members()
+        .into_iter()
+        .map(|(name, (relative, limit))| {
+            let bytes = if name == "llvm-sdk-compiler-inventory.json" {
+                selection.compiler_inventory_bytes().to_vec()
+            } else {
+                let path = if name == "llvm-sdk-aros-native-consumer-binding.json" {
+                    selection.binding_path()
+                } else {
+                    request.reports_root.join("llvm-sdk-links").join(relative)
+                };
+                read_member(&path, limit, &mut aliases)?
+            };
+            Ok((name, bytes))
+        })
+        .collect()
 }
 
 fn readback_sdk_snapshot(

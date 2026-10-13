@@ -81,6 +81,12 @@ elseif(AROS_NATIVE_BUILD_CONTRACT_SHA256 OR AROS_NATIVE_CONSUMER_CONTRACT_SHA256
         "use a separate build tree for a different source contract")
 endif()
 
+# Register language-rule overrides after the source contract and identity are
+# locked, but before project() initializes any compiler. The override runs
+# after toolchain/platform *_FLAGS_INIT values are set and before CMake folds
+# those values together with CFLAGS/CXXFLAGS/ASMFLAGS into its cache.
+aros_register_sdk_consumer_compiler_option_overrides()
+
 project(AROS-NX
     VERSION 0.1.0
     LANGUAGES C CXX ASM
@@ -621,21 +627,47 @@ endif()
 
 # The GRUB2 host-tool lanes above produce the real BIOS and EFI generators,
 # but the historic ISO recipe's asset staging is a separate, output-producing
-# step. Materialise it only for its one audited x86_64-pc LLVM profile, and
-# only on the host capability that actually implements the closed GRUB
-# contract, after the generated declarations have created all three concrete
-# host-lane targets.
-if(AROS_TOOLCHAIN STREQUAL "llvm" AND
-   AROS_TARGET_CPU STREQUAL "x86_64" AND
-   AROS_TARGET_PLATFORM STREQUAL "pc" AND
-   AROS_GRUB2_HOST_LANES_AVAILABLE)
-    foreach(_aros_grub_host_lane IN ITEMS
-            grub2-host grub2-efi-host grub2-efi32-host)
-        if(NOT TARGET "${_aros_grub_host_lane}")
+# build/media step. A source-selected SDK consumer uses the same profile
+# selectors without owning that build graph, so do not infer build authority
+# from the board or host capability alone. Only a freshly revalidated generic
+# SDK consumer binding excludes this legacy fallback; ordinary builds retain
+# the fail-closed concrete-lane checks below.
+function(_aros_grub_iso_assets_fallback_required out_required)
+    set(_aros_sdk_consumer_selection FALSE)
+    if(AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED)
+        if(NOT COMMAND _aros_native_source_selection_validated)
             message(FATAL_ERROR
-                "GRUB2 ISO asset staging requires ${_aros_grub_host_lane}")
+                "GRUB2 ISO asset staging cannot verify the selected source contract")
         endif()
-    endforeach()
+        _aros_native_source_selection_validated(_aros_source_selected)
+        get_property(_aros_consumer_schema GLOBAL PROPERTY
+            AROS_NATIVE_CONSUMER_VALIDATED_SCHEMA)
+        if(_aros_source_selected AND
+           _aros_consumer_schema STREQUAL "aros-sdk-consumer-validation-v1")
+            set(_aros_sdk_consumer_selection TRUE)
+        endif()
+    endif()
+
+    set(_aros_required FALSE)
+    if(NOT _aros_sdk_consumer_selection AND
+       AROS_TOOLCHAIN STREQUAL "llvm" AND
+       AROS_TARGET_CPU STREQUAL "x86_64" AND
+       AROS_TARGET_PLATFORM STREQUAL "pc" AND
+       AROS_GRUB2_HOST_LANES_AVAILABLE)
+        foreach(_aros_grub_host_lane IN ITEMS
+                grub2-host grub2-efi-host grub2-efi32-host)
+            if(NOT TARGET "${_aros_grub_host_lane}")
+                message(FATAL_ERROR
+                    "GRUB2 ISO asset staging requires ${_aros_grub_host_lane}")
+            endif()
+        endforeach()
+        set(_aros_required TRUE)
+    endif()
+    set(${out_required} "${_aros_required}" PARENT_SCOPE)
+endfunction()
+
+_aros_grub_iso_assets_fallback_required(_aros_stage_legacy_grub_iso)
+if(_aros_stage_legacy_grub_iso)
     include("${AROS_CMAKE_ENGINE_DIR}/GrubIsoAssets.cmake")
     aros_stage_grub2_iso_assets(
         MODE x86_64

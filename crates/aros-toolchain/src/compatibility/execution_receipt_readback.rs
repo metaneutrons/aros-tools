@@ -95,7 +95,7 @@ pub struct NativeCompatibilityReceiptReadbackRequest<'a> {
     pub gnu_source_preset: Option<&'a str>,
     /// Whether the validated GNU source preset requires a CMake build command.
     /// Derive this from its source-native-consumer contract, not the reports.
-    /// LLVM must set this to false.
+    /// LLVM requires an independently selected generic SDK identity to use it.
     pub cmake_build_required: bool,
     /// Ordinary SDK links required by the independently selected consumer-v2
     /// source contract. Never infer this policy from the result receipt.
@@ -103,6 +103,10 @@ pub struct NativeCompatibilityReceiptReadbackRequest<'a> {
     /// Complete SDK bytes already independently joined to the selected source,
     /// compiler, binding, inventory, reports, logs and actual application ELFs.
     pub native_sdk: Option<&'a crate::compatibility::NativeSdkPortableProof>,
+    /// Complete generic LLVM SDK identity selected independently of reports.
+    pub llvm_sdk_identity: Option<&'a aros_common::sdk_manifest::SdkIdentity>,
+    /// Rootless four-link evidence independently checked against that selection.
+    pub llvm_sdk: Option<&'a crate::compatibility::LlvmSdkPortableProof>,
     /// Measured content-only CAS of the engine-free SDK consumer source tree.
     pub sdk_consumer_source_tree_sha256: &'a Sha256Digest,
     /// Embedded tools-owned CMake engine API version expected by every phase.
@@ -139,7 +143,8 @@ pub struct NativeCompatibilityReceiptReadback {
 /// Verify exact in-memory receipt, report, and retained-log bytes against
 /// independently supplied compiler-family expectations.
 ///
-/// Only GNU receipt v3 and LLVM family-v2 receipt v4 are admitted. All JSON
+/// GNU v3/v5 and LLVM family-v2 v4/v6 receipts are admitted only with the
+/// independently selected matching SDK policy and proof. All JSON
 /// documents must be canonical, closed metadata; reports and logs are bounded
 /// before hashing. The caller must bind the expected manifest, source/profile,
 /// engine/helper, ports, upstream, and standalone identities to the relevant
@@ -185,6 +190,9 @@ pub fn readback_native_compatibility_receipt(
             super::GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA
         }
         ArosCompilerIdentity::Gnu { .. } => super::GNU_COMPATIBILITY_RECEIPT_SCHEMA,
+        ArosCompilerIdentity::Llvm { .. } if request.llvm_sdk_identity.is_some() => {
+            super::LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+        }
         ArosCompilerIdentity::Llvm { .. } => super::LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA,
     };
     if document.schema != expected_schema || document.package.is_none() {
@@ -207,6 +215,25 @@ pub fn readback_native_compatibility_receipt(
         _ => {
             return Err(readback_error(
                 "native compatibility SDK evidence differs from its independently required complete proof",
+            ));
+        }
+    }
+    match (
+        document.llvm_sdk.as_ref(),
+        request.llvm_sdk_identity,
+        request.llvm_sdk,
+    ) {
+        (Some(claim), Some(identity), Some(proof))
+            if &claim.identity == identity
+                && proof.identity() == identity
+                && &claim.binding_sha256 == proof.binding_sha256()
+                && &claim.receipt_sha256 == proof.receipt_sha256()
+                && &claim.sdk_inventory_sha256 == proof.inventory_sha256()
+                && claim.sdk_entries == proof.entries() => {}
+        (None, None, None) => {}
+        _ => {
+            return Err(readback_error(
+                "LLVM compatibility SDK evidence differs from its independent identity or complete proof",
             ));
         }
     }
@@ -274,10 +301,27 @@ fn validate_expectations(
     }
     if matches!(request.package.compiler, ArosCompilerIdentity::Llvm { .. })
         && request.cmake_build_required
+        && request.llvm_sdk_identity.is_none()
     {
         return Err(readback_error(
             "LLVM compatibility cannot require the GNU source-native-consumer CMake build command",
         ));
+    }
+    if let Some(identity) = request.llvm_sdk_identity {
+        if identity.validate().is_err()
+            || !matches!(request.package.compiler, ArosCompilerIdentity::Llvm { .. })
+            || request.native_sdk_required
+            || request.native_sdk.is_some()
+            || !request.cmake_build_required
+            || identity.target.target_triple != request.profile.target_triple()
+            || identity.source.content_sha256 != *request.sdk_consumer_source_tree_sha256
+        {
+            return Err(readback_error(
+                "LLVM SDK identity requires a distinct source-bound LLVM consumer build",
+            ));
+        }
+    } else if request.llvm_sdk.is_some() {
+        return Err(readback_error("LLVM SDK proof has no independent identity"));
     }
     if request.native_sdk_required
         && (!request.cmake_build_required

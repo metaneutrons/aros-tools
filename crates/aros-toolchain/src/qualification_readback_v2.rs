@@ -7,12 +7,14 @@
 //! signature verification and observed Git tag identity remain external gates.
 
 use crate::native_candidate::{
-    readback_release_compatibility_v2, ReleaseCompatibilityReadbackRequestV2,
-    ReleaseCompatibilityReadbackV2,
+    ReleaseCompatibilityReadbackRequestV2, ReleaseCompatibilityReadbackV2,
 };
 use crate::qualification_evidence::{EvidenceCoverage, EvidencePolicy};
 use crate::qualification_evidence_v2::QualificationEvidenceV2;
 use crate::release_index_v2::NativeReleaseIndexV2;
+use crate::sdk_generation_matrix::{
+    IndexedSdkGenerationReadback, SdkGenerationMatrixReadbackRequest,
+};
 use crate::ContractError;
 
 /// Independently selected claim/index bytes and complete evidence selections.
@@ -28,6 +30,8 @@ pub struct QualificationByteReadbackRequestV2<'a, 'e> {
     pub index_bytes: &'a [u8],
     /// Complete input-derived A/B, comparison and compatibility byte closure.
     pub complete: &'a ReleaseCompatibilityReadbackRequestV2<'e>,
+    /// Complete SDK selections for SDK-bearing inputs; never an adopted proof.
+    pub sdk: Option<&'a SdkGenerationMatrixReadbackRequest<'a, 'e>>,
     /// Independently selected repository/workflow/signer and current epoch.
     pub policy: &'a EvidencePolicy,
 }
@@ -41,6 +45,7 @@ pub struct QualificationByteReadbackRequestV2<'a, 'e> {
 pub struct QualificationByteReadbackV2 {
     evidence: QualificationEvidenceV2,
     complete: ReleaseCompatibilityReadbackV2,
+    sdk_generations: Vec<IndexedSdkGenerationReadback>,
 }
 
 impl QualificationByteReadbackV2 {
@@ -56,10 +61,21 @@ impl QualificationByteReadbackV2 {
         &self.complete
     }
 
-    /// Consume the claim join and retain only its non-authenticating byte proof.
+    /// Complete SDK byte joins retained by qualification and recovery readback.
     #[must_use]
-    pub fn into_complete(self) -> ReleaseCompatibilityReadbackV2 {
-        self.complete
+    pub fn sdk_generations(&self) -> &[IndexedSdkGenerationReadback] {
+        &self.sdk_generations
+    }
+
+    /// Consume the result without dropping its measured SDK tuple coverage.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        ReleaseCompatibilityReadbackV2,
+        Vec<IndexedSdkGenerationReadback>,
+    ) {
+        (self.complete, self.sdk_generations)
     }
 }
 
@@ -97,7 +113,9 @@ pub fn readback_qualification_bytes_v2(
             "qualification index bytes differ from the complete selected release",
         ));
     }
-    let complete = readback_release_compatibility_v2(request.complete)?;
+    let (complete, sdk_generations) =
+        crate::qualification_complete_v2::acquire_complete(request.complete, request.sdk)?;
+    crate::qualification_sdk_v2::match_readback(&evidence.sdk_generations, &sdk_generations)?;
     let builds = complete.builds();
     if evidence.release.checksums_sha256 != *builds.checksums_sha256()
         || evidence.release.pre_attestation_checksums_sha256 != *builds.subject_manifest_sha256()
@@ -132,7 +150,11 @@ pub fn readback_qualification_bytes_v2(
             ));
         }
     }
-    Ok(QualificationByteReadbackV2 { evidence, complete })
+    Ok(QualificationByteReadbackV2 {
+        evidence,
+        complete,
+        sdk_generations,
+    })
 }
 
 fn error(message: &str) -> ContractError {

@@ -2,9 +2,9 @@
 
 use super::{
     arch_compatible, arch_of, has_public_link_archive, inventory_runtime_name,
-    needs_canonical_link_archive, raw_link_archive_visible, runtime_name, target_runtime_name,
-    DefaultLinkSet, DependencyGraph, ModuleType, ResolvedDefaultLinkItem, ResolvedPackageMember,
-    TargetDefinition,
+    needs_canonical_link_archive, raw_link_archive_visible, runtime_name,
+    supports_genmodule_client_archives, target_runtime_name, DefaultLinkSet, DependencyGraph,
+    ModuleType, ResolvedDefaultLinkItem, ResolvedPackageMember, TargetDefinition,
 };
 
 fn known_meta_endpoint(graph: &DependencyGraph, name: &str) -> bool {
@@ -41,6 +41,29 @@ fn implicit_uselib_consumers(target: &TargetDefinition) -> Vec<String> {
         // The simple-module path does not call implicit_module_meta_rules.
         Some(ModuleMacroForm::Simple) | None => Vec::new(),
     }
+}
+
+/// Whether a retained library-builder declaration is present only to produce
+/// a selected client archive, not its runtime module. The client archive is a
+/// static collection of its declared sources; runtime `uselibs`, `-l` flags,
+/// and relative-library requirements are not link inputs to that archive.
+fn selected_client_only_runtime_owner(graph: &DependencyGraph, target: &TargetDefinition) -> bool {
+    use crate::ast::ModuleMacroForm;
+
+    if !supports_genmodule_client_archives(&target.module_type)
+        || target.module_macro != Some(ModuleMacroForm::Full)
+    {
+        return false;
+    }
+    let Some(runtime_modules) = graph.native_selected_runtime_modules.as_ref() else {
+        return false;
+    };
+    let Some(client_archives) = graph.native_selected_client_archives.as_ref() else {
+        return false;
+    };
+    !runtime_modules.contains(&target.mmake_name)
+        && (client_archives.contains(&format!("{}-linklib", target.mmake_name))
+            || client_archives.contains(&format!("{}-linklib-rel", target.mmake_name)))
 }
 
 impl DependencyGraph {
@@ -83,6 +106,7 @@ impl DependencyGraph {
         let required_relative: std::collections::HashSet<String> = self
             .targets
             .values()
+            .filter(|target| !selected_client_only_runtime_owner(self, target))
             .flat_map(|target| {
                 target
                     .config_relative_libraries
@@ -98,7 +122,7 @@ impl DependencyGraph {
             })
             .collect();
         for target in self.targets.values_mut() {
-            if target.module_type != ModuleType::Library
+            if !supports_genmodule_client_archives(&target.module_type)
                 || !required_relative.contains(&target.target_name)
             {
                 continue;
@@ -117,7 +141,7 @@ impl DependencyGraph {
         let mut by_name: std::collections::HashMap<String, Vec<(String, String)>> =
             std::collections::HashMap::new();
         for (mmake, target) in &self.targets {
-            let mut providers: Vec<(String, Vec<String>)> = match target.module_type {
+            let mut providers: Vec<(String, Vec<String>)> = match &target.module_type {
                 ModuleType::Abi => vec![(
                     format!("{mmake}-linklib"),
                     vec![
@@ -132,12 +156,13 @@ impl DependencyGraph {
                 // archive under `<mmake>-linklib`. The default provider name is
                 // the module name; `linklibname=` publishes an additional
                 // spelling for the same archive.
-                ModuleType::Library
-                    if target.genmodule_only
-                        || target
-                            .genmodule_linklibs
-                            .as_ref()
-                            .is_some_and(|metadata| metadata.enabled) =>
+                module_type
+                    if supports_genmodule_client_archives(module_type)
+                        && (target.genmodule_only
+                            || target
+                                .genmodule_linklibs
+                                .as_ref()
+                                .is_some_and(|metadata| metadata.enabled)) =>
                 {
                     let mut names = vec![target.target_name.clone()];
                     if let Some(alias) = &target.linklib_name {
@@ -210,7 +235,9 @@ impl DependencyGraph {
         let mut rejected_link_options = Vec::new();
         let mut resolved_typed_uselibs = Vec::new();
         for (mmake, target) in &self.targets {
-            if target.module_type == ModuleType::ModuleHeaders {
+            if target.module_type == ModuleType::ModuleHeaders
+                || selected_client_only_runtime_owner(self, target)
+            {
                 continue;
             }
             let mut ids = Vec::new();
@@ -517,10 +544,14 @@ impl DependencyGraph {
             if needs_canonical_link_archive(provider) && !promote_canonical.contains(&mmake) {
                 promote_canonical.push(mmake.clone());
             }
-            let archive = match provider.module_type {
-                // A module publishes its client archive as a separate target.
-                ModuleType::Library | ModuleType::Abi => format!("{mmake}-linklib"),
-                _ => mmake.clone(),
+            // These module builders publish their client archive as a
+            // separate target; ABI modules do so as well.
+            let archive = if provider.module_type == ModuleType::Abi
+                || supports_genmodule_client_archives(&provider.module_type)
+            {
+                format!("{mmake}-linklib")
+            } else {
+                mmake.clone()
             };
             resolved.push(ResolvedDefaultLinkItem {
                 name: item.name.clone(),

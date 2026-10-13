@@ -23,11 +23,14 @@ pair, not from a Rust board list. Release-candidate coverage requires every
 indexed lane exactly once. Diagnostic coverage permits nonempty subsets; a
 subset does not become a qualified release candidate.
 
-An SDK-selected V2 index is not covered by those compiler lanes. Until the
-SDK generation/package evidence and separately verified owning-job origin are
-joined to qualification, `validate_against_index` explicitly rejects any SDK
-selection for both candidate and diagnostic coverage. Pure shared-index
-parsing cannot silently turn compiler-only evidence into SDK release admission.
+SDK generation claims form a separate input-derived matrix of SDK, compiler
+group, profile and host tuples. For SDK-bearing inputs,
+`validate_against_index` requires exact tuple coverage, so compiler-only
+evidence fails. The pure validator does not measure those claims. In the
+current unreleased V2 path, complete acquisition requires the full generation
+matrix to use the same complete compiler request, then matches every tuple and
+digest to measured bytes. These byte joins do not authenticate owning jobs or
+signatures; production qualification remains a separate gate.
 
 The record names four report digests per lane: build A, build B, byte comparison
 and compatibility/relocation. These are claims, not independently measured
@@ -56,13 +59,11 @@ measured `FinalChecksumsReadbackV2`. Manifest, SHA sidecar and SBOM claims must
 match too. This join does not reread files, create a stable snapshot, verify
 package semantics, authenticate the report's origin or prove independent builds.
 The caller still has to bind the raw report digest and enforce those separate
-requirements; the legacy CLI does not yet use this v2 join.
+requirements. The current unreleased family-v2 complete readback uses this
+join.
 
-This boundary adds no CLI, recovery or publication authority. The current v1
-qualification/recovery CLI does not accept a v2 evidence record, GNU v3
-compatibility receipt or LLVM family-v2 v4 compatibility receipt. Report
-byte read-back has a separate bounded library API documented in
-[compiler-family compatibility](compiler-family-compatibility.md#retained-receipt-read-back).
-Binding that API to independently verified release inputs, versioned recovery
-and protected workflow integration remains necessary for
+This contract itself grants no CLI, recovery or publication authority. The
+current unreleased source has explicit family-v2 qualification, recording and
+recovery paths; historical V1 defaults do not select them. Protected workflow
+integration remains necessary for
 [RV4 release admission](riscv-board-integration-plan.md#rv4-immutable-toolchain-releases).

@@ -104,6 +104,7 @@ fn sdk_group(owner: &str) -> crate::sdk_objects::SdkObjectGroupDecl {
         file: "compiler/example/mmakefile.src".into(),
         line: 1,
         objects: vec![crate::sdk_objects::SdkObjectDecl {
+            companion_cpu: None,
             source: "compiler/example/entry.c".into(),
             intermediate: "${AROS_BUILD_DIR}/gen/compiler/example/entry.o".into(),
             output: "${AROS_DEVELOPER_LIB_DIR}/entry.o".into(),
@@ -127,6 +128,7 @@ fn literal_group(owner: &str) -> crate::literal_objects::LiteralObjectGroupDecl 
             output: "${AROS_BUILD_DIR}/gen/compiler/example/entry.o".into(),
             language: "C".into(),
             arguments: vec!["-DX=1".into(), "-UX".into(), "-DX=2".into()],
+            dependency: None,
             line: 1,
         }],
     }
@@ -267,6 +269,7 @@ fn selected_architecture_objects_retain_their_module_declaration_without_a_back_
             mainmmake: "kernel-example".into(),
             tag: "riscv".into(),
             module_sources: vec!["entry".into()],
+            linklib_sources: Vec::new(),
             directory: "arch/riscv-all/example".into(),
         },
     });
@@ -282,7 +285,106 @@ fn selected_architecture_objects_retain_their_module_declaration_without_a_back_
     graph.retain_native_selection(&selected, &context).unwrap();
     assert!(graph.arch_sources.contains_key("kernel-example"));
     assert!(!graph.arch_sources.contains_key("unrelated"));
+    assert!(graph
+        .native_selected_runtime_modules
+        .as_ref()
+        .unwrap()
+        .contains("kernel-example"));
     assert_eq!(graph.arch_endpoint_effects.len(), 1);
+}
+
+#[test]
+fn selected_architecture_client_linklib_retains_its_bound_module_without_a_back_edge() {
+    use crate::arch_endpoint_effects::{ArchEndpointEffect, ArchEndpointEffectData};
+    let mut graph = DependencyGraph::new();
+    let context = TargetContext {
+        cpu: Some("x86_64".into()),
+        platform: Some("pc".into()),
+        ..TargetContext::default()
+    };
+    let mut stdc = target("libstdc", ModuleType::Library);
+    stdc.genmodule_abi = true;
+    stdc.genmodule_linklibs = Some(GenmoduleLinklibs {
+        enabled: true,
+        ..GenmoduleLinklibs::default()
+    });
+    graph.targets.insert("libstdc".into(), stdc);
+    graph.add_meta_rule(MetaTargetRule {
+        name: "libstdc-x86_64-includes".into(),
+        dependencies: vec!["libstdc-includes".into()],
+    });
+    graph.arch_sources.insert(
+        "libstdc".into(),
+        vec![crate::arch_sources::ArchSourceDecl {
+            mainmmake: "libstdc".into(),
+            maindir: None,
+            modname: None,
+            tag: "x86_64".into(),
+            dir: "arch/x86_64-all/stdc".into(),
+            files: vec!["stdlib".into()],
+            linklib_files: vec!["mathinit".into()],
+            extra_quote_include: None,
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            compile_options: Vec::new(),
+            line: 1,
+        }],
+    );
+    graph.arch_endpoint_effects.push(ArchEndpointEffect {
+        recipe: "arch/x86_64-all/stdc/mmakefile.src".into(),
+        line: 1,
+        endpoint: "libstdc-x86_64-linklib".into(),
+        dependencies: vec!["libstdc-x86_64-includes".into()],
+        data: ArchEndpointEffectData::ArchClientLinklibSources {
+            mainmmake: "libstdc".into(),
+            tag: "x86_64".into(),
+            module_sources: vec!["stdlib".into()],
+            linklib_sources: vec!["mathinit".into()],
+            directory: "arch/x86_64-all/stdc".into(),
+            compiler: "target".into(),
+        },
+    });
+
+    let selected = graph
+        .selected_dependency_closure(&["libstdc-x86_64-linklib".into()], &context, &[])
+        .unwrap();
+    assert!(selected.contains("libstdc-x86_64-linklib"));
+    assert!(selected.contains("libstdc-x86_64-includes"));
+    assert!(!selected.contains("libstdc"));
+    graph.retain_native_selection(&selected, &context).unwrap();
+
+    assert!(graph.targets.contains_key("libstdc"));
+    assert_eq!(graph.arch_sources.len(), 1);
+    assert_eq!(graph.arch_sources["libstdc"][0].linklib_files, ["mathinit"]);
+    assert!(!graph
+        .native_selected_runtime_modules
+        .as_ref()
+        .unwrap()
+        .contains("libstdc"));
+    assert_eq!(
+        graph.native_selected_client_archives.as_ref().unwrap(),
+        &BTreeSet::from(["libstdc-linklib".to_owned()])
+    );
+    assert_eq!(graph.arch_endpoint_effects.len(), 1);
+
+    // The relative archive builder is retained only when genmodule proves
+    // that the selected module declares one.
+    graph
+        .targets
+        .get_mut("libstdc")
+        .unwrap()
+        .genmodule_linklibs
+        .as_mut()
+        .unwrap()
+        .has_relative = true;
+    graph.retain_native_selection(&selected, &context).unwrap();
+    assert_eq!(
+        graph.native_selected_client_archives.as_ref().unwrap(),
+        &BTreeSet::from([
+            "libstdc-linklib".to_owned(),
+            "libstdc-linklib-rel".to_owned()
+        ])
+    );
 }
 
 #[test]
@@ -341,6 +443,158 @@ fn a_library_reached_only_through_its_fd_alias_is_reduced_to_its_headers() {
 }
 
 #[test]
+fn client_only_full_library_ignores_runtime_link_requirements_but_runtime_does_not() {
+    let make_graph = |module_type| {
+        let mut graph = DependencyGraph::new();
+        let mut client = target("client-owner", module_type);
+        client.module_macro = Some(crate::ast::ModuleMacroForm::Full);
+        client.genmodule_abi = true;
+        client.use_libs = vec!["missing-runtime-uselib".into()];
+        client.link_options = vec!["-lmissing-runtime-option".into()];
+        client.config_relative_libraries = vec!["relative-provider".into()];
+        client.genmodule_linklibs = Some(GenmoduleLinklibs {
+            enabled: true,
+            has_relative: true,
+            relative_libraries: vec!["relative-provider".into()],
+            ..GenmoduleLinklibs::default()
+        });
+        graph.targets.insert(client.mmake_name.clone(), client);
+
+        let mut relative_provider = target("relative-provider", ModuleType::Library);
+        relative_provider.genmodule_linklibs = Some(GenmoduleLinklibs {
+            has_relative: true,
+            inputs_exact: true,
+            ..GenmoduleLinklibs::default()
+        });
+        graph
+            .targets
+            .insert(relative_provider.mmake_name.clone(), relative_provider);
+        graph
+    };
+
+    for module_type in [
+        ModuleType::Library,
+        ModuleType::Datatype,
+        ModuleType::Gadget,
+        ModuleType::Mcc,
+    ] {
+        let mut client_only = make_graph(module_type.clone());
+        client_only.native_selected_runtime_modules = Some(BTreeSet::new());
+        client_only.native_selected_client_archives =
+            Some(BTreeSet::from(["client-owner-linklib".into()]));
+        assert!(client_only.resolve_use_libs().is_empty());
+        assert!(
+            !client_only.targets["relative-provider"]
+                .genmodule_linklibs
+                .as_ref()
+                .unwrap()
+                .enabled
+        );
+        assert!(client_only.targets["client-owner"].link_libs.is_empty());
+        assert_eq!(
+            client_only.targets["client-owner"].link_options,
+            ["-lmissing-runtime-option"]
+        );
+
+        // Selecting the same owner as a runtime target restores ordinary
+        // strict validation, even when its client archive is selected too.
+        let mut runtime = make_graph(module_type);
+        runtime.native_selected_runtime_modules = Some(BTreeSet::from(["client-owner".into()]));
+        runtime.native_selected_client_archives =
+            Some(BTreeSet::from(["client-owner-linklib".into()]));
+        let unresolved = runtime.resolve_use_libs();
+        assert!(unresolved.iter().any(|item| {
+            item.contains("client-owner uselibs=missing-runtime-uselib has no link library")
+        }));
+        assert!(unresolved.iter().any(|item| {
+            item.contains("client-owner link option -lmissing-runtime-option has no link library")
+        }));
+        assert!(
+            runtime.targets["relative-provider"]
+                .genmodule_linklibs
+                .as_ref()
+                .unwrap()
+                .enabled
+        );
+    }
+}
+
+#[test]
+fn datatype_client_archive_selection_retains_client_sources_without_runtime_owner() {
+    let owner = "datatype-owner";
+    let mut graph = DependencyGraph::new();
+    let mut datatype = target(owner, ModuleType::Datatype);
+    datatype.module_macro = Some(crate::ast::ModuleMacroForm::Full);
+    datatype.genmodule_abi = true;
+    datatype.source_files = vec!["runtime.c".into()];
+    datatype.use_libs = vec!["missing-runtime-uselib".into()];
+    datatype.config_relative_libraries = vec!["missing-runtime-relative".into()];
+    datatype.genmodule_linklibs = Some(GenmoduleLinklibs {
+        enabled: true,
+        has_relative: true,
+        relative_libraries: vec!["missing-runtime-relative".into()],
+        source_files: vec!["client.c".into()],
+        ..GenmoduleLinklibs::default()
+    });
+    graph.targets.insert(owner.to_owned(), datatype);
+    graph.add_meta_rule(MetaTargetRule {
+        name: format!("{owner}-linklib"),
+        dependencies: vec![format!("{owner}-includes"), "client-prerequisite".into()],
+    });
+    graph.add_meta_rule(MetaTargetRule {
+        name: "client-prerequisite".into(),
+        dependencies: Vec::new(),
+    });
+
+    let selected = graph
+        .selected_dependency_closure(
+            &[format!("{owner}-linklib")],
+            &TargetContext::default(),
+            &[],
+        )
+        .unwrap();
+    assert!(!selected.contains(owner));
+    assert!(selected.contains("client-prerequisite"));
+    assert!(selected.contains(&format!("{owner}-includes")));
+
+    graph
+        .retain_native_selection(&selected, &TargetContext::default())
+        .unwrap();
+    assert!(graph
+        .native_selected_runtime_modules
+        .as_ref()
+        .unwrap()
+        .is_empty());
+    assert!(graph
+        .native_selected_client_archives
+        .as_ref()
+        .unwrap()
+        .contains(&format!("{owner}-linklib")));
+    assert!(graph.resolve_use_libs().is_empty());
+    assert_eq!(graph.targets[owner].module_type, ModuleType::Datatype);
+    assert_eq!(
+        graph.targets[owner].module_macro,
+        Some(crate::ast::ModuleMacroForm::Full)
+    );
+    assert_eq!(graph.targets[owner].source_files, ["runtime.c"]);
+    assert_eq!(
+        graph.targets[owner]
+            .genmodule_linklibs
+            .as_ref()
+            .unwrap()
+            .source_files,
+        ["client.c"]
+    );
+
+    let generated = crate::generate_cmake(&graph);
+    assert!(generated.contains("aros_add_datatype("));
+    assert!(generated.contains("    CLIENTS_ONLY"));
+    assert!(generated.contains("    LINKLIB_SOURCES \"client.c\""));
+    assert!(generated.contains("client-prerequisite"));
+    assert!(!generated.contains("    NO_CLIENT_ARCHIVES"));
+}
+
+#[test]
 fn a_kept_header_transform_lists_only_the_consumers_the_selection_kept() {
     let mut graph = DependencyGraph::new();
     graph.header_transforms.push(
@@ -385,6 +639,49 @@ fn literal_object_groups_refuse_conflicting_kinds_and_outputs() {
     assert!(graph
         .selected_dependency_closure(&["shared".into(), "sdk".into()], &context, &[])
         .is_err());
+}
+
+#[test]
+fn literal_source_dependencies_have_unique_selected_file_ownership() {
+    let mut graph = DependencyGraph::new();
+    let mut group = literal_group("unit");
+    let object = &mut group.objects[0];
+    object.dependency = Some(crate::literal_objects::LiteralDependencyDecl {
+        output: "${AROS_BUILD_DIR}/gen/compiler/example/entry.d".into(),
+        arguments: vec!["-DDEP_CONTEXT=1".into()],
+    });
+    graph.literal_object_groups.push(group);
+    let context = TargetContext::default();
+    assert!(graph
+        .selected_dependency_closure(&["unit".into()], &context, &[])
+        .is_ok());
+    let mut sdk = sdk_group("sdk");
+    sdk.objects[0].intermediate = "${AROS_BUILD_DIR}/gen/compiler/example/entry.d".into();
+    graph.sdk_object_groups.push(sdk);
+    // Unselected writers cannot poison the selected closure.
+    assert!(graph
+        .selected_dependency_closure(&["unit".into()], &context, &[])
+        .is_ok());
+    let error = graph
+        .selected_dependency_closure(&["unit".into(), "sdk".into()], &context, &[])
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("entry.d has conflicting concrete file producers"),
+        "{error}"
+    );
+    graph.sdk_object_groups.clear();
+    let mut other = graph.literal_object_groups[0].clone();
+    other.owner = "other".into();
+    other.objects[0].output = "${AROS_BUILD_DIR}/gen/compiler/example/entry.o.o".into();
+    other.objects[0].dependency.as_mut().unwrap().output =
+        "${AROS_BUILD_DIR}/gen/compiler/example/entry.o.d".into();
+    graph.literal_object_groups.push(other);
+    let error = graph
+        .selected_dependency_closure(&["unit".into(), "other".into()], &context, &[])
+        .unwrap_err();
+    assert!(error.to_string().contains("conflict at"), "{error}");
 }
 
 #[test]
@@ -1172,7 +1469,7 @@ fn genmodule_only_library_does_not_invent_a_relative_archive_endpoint() {
 }
 
 #[test]
-fn genmodule_only_library_archive_selects_runtime_dependencies_and_guarded_defaults() {
+fn genmodule_only_library_client_archive_does_not_select_runtime_dependencies() {
     let mut graph = DependencyGraph::new();
     let mut library = target("fixture-library", ModuleType::Library);
     library.genmodule_only = true;
@@ -1186,6 +1483,7 @@ fn genmodule_only_library_archive_selects_runtime_dependencies_and_guarded_defau
     graph.targets.insert(library.mmake_name.clone(), library);
     for name in [
         "fixture-library-includes",
+        "source-client-prerequisite",
         "runtime-prerequisite",
         "runtime-link-provider",
         "stdc-static-provider",
@@ -1198,7 +1496,10 @@ fn genmodule_only_library_archive_selects_runtime_dependencies_and_guarded_defau
     }
     graph.add_meta_rule(MetaTargetRule {
         name: "fixture-library-linklib".to_owned(),
-        dependencies: vec!["fixture-library-includes".to_owned()],
+        dependencies: vec![
+            "fixture-library-includes".to_owned(),
+            "source-client-prerequisite".to_owned(),
+        ],
     });
     graph.default_link_set = vec![
         crate::graph::ResolvedDefaultLinkItem {
@@ -1223,16 +1524,222 @@ fn genmodule_only_library_archive_selects_runtime_dependencies_and_guarded_defau
         )
         .unwrap();
 
-    assert!(selected.contains("fixture-library"));
+    assert!(!selected.contains("fixture-library"));
     assert!(selected.contains("fixture-library-includes"));
-    assert!(selected.contains("runtime-prerequisite"));
-    assert!(selected.contains("runtime-link-provider"));
-    assert!(selected.contains("stdc-static-provider"));
+    assert!(selected.contains("source-client-prerequisite"));
+    assert!(!selected.contains("runtime-prerequisite"));
+    assert!(!selected.contains("runtime-link-provider"));
+    assert!(!selected.contains("stdc-static-provider"));
     assert!(!selected.contains("stdc-dynamic-provider"));
+
+    let runtime = graph
+        .selected_dependency_closure(
+            &["fixture-library".to_owned()],
+            &TargetContext::default(),
+            &[],
+        )
+        .unwrap();
+    assert!(runtime.contains("runtime-prerequisite"));
+    assert!(runtime.contains("runtime-link-provider"));
+    assert!(runtime.contains("stdc-static-provider"));
+    assert!(!runtime.contains("stdc-dynamic-provider"));
 }
 
 #[test]
-fn full_library_relative_archive_alias_selects_runtime_but_abi_alias_does_not() {
+fn inventory_library_client_alias_does_not_select_runtime_owner() {
+    let mut graph = DependencyGraph::new();
+    let mut library = target("inventory-library", ModuleType::Library);
+    library.genmodule_linklibs = Some(GenmoduleLinklibs {
+        enabled: true,
+        ..GenmoduleLinklibs::default()
+    });
+    library.dependencies = vec!["inventory-runtime-prerequisite".to_owned()];
+    graph
+        .inventory_targets
+        .push(crate::ast::InventoryTargetIdentity::from(&library));
+    graph.add_meta_rule(MetaTargetRule {
+        name: "inventory-library-linklib".to_owned(),
+        dependencies: vec!["inventory-library-includes".to_owned()],
+    });
+    graph.add_meta_rule(MetaTargetRule {
+        name: "inventory-library-includes".to_owned(),
+        dependencies: Vec::new(),
+    });
+    graph.add_meta_rule(MetaTargetRule {
+        name: "inventory-runtime-prerequisite".to_owned(),
+        dependencies: Vec::new(),
+    });
+
+    let selected = graph
+        .selected_dependency_closure(
+            &["inventory-library-linklib".to_owned()],
+            &TargetContext::default(),
+            &[],
+        )
+        .unwrap();
+
+    assert!(selected.contains("inventory-library-linklib"));
+    assert!(selected.contains("inventory-library-includes"));
+    assert!(!selected.contains("inventory-library"));
+    assert!(!selected.contains("inventory-runtime-prerequisite"));
+}
+
+#[test]
+fn selected_kobj_retains_runtime_mode_for_its_module() {
+    let mut graph = DependencyGraph::new();
+    let mut library = target("kobj-library", ModuleType::Library);
+    library.genmodule_abi = true;
+    library.module_macro = Some(crate::ast::ModuleMacroForm::Full);
+    graph.targets.insert(library.mmake_name.clone(), library);
+    graph.add_meta_rule(MetaTargetRule {
+        name: "kobj-library-kobj".to_owned(),
+        dependencies: Vec::new(),
+    });
+
+    let selected = graph
+        .selected_dependency_closure(
+            &["kobj-library-kobj".to_owned()],
+            &TargetContext::default(),
+            &[],
+        )
+        .unwrap();
+    graph
+        .retain_native_selection(&selected, &TargetContext::default())
+        .unwrap();
+
+    assert!(graph.targets.contains_key("kobj-library"));
+    assert!(graph
+        .native_selected_runtime_modules
+        .as_ref()
+        .unwrap()
+        .contains("kobj-library"));
+    assert!(!crate::generate_cmake(&graph).contains("    CLIENTS_ONLY"));
+}
+
+#[test]
+fn selected_client_archive_retains_full_source_declaration_without_runtime_arch_lane() {
+    use crate::arch_endpoint_effects::{ArchEndpointEffect, ArchEndpointEffectData};
+
+    let mut graph = DependencyGraph::new();
+    let context = TargetContext {
+        cpu: Some("riscv".into()),
+        platform: Some("all".into()),
+        ..TargetContext::default()
+    };
+    let mut library = target("fixture-library", ModuleType::Library);
+    library.module_macro = Some(crate::ast::ModuleMacroForm::Full);
+    library.source_files = vec!["runtime.c".into()];
+    library.genmodule_abi = true;
+    library.genmodule_linklibs = Some(GenmoduleLinklibs {
+        enabled: true,
+        source_files: vec!["generic-client.c".into()],
+        ..GenmoduleLinklibs::default()
+    });
+    graph.targets.insert(library.mmake_name.clone(), library);
+    graph.arch_sources.insert(
+        "fixture-library".into(),
+        vec![crate::arch_sources::ArchSourceDecl {
+            mainmmake: "fixture-library".into(),
+            maindir: None,
+            modname: None,
+            tag: "riscv".into(),
+            dir: "arch/riscv-all/fixture".into(),
+            files: vec!["runtime-arch".into()],
+            linklib_files: vec!["arch-client".into()],
+            extra_quote_include: None,
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            compile_options: Vec::new(),
+            line: 1,
+        }],
+    );
+    graph.arch_endpoint_effects.extend([
+        ArchEndpointEffect {
+            recipe: "arch/riscv-all/fixture/mmakefile.src".into(),
+            line: 1,
+            endpoint: "fixture-library-riscv".into(),
+            dependencies: vec!["fixture-library-includes".into()],
+            data: ArchEndpointEffectData::ArchModuleObjects {
+                mainmmake: "fixture-library".into(),
+                tag: "riscv".into(),
+                module_sources: vec!["runtime-arch".into()],
+                linklib_sources: vec!["arch-client".into()],
+                directory: "arch/riscv-all/fixture".into(),
+            },
+        },
+        ArchEndpointEffect {
+            recipe: "arch/riscv-all/fixture/mmakefile.src".into(),
+            line: 2,
+            endpoint: "fixture-library-riscv-linklib".into(),
+            dependencies: vec!["fixture-library-includes".into()],
+            data: ArchEndpointEffectData::ArchClientLinklibSources {
+                mainmmake: "fixture-library".into(),
+                tag: "riscv".into(),
+                module_sources: vec!["runtime-arch".into()],
+                linklib_sources: vec!["arch-client".into()],
+                directory: "arch/riscv-all/fixture".into(),
+                compiler: "target".into(),
+            },
+        },
+    ]);
+
+    let selected = graph
+        .selected_dependency_closure(&["fixture-library-riscv-linklib".into()], &context, &[])
+        .unwrap();
+    assert!(!selected.contains("fixture-library"));
+    assert!(!selected.contains("fixture-library-riscv"));
+    assert!(selected.contains("fixture-library-includes"));
+
+    graph.retain_native_selection(&selected, &context).unwrap();
+
+    assert_eq!(
+        graph.native_selected_runtime_modules.as_ref().unwrap(),
+        &BTreeSet::new()
+    );
+    assert_eq!(
+        graph.native_selected_client_archives.as_ref().unwrap(),
+        &BTreeSet::from(["fixture-library-linklib".to_owned()])
+    );
+    assert_eq!(
+        graph.targets["fixture-library"].module_type,
+        ModuleType::Library
+    );
+    assert_eq!(
+        graph.targets["fixture-library"].module_macro,
+        Some(crate::ast::ModuleMacroForm::Full)
+    );
+    assert_eq!(graph.targets["fixture-library"].source_files, ["runtime.c"]);
+    assert_eq!(
+        graph.targets["fixture-library"]
+            .genmodule_linklibs
+            .as_ref()
+            .unwrap()
+            .source_files,
+        ["generic-client.c"]
+    );
+    assert_eq!(
+        graph.arch_sources["fixture-library"][0].linklib_files,
+        ["arch-client"]
+    );
+    assert_eq!(graph.arch_endpoint_effects.len(), 1);
+    assert_eq!(
+        graph.arch_endpoint_effects[0].endpoint,
+        "fixture-library-riscv-linklib"
+    );
+
+    let generated = crate::generate_cmake(&graph);
+    assert!(generated.contains("    CLIENTS_ONLY"));
+    assert!(generated.contains("aros_record_module_macro(OWNER fixture-library FORM full)"));
+    assert!(generated.contains("    GENMODULE_LINKLIBS"));
+    assert!(generated.contains("    LINKLIB_SOURCES \"generic-client.c\""));
+    assert!(
+        generated.contains("    ARCH_LINKLIB_SOURCES \"riscv|arch/riscv-all/fixture|arch-client\"")
+    );
+    assert!(!generated.contains("ENDPOINT \"fixture-library-riscv\""));
+}
+
+#[test]
+fn full_library_relative_archive_alias_is_independent_of_runtime_and_abi_alias() {
     let mut graph = DependencyGraph::new();
     let mut library = target("full-library", ModuleType::Library);
     library.source_files = vec!["library.c".to_owned()];
@@ -1244,16 +1751,6 @@ fn full_library_relative_archive_alias_selects_runtime_but_abi_alias_does_not() 
     graph.targets.insert(library.mmake_name.clone(), library);
     let abi = target("abi-only", ModuleType::Abi);
     graph.targets.insert(abi.mmake_name.clone(), abi);
-
-    let relative = graph
-        .selected_dependency_closure(
-            &["full-library-linklib-rel".to_owned()],
-            &TargetContext::default(),
-            &[],
-        )
-        .unwrap();
-    assert!(relative.contains("full-library"));
-
     graph
         .default_link_set
         .push(crate::graph::ResolvedDefaultLinkItem {
@@ -1266,6 +1763,24 @@ fn full_library_relative_archive_alias_selects_runtime_but_abi_alias_does_not() 
         name: "default-archive".to_owned(),
         dependencies: Vec::new(),
     });
+
+    let relative = graph
+        .selected_dependency_closure(
+            &["full-library-linklib-rel".to_owned()],
+            &TargetContext::default(),
+            &[],
+        )
+        .unwrap();
+    assert!(relative.contains("full-library-linklib-rel"));
+    assert!(relative.contains("full-library-includes"));
+    assert!(!relative.contains("full-library"));
+    assert!(!relative.contains("default-archive"));
+
+    let runtime = graph
+        .selected_dependency_closure(&["full-library".to_owned()], &TargetContext::default(), &[])
+        .unwrap();
+    assert!(runtime.contains("default-archive"));
+
     let abi_archive = graph
         .selected_dependency_closure(
             &["abi-only-linklib".to_owned()],

@@ -138,6 +138,35 @@ fn prepare_compatibility(
     PreparedCompatibility { _root: root, lanes }
 }
 
+pub fn with_gnu_matrix_complete_request<T>(
+    prepared: &PreparedRelease,
+    use_request: impl for<'a> FnOnce(&ReleaseCompatibilityReadbackRequestV2<'a>) -> T,
+) -> T {
+    with_matrix_complete_request(prepared, use_request)
+}
+
+pub fn with_llvm_matrix_complete_request<T>(
+    prepared: &PreparedRelease,
+    use_request: impl for<'a> FnOnce(&ReleaseCompatibilityReadbackRequestV2<'a>) -> T,
+) -> T {
+    with_matrix_complete_request(prepared, use_request)
+}
+
+fn with_matrix_complete_request<T>(
+    prepared: &PreparedRelease,
+    use_request: impl for<'a> FnOnce(&ReleaseCompatibilityReadbackRequestV2<'a>) -> T,
+) -> T {
+    let builds = prepared.request();
+    let proof = readback_release_builds_v2(&builds).unwrap();
+    let compatibility = prepare_compatibility(prepared, &proof);
+    let no_overrides = BTreeMap::new();
+    let complete = compatibility_request(&builds, &compatibility.lanes, &no_overrides);
+    // Keep this ordinary complete closure as a fixture sanity check. The
+    // matrix API independently reacquires it from the same selected request.
+    readback_release_compatibility_v2(&complete).unwrap();
+    use_request(&complete)
+}
+
 fn bind_fixture_to_indexed_package(
     fixture: &mut ReceiptFixture,
     package: &VerifiedPackage,
@@ -340,6 +369,7 @@ fn expected(fixture: &ReceiptFixture) -> NativeCompatibilityReceiptExpectations<
         gnu_source_preset: request.gnu_source_preset,
         cmake_build_required: request.cmake_build_required,
         native_sdk: None,
+        llvm_sdk: None,
         sdk_consumer_source_tree_sha256: request.sdk_consumer_source_tree_sha256,
         engine_api_version: request.engine_api_version,
         engine_sha256: request.engine_sha256,
@@ -560,6 +590,7 @@ fn recording_request<'a, 'e>(
     QualificationRecordingRequestV2 {
         index_bytes,
         complete,
+        sdk: None,
         source_run,
         policy,
         created_at,
@@ -605,6 +636,7 @@ fn assert_qualification_rejected_without_mutation(
         evidence_bytes,
         index_bytes,
         complete: request,
+        sdk: None,
         policy,
     }) else {
         panic!("qualification byte read-back accepted an invalid claim");
@@ -629,6 +661,7 @@ fn assert_lower_layer_rejected_without_mutation(
         evidence_bytes,
         index_bytes,
         complete: request,
+        sdk: None,
         policy,
     }) else {
         panic!("qualification byte read-back accepted changed compatibility bytes");
@@ -669,6 +702,7 @@ fn qualification_readback_joins_three_host_claims_to_complete_bytes_without_writ
         evidence_bytes: &evidence_bytes,
         index_bytes: &index_bytes,
         complete: &complete,
+        sdk: None,
         policy: &policy,
     })
     .unwrap();
@@ -928,6 +962,7 @@ fn qualification_recording_derives_claims_and_roundtrips_through_byte_readback_w
         evidence_bytes: &evidence_bytes,
         index_bytes: &index_bytes,
         complete: &complete,
+        sdk: None,
         policy: &policy,
     })
     .unwrap();
@@ -1510,6 +1545,7 @@ fn recovery_qualification_request<'a, 'e>(
         evidence_bytes,
         index_bytes: &fixture.index_bytes,
         complete,
+        sdk: None,
         policy,
     }
 }

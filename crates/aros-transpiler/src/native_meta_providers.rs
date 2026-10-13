@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 
 use crate::ast::{ModuleType, ParsedMmakefile};
+use crate::graph::supports_genmodule_client_archives;
 
 /// Recognize deliberately disabled literal owners without executing comments.
 /// Only `##MM name : ...`, or a bare `##MM` immediately followed by the
@@ -143,6 +144,12 @@ pub fn validate(
             .map(|rule| rule.owner.clone()),
     );
     local_producers.extend(parsed.sdk_file_copies.iter().map(|rule| rule.owner.clone()));
+    local_producers.extend(
+        parsed
+            .source_literal_text_rules
+            .iter()
+            .map(|rule| rule.owner.clone()),
+    );
     local_producers.extend(parsed.sdk_asset_rules.iter().map(|rule| rule.owner.clone()));
     local_producers.extend(
         parsed
@@ -200,6 +207,12 @@ pub fn validate(
             .python_outputs
             .iter()
             .map(|declaration| declaration.owner.clone()),
+    );
+    local_producers.extend(
+        parsed
+            .script_output_aggregates
+            .iter()
+            .map(|rule| rule.owner.clone()),
     );
     local_producers.extend(
         parsed
@@ -281,7 +294,7 @@ pub fn validate(
     // emits them. In particular, an arbitrary `<name>-includes` token is not
     // made concrete by its suffix alone.
     for target in &parsed.targets {
-        let full_genmodule = target.module_type == ModuleType::Library
+        let full_genmodule = supports_genmodule_client_archives(&target.module_type)
             && (target.genmodule_only
                 || target
                     .genmodule_linklibs
@@ -296,7 +309,7 @@ pub fn validate(
         if target.module_type == ModuleType::Abi {
             local_producers.insert(format!("{}-fd", target.mmake_name));
         }
-        if target.module_type == ModuleType::Library
+        if supports_genmodule_client_archives(&target.module_type)
             && !target.genmodule_only
             && target
                 .genmodule_linklibs

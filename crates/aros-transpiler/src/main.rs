@@ -33,6 +33,7 @@ use error_mapping::{diagnostics_error, error_to_diagnostics, source_location};
 use native_selection::{
     append_unscoped_diagnostics, bind_architecture_effects, load_native_selection,
     native_build_exclusion, native_selection_input_error, reverify_native_owner_projection,
+    selected_meta_owner,
 };
 use publication::Publication;
 use reports::{render_source_inventory_manifest, resolved_publication_path, write_report};
@@ -226,6 +227,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     .iter()
     .any(|value| value.is_some())
     .then(|| TargetContext {
+        native_arch_lane_alias_endpoints: std::collections::BTreeSet::new(),
         native_arch_include_effects: Vec::new(),
         native_arch_include_errors: Vec::new(),
         native_arch_include_catalog_closed: false,
@@ -234,6 +236,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         host_file_generators: Vec::new(),
         make_variables: std::collections::BTreeMap::new(),
         make_include_bindings: std::collections::BTreeMap::new(),
+        native_configuration_inputs: std::collections::BTreeMap::new(),
         generated_make_templates: std::collections::BTreeMap::new(),
         cpu: args.cpu.clone(),
         platform: args.platform.clone(),
@@ -253,6 +256,9 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         load_native_selection(args, target.as_ref()).map_err(native_selection_input_error)?;
     if let (Some(contract), Some(target)) = (&native_contract, &mut target) {
         dirs.bind_native_target_tool_roles();
+        if let native_selection::LoadedNativeSelection::SdkConsumer(loaded) = contract {
+            dirs.bind_sdk_companion_roles(&loaded.contract.companion_roles);
+        }
         target
             .host_file_generators
             .clone_from(contract.invocation().host_file_generators);
@@ -264,6 +270,12 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             .clone_from(contract.invocation().make_include_bindings);
         target.native_kernel_sources_in_target_role =
             contract.invocation().kernel_compiler_role == Some("target");
+        target.native_configuration_inputs = contract
+            .invocation()
+            .inputs
+            .iter()
+            .map(|input| (input.path.clone(), input.sha256.to_string()))
+            .collect();
         target.generated_make_templates =
             aros_common::native_make_template::resolve_generated_make_templates(
                 &args.source_dir,
@@ -523,7 +535,10 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                     for rule in &parsed.explicit_meta_rules {
                         for dependency in &rule.dependencies {
                             meta_edge_sources
-                                .entry((rule.name.clone(), dependency.clone()))
+                                .entry((
+                                    selected_meta_owner(&rule.name, target.as_ref()),
+                                    dependency.clone(),
+                                ))
                                 .or_default()
                                 .insert(relative.to_string());
                         }
@@ -550,7 +565,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                             }));
                         }
                         if !parsed.explicit_meta_rules.iter().any(|rule| {
-                            rule.name == declaration.target
+                            selected_meta_owner(&rule.name, target.as_ref()) == declaration.target
                                 && rule.dependencies.contains(&declaration.dependency)
                         }) {
                             return Err(native_selection_input_error(ArosError::Configuration {
@@ -719,6 +734,9 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         graph.sfd_header_rules.extend(parsed.sfd_header_rules);
         graph.source_text_rules.extend(parsed.source_text_rules);
         graph.source_value_rules.extend(parsed.source_value_rules);
+        graph
+            .source_literal_text_rules
+            .extend(parsed.source_literal_text_rules);
         graph.sdk_file_copies.extend(parsed.sdk_file_copies);
         graph.sdk_asset_rules.extend(parsed.sdk_asset_rules);
         graph.sdk_program_outputs.extend(parsed.sdk_program_outputs);
@@ -811,6 +829,9 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         skipped_hidd_stubs.extend(parsed.skipped_hidd_stubs);
         graph.add_bison_outputs(parsed.bison_outputs);
         graph.add_script_outputs(parsed.script_outputs);
+        graph
+            .script_output_aggregates
+            .extend(parsed.script_output_aggregates);
         skipped_script_outputs.extend(parsed.skipped_script_outputs);
         skipped_host_generated_headers.extend(parsed.skipped_host_generated_headers);
         graph.add_binary_objects(parsed.binary_objects);
@@ -909,6 +930,24 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // Before uselibs, because a generated source has to be registered before
     // the target that names it is emitted.
     skipped_script_outputs.extend(graph.resolve_script_outputs());
+    for aggregate in graph
+        .script_output_aggregates
+        .iter()
+        .filter(|rule| rule.generators.is_empty())
+    {
+        capability_errors.push(
+            Diagnostic::error(
+                DiagnosticCode::CapabilityDrift,
+                DiagnosticStage::CapabilityValidation,
+                "source script aggregate has no complete concrete generator binding",
+            )
+            .with_location(SourceLocation::new(&aggregate.file).at(aggregate.line, None))
+            .with_context(aros_common::DiagnosticContext {
+                target: Some(aggregate.owner.clone()),
+                ..Default::default()
+            }),
+        );
+    }
     // Preserve the original invocation inputs across consumer-bound script
     // naming. Compare exact declared script/output identities, not guessed
     // recipe directories or generated target-name prefixes.
@@ -1009,7 +1048,38 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // target defined elsewhere, so they too need the full parse first.
     // A lane whose `arch=` is a name rather than an architecture gets the tag of
     // the lane that pulls it in, before the overrides are resolved.
-    let arch_lane_attachments = graph.resolve_arch_lane_attachments();
+    let mut arch_lane_attachments = Vec::new();
+    if let (Some(projection), Some(context)) = (&native_owner_projection, &mut target) {
+        let aliases = projection
+            .verified_arch_lane_aliases(&args.source_dir, &graph.arch_endpoint_effects, context)
+            .map_err(|message| {
+                native_selection_input_error(ArosError::Configuration {
+                    file: "architecture lane routes".into(),
+                    message,
+                })
+            })?;
+        context.native_arch_lane_alias_endpoints.extend(
+            aliases
+                .iter()
+                .map(|alias| alias.original_endpoint().to_owned()),
+        );
+        bind_architecture_effects(
+            projection,
+            &args.source_dir,
+            context,
+            &mut graph,
+            &mut capability_errors,
+        )?;
+        arch_lane_attachments.extend(graph.apply_arch_lane_aliases(&aliases).map_err(
+            |message| {
+                native_selection_input_error(ArosError::Configuration {
+                    file: "architecture lane routes".into(),
+                    message,
+                })
+            },
+        )?);
+    }
+    arch_lane_attachments.extend(graph.resolve_arch_lane_attachments());
     let inherited_arch_sources = graph.resolve_arch_sources();
     // Catalog generators can emit a source/header adjacent to a module's
     // sources. CMake rehomes that output, so preserve the completed logical
@@ -1095,13 +1165,6 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                         .with_hint("fix the source contract or unsupported transpiler capability; no generated header is accepted as proof")),
                 }
             }
-            bind_architecture_effects(
-                projection,
-                &args.source_dir,
-                context,
-                &mut graph,
-                &mut capability_errors,
-            )?;
         } else if !graph.arch_endpoint_effects.is_empty() || !graph.assembly_headers.is_empty() {
             return Err(native_selection_input_error(ArosError::Configuration {
                 file: "architecture endpoint effects".into(),

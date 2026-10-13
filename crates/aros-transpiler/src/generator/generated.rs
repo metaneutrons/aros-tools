@@ -468,6 +468,9 @@ pub(super) fn emit_sdk_object_groups<'a>(
         ] {
             writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
         }
+        if let Some(cpu) = &object.companion_cpu {
+            writeln!(out, "    COMPANION_CPU {}", cmake_arg(cpu)).unwrap();
+        }
         for (key, values) in [
             ("DEFINES", &object.defines),
             ("UNDEFINES", &object.undefines),
@@ -507,34 +510,59 @@ pub(super) fn emit_literal_objects_and_archives(
     sdk_paths: &BTreeMap<String, &crate::sdk_objects::SdkObjectDecl>,
 ) -> Option<String> {
     let mut literal_objects = std::collections::BTreeMap::new();
+    let mut literal_outputs = std::collections::BTreeMap::new();
     for group in &graph.literal_object_groups {
         for object in &group.objects {
             let key = object.output.to_ascii_lowercase();
-            if sdk_paths.contains_key(&key) {
-                return Some(format!(
-                    "message(FATAL_ERROR {})\n",
-                    cmake_arg(&format!(
-                        "Literal and SDK object ownership conflict: {}",
-                        object.output
-                    ))
-                ));
-            }
-            if let Some(previous) = literal_objects.insert(key, object) {
-                if previous != object {
+            for output in object.produced_outputs() {
+                let output_key = output.to_ascii_lowercase();
+                if sdk_paths.contains_key(&output_key) {
                     return Some(format!(
                         "message(FATAL_ERROR {})\n",
                         cmake_arg(&format!(
-                            "Conflicting literal object ownership: {}",
-                            object.output
+                            "Literal and SDK object ownership conflict: {output}"
                         ))
                     ));
                 }
+                if let Some(previous) = literal_outputs.get(&output_key) {
+                    if *previous != object {
+                        return Some(format!(
+                            "message(FATAL_ERROR {})\n",
+                            cmake_arg(&format!("Conflicting literal object ownership: {output}"))
+                        ));
+                    }
+                } else {
+                    literal_outputs.insert(output_key, object);
+                }
             }
+            literal_objects.entry(key).or_insert(object);
         }
     }
     for object in literal_objects.values() {
         let digest = aros_common::sha256_bytes(object.output.as_bytes());
         let name = format!("aros-literal-object-{}", digest.as_str());
+        if let Some(dependency) = &object.dependency {
+            let dependency_digest = aros_common::sha256_bytes(dependency.output.as_bytes());
+            let dependency_name =
+                format!("aros-literal-dependencies-{}", dependency_digest.as_str());
+            writeln!(out, "aros_generate_literal_dependencies(").unwrap();
+            for (key, value) in [
+                ("NAME", dependency_name.as_str()),
+                ("SOURCE", object.source.as_str()),
+                ("OUTPUT", dependency.output.as_str()),
+                ("OBJECT_OUTPUT", object.output.as_str()),
+                ("LANGUAGE", object.language.as_str()),
+            ] {
+                writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+            }
+            if !dependency.arguments.is_empty() {
+                writeln!(out, "    ARGUMENTS").unwrap();
+                for value in &dependency.arguments {
+                    writeln!(out, "        {}", cmake_arg(value)).unwrap();
+                }
+            }
+            writeln!(out, ")\n").unwrap();
+        }
         writeln!(out, "aros_compile_literal_object(").unwrap();
         for (key, value) in [
             ("NAME", name.as_str()),
@@ -543,6 +571,14 @@ pub(super) fn emit_literal_objects_and_archives(
             ("LANGUAGE", object.language.as_str()),
         ] {
             writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+        }
+        if let Some(dependency) = &object.dependency {
+            writeln!(
+                out,
+                "    SOURCE_DEPENDENCY_OUTPUT {}",
+                cmake_arg(&dependency.output)
+            )
+            .unwrap();
         }
         if !object.arguments.is_empty() {
             writeln!(out, "    ARGUMENTS").unwrap();

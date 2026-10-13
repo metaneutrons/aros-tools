@@ -7,7 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 
 use anyhow::{bail, Context, Result};
 use aros_common::elf::{Binding, Home, Object};
@@ -20,7 +20,7 @@ use crate::{extra, libreq, sets};
 mod driver_output_tests;
 mod driver_tools;
 
-use driver_tools::{resolve_driver_tools, validate_emulation, TOOL_MANIFEST_NAME};
+use driver_tools::{resolve_driver_tools, run_tool, validate_emulation, TOOL_MANIFEST_NAME};
 
 const DRIVER_NAMES: &[&str] = &["collect-aros", "collect-aros32"];
 const RESPONSE_DEPTH_LIMIT: usize = 8;
@@ -53,6 +53,7 @@ struct EngineRequest {
     name: String,
     linker: PathBuf,
     strip: Option<PathBuf>,
+    driver_tool_names: Option<driver_tools::DriverToolNames>,
     emulation: Option<String>,
     args: Vec<OsString>,
     output: PathBuf,
@@ -222,7 +223,7 @@ pub fn run_entry(
             DiagnosticContext::default(),
         )
     })?;
-    let request = parse_configured(
+    let mut request = parse_configured(
         name,
         tools.linker,
         tools.strip,
@@ -239,6 +240,7 @@ pub fn run_entry(
             DiagnosticContext::default(),
         )
     })?;
+    request.driver_tool_names = Some(tools.names);
     validate_sysroot(&request).map_err(|error| {
         failure(
             DiagnosticCode::CollectorSysroot,
@@ -263,6 +265,7 @@ pub fn run_direct(
         name: "aros-collect".into(),
         linker,
         strip: None,
+        driver_tool_names: None,
         emulation: None,
         args,
         output,
@@ -429,6 +432,7 @@ fn parse_configured(
         name,
         linker,
         strip: Some(strip),
+        driver_tool_names: None,
         emulation,
         args,
         output,
@@ -794,8 +798,12 @@ fn run_with<F>(
     mut execute: F,
 ) -> CollectorResult<()>
 where
-    F: FnMut(&Path, &[OsString]) -> Result<ExitStatus>,
+    F: FnMut(&Path, Option<&str>, &[OsString]) -> Result<ExitStatus>,
 {
+    let linker_invocation = request
+        .driver_tool_names
+        .as_ref()
+        .map(|names| names.linker.as_str());
     let staged = adjacent(&request.output, ".collect-pre");
     let final_staged = adjacent(&request.output, ".collect-final");
     let script = request
@@ -845,7 +853,7 @@ where
         "starting first relocatable link",
         &request_context(request),
     )?;
-    let status = execute(&request.linker, &first).map_err(|error| {
+    let status = execute(&request.linker, linker_invocation, &first).map_err(|error| {
         failure(
             DiagnosticCode::CollectorFirstLink,
             DiagnosticStage::FirstLink,
@@ -1002,7 +1010,7 @@ where
         "starting set-collection link",
         &request_context(request),
     )?;
-    let status = execute(&request.linker, &second).map_err(|error| {
+    let status = execute(&request.linker, linker_invocation, &second).map_err(|error| {
         failure(
             DiagnosticCode::CollectorSecondLink,
             DiagnosticStage::SecondLink,
@@ -1054,6 +1062,10 @@ where
         })?;
         let status = execute(
             strip,
+            request
+                .driver_tool_names
+                .as_ref()
+                .map(|names| names.strip.as_str()),
             &[
                 OsString::from("--strip-unneeded"),
                 final_staged.clone().into_os_string(),
@@ -1147,12 +1159,6 @@ impl Drop for Cleanup {
 fn read_object(path: &Path) -> Result<Object> {
     let bytes = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
     aros_common::elf::read(&bytes).with_context(|| format!("cannot parse {}", path.display()))
-}
-
-fn run_tool(tool: &Path, args: &[OsString]) -> Result<ExitStatus> {
-    aros_common::run_status(Command::new(tool).args(args))
-        .map(|observed| observed.status)
-        .with_context(|| format!("cannot execute required sibling tool {}", tool.display()))
 }
 
 fn request_context(request: &EngineRequest) -> DiagnosticContext {
@@ -1861,7 +1867,7 @@ mod tests {
             "collect-aros",
         )
         .unwrap();
-        let execute = |_tool: &Path, arguments: &[OsString]| {
+        let execute = |_tool: &Path, _invocation: Option<&str>, arguments: &[OsString]| {
             fs::write(output_argument(arguments), b"not an ELF")?;
             Ok(test_exit_status(0))
         };
@@ -1887,6 +1893,7 @@ mod tests {
             name: "aros-collect".into(),
             linker: "test-linker".into(),
             strip: None,
+            driver_tool_names: None,
             emulation: None,
             args: vec![
                 OsString::from("-r"),
@@ -1904,7 +1911,7 @@ mod tests {
             frontend: Frontend::Direct,
         };
         let mut calls = 0;
-        let mut execute = |_tool: &Path, arguments: &[OsString]| {
+        let mut execute = |_tool: &Path, _invocation: Option<&str>, arguments: &[OsString]| {
             calls += 1;
             fs::copy(&fixture, output_argument(arguments))?;
             Ok(test_exit_status(0))
@@ -1937,6 +1944,7 @@ mod tests {
             name: "aros-collect".into(),
             linker: "test-linker".into(),
             strip: None,
+            driver_tool_names: None,
             emulation: None,
             args: vec![
                 OsString::from("-r"),
@@ -1954,7 +1962,7 @@ mod tests {
             frontend: Frontend::Direct,
         };
         let mut calls = 0;
-        let mut execute = |_tool: &Path, arguments: &[OsString]| {
+        let mut execute = |_tool: &Path, _invocation: Option<&str>, arguments: &[OsString]| {
             calls += 1;
             let target = output_argument(arguments);
             if calls == 1 {

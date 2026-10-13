@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 project(release_toolchain_fixture NONE)
 
+if(NOT DEFINED EXPECTED_LLVM_VERSION)
+    set(EXPECTED_LLVM_VERSION "11.0.0")
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/../../ToolchainIdentity.cmake")
 aros_lock_build_tree_toolchain()
 
@@ -37,11 +41,11 @@ set(_expected_cxx_runtime_libraries
     "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/libc++.a"
     "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/libc++abi.a"
     "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/libunwind.a"
-    "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/clang/11.0.0/lib/aros/libclang_rt.builtins-${EXPECTED_BUILTINS}.a")
+    "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/clang/${EXPECTED_LLVM_VERSION}/lib/aros/libclang_rt.builtins-${EXPECTED_BUILTINS}.a")
 if(NOT AROS_CROSS_TOOLCHAIN_CXX_RUNTIME_LIBRARIES STREQUAL
        _expected_cxx_runtime_libraries OR
    NOT AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE STREQUAL
-       "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/clang/11.0.0/lib/aros/libclang_rt.builtins-${EXPECTED_BUILTINS}.a")
+       "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/clang/${EXPECTED_LLVM_VERSION}/lib/aros/libclang_rt.builtins-${EXPECTED_BUILTINS}.a")
     message(FATAL_ERROR
         "release toolchain did not publish the exact prefix-owned C++ runtime")
 endif()

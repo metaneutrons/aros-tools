@@ -19,6 +19,7 @@ fn literal_object_generation_preserves_order_and_shared_ownership() {
         output: "${AROS_BUILD_DIR}/gen/compiler/local/entry.o".into(),
         language: "C".into(),
         arguments: vec!["-DX=1".into(), "-UX".into(), "-DX=2".into(), "-DX=2".into()],
+        dependency: None,
         line: 1,
     };
     let mut graph = DependencyGraph::new();
@@ -48,9 +49,76 @@ fn literal_object_generation_preserves_order_and_shared_ownership() {
 }
 
 #[test]
+fn source_dependency_generation_precedes_compile_and_keeps_independent_arguments() {
+    use crate::literal_objects::{
+        LiteralDependencyDecl, LiteralObjectDecl, LiteralObjectGroupDecl,
+    };
+    let object = LiteralObjectDecl {
+        source: "${AROS_SOURCE_DIR}/arch/example/unit.c".into(),
+        output: "${AROS_BUILD_DIR}/gen/example/unit.o".into(),
+        language: "C".into(),
+        arguments: vec!["-DCOMPILE_CONTEXT=1".into(), "-O2".into()],
+        dependency: Some(LiteralDependencyDecl {
+            output: "${AROS_BUILD_DIR}/gen/example/unit.d".into(),
+            arguments: vec!["-DDEPENDENCY_CONTEXT=1".into()],
+        }),
+        line: 7,
+    };
+    let mut graph = DependencyGraph::new();
+    for owner in ["unit-all", "unit-quick"] {
+        graph.literal_object_groups.push(LiteralObjectGroupDecl {
+            owner: owner.into(),
+            file: "arch/example/mmakefile.src".into(),
+            line: 6,
+            objects: vec![object.clone()],
+        });
+    }
+    let generated = generate_cmake(&graph);
+    assert_eq!(
+        generated
+            .matches("aros_generate_literal_dependencies(")
+            .count(),
+        1
+    );
+    assert_eq!(generated.matches("aros_compile_literal_object(").count(), 1);
+    let dependency_start = generated
+        .find("aros_generate_literal_dependencies(")
+        .unwrap();
+    let object_start = generated.find("aros_compile_literal_object(").unwrap();
+    assert!(dependency_start < object_start);
+    let dependency_call = &generated[dependency_start..object_start];
+    assert!(dependency_call.contains("OBJECT_OUTPUT \"${AROS_BUILD_DIR}/gen/example/unit.o\""));
+    assert!(dependency_call.contains("\"-DDEPENDENCY_CONTEXT=1\""));
+    assert!(!dependency_call.contains("COMPILE_CONTEXT"));
+    let compile_call = generated[object_start..]
+        .split("aros_literal_object_group(")
+        .next()
+        .unwrap();
+    assert!(
+        compile_call.contains("SOURCE_DEPENDENCY_OUTPUT \"${AROS_BUILD_DIR}/gen/example/unit.d\"")
+    );
+    assert!(compile_call.contains("\"-DCOMPILE_CONTEXT=1\""));
+    assert!(!compile_call.contains("DEPENDENCY_CONTEXT"));
+    graph.literal_object_groups[1].objects[0]
+        .dependency
+        .as_mut()
+        .unwrap()
+        .arguments
+        .push("-DX=1".into());
+    assert!(generate_cmake(&graph).contains("Conflicting literal object ownership"));
+    let mut conflicting = object;
+    conflicting.output = "${AROS_BUILD_DIR}/gen/example/unit.o.o".into();
+    conflicting.dependency.as_mut().unwrap().output =
+        "${AROS_BUILD_DIR}/gen/example/unit.o.d".into();
+    graph.literal_object_groups[1].objects[0] = conflicting;
+    assert!(generate_cmake(&graph).contains("Conflicting literal object ownership"));
+}
+
+#[test]
 fn sdk_objects_share_one_owner_but_conflicting_outputs_fail_without_selection() {
     use crate::sdk_objects::{SdkObjectDecl, SdkObjectGroupDecl};
     let object = SdkObjectDecl {
+        companion_cpu: None,
         source: "compiler/local/start.c".into(),
         intermediate: "${AROS_GENERATED_DIR}/compiler/local/start.o".into(),
         output: "${AROS_DEVELOPER_LIB_DIR}/start.o".into(),
@@ -1184,6 +1252,66 @@ fn sourceful_and_sourceless_full_modules_keep_their_exact_cmake_contracts() {
         .expect("source-free version module");
     let version_end = cmake[version_at..].find("\n)\n").unwrap() + version_at;
     assert!(cmake[version_at..version_end].contains("    GENMODULE_ONLY"));
+}
+
+#[test]
+fn architecture_client_linklib_sources_emit_outside_the_module_source_lane() {
+    use crate::arch_sources::collect_arch_sources;
+    use crate::ast::GenmoduleLinklibs;
+
+    let tree = TempTree::new();
+    let module = tree.0.join("compiler/crt/stdc");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(
+        module.join("runtime.c"),
+        "int runtime(void) { return 0; }\n",
+    )
+    .unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=compiler-stdc modname=stdc modtype=library files=runtime\n",
+    )
+    .unwrap();
+    let mut parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    let target = parsed.targets.first_mut().expect("stdc module target");
+    target.genmodule_linklibs = Some(GenmoduleLinklibs {
+        enabled: true,
+        source_files: vec!["__stdc_mathinit".to_owned()],
+        ..GenmoduleLinklibs::default()
+    });
+
+    let arch_recipe = concat!(
+        "RUNTIME := runtime_arch\n",
+        "%build_archspecific mainmmake=compiler-stdc arch=x86_64 files=$(RUNTIME) \\\n",
+        "  linklibfiles=__stdc_mathinit maindir=compiler/crt/stdc modname=stdc\n",
+        "%build_archspecific mainmmake=compiler-stdc arch=i386 files=$(RUNTIME) \\\n",
+        "  linklibfiles=\"__stdc_mathinit sse\" maindir=compiler/crt/stdc modname=stdc\n",
+    );
+    let (arch_sources, skipped) = collect_arch_sources(
+        arch_recipe,
+        std::path::Path::new("arch/x86_64-all/stdc"),
+        None,
+    );
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert_eq!(arch_sources.len(), 2);
+
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        graph.add_target(target);
+    }
+    graph.add_arch_sources(arch_sources);
+    graph.resolve_arch_sources();
+    let cmake = generate_cmake(&graph);
+    let module_at = cmake
+        .find("aros_add_library(\n    TARGET stdc\n    MMAKE_ID compiler-stdc")
+        .expect("stdc module builder");
+    let module_end = cmake[module_at..].find("\n)\n").unwrap() + module_at;
+    let module = &cmake[module_at..module_end];
+    assert!(module.contains("ARCH_SOURCES \"x86_64|arch/x86_64-all/stdc|runtime_arch\""));
+    assert!(module.contains(
+        "ARCH_LINKLIB_SOURCES \"x86_64|arch/x86_64-all/stdc|__stdc_mathinit\" \"i386|arch/x86_64-all/stdc|__stdc_mathinit,sse\""
+    ));
 }
 
 #[test]

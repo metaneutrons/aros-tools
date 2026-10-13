@@ -157,13 +157,38 @@ pub(super) fn parse_mmakefile_impl(
         .flatten()
         .unwrap_or_default();
     let define_scope_adopted = !define_headers.is_empty();
-    let local_make_scan = if port_scope_adopted {
-        port_scope_candidate
-    } else if define_scope_adopted {
-        define_scope_candidate
-    } else {
-        plain_local_make_scan
-    };
+    let native_scope_candidate = target
+        .filter(|context| !context.native_configuration_inputs.is_empty())
+        .map(|selected| {
+            crate::local_make_includes::inline_native_make_configuration_for_context(
+                &content,
+                root,
+                &relative_path,
+                LocalMakeIncludeLimits::default(),
+                selected,
+            )
+        });
+    let native_options_context = target.filter(|_| {
+        native_scope_candidate
+            .as_ref()
+            .is_some_and(crate::local_make_includes::contains_options)
+    });
+    // Existing source-list, fetch-owned port and literal-header scopes have
+    // independent provenance proofs. Preserve those projections unless they
+    // consume options; never replace ARCHSRCDIR or fetched inventories with
+    // unrelated global configuration.
+    let local_make_scan = native_options_context.map_or_else(
+        || {
+            if port_scope_adopted {
+                port_scope_candidate
+            } else if define_scope_adopted {
+                define_scope_candidate
+            } else {
+                plain_local_make_scan
+            }
+        },
+        |_| native_scope_candidate.expect("selected native options context has its captured scope"),
+    );
     let skipped_local_make_includes = local_make_scan
         .issues
         .iter()
@@ -234,7 +259,9 @@ pub(super) fn parse_mmakefile_impl(
     // numbers drift with every continuation and every inlined fragment, so the
     // positional flag lookup below would read some other declaration's flags.
     let native_arch_context = target.filter(|context| {
-        !context.make_include_bindings.is_empty() || !context.generated_make_templates.is_empty()
+        !context.make_include_bindings.is_empty()
+            || !context.generated_make_templates.is_empty()
+            || !context.native_configuration_inputs.is_empty()
     });
     let (arch_sources, skipped_arch_sources) = if let Some(context) =
         native_arch_context.filter(|_| content.contains("%build_archspecific"))
@@ -353,7 +380,14 @@ pub(super) fn parse_mmakefile_impl(
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
     // transpiler itself stays target-agnostic.
-    let (opts_files, mut skipped_make_opts) = collect_make_opts(&content, &rel_dir, root);
+    let (opts_files, mut skipped_make_opts) =
+        if target.is_some_and(|context| !context.native_configuration_inputs.is_empty()) {
+            // Native includes were resolved exactly in the positional scope.
+            // No wildcard/tag discovery may lend additional unsealed flags.
+            (Vec::new(), Vec::new())
+        } else {
+            collect_make_opts(&content, &rel_dir, root)
+        };
     let active_tags = crate::make_opts::active_arch_tags(
         target.and_then(|target| target.platform.as_deref()),
         target.and_then(|target| target.cpu.as_deref()),
@@ -474,6 +508,13 @@ pub(super) fn parse_mmakefile_impl(
             copy_directory_line_states,
         );
     let mut native_graph_errors = Vec::new();
+    if native_options_context.is_some() {
+        for problem in &local_make_scan.issues {
+            native_graph_errors.push(capability_diagnostic(
+                &problem.source, Some(problem.line),
+                format!("native source configuration is incomplete: {problem}; fix upstream or bind its exact source input")));
+        }
+    }
     copy_scan.transforms.extend(literal_header_copies);
     for rejection in literal_header_copy_rejections {
         native_graph_errors.push(capability_diagnostic_with_owner(
@@ -508,13 +549,15 @@ pub(super) fn parse_mmakefile_impl(
         ));
     }
     let (directory_setups, directory_setup_rejections) =
-        crate::directory_setup::collect_directory_setups_with_context(
+        crate::directory_setup::collect_native_directory_setups(
+            &content,
             &joined,
             &rel_dir,
             &scope,
             dirs,
             root,
             copy_directory_line_states,
+            target,
         );
     for rejection in directory_setup_rejections {
         native_graph_errors.push(capability_diagnostic_with_owner(
@@ -630,6 +673,33 @@ pub(super) fn parse_mmakefile_impl(
             dirs,
             copy_directory_line_states,
         );
+    let (mut source_literal_text_rules, source_literal_text_rejections) =
+        crate::source_literal_text_scope::collect(
+            &content,
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+            target,
+            architecture_scope_positions(root, &relative_path, &content, &local_make_scan, &joined)
+                .as_deref(),
+        );
+    for rule in &mut source_literal_text_rules {
+        source_sha256.as_str().clone_into(&mut rule.file_sha256);
+    }
+    for rejection in source_literal_text_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "literal source text rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
     for rejection in source_text_rejections {
         native_graph_errors.push(capability_diagnostic_with_owner(
             &relative_path,
@@ -704,30 +774,33 @@ pub(super) fn parse_mmakefile_impl(
             ),
         ));
     }
-    let (sdk_object_groups, sdk_object_rejections) = crate::sdk_objects::collect_from_snapshot(
-        &invocations,
-        &scope,
-        dirs,
-        root,
-        &rel_dir,
-        copy_directory_line_states,
-        &joined,
-    );
+    let sdk_object_physical_positions =
+        architecture_scope_positions(root, &relative_path, &content, &local_make_scan, &joined);
+    let (sdk_object_groups, sdk_object_rejections) =
+        crate::sdk_objects::collect_with_native_configuration(
+            crate::sdk_objects::SdkObjectSnapshot {
+                invocations: &invocations,
+                scope: &scope,
+                line_states: copy_directory_line_states,
+                text: &joined,
+                physical_positions: sdk_object_physical_positions.as_deref(),
+            },
+            &content,
+            target,
+            dirs,
+            root,
+            &rel_dir,
+        );
     // Literal recipes execute after all source assignments have been read.
     // Their native configuration is a separate, explicitly bound scope; it
     // must not silently expand the global configuration of unrelated macros.
     let literal_configuration =
-        crate::local_make_includes::inline_native_make_configuration_with_templates(
+        crate::local_make_includes::inline_native_make_configuration_for_selection(
             &content,
             root,
             &relative_path,
             LocalMakeIncludeLimits::default(),
-            &target.map_or_else(std::collections::BTreeMap::new, |target| {
-                target.make_include_bindings.clone()
-            }),
-            &target.map_or_else(std::collections::BTreeMap::new, |target| {
-                target.generated_make_templates.clone()
-            }),
+            target,
         );
     let literal_joined = join_continuations(&literal_configuration.expanded);
     let (literal_scope, literal_states) = collect_vars_impl(&literal_joined, target);
@@ -762,7 +835,7 @@ pub(super) fn parse_mmakefile_impl(
             copy_scan.decls.push(declaration);
         }
     }
-    let (literal_object_groups, literal_object_rejections) =
+    let (mut literal_object_groups, literal_object_rejections) =
         crate::literal_objects::collect_from_snapshot(
             &literal_scope,
             dirs,
@@ -771,6 +844,22 @@ pub(super) fn parse_mmakefile_impl(
             Some(&literal_states),
             &literal_joined,
         );
+    let (macro_objects, macro_object_rejections) =
+        crate::compile_multi::collect(&content, &relative_path, root, dirs, target);
+    literal_object_groups.extend(macro_objects);
+    for rejection in macro_object_rejections {
+        // This collector retains physical source lines, not positions in the
+        // expanded native configuration; do not remap its source anchors.
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            (rejection.owner != "<unknown>").then_some(rejection.owner.as_str()),
+            format!(
+                "compile-multi producer is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
     let literal_object_anchors = literal_object_source_anchors(
         root,
         &relative_path,
@@ -1197,6 +1286,11 @@ pub(super) fn parse_mmakefile_impl(
         )
     })?;
 
+    let kobj_native_positions = native_options_context.and_then(|_| {
+        architecture_scope_positions(root, &relative_path, &content, &local_make_scan, &joined)
+    });
+    let (kobj_physical_joined, kobj_physical_lines) =
+        crate::parser::join_continuations_with_origins(&content);
     let capture_kobj_inputs = |inv: &Invocation, fallback_name: &str| {
         target.map(|target| {
             let expression_scope = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
@@ -1212,9 +1306,25 @@ pub(super) fn parse_mmakefile_impl(
                 .transpose();
             let raw_uselibs = macro_arg(&inv.args, "uselibs");
             let raw_funcinstr = macro_arg(&inv.args, "funcinstr");
+            let physical_declaration = kobj_native_positions
+                .as_ref()
+                .and_then(|positions| {
+                    positions
+                        .iter()
+                        .position(|position| *position == Some(inv.line))
+                })
+                .and_then(|physical| {
+                    kobj_physical_lines
+                        .iter()
+                        .position(|line| *line == physical)
+                });
+            let (kobj_source, kobj_line) = physical_declaration
+                .map_or((joined.as_str(), inv.line), |line| {
+                    (kobj_physical_joined.as_str(), line)
+                });
             let mut captured = crate::kobj_scoped_inputs::capture_kobj_scoped_inputs_for_module(
-                &joined,
-                inv.line,
+                kobj_source,
+                kobj_line,
                 crate::kobj_scoped_inputs::KobjModuleArgs {
                     module_name: name.as_deref().unwrap_or(fallback_name),
                     flavour: flavour.as_ref().ok().and_then(|value| value.as_deref()),
@@ -1227,14 +1337,25 @@ pub(super) fn parse_mmakefile_impl(
                 target,
                 &[],
             );
-            let issue = name.err().or_else(|| flavour.err()).or_else(|| {
-                (!skipped_local_make_includes.is_empty()).then(|| {
-                    format!(
-                        "unresolved local Make fragments: {}",
-                        skipped_local_make_includes.join("; ")
+            let issue = name
+                .err()
+                .or_else(|| flavour.err())
+                .or_else(|| {
+                    (native_options_context.is_some() && physical_declaration.is_none()).then(
+                        || {
+                            "native KOBJ declaration lacks its exact physical recipe position"
+                                .into()
+                        },
                     )
                 })
-            });
+                .or_else(|| {
+                    (!skipped_local_make_includes.is_empty()).then(|| {
+                        format!(
+                            "unresolved local Make fragments: {}",
+                            skipped_local_make_includes.join("; ")
+                        )
+                    })
+                });
             if let Some(reason) = issue {
                 for input in [
                     &mut captured.user_objects,
@@ -1459,6 +1580,15 @@ pub(super) fn parse_mmakefile_impl(
     // This pass appends only handwritten #MM/#MM- declarations. Keep their
     // edge origin even when their dependencies duplicate generated aliases.
     let explicit_meta_rules = meta_rules[implicit_meta_rule_count..].to_vec();
+    let script_output_aggregates = crate::script_output_aggregates::collect(
+        &content,
+        &relative_path,
+        root,
+        dirs,
+        target,
+        &make_meta_providers,
+        &copy_scan.script_outputs,
+    );
     let sfd_header_scan = crate::sfd_header_rules::collect_sfd_header_rules_with_context(
         &joined,
         root,
@@ -1604,6 +1734,7 @@ pub(super) fn parse_mmakefile_impl(
         sfd_header_rules: sfd_header_scan.declarations,
         source_text_rules,
         source_value_rules,
+        source_literal_text_rules,
         sdk_file_copies,
         sdk_asset_rules,
         sdk_program_outputs,
@@ -1649,6 +1780,7 @@ pub(super) fn parse_mmakefile_impl(
         define_headers,
         generated_file_rules: copy_scan.generated_files,
         script_outputs: copy_scan.script_outputs,
+        script_output_aggregates,
         skipped_script_outputs: copy_scan.skipped_script_outputs,
         flags: flag_set,
         arch_sources,

@@ -23,6 +23,7 @@ use crate::ContractError;
 
 const SCHEMA: &str = "aros-toolchain-compatibility-inputs-v1";
 const SDK_SCHEMA: &str = "aros-toolchain-compatibility-inputs-v2";
+const LLVM_SDK_SCHEMA: &str = "aros-toolchain-compatibility-inputs-v3";
 const MAX_STANDALONE_FIXTURE_BYTES: u64 = 1024 * 1024;
 
 /// Bounded content identity only; this makes no claim about a fixture path or
@@ -57,6 +58,8 @@ struct InputDocument {
     cmake_build_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_sdk: Option<crate::compatibility::NativeSdkLinkSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    llvm_sdk: Option<crate::compatibility::LlvmSdkLinkSelection>,
     sdk_source_tree_sha256: Sha256Digest,
     engine_api_version: u32,
     engine_sha256: Sha256Digest,
@@ -104,12 +107,31 @@ impl NativeCompatibilityInputClaims {
         reject_duplicate_json_keys(bytes)?;
         let document: InputDocument = serde_json::from_slice(bytes)
             .map_err(|_| error("compatibility input observation is not closed JSON"))?;
-        if (document.schema != SCHEMA && document.schema != SDK_SCHEMA)
+        if (document.schema != SCHEMA
+            && document.schema != SDK_SCHEMA
+            && document.schema != LLVM_SDK_SCHEMA)
             || (document.schema == SDK_SCHEMA) != document.native_sdk.is_some()
+            || (document.schema == LLVM_SDK_SCHEMA) != document.llvm_sdk.is_some()
         {
             return Err(error(
                 "compatibility input observation has an unsupported schema",
             ));
+        }
+        if let Some(selection) = &document.llvm_sdk {
+            selection.validate()?;
+            if !document.cmake_build_required
+                || document.native_sdk.is_some()
+                || document.source_preset.is_some()
+                || !matches!(document.compiler, ArosCompilerIdentity::Llvm { .. })
+                || selection.compiler() != &document.compiler
+                || selection.toolchain_profile() != document.target_profile
+                || selection.identity().target.target_triple != document.target_triple
+                || selection.identity().source.content_sha256 != document.sdk_source_tree_sha256
+            {
+                return Err(error(
+                    "LLVM SDK input observation differs from its source/compiler build selection",
+                ));
+            }
         }
         if let Some(selection) = &document.native_sdk {
             selection.validate()?;
@@ -172,13 +194,58 @@ impl NativeCompatibilityInputClaims {
         profile: &'a Profile,
         native_sdk_required: bool,
     ) -> Result<NativeCompatibilityReceiptExpectations<'a>, ContractError> {
+        self.selected_expectations(package, profiles, profile, native_sdk_required, None)
+    }
+
+    /// Rebind generic LLVM SDK inputs to a separately selected complete SDK
+    /// identity. Neither parsed input claims nor hashes authenticate a CI job.
+    ///
+    /// # Errors
+    /// Rejects a different SDK product/source/ABI or compiler/profile selection.
+    pub fn expectations_with_llvm_sdk<'a>(
+        &'a self,
+        package: NativeCompatibilityExpectedPackage<'a>,
+        profiles: &'a Profiles,
+        profile: &'a Profile,
+        identity: &aros_common::sdk_manifest::SdkIdentity,
+    ) -> Result<NativeCompatibilityReceiptExpectations<'a>, ContractError> {
+        self.selected_expectations(package, profiles, profile, false, Some(identity))
+    }
+
+    fn selected_expectations<'a>(
+        &'a self,
+        package: NativeCompatibilityExpectedPackage<'a>,
+        profiles: &'a Profiles,
+        profile: &'a Profile,
+        native_sdk_required: bool,
+        llvm_sdk_identity: Option<&aros_common::sdk_manifest::SdkIdentity>,
+    ) -> Result<NativeCompatibilityReceiptExpectations<'a>, ContractError> {
         let doc = &self.document;
         if doc.native_sdk.is_some() != native_sdk_required {
             return Err(error(
                 "SDK requirement differs from independent source policy",
             ));
         }
+        if doc
+            .llvm_sdk
+            .as_ref()
+            .map(crate::compatibility::LlvmSdkLinkSelection::identity)
+            != llvm_sdk_identity
+        {
+            return Err(error(
+                "LLVM SDK requirement differs from independent product/source policy",
+            ));
+        }
         let selected = profiles.select(profile.name())?;
+        if doc
+            .llvm_sdk
+            .as_ref()
+            .is_some_and(|selection| selection.toolchain_profile() != profile.name())
+        {
+            return Err(error(
+                "LLVM SDK source profile differs from the independent compiler profile",
+            ));
+        }
         let manifest = crate::canonical::bytes(
             &serde_json::to_value(package.manifest)
                 .map_err(|_| error("cannot encode expected compatibility package manifest"))?,
@@ -206,6 +273,7 @@ impl NativeCompatibilityInputClaims {
             gnu_source_preset: doc.source_preset.as_deref(),
             cmake_build_required: doc.cmake_build_required,
             native_sdk: doc.native_sdk.as_ref(),
+            llvm_sdk: doc.llvm_sdk.as_ref(),
             sdk_consumer_source_tree_sha256: &doc.sdk_source_tree_sha256,
             engine_api_version: doc.engine_api_version,
             engine_sha256: &doc.engine_sha256,
@@ -228,7 +296,9 @@ impl NativeCompatibilityInputClaims {
                 .map_err(|_| error("cannot encode observed compatibility package manifest"))?,
         )?;
         let document = InputDocument {
-            schema: if expected.native_sdk.is_some() {
+            schema: if expected.llvm_sdk.is_some() {
+                LLVM_SDK_SCHEMA
+            } else if expected.native_sdk.is_some() {
                 SDK_SCHEMA
             } else {
                 SCHEMA
@@ -246,6 +316,7 @@ impl NativeCompatibilityInputClaims {
             source_preset: expected.gnu_source_preset.map(str::to_owned),
             cmake_build_required: expected.cmake_build_required,
             native_sdk: expected.native_sdk.cloned(),
+            llvm_sdk: expected.llvm_sdk.cloned(),
             sdk_source_tree_sha256: expected.sdk_consumer_source_tree_sha256.clone(),
             engine_api_version: expected.engine_api_version,
             engine_sha256: expected.engine_sha256.clone(),

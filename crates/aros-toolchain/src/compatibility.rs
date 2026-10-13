@@ -34,10 +34,23 @@ mod environment_plan;
 mod execution;
 mod host_generator_inputs;
 mod host_tools;
+mod llvm_sdk_application;
+mod llvm_sdk_application_plan;
+mod llvm_sdk_driver;
+mod llvm_sdk_generated_root;
+mod llvm_sdk_link_paths;
+mod llvm_sdk_links;
+mod llvm_sdk_portable;
 mod native_sdk_links;
 mod native_sdk_portable;
 mod native_sdk_relocation;
 mod relocation;
+#[cfg(all(test, unix))]
+mod sdk_generation_matrix_cli_tests;
+#[cfg(all(test, unix))]
+mod sdk_qualification_cli_tests;
+#[cfg(all(test, unix))]
+mod sdk_qualification_tests;
 mod standalone;
 pub use environment::{CompatibilityEnvironment, CompatibilityHostToolReport};
 pub use environment_plan::{
@@ -54,12 +67,12 @@ pub use execution::{
     execute_native_compatibility, execute_native_compatibility_with_export,
     execute_native_compatibility_with_readback, export_retained_native_compatibility,
     readback_native_compatibility_receipt, readback_portable_native_compatibility,
-    readback_retained_native_compatibility, NativeCompatibilityCommandLogs,
-    NativeCompatibilityExecutionExport, NativeCompatibilityExpectedPackage,
-    NativeCompatibilityExpectedPortSource, NativeCompatibilityInputClaims,
-    NativeCompatibilityReceiptExpectations, NativeCompatibilityReceiptReadback,
-    NativeCompatibilityReceiptReadbackRequest, NativeCompatibilityReport,
-    NativeCompatibilityRequest, PortableNativeCompatibilityExport,
+    readback_retained_native_compatibility, LlvmSdkCompatibilityReport,
+    NativeCompatibilityCommandLogs, NativeCompatibilityExecutionExport,
+    NativeCompatibilityExpectedPackage, NativeCompatibilityExpectedPortSource,
+    NativeCompatibilityInputClaims, NativeCompatibilityReceiptExpectations,
+    NativeCompatibilityReceiptReadback, NativeCompatibilityReceiptReadbackRequest,
+    NativeCompatibilityReport, NativeCompatibilityRequest, PortableNativeCompatibilityExport,
     PortableNativeCompatibilityReadback, PortableNativeCompatibilityRequest, StandaloneFixtures,
     PORTABLE_NATIVE_COMPATIBILITY_MANIFEST,
 };
@@ -70,6 +83,21 @@ pub use host_tools::{
     HostToolClosure, HostToolClosureRequest, HostToolIdentity,
     REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
 };
+pub use llvm_sdk_application_plan::{
+    plan_llvm_sdk_application_links, LlvmSdkApplicationPlan, LlvmSdkApplicationPlanRequest,
+};
+pub use llvm_sdk_driver::{
+    inspect_llvm_sdk_drivers, LlvmSdkDriverBinding, LlvmSdkDriverQueryIdentity,
+    LlvmSdkDriverRequest, LlvmSdkDriverRole, LlvmSdkDriverRoleIdentity,
+};
+pub use llvm_sdk_generated_root::{
+    bind_llvm_sdk_generated_root, execute_llvm_sdk_build_links, readback_llvm_sdk_build_links,
+    CompletedLlvmSdkBuildLinks, LlvmSdkGeneratedRoot, LlvmSdkGeneratedRootRequest,
+};
+pub use llvm_sdk_links::{
+    execute_llvm_sdk_links, readback_llvm_sdk_links, CompletedLlvmSdkLinks, LlvmSdkLinkRequest,
+};
+pub use llvm_sdk_portable::{LlvmSdkLinkSelection, LlvmSdkPortableProof};
 pub use native_sdk_links::{
     execute_native_sdk_links, readback_native_sdk_links, NativeSdkLinkReport, NativeSdkLinkRequest,
 };

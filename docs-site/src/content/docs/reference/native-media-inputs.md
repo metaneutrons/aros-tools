@@ -86,6 +86,20 @@ contract's hashes. The fragment is evaluated at the include's position; later so
 retain their order. It is not an ignored include or an ambient Make configuration.
 Unmapped includes and unresolved values still refuse KOBJ consumption.
 
+Source-local configuration and `make.opts` files are read in include order
+against the selected source contract. Present files, including nested fragments,
+must match its input hashes. An optional include may be absent only at an exact,
+symlink-free source path; missing required files fail. Source option files cannot
+be replaced by `.mk` projections, and configuration fragments cannot declare
+build owners. Native parsing does not glob other architectures' option files.
+Existing plain source inventories and declaration-proved fetched-port/header
+scopes keep their own provenance rules; global native configuration does not
+replace them. If they consume source options, the sealed native path applies.
+Directory expressions use `config/make.cfg.in` only when it is a sealed input;
+its bounded, no-follow snapshot shares the include read budget. An unresolved
+variable can hide an options path even with a `.mk` suffix and remains an error.
+Fully resolved generated paths retain their separate capability ownership.
+
 `generated_make_templates` reconstructs a generated Make include from a sealed
 `.in` template, its literal `AC_CONFIG_FILES` declaration and explicit profile
 substitutions. It never reads the generated file. Only plain assignments and
@@ -100,6 +114,11 @@ overrides and Make-built outputs are not imported. This remains experimental;
 configuration binding alone does not qualify the complete kernel or BSP.
 
 Native SDK objects must have source-declared compile and staging rules.
+Explicit native configuration supplies their variable and compiler context.
+The compile, copy and aggregate owners must remain in the physical recipe;
+an included configuration cannot create providers. Unbound configuration or
+unsupported object/staging roots fail rather than falling back to an ordinary
+Make scope.
 The supported subset is a finite ordinary Make aggregate, local C/C++ sources,
 `%rule_compile`/`%rule_compile_cxx`, and an exact object-copy pattern.
 Declaration-time flags and generated-header prerequisites are retained.
@@ -119,6 +138,22 @@ object outputs. The native compiler command preserves the source's ordered
 arguments, including repeated flag lanes; it does not inject CMake global
 flags. Bound configuration supplies the source-owned flags and fresh native
 Developer sysroot. Unknown flags, unmodelled commands and unsafe paths fail.
+Direct compiler calls preserve the selected language driver's target and
+validated SDK ABI options separately from those source arguments. A conflicting
+target, ABI or Developer sysroot is rejected; arbitrary `CMAKE_<LANG>_FLAGS`
+are not imported.
+
+Standalone C `%rule_compile_multi` calls require verified GenMF templates and
+`mkdep`, bound compiler roles, one physical phony owner with the complete object
+list, and its exact `%include_deps` list. The `mmake` argument is a variable
+namespace, not an owner. Source lookup follows the template's ordered `vpath`
+search; shadowing sources, Make exports and unproven adjacent macros are rejected.
+Multi-batch and multi-owner forms remain unsupported, as do host/kernel compiler
+selection and custom source-tree layouts.
+
+The source `.d` file retains its separate dependency flags and names its object.
+A private Ninja tracker regenerates it when its headers change; the object's
+private depfile combines both contexts. This does not qualify a complete SDK.
 
 Archive, HIDD-compile and layered-header projections may appear in the graph
 audit before their full producer contracts are implemented. These partial
@@ -139,6 +174,21 @@ the check preserves GNU Make's directory-stripping semantics.
 Explicit expressions also require stable variable origins: ambient `?=`
 assignments, later overrides and unproved GenMF or Make effects are refused.
 Recognizing the archive recipe does not prove its object producers.
+
+Literal generated text has a separate source-owned capability. A nonvirtual
+`#MM` owner must name one direct file under its recipe's `gen/<directory>` lane,
+with that `mmakefile.src` as its prerequisite. Only directory creation and
+ordered, bounded `$(ECHO)` text writes with a proven `echo` binding are supported.
+Native configuration supplies values, not executable owners. Source and payload hashes are rechecked
+at build time; arbitrary shell commands and conflicting producers are rejected.
+
+Source-local Python output aggregates require an explicit effective `.PHONY`
+declaration and a dependency-only `#MM` rule. Every prerequisite must bind to
+one exact script output in the same recipe. Bare `#MM` alone is insufficient:
+GNU Make can otherwise apply an implicit recipe. Unknown conditions, opaque
+commands, custom recipe prefixes and incomplete generator bindings are rejected.
+Generator target identities include the full output path, so equal basenames
+in different directories remain separate producers.
 
 With a sealed MetaMake invocation policy, native selection preserves reachable
 GenMF virtual aliases and their exact source dependencies. Aliases are metadata
@@ -195,8 +245,10 @@ The transpiler selects it explicitly with `--native-consumer-profile` and can
 bind its exact bytes with `--native-consumer-contract-sha256`. This mode cannot
 be combined with the full-build `--native-profile` selection. Both use the same
 strict dependency closure and source-owner checks; missing required endpoints,
-selected capability errors and unknown/global errors remain fatal. Contract
-files are limited to 1 MiB, inputs to 16 MiB each, and symlink or hardlinked
+selected capability errors and unknown/global errors remain fatal.
+Optional edges use a literal selected owner and its exact source selector
+expression; owner selectors resolve from the same native context.
+Contract files are limited to 1 MiB, inputs to 16 MiB each, and symlink or hardlinked
 input aliases are rejected. Native invocation sidecars identify the contract
 kind; they are scope evidence, not build or release evidence.
 
@@ -233,6 +285,20 @@ Bootstrap headers, source-declared header producers and target include paths
 use that same root. Unsafe or unresolved paths, incompatible layouts and native
 Make overrides of the SDK root variables fail validation. Nonconsumer builds
 retain the internal `SDK/include` layout.
+
+LLVM SDK contracts may declare an explicit companion compiler role for a
+separate Developer library, such as x86-64's i386 `lib32`. `cpu32` alone does
+not authorize it. The source descriptor must bind the triple, ELF ABI,
+compiler options and required runtime. Companion objects use that context,
+not the primary target's inherited flags; staging checks their ELF identity
+and unchanged bytes on incremental builds too.
+
+Architecture client-linklib sources remain separate from runtime module
+sources. They replace matching generic client sources in both normal and
+relative archives. A source-owned linklib leaf builds its architecture
+objects, not the whole archive. Compile-multi neighbors require verified
+template effects, disjoint outputs and a physical owner; AVX flags are retained.
+These graph capabilities do not prove a complete SDK build or release.
 
 The engine passes the build directory to `aros-genmodule --output-root`, keeping
 the Developer includes, generated sources and symbol audit in one publication

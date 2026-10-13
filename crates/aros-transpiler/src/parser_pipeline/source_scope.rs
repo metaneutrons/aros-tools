@@ -131,7 +131,7 @@ pub(super) struct ReconstructedLiteralSource {
     pub(super) physical_anchors: Vec<Option<LiteralObjectSourceAnchor>>,
 }
 
-/// Reconstructs the exact native-configuration expansion while retaining the
+/// Reconstructs the exact source include expansion while retaining the
 /// original file and physical line for every emitted line. A mismatch means
 /// the include provenance cannot safely support a source location.
 pub(super) fn literal_object_source_anchors(
@@ -143,15 +143,34 @@ pub(super) fn literal_object_source_anchors(
 ) -> Option<Vec<Option<LiteralObjectSourceAnchor>>> {
     let canonical_root = std::fs::canonicalize(root).ok()?;
     let mut next_fragment = 0;
-    let reconstructed = reconstruct_literal_source(
+    let mut remaining_fragment_bytes = crate::LocalMakeIncludeLimits::default().bytes;
+    let mut reconstructed = reconstruct_literal_source(
         &canonical_root,
         source,
         source_text,
         &scan.fragments,
         &mut next_fragment,
+        false,
+        &mut remaining_fragment_bytes,
     )?;
     if next_fragment != scan.fragments.len() || reconstructed.text != scan.expanded {
-        return None;
+        // Ordinary local scopes retain their include directive; explicit
+        // native configuration replaces it with a verification marker. Both
+        // grammars must reproduce the complete observed expansion exactly.
+        next_fragment = 0;
+        remaining_fragment_bytes = crate::LocalMakeIncludeLimits::default().bytes;
+        reconstructed = reconstruct_literal_source(
+            &canonical_root,
+            source,
+            source_text,
+            &scan.fragments,
+            &mut next_fragment,
+            true,
+            &mut remaining_fragment_bytes,
+        )?;
+        if next_fragment != scan.fragments.len() || reconstructed.text != scan.expanded {
+            return None;
+        }
     }
 
     let joined = join_continuations(&reconstructed.text);
@@ -277,6 +296,8 @@ pub(super) fn reconstruct_literal_source(
     source_text: &str,
     fragments: &[crate::local_make_includes::IncludedLocalMakeFragment],
     next_fragment: &mut usize,
+    retain_include_directive: bool,
+    remaining_fragment_bytes: &mut usize,
 ) -> Option<ReconstructedLiteralSource> {
     let mut reconstructed = ReconstructedLiteralSource::default();
     for (index, chunk) in source_text.split_inclusive('\n').enumerate() {
@@ -297,6 +318,21 @@ pub(super) fn reconstruct_literal_source(
                 }
                 let fragment_path = fragment.path.clone();
                 *next_fragment += 1;
+                if fragment.is_proven_absent() {
+                    crate::local_make_includes::verify_absent_source_options(root, &fragment_path)
+                        .ok()?;
+                    if fragment.generated_output.is_some()
+                        || fragment.template_substitutions.is_some()
+                        || retain_include_directive
+                    {
+                        return None;
+                    }
+                    reconstructed
+                        .text
+                        .push_str("# Verified source configuration include\n");
+                    reconstructed.physical_anchors.push(None);
+                    continue;
+                }
                 let resolved_fragment_path = root.join(&fragment_path);
                 if std::fs::canonicalize(&resolved_fragment_path)
                     .ok()
@@ -306,16 +342,32 @@ pub(super) fn reconstruct_literal_source(
                 {
                     return None;
                 }
-                reconstructed
-                    .text
-                    .push_str(if fragment.generated_output.is_some() {
-                        "# Verified source configuration template\n"
-                    } else {
-                        "# Verified source configuration include\n"
-                    });
-                reconstructed.physical_anchors.push(None);
+                if retain_include_directive && fragment.generated_output.is_none() {
+                    reconstructed.text.push_str(chunk);
+                    reconstructed
+                        .physical_anchors
+                        .push(Some(LiteralObjectSourceAnchor {
+                            source: source.to_path_buf(),
+                            line,
+                        }));
+                } else {
+                    reconstructed
+                        .text
+                        .push_str(if fragment.generated_output.is_some() {
+                            "# Verified source configuration template\n"
+                        } else {
+                            "# Verified source configuration include\n"
+                        });
+                    reconstructed.physical_anchors.push(None);
+                }
 
-                let mut fragment_text = std::fs::read_to_string(&resolved_fragment_path).ok()?;
+                let (_, bytes) = aros_common::publication::measure_regular_file_bounded(
+                    &resolved_fragment_path,
+                    *remaining_fragment_bytes as u64,
+                )
+                .ok()??;
+                *remaining_fragment_bytes = remaining_fragment_bytes.checked_sub(bytes.len())?;
+                let mut fragment_text = String::from_utf8(bytes).ok()?;
                 if let Some(substitutions) = &fragment.template_substitutions {
                     fragment.generated_output.as_ref()?;
                     for (token, value) in substitutions {
@@ -331,6 +383,8 @@ pub(super) fn reconstruct_literal_source(
                     &fragment_text,
                     fragments,
                     next_fragment,
+                    retain_include_directive,
+                    remaining_fragment_bytes,
                 )?;
                 let has_text = !expanded.text.is_empty();
                 let ends_with_newline = expanded.text.ends_with('\n');

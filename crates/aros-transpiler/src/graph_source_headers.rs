@@ -30,9 +30,26 @@ fn canonical_path(path: &str) -> String {
         .replace("${CMAKE_BINARY_DIR}/gen/", "${AROS_BUILD_DIR}/gen/")
 }
 
-/// Conservative collision key, not proof that two paths denote the same file.
-fn output_key(path: &str) -> String {
-    canonical_path(path).to_ascii_lowercase()
+/// Conservative portable collision key, not proof that two paths denote the
+/// same file on a particular host. Case-only differences remain forbidden:
+/// the graph must also be safe on supported case-insensitive host filesystems.
+pub(super) fn output_key(path: &str) -> String {
+    let canonical = canonical_path(path).replace("${CMAKE_BINARY_DIR}", "${AROS_BUILD_DIR}");
+    let mut components = Vec::new();
+    for component in canonical.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if components
+                .last()
+                .is_some_and(|previous: &&str| *previous != ".." && !previous.contains('$')) =>
+            {
+                components.pop();
+            }
+            _ => components.push(component),
+        }
+    }
+    let prefix = if canonical.starts_with('/') { "/" } else { "" };
+    format!("{prefix}{}", components.join("/")).to_ascii_lowercase()
 }
 
 /// Concrete typed owners share a generated target namespace. Ordinary
@@ -69,6 +86,10 @@ fn concrete_owner_conflict(graph: &DependencyGraph, owner: &str) -> bool {
             .iter()
             .any(|item| item.owner == owner || item.setup_owner == owner)
         || graph.sdk_text_rules.iter().any(|item| item.owner == owner)
+        || graph
+            .source_literal_text_rules
+            .iter()
+            .any(|item| item.owner == owner)
         || graph
             .sfd_header_rules
             .iter()
@@ -123,15 +144,17 @@ enum OutputClaimSource {
 #[derive(Debug, Clone)]
 struct ConcreteOutputClaim {
     output: String,
+    owner: Option<String>,
     source: OutputClaimSource,
 }
 
 fn concrete_output_claims(graph: &DependencyGraph) -> Vec<ConcreteOutputClaim> {
     let mut claims = Vec::new();
     {
-        let mut add = |_owner: &str, output: String| {
+        let mut add = |owner: &str, output: String| {
             claims.push(ConcreteOutputClaim {
                 output,
+                owner: Some(owner.to_owned()),
                 source: OutputClaimSource::Typed,
             });
         };
@@ -141,6 +164,19 @@ fn concrete_output_claims(graph: &DependencyGraph) -> Vec<ConcreteOutputClaim> {
                 &archive.declaration.owner,
                 archive.declaration.output.clone(),
             );
+        }
+        for group in &graph.sdk_object_groups {
+            for object in &group.objects {
+                add(&group.owner, object.output.clone());
+                add(&group.owner, object.intermediate.clone());
+            }
+        }
+        for group in &graph.literal_object_groups {
+            for object in &group.objects {
+                for output in object.produced_outputs() {
+                    add(&group.owner, output);
+                }
+            }
         }
 
         for declaration in &graph.host_header_aggregates {
@@ -186,6 +222,9 @@ fn concrete_output_claims(graph: &DependencyGraph) -> Vec<ConcreteOutputClaim> {
             }
         }
         for declaration in &graph.source_value_rules {
+            add(&declaration.owner, declaration.output.clone());
+        }
+        for declaration in &graph.source_literal_text_rules {
             add(&declaration.owner, declaration.output.clone());
         }
         for declaration in &graph.sdk_asset_rules {
@@ -321,6 +360,7 @@ fn concrete_output_claims(graph: &DependencyGraph) -> Vec<ConcreteOutputClaim> {
         };
         claims.push(ConcreteOutputClaim {
             output: format!("{root}{}", declaration.dest),
+            owner: None,
             source: OutputClaimSource::Adhoc {
                 index,
                 file: declaration.file.clone(),
@@ -329,6 +369,22 @@ fn concrete_output_claims(graph: &DependencyGraph) -> Vec<ConcreteOutputClaim> {
         });
     }
     claims
+}
+
+pub(super) fn selected_concrete_outputs(
+    graph: &DependencyGraph,
+    selected: &BTreeSet<String>,
+) -> Vec<String> {
+    concrete_output_claims(graph)
+        .into_iter()
+        .filter_map(|claim| {
+            claim
+                .owner
+                .as_ref()
+                .is_some_and(|owner| selected.contains(owner))
+                .then_some(claim.output)
+        })
+        .collect()
 }
 
 /// Preserve source spelling and case: this is an identity check, not a

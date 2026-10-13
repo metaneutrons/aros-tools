@@ -46,6 +46,7 @@ pub mod observability;
 pub mod pins;
 pub mod process;
 pub mod publication;
+pub mod sdk_companion_role;
 pub mod sdk_consumer_contract;
 pub mod sdk_manifest;
 pub mod sdk_release_lock;
@@ -93,6 +94,7 @@ pub use publication::{
     PortableOutputName, PublicationError, PublicationFailureClass, PublicationReceipt,
     RecoveryOutcome, TreeContentCas, TreeTraversalLimits,
 };
+pub use sdk_companion_role::{SdkCompanionRole, MAX_SDK_COMPANION_ROLES};
 pub use target::{BootstrapAbiProfile, TargetProfile, TranspilerProfile};
 pub use text::{decode_source_bytes, read_source};
 pub use toolchain::Toolchain;

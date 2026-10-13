@@ -8,6 +8,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use aros_common::sdk_consumer_contract::SDK_CONSUMER_CONTRACT_SCHEMA;
 use aros_common::sdk_manifest::SdkIdentity;
 use aros_common::{
     publish_atomic_file, sha256_bytes, AtomicFilePolicy, CancellationToken, Sha256Digest,
@@ -24,6 +25,9 @@ use crate::profiles::Profiles;
 use crate::sdk_package::{self, SdkPackageOutput, SdkPackageRequest, SdkVerificationRequest};
 use crate::sdk_source::VerifiedSdkSource;
 use crate::{canonical, inspection, ContractError};
+
+mod readback;
+pub use readback::{readback_generation, SdkGenerationReadback, SdkGenerationReadbackRequest};
 
 /// Independent selection for executing and recording one source-owned SDK.
 #[derive(Debug, Clone)]
@@ -50,7 +54,7 @@ pub struct CompletedSdkGeneration {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GenerationRecord {
+struct GnuGenerationRecordV1 {
     schema: String,
     assurance: String,
     identity: SdkIdentity,
@@ -62,17 +66,55 @@ struct GenerationRecord {
     sdk_entries: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LlvmGenerationRecordV1 {
+    schema: String,
+    assurance: String,
+    identity: SdkIdentity,
+    source_profile: String,
+    binding_sha256: Sha256Digest,
+    environment_sha256: Sha256Digest,
+    compatibility_receipt_sha256: Sha256Digest,
+    sdk_link_receipt_sha256: Sha256Digest,
+    sdk_inventory_sha256: Sha256Digest,
+    sdk_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum GenerationRecord {
+    GnuV1(GnuGenerationRecordV1),
+    LlvmV1(LlvmGenerationRecordV1),
+}
+
+impl GenerationRecord {
+    const fn identity(&self) -> &SdkIdentity {
+        match self {
+            Self::GnuV1(record) => &record.identity,
+            Self::LlvmV1(record) => &record.identity,
+        }
+    }
+
+    const fn sdk_inventory_sha256(&self) -> &Sha256Digest {
+        match self {
+            Self::GnuV1(record) => &record.sdk_inventory_sha256,
+            Self::LlvmV1(record) => &record.sdk_inventory_sha256,
+        }
+    }
+}
+
 impl CompletedSdkGeneration {
     /// Source-owned identity that actually selected this generation.
     #[must_use]
     pub const fn identity(&self) -> &SdkIdentity {
-        &self.record.identity
+        self.record.identity()
     }
 
     /// Complete inventory from original and independently relocated links.
     #[must_use]
     pub const fn tree_sha256(&self) -> &Sha256Digest {
-        &self.record.sdk_inventory_sha256
+        self.record.sdk_inventory_sha256()
     }
 
     /// Exact no-clobber generation record, not a release attestation.
@@ -116,7 +158,7 @@ impl CompletedSdkGeneration {
 /// Execute the complete native SDK proof with the explicit product epoch.
 ///
 /// No source/compiler identity is inferred from another product. Generation
-/// requires the source-v2 ordinary links and family-v2 GNU compiler. Failed
+/// requires a supported source contract paired with its family-v2 compiler. Failed
 /// execution roots remain diagnostic evidence; no completed record is emitted.
 ///
 /// # Errors
@@ -237,16 +279,23 @@ pub fn package_generated(
 
 /// Require a source contract implemented by the current generation executor.
 ///
-/// Source identity verification can understand a generic SDK contract without
-/// claiming its LLVM or GNU link adapter is implemented. Call this before any
-/// compatibility preparation or source program execution.
+/// Call this before any compatibility preparation or source program execution.
 ///
 /// # Errors
-/// Rejects generic source contracts until their execution/evidence path exists.
+/// Rejects source contracts without a matching generation execution path.
 pub fn validate_source_executor(source: &VerifiedSdkSource) -> Result<(), ContractError> {
-    if source.consumer_contract_schema() != "aros-native-consumer-contract-v2" {
+    let family = source
+        .source_profile()
+        .transpiler
+        .as_ref()
+        .map(|context| context.toolchain.as_str());
+    if !matches!(
+        (source.consumer_contract_schema(), family),
+        ("aros-native-consumer-contract-v2", Some("gnu"))
+            | (SDK_CONSUMER_CONTRACT_SCHEMA, Some("llvm"))
+    ) {
         return Err(error(
-            "SDK generation executor does not yet support the selected generic source contract",
+            "SDK generation executor does not support the selected source contract and compiler family",
         ));
     }
     Ok(())
@@ -268,46 +317,151 @@ fn validate_selection(request: &SdkGenerationRequest) -> Result<(), ContractErro
             "SDK generation source differs from its verified committed projection",
         ));
     }
-    if native.source_preset.as_deref() != Some(request.source.source_profile().name.as_str()) {
+    validate_source_executor(&request.source)?;
+    let first_manifest = &native.relocation.first.verified.manifest;
+    let second_manifest = &native.relocation.second.verified.manifest;
+    let (Some(compiler), Some(second_compiler)) = (
+        first_manifest.compiler.as_ref(),
+        second_manifest.compiler.as_ref(),
+    ) else {
         return Err(error(
-            "SDK generation preset differs from its verified source profile",
+            "SDK generation requires a family-v2 compiler package",
+        ));
+    };
+    if first_manifest.schema != 2
+        || second_manifest.schema != 2
+        || compiler.family() != second_compiler.family()
+    {
+        return Err(error(
+            "SDK generation requires a family-v2 compiler package",
         ));
     }
-    validate_source_executor(&request.source)?;
-    let compiler = native.relocation.first.verified.manifest.compiler.as_ref();
-    if compiler.is_none_or(|compiler| compiler.family() != "gnu") {
-        return Err(error(
-            "SDK generation requires a compiler-family-v2 GNU package",
-        ));
+    match (request.source.consumer_contract_schema(), compiler.family()) {
+        ("aros-native-consumer-contract-v2", "gnu") => {
+            if native.llvm_sdk_source.is_some() {
+                return Err(error(
+                    "GNU SDK generation requires its verified source preset and no generic source selection",
+                ));
+            }
+            if native.source_preset.as_deref()
+                != Some(request.source.source_profile().name.as_str())
+            {
+                return Err(error(
+                    "SDK generation preset differs from its verified source profile",
+                ));
+            }
+        }
+        (SDK_CONSUMER_CONTRACT_SCHEMA, "llvm") => {
+            let Some(selected_source) = native.llvm_sdk_source.as_ref() else {
+                return Err(error(
+                    "LLVM SDK generation requires the verified generic source selection",
+                ));
+            };
+            if native.source_preset.is_some()
+                || !same_source_selection(selected_source, &request.source)
+            {
+                return Err(error(
+                    "LLVM SDK generation selection differs from its verified generic source",
+                ));
+            }
+            let profile = request.source.source_profile();
+            let context = profile
+                .transpiler
+                .as_ref()
+                .ok_or_else(|| error("LLVM SDK source has no compiler profile mapping"))?;
+            if request.source.identity().target.target_triple != native.profile.target_triple()
+                || profile.toolchain_profile() != native.profile.name()
+                || profile.arch.source_cpu() != native.profile.cpu()
+                || profile.platform != native.profile.platform()
+                || profile.float_abi.as_deref().unwrap_or_default() != native.profile.float_abi()
+                || context.toolchain != "llvm"
+            {
+                return Err(error(
+                    "LLVM SDK source profile differs from its selected compiler profile",
+                ));
+            }
+        }
+        _ => {
+            return Err(error(
+                "SDK source contract and family-v2 compiler selection do not match",
+            ));
+        }
     }
     request.source.revalidate()
+}
+
+fn same_source_selection(first: &VerifiedSdkSource, second: &VerifiedSdkSource) -> bool {
+    first.identity() == second.identity()
+        && first.source_profile().name == second.source_profile().name
+        && first.consumer_contract_schema() == second.consumer_contract_schema()
+        && first.original_source_root() == second.original_source_root()
+        && first.materialized_source_root() == second.materialized_source_root()
 }
 
 fn generation_record(
     request: &SdkGenerationRequest,
     report: &NativeCompatibilityReport,
 ) -> Result<GenerationRecord, ContractError> {
-    let sdk = report
-        .native_sdk
-        .as_ref()
-        .ok_or_else(|| error("SDK generation requires four ordinary SDK links"))?;
     let environment = derive_native_compatibility_environment_identity_with_epoch(
         &request.compatibility.host_python,
         &request.compatibility.host_tools,
         &request.compatibility.host,
         request.compatibility.consumer_source_date_epoch,
     )?;
-    Ok(GenerationRecord {
-        schema: "aros-sdk-generation-record-v1".into(),
-        assurance: "local-generation-binding-not-release-admission".into(),
-        identity: request.source.identity().clone(),
-        source_profile: request.source.source_profile().name.clone(),
-        environment_sha256: environment.sdk_environment_sha256,
-        compatibility_receipt_sha256: report.receipt.sha256.clone(),
-        sdk_link_receipt_sha256: sdk.receipt_sha256.clone(),
-        sdk_inventory_sha256: sdk.sdk_inventory_sha256.clone(),
-        sdk_entries: sdk.sdk_entries,
-    })
+    let assurance = "local-generation-binding-not-release-admission".to_owned();
+    let identity = request.source.identity().clone();
+    let source_profile = request.source.source_profile().name.clone();
+    let environment_sha256 = environment.sdk_environment_sha256;
+    let compatibility_receipt_sha256 = report.receipt.sha256.clone();
+    match request.source.consumer_contract_schema() {
+        "aros-native-consumer-contract-v2" => {
+            if report.llvm_sdk.is_some() {
+                return Err(error("GNU SDK generation received LLVM link evidence"));
+            }
+            let sdk = report
+                .native_sdk
+                .as_ref()
+                .ok_or_else(|| error("SDK generation requires four ordinary SDK links"))?;
+            Ok(GenerationRecord::GnuV1(GnuGenerationRecordV1 {
+                schema: "aros-sdk-generation-record-v1".into(),
+                assurance,
+                identity,
+                source_profile,
+                environment_sha256,
+                compatibility_receipt_sha256,
+                sdk_link_receipt_sha256: sdk.receipt_sha256.clone(),
+                sdk_inventory_sha256: sdk.sdk_inventory_sha256.clone(),
+                sdk_entries: sdk.sdk_entries,
+            }))
+        }
+        SDK_CONSUMER_CONTRACT_SCHEMA => {
+            if report.native_sdk.is_some() {
+                return Err(error("LLVM SDK generation received GNU link evidence"));
+            }
+            let sdk = report
+                .llvm_sdk
+                .as_ref()
+                .ok_or_else(|| error("LLVM SDK generation requires four ordinary SDK links"))?;
+            if sdk.identity != identity {
+                return Err(error(
+                    "LLVM SDK link evidence differs from its verified source identity",
+                ));
+            }
+            Ok(GenerationRecord::LlvmV1(LlvmGenerationRecordV1 {
+                schema: "aros-llvm-sdk-generation-record-v1".into(),
+                assurance,
+                identity,
+                source_profile,
+                binding_sha256: sdk.binding_sha256.clone(),
+                environment_sha256,
+                compatibility_receipt_sha256,
+                sdk_link_receipt_sha256: sdk.receipt_sha256.clone(),
+                sdk_inventory_sha256: sdk.sdk_inventory_sha256.clone(),
+                sdk_entries: sdk.sdk_entries,
+            }))
+        }
+        _ => Err(error("SDK generation source contract is unsupported")),
+    }
 }
 
 fn record_bytes(record: &GenerationRecord) -> Result<Vec<u8>, ContractError> {

@@ -16,6 +16,10 @@ use aros_common::{ArosError, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
+#[path = "graph_arch_lane_aliases.rs"]
+mod arch_lane_aliases;
+#[path = "graph_literal_text_claims.rs"]
+mod literal_text_claims;
 #[path = "graph_plain_headers.rs"]
 mod plain_headers;
 #[path = "graph_sdk_assets.rs"]
@@ -27,6 +31,19 @@ mod source_headers;
 pub use sdk_assets::SdkProgramOutput;
 pub(crate) use source_archives::private_source_object_owner;
 pub(crate) use source_headers::private_source_directory_owner;
+
+/// Module target kinds whose CMake macros forward to `aros_add_library` and
+/// therefore share its genmodule client-archive endpoints.
+///
+/// This is deliberately narrower than the full module family: devices,
+/// resources, and HIDDs have distinct runtime builders and do not expose the
+/// `CLIENTS_ONLY` archive projection.
+pub(crate) const fn supports_genmodule_client_archives(module_type: &ModuleType) -> bool {
+    matches!(
+        module_type,
+        ModuleType::Library | ModuleType::Datatype | ModuleType::Gadget | ModuleType::Mcc
+    )
+}
 
 /// A script-generated file bound to the targets that consume it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +73,10 @@ pub struct DependencyGraph {
     /// Selected client archive endpoints in their source declaration spelling,
     /// after concrete selector resolution. None keeps whole-tree export unchanged.
     pub native_selected_client_archives: Option<BTreeSet<String>>,
+    /// Runtime module owners selected for native generation. A client archive
+    /// endpoint can retain its declaration without selecting the runtime
+    /// producer; None keeps whole-tree export unchanged.
+    pub native_selected_runtime_modules: Option<BTreeSet<String>>,
     pub sdk_asset_rules: Vec<crate::sdk_asset_rules::SdkAssetRuleDecl>,
     pub sdk_program_outputs: Vec<SdkProgramOutput>,
     /// Native source-owned host-header aggregates, including exact mirror policy.
@@ -79,6 +100,8 @@ pub struct DependencyGraph {
     pub source_text_rules: Vec<crate::source_text_rules::SourceTextRuleDecl>,
     /// Local source-value products, not guessed constants or shell execution.
     pub source_value_rules: Vec<crate::source_value_rules::SourceValueRuleDecl>,
+    /// Source-owned literal text outputs, never arbitrary shell recipes.
+    pub source_literal_text_rules: Vec<crate::source_literal_text_rules::SourceLiteralTextRuleDecl>,
     pub sdk_file_copies: Vec<crate::sdk_file_copies::SdkFileCopyDecl>,
     pub sdk_object_groups: Vec<crate::sdk_objects::SdkObjectGroupDecl>,
     pub literal_object_groups: Vec<crate::literal_objects::LiteralObjectGroupDecl>,
@@ -115,6 +138,7 @@ pub struct DependencyGraph {
     /// consumes its output. The script may be in-tree or materialised by a
     /// `%fetch`. Empty until `resolve_script_outputs` runs.
     pub script_outputs: Vec<ResolvedScriptOutput>,
+    pub script_output_aggregates: Vec<crate::script_output_aggregates::ScriptOutputAggregate>,
     /// The same declarations before they are bound to a consumer.
     pending_script_outputs: Vec<crate::copy_includes::ScriptOutputDecl>,
     /// `%make_hidd_stubs` declarations, in declaration order. They are the
@@ -215,7 +239,7 @@ fn arch_of(dir: &std::path::Path) -> Option<(String, String)> {
 }
 
 fn define_header_compile_targets(mmake: &str, target: &TargetDefinition) -> Vec<String> {
-    match target.module_type {
+    match &target.module_type {
         ModuleType::ProgramGroup => {
             let mut members = target
                 .source_files
@@ -233,7 +257,9 @@ fn define_header_compile_targets(mmake: &str, target: &TargetDefinition) -> Vec<
         // Despite having no declaration sources, this is a real compiler
         // target: aros_add_library(GENMODULE_ONLY) creates the runtime with
         // libentry plus the generated start/end sources under the mmake id.
-        ModuleType::Library if target.genmodule_only => vec![mmake.to_owned()],
+        module_type if supports_genmodule_client_archives(module_type) && target.genmodule_only => {
+            vec![mmake.to_owned()]
+        }
         // These declarations materialise only utility/package orchestration
         // under their mmake id. An ABI's compiling target is its generated
         // client archive and does not consume the declaration's `uselibs`.
@@ -420,9 +446,9 @@ fn declaration_runtime_name(
 }
 
 fn inventory_has_public_link_archive(target: &crate::ast::InventoryTargetIdentity) -> bool {
-    match target.module_type {
+    match &target.module_type {
         ModuleType::Abi => true,
-        ModuleType::Library => {
+        module_type if supports_genmodule_client_archives(module_type) => {
             target.linklib_output_dir.is_none()
                 && (target.genmodule_only
                     || target
@@ -445,9 +471,9 @@ fn inventory_has_public_link_archive(target: &crate::ast::InventoryTargetIdentit
 /// In-tree/private `libdir=` outputs are deliberately excluded: the direct
 /// AROS linker rule has no proven search path for them.
 fn has_public_link_archive(target: &TargetDefinition) -> bool {
-    match target.module_type {
+    match &target.module_type {
         ModuleType::Abi => true,
-        ModuleType::Library => {
+        module_type if supports_genmodule_client_archives(module_type) => {
             target.linklib_output_dir.is_none()
                 && (target.genmodule_only
                     || target
@@ -516,7 +542,7 @@ mod linking;
 mod meta;
 #[path = "graph_selection.rs"]
 mod selection;
-pub(crate) use selection::endpoint as native_endpoint;
+pub use selection::endpoint as native_endpoint;
 
 pub use audit::NativeGraphAudit;
 
