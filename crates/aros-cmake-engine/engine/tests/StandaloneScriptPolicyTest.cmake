@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.22)
 
 get_filename_component(_cmake_root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 # Standalone runners use Run<Action> names. RuntimeProbes is an included
-# target-definition module, not a cmake -P entry point.
+# target-definition module, not a cmake -P entry point. VerifySdkCompanionElf
+# only defines the shared ELF-check function; RunLiteralObject and RunSdkObject
+# establish policy before including it.
 file(GLOB _standalone_scripts
     "${_cmake_root}/Run*.cmake"
     "${_cmake_root}/Verify*.cmake"
@@ -16,9 +18,12 @@ foreach(_script IN LISTS _standalone_scripts)
         list(REMOVE_ITEM _standalone_scripts "${_script}")
     endif()
 endforeach()
+list(REMOVE_ITEM _standalone_scripts
+    "${_cmake_root}/VerifySdkCompanionElf.cmake")
 list(FIND _standalone_scripts "${_cmake_root}/RunConfigureBuild.cmake" _runner_index)
 list(FIND _standalone_scripts "${_cmake_root}/RuntimeProbes.cmake" _module_index)
-if(_runner_index EQUAL -1 OR NOT _module_index EQUAL -1)
+list(FIND _standalone_scripts "${_cmake_root}/VerifySdkCompanionElf.cmake" _elf_module_index)
+if(_runner_index EQUAL -1 OR NOT _module_index EQUAL -1 OR NOT _elf_module_index EQUAL -1)
     message(FATAL_ERROR "standalone runner selection includes a module or excludes a real runner")
 endif()
 list(APPEND _standalone_scripts
