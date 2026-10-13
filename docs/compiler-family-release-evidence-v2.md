@@ -30,6 +30,7 @@ The external selection is bounded to 16 MiB and uses the closed JSON schema
 | `lanes` | Map keyed by every exact index archive basename |
 | `lanes[asset].build_environment` | Independently retained host-environment object, not copied from a package manifest |
 | `lanes[asset].required_paths` | Reviewed required paths; must equal the indexed lane's paths |
+| `lanes[asset].llvm_sdk_id` | Optional explicit SDK product for LLVM SDK-style compiler compatibility; identity comes only from bound release inputs and must reference this exact group/profile |
 | `lanes[asset].builds` | Exactly two records in A/B order |
 | `builds[n].package_dir` | Canonical directory containing exactly the four downloaded package members |
 | `builds[n].measurement` | `{ "path": ABSOLUTE_FILE, "sha256": RAW_DIGEST }` for the complete owning-host build export |
@@ -49,7 +50,10 @@ The external selection is bounded to 16 MiB and uses the closed JSON schema
 | `sdk_generations[n].record` | Selected-file record for the original closed generation record |
 | `sdk_generations[n].compatibility` | Same closed selector as compiler lanes; explicit `native_sdk_required` is true for GNU and false for LLVM, whose SDK identity is bound separately from release inputs |
 
-The selection cannot supply an SDK identity or choose additional SDK products.
+LLVM SDK-style compiler compatibility requires the explicit `llvm_sdk_id`.
+An absent, unrelated or GNU-lane selection cannot admit that proof. Omission
+preserves ordinary LLVM compiler-only compatibility; no SDK identity is inferred
+from a receipt. The selection cannot supply an SDK identity or choose additional SDK products.
 Identity, source/ABI, product version and required compiler-profile references
 come from the digest-bound release inputs. The SDK map must cover that exact
 set, independent of compiler host lanes. Archive/manifest/sidecar bytes and

@@ -282,6 +282,9 @@ checks every selected A/B package and compatibility report/log/ELF closure,
 without executing builds or modifying files. Its result is not release admission.
 SDK-bearing inputs also require the exact `sdk_generations` host/profile matrix,
 with generation records, four-link evidence and cross-host SDK package equality.
+LLVM SDK-style compiler compatibility selects `lanes[asset].llvm_sdk_id` explicitly;
+the product must reference that compiler group/profile in the bound release inputs.
+The reader never infers this identity from a report.
 Recording, qualification verification and recovery require that same matrix;
 none accepts a compiler-only selection for an SDK-bearing release.
 

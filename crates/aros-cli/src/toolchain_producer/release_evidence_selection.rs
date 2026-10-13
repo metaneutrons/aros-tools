@@ -54,6 +54,10 @@ pub(super) struct SdkGenerationSelection {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Lane {
+    /// Optional independently selected LLVM SDK product for this compiler lane.
+    /// Omission preserves compiler-only compatibility selections.
+    #[serde(default)]
+    pub llvm_sdk_id: Option<String>,
     pub build_environment: Map<String, Value>,
     pub required_paths: Vec<String>,
     pub builds: [Build; 2],
@@ -119,6 +123,15 @@ pub(super) fn parse(bytes: &[u8]) -> miette::Result<Selection> {
         PortableOutputName::new(asset).map_err(|_| {
             miette::miette!("release evidence lane key must be a portable basename")
         })?;
+        if lane
+            .llvm_sdk_id
+            .as_deref()
+            .is_some_and(|id| PortableOutputName::new(id).is_err())
+        {
+            return Err(miette::miette!(
+                "LLVM SDK selection must be a portable product ID"
+            ));
+        }
         for build in &lane.builds {
             validate_selected_path(&build.package_dir)?;
             validate_selected_path(&build.measurement.path)?;
@@ -732,6 +745,32 @@ mod tests {
         value["lanes"]["llvm-pc-x86_64-linux.tar.xz"]["compatibility"]["native_sdk_required"] =
             json!("false");
         assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn lane_llvm_sdk_product_id_is_optional_and_portable() {
+        let mut value = valid_selection();
+        let asset = "llvm-pc-x86_64-linux.tar.xz";
+        assert_eq!(
+            parse(&serde_json::to_vec(&value).unwrap()).unwrap().lanes[asset].llvm_sdk_id,
+            None
+        );
+
+        value["lanes"][asset]["llvm_sdk_id"] = json!("aros-sdk-v1");
+        assert_eq!(
+            parse(&serde_json::to_vec(&value).unwrap()).unwrap().lanes[asset]
+                .llvm_sdk_id
+                .as_deref(),
+            Some("aros-sdk-v1")
+        );
+
+        for unsafe_id in ["", "../sdk", "sdk/name", "CON"] {
+            value["lanes"][asset]["llvm_sdk_id"] = json!(unsafe_id);
+            assert!(
+                parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "{unsafe_id:?}"
+            );
+        }
     }
 
     #[test]

@@ -8,6 +8,7 @@ use aros_common::publication::{
     publish_atomic_file, validate_existing_directory_prefix_nofollow, AtomicFilePolicy,
     PortableOutputName,
 };
+use aros_common::sdk_manifest::SdkIdentity;
 use aros_common::{
     measure_regular_file_bounded, open_regular_file_nofollow, sha256_bytes, Sha256Digest,
 };
@@ -35,7 +36,7 @@ use aros_toolchain::release_index_v2::{NativeReleaseIndexV2, INDEX_NAME};
 use aros_toolchain::release_index_v2_readback::{
     readback_indexed_packages, IndexedPackageReadbackRequestV2, IndexedPackageReadbackV2,
 };
-use aros_toolchain::release_inputs::{ReleaseInputs, ACTIVE_HOSTS};
+use aros_toolchain::release_inputs::{BoundSdk, ReleaseInputs, ACTIVE_HOSTS};
 use aros_toolchain::repackage_v2::{
     repackage_verified_package_v2, VerifiedPackageRepackageRequestV2,
 };
@@ -221,6 +222,125 @@ fn sdk_compatibility_requests<'a>(
     }).collect()
 }
 
+fn selected_bound_llvm_sdk<'a>(
+    sdks: &'a [BoundSdk],
+    sdk_id: &str,
+    family: CompilerFamily,
+    group_id: &str,
+    profile: &str,
+    native_sdk_required: bool,
+) -> miette::Result<&'a SdkIdentity> {
+    if family != CompilerFamily::Llvm || native_sdk_required {
+        return Err(miette::miette!(
+            "explicit LLVM SDK selection requires an LLVM compiler lane without GNU SDK policy"
+        ));
+    }
+    let sdk = sdks.iter().find(|sdk| sdk.id() == sdk_id).ok_or_else(|| {
+        miette::miette!("selected LLVM SDK product is absent from release inputs")
+    })?;
+    if !sdk
+        .compiler_profiles()
+        .iter()
+        .any(|reference| reference.group_id() == group_id && reference.profile() == profile)
+    {
+        return Err(miette::miette!(
+            "selected LLVM SDK does not reference this exact compiler group and profile"
+        ));
+    }
+    Ok(sdk.identity())
+}
+
+fn lane_llvm_sdk_identity<'a>(
+    inputs: &'a ReleaseInputs,
+    sdk_id: Option<&str>,
+    native_sdk_required: bool,
+    group_id: &str,
+    target_profile: &str,
+) -> miette::Result<Option<&'a SdkIdentity>> {
+    let Some(sdk_id) = sdk_id else {
+        return Ok(None);
+    };
+    let group = inputs
+        .groups()
+        .iter()
+        .find(|group| group.id() == group_id)
+        .ok_or_else(|| miette::miette!("selected compiler lane has no bound input group"))?;
+    let profile = group
+        .profiles()
+        .select(target_profile)
+        .map_err(|error| native_error(&error))?;
+    selected_bound_llvm_sdk(
+        inputs.sdks(),
+        sdk_id,
+        group.source_lock().family(),
+        group.id(),
+        profile.name(),
+        native_sdk_required,
+    )
+    .map(Some)
+}
+
+fn select_lane_llvm_sdks<'a>(
+    inputs: &'a ReleaseInputs,
+    index: &NativeReleaseIndexV2,
+    selection: &Selection,
+) -> miette::Result<BTreeMap<String, Option<&'a SdkIdentity>>> {
+    index
+        .artifacts()
+        .iter()
+        .map(|artifact| {
+            let lane = selection.lanes.get(artifact.asset()).ok_or_else(|| {
+                miette::miette!("indexed compiler lane has no evidence selection")
+            })?;
+            Ok((
+                artifact.asset().to_owned(),
+                lane_llvm_sdk_identity(
+                    inputs,
+                    lane.llvm_sdk_id.as_deref(),
+                    lane.compatibility.native_sdk_required,
+                    artifact.group_id(),
+                    artifact.target_profile(),
+                )?,
+            ))
+        })
+        .collect()
+}
+
+fn validate_lane_llvm_sdks(
+    inputs: &ReleaseInputs,
+    index: &NativeReleaseIndexV2,
+    selection: &Selection,
+) -> miette::Result<()> {
+    for artifact in index.artifacts() {
+        let lane = selection
+            .lanes
+            .get(artifact.asset())
+            .ok_or_else(|| miette::miette!("indexed compiler lane has no evidence selection"))?;
+        let _ = lane_llvm_sdk_identity(
+            inputs,
+            lane.llvm_sdk_id.as_deref(),
+            lane.compatibility.native_sdk_required,
+            artifact.group_id(),
+            artifact.target_profile(),
+        )?;
+    }
+    Ok(())
+}
+
+fn selected_qualification_readback(
+    selected: &QualificationArgs,
+) -> miette::Result<(Vec<u8>, EvidencePolicy)> {
+    let bytes = read_selected(
+        &selected.qualification_evidence,
+        &selected.qualification_sha256,
+    )?;
+    let policy_bytes = read_selected(&selected.policy, &selected.policy_sha256)?;
+    let policy = serde_json::from_slice(&policy_bytes).map_err(|_| {
+        miette::miette!("qualification policy must match the closed verifier schema")
+    })?;
+    Ok((bytes, policy))
+}
+
 fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result<()> {
     let qualification = match operation {
         Operation::Verify(selected) => Some(selected),
@@ -228,28 +348,6 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             Some(&selected.qualification)
         }
         _ => None,
-    };
-    let selected_qualification = qualification
-        .map(|selected| {
-            let bytes = read_selected(
-                &selected.qualification_evidence,
-                &selected.qualification_sha256,
-            )?;
-            let policy_bytes = read_selected(&selected.policy, &selected.policy_sha256)?;
-            let policy: EvidencePolicy = serde_json::from_slice(&policy_bytes).map_err(|_| {
-                miette::miette!("qualification policy must match the closed verifier schema")
-            })?;
-            Ok::<_, miette::Report>((bytes, policy))
-        })
-        .transpose()?;
-    let selected_recovery = if let Some(selected) = operation.recovery() {
-        let bytes = read_selected(
-            &selected.recovery_request,
-            &selected.recovery_request_sha256,
-        )?;
-        Some(RecoveryRequestV2::parse(&bytes).map_err(|error| native_error(&error))?)
-    } else {
-        None
     };
     let selection_bytes = read_selected(&args.selection, &args.selection_sha256)?;
     let selection = release_evidence_selection::parse(&selection_bytes)?;
@@ -264,6 +362,7 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
     let index =
         NativeReleaseIndexV2::parse(&index_bytes, &inputs).map_err(|error| native_error(&error))?;
     validate_selection(args, &index, &selection, qualification)?;
+    validate_lane_llvm_sdks(&inputs, &index, &selection)?;
     release_evidence_selection::require_sdk_package_ids(
         &selection,
         inputs
@@ -287,6 +386,18 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
     if let Operation::Record(selected) = operation {
         recording_preflight(selected, args, &selection)?;
     }
+    let selected_qualification = qualification
+        .map(selected_qualification_readback)
+        .transpose()?;
+    let selected_recovery = if let Some(selected) = operation.recovery() {
+        let bytes = read_selected(
+            &selected.recovery_request,
+            &selected.recovery_request_sha256,
+        )?;
+        Some(RecoveryRequestV2::parse(&bytes).map_err(|error| native_error(&error))?)
+    } else {
+        None
+    };
     // Identity comes only from the independently digest-bound input collection;
     // the external selection contributes byte expectations, never source/ABI
     // identity, product membership or execution/authenticity claims.
@@ -320,6 +431,7 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             .collect(),
         forbidden_prefixes: args.forbidden_prefixes.clone(),
     };
+    let lane_llvm_sdks = select_lane_llvm_sdks(&packages.inputs, &packages.index, &selection)?;
     let builds = build_request(args, &packages, &selection)?;
     // These actual archives, rather than an input observation's package
     // claims, supply the independently checked compatibility package bindings.
@@ -375,24 +487,31 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
                     miette::miette!("indexed evidence lane has no selected input group")
                 })?;
             let package = package.package();
-            let expected = claims[artifact.asset()]
-                .expectations(
-                    NativeCompatibilityExpectedPackage {
-                        manifest: &package.manifest,
-                        archive_sha256: &package.archive_sha256,
-                        archive_size: package.archive_size,
-                        compiler: artifact.compiler(),
-                        source_commit: artifact.source_commit(),
-                        host: artifact.host(),
-                    },
+            let expected_package = NativeCompatibilityExpectedPackage {
+                manifest: &package.manifest,
+                archive_sha256: &package.archive_sha256,
+                archive_size: package.archive_size,
+                compiler: artifact.compiler(),
+                source_commit: artifact.source_commit(),
+                host: artifact.host(),
+            };
+            let selected = &selection.lanes[artifact.asset()].compatibility;
+            let expected = if let Some(identity) = lane_llvm_sdks[artifact.asset()] {
+                claims[artifact.asset()].expectations_with_llvm_sdk(
+                    expected_package,
                     group.profiles(),
                     profiles[artifact.asset()],
-                    selection.lanes[artifact.asset()]
-                        .compatibility
-                        .native_sdk_required,
+                    identity,
                 )
-                .map_err(|error| native_error(&error))?;
-            let selected = &selection.lanes[artifact.asset()].compatibility;
+            } else {
+                claims[artifact.asset()].expectations(
+                    expected_package,
+                    group.profiles(),
+                    profiles[artifact.asset()],
+                    selected.native_sdk_required,
+                )
+            }
+            .map_err(|error| native_error(&error))?;
             Ok((
                 artifact.asset().to_owned(),
                 PortableNativeCompatibilityRequest {
@@ -1043,4 +1162,281 @@ fn standalone_document(
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use super::lane_llvm_sdk_identity;
+    use aros_common::sha256_bytes;
+    use aros_toolchain::release_inputs::{ReleaseInputs, ACTIVE_HOSTS};
+
+    fn llvm_inputs() -> ReleaseInputs {
+        const PRODUCER_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const TOOLS_COMMIT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const SOURCE_COMMIT: &str = "1111111111111111111111111111111111111111";
+        const GNU_SOURCE_COMMIT: &str = "2222222222222222222222222222222222222222";
+        let gnu_source_lock = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-source-lock-v3",
+            "family":"gnu",
+            "version":"16.2.0",
+            "sources":[
+                {
+                    "component":"gcc","version":"16.2.0","purpose":"toolchain-component",
+                    "filename":"gcc.tar.xz","url":"https://example.invalid/gcc.tar.xz",
+                    "sha256":"3".repeat(64),"size":1
+                },
+                {
+                    "component":"binutils","version":"2.47","purpose":"toolchain-component",
+                    "filename":"binutils.tar.xz","url":"https://example.invalid/binutils.tar.xz",
+                    "sha256":"4".repeat(64),"size":1
+                }
+            ],
+            "host_python_packages":[{
+                "name":"mako","version":"1.3.10","filename":"mako.tar.gz",
+                "url":"https://example.invalid/mako.tar.gz","sha256":"5".repeat(64),
+                "size":1,"source_root":"mako","python_path":"."
+            }]
+        }))
+        .unwrap();
+        let gnu_profiles = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-profiles-v2",
+            "family":"gnu",
+            "upstream_commit":GNU_SOURCE_COMMIT,
+            "profiles":[{
+                "name":"rv32-aros","configure_target":"riscv-aros",
+                "upstream_output_target":"riscv-aros","target_triple":"riscv-aros",
+                "cpu":"riscv","platform":"fixture","float_abi":"ilp32f",
+                "capabilities":["c","libgcc","standalone-collector"],
+                "target":{
+                    "schema":"aros-riscv-target-v1","isa":"rv32imafc","abi":"ilp32f",
+                    "code_model":"medany","architecture":"rv32i2p1_m2p0_a2p1_f2p2_c2p0",
+                    "unaligned_access":false,"atomic_abi":0,"x3_reg_usage":0
+                }
+            }]
+        }))
+        .unwrap();
+        let mut gnu_recipe = json!({
+            "schema":"aros-toolchain-recipe-v2",
+            "source_commit":GNU_SOURCE_COMMIT,
+            "source_tree":"6".repeat(40),
+            "producer_commit":PRODUCER_COMMIT,
+            "producer_tree":"e".repeat(40),
+            "tools_commit":TOOLS_COMMIT,
+            "tools_tree":"f".repeat(40),
+            "source_date_epoch":0,
+            "source_lock_sha256":sha256_bytes(&gnu_source_lock),
+            "profiles_sha256":sha256_bytes(&gnu_profiles),
+            "patches":[]
+        });
+        gnu_recipe["recipe_sha256"] = json!(sha256_bytes(
+            &aros_toolchain::canonical::bytes(&gnu_recipe).unwrap()
+        ));
+        let gnu_recipe = serde_json::to_vec(&gnu_recipe).unwrap();
+        let source_lock = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-source-lock-v2",
+            "family":"llvm",
+            "version":"17.0.6",
+            "sources":[{
+                "component":"llvm","version":"17.0.6","purpose":"toolchain-component",
+                "filename":"llvm.tar.xz","url":"https://example.invalid/llvm.tar.xz",
+                "sha256":"1".repeat(64),"size":1
+            }],
+            "host_python_packages":[{
+                "name":"wheel","version":"0.43.0","filename":"wheel.tar.gz",
+                "url":"https://example.invalid/wheel.tar.gz","sha256":"2".repeat(64),
+                "size":1,"source_root":"wheel","python_path":"."
+            }]
+        }))
+        .unwrap();
+        let profiles = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-profiles-v2",
+            "family":"llvm",
+            "upstream_commit":SOURCE_COMMIT,
+            "profiles":[
+                {
+                    "name":"pc-x86_64","configure_target":"pc-x86_64",
+                    "upstream_output_target":"pc-x86_64","target_triple":"x86_64-unknown-aros",
+                    "cpu":"x86_64","platform":"pc","float_abi":"",
+                    "capabilities":["c","cxx","standalone-collector"]
+                },
+                {
+                    "name":"pc-aarch64","configure_target":"pc-aarch64",
+                    "upstream_output_target":"pc-aarch64","target_triple":"aarch64-unknown-aros",
+                    "cpu":"aarch64","platform":"pc","float_abi":"",
+                    "capabilities":["c","cxx","standalone-collector"]
+                }
+            ]
+        }))
+        .unwrap();
+        let mut recipe = json!({
+            "schema":"aros-toolchain-recipe-v2",
+            "source_commit":SOURCE_COMMIT,
+            "source_tree":"7".repeat(40),
+            "producer_commit":PRODUCER_COMMIT,
+            "producer_tree":"e".repeat(40),
+            "tools_commit":TOOLS_COMMIT,
+            "tools_tree":"f".repeat(40),
+            "source_date_epoch":0,
+            "source_lock_sha256":sha256_bytes(&source_lock),
+            "profiles_sha256":sha256_bytes(&profiles),
+            "patches":[]
+        });
+        recipe["recipe_sha256"] = json!(sha256_bytes(
+            &aros_toolchain::canonical::bytes(&recipe).unwrap()
+        ));
+        let recipe = serde_json::to_vec(&recipe).unwrap();
+        let alt_profiles = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-profiles-v2",
+            "family":"llvm",
+            "upstream_commit":SOURCE_COMMIT,
+            "profiles":[
+                {
+                    "name":"pc-alt-x86_64","configure_target":"pc-alt-x86_64",
+                    "upstream_output_target":"pc-alt-x86_64","target_triple":"x86_64-alt-unknown-aros",
+                    "cpu":"x86_64","platform":"pc","float_abi":"",
+                    "capabilities":["c","cxx","standalone-collector"]
+                },
+                {
+                    "name":"pc-alt-aarch64","configure_target":"pc-alt-aarch64",
+                    "upstream_output_target":"pc-alt-aarch64","target_triple":"aarch64-alt-unknown-aros",
+                    "cpu":"aarch64","platform":"pc","float_abi":"",
+                    "capabilities":["c","cxx","standalone-collector"]
+                }
+            ]
+        }))
+        .unwrap();
+        let mut alt_recipe = json!({
+            "schema":"aros-toolchain-recipe-v2",
+            "source_commit":SOURCE_COMMIT,
+            "source_tree":"7".repeat(40),
+            "producer_commit":PRODUCER_COMMIT,
+            "producer_tree":"e".repeat(40),
+            "tools_commit":TOOLS_COMMIT,
+            "tools_tree":"f".repeat(40),
+            "source_date_epoch":0,
+            "source_lock_sha256":sha256_bytes(&source_lock),
+            "profiles_sha256":sha256_bytes(&alt_profiles),
+            "patches":[]
+        });
+        alt_recipe["recipe_sha256"] = json!(sha256_bytes(
+            &aros_toolchain::canonical::bytes(&alt_recipe).unwrap()
+        ));
+        let alt_recipe = serde_json::to_vec(&alt_recipe).unwrap();
+        let identity = serde_json::to_vec(&json!({
+            "sdk_id":"llvm-sdk",
+            "version":"1.2.3",
+            "target":{
+                "target_triple":"i686-unknown-aros",
+                "abi":{"target_triple":"i686-unknown-aros","data_model":"ilp32"}
+            },
+            "source":{
+                "commit":"0000000000000000000000000000000000000003",
+                "git_tree":"000000000000000000000000000000000000000d",
+                "content_sha256":"0000000000000000000000000000000000000000000000000000000000000017",
+                "contract_sha256":"0000000000000000000000000000000000000000000000000000000000000021"
+            },
+            "source_date_epoch":1234
+        }))
+        .unwrap();
+        let reference =
+            |file: &str, bytes: &[u8]| json!({"file":file,"sha256":sha256_bytes(bytes)});
+        let documents = BTreeMap::from([
+            ("gnu-rv32-recipe.json".to_owned(), gnu_recipe.clone()),
+            (
+                "gnu-rv32-source-lock.json".to_owned(),
+                gnu_source_lock.clone(),
+            ),
+            ("gnu-rv32-profiles.json".to_owned(), gnu_profiles.clone()),
+            ("llvm-pc-recipe.json".to_owned(), recipe.clone()),
+            ("llvm-alt-recipe.json".to_owned(), alt_recipe.clone()),
+            ("llvm-pc-source-lock.json".to_owned(), source_lock.clone()),
+            ("llvm-alt-source-lock.json".to_owned(), source_lock.clone()),
+            ("llvm-pc-profiles.json".to_owned(), profiles.clone()),
+            ("llvm-alt-profiles.json".to_owned(), alt_profiles.clone()),
+            ("llvm-sdk-identity.json".to_owned(), identity.clone()),
+        ]);
+        let collection = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-release-inputs-v2",
+            "producer_commit":PRODUCER_COMMIT,
+            "tools_commit":TOOLS_COMMIT,
+            "hosts":ACTIVE_HOSTS,
+            "groups":[
+                {
+                    "id":"gnu-rv32",
+                    "recipe":reference("gnu-rv32-recipe.json", &gnu_recipe),
+                    "source_lock":reference("gnu-rv32-source-lock.json", &gnu_source_lock),
+                    "profiles":reference("gnu-rv32-profiles.json", &gnu_profiles)
+                },
+                {
+                    "id":"llvm-alt",
+                    "recipe":reference("llvm-alt-recipe.json", &alt_recipe),
+                    "source_lock":reference("llvm-alt-source-lock.json", &source_lock),
+                    "profiles":reference("llvm-alt-profiles.json", &alt_profiles)
+                },
+                {
+                    "id":"llvm-pc",
+                    "recipe":reference("llvm-pc-recipe.json", &recipe),
+                    "source_lock":reference("llvm-pc-source-lock.json", &source_lock),
+                    "profiles":reference("llvm-pc-profiles.json", &profiles)
+                }
+            ],
+            "sdks":[{
+                "id":"llvm-sdk",
+                "identity":reference("llvm-sdk-identity.json", &identity),
+                "source_preset":"aros-sdk-source-v1",
+                "compiler_profiles":[{"group_id":"llvm-pc","profile":"pc-x86_64"}]
+            }]
+        }))
+        .unwrap();
+        ReleaseInputs::parse(&collection, &documents).unwrap()
+    }
+
+    #[test]
+    fn selected_llvm_sdk_requires_exact_bound_product_context() {
+        let inputs = llvm_inputs();
+        let identity =
+            lane_llvm_sdk_identity(&inputs, Some("llvm-sdk"), false, "llvm-pc", "pc-x86_64")
+                .unwrap()
+                .unwrap();
+        assert_eq!(identity.sdk_id, "llvm-sdk");
+        assert!(lane_llvm_sdk_identity(
+            &inputs,
+            Some("llvm-sdk"),
+            false,
+            "llvm-alt",
+            "pc-alt-x86_64",
+        )
+        .is_err());
+        assert!(
+            lane_llvm_sdk_identity(&inputs, Some("llvm-sdk"), false, "llvm-pc", "pc-aarch64",)
+                .is_err()
+        );
+        assert!(
+            lane_llvm_sdk_identity(&inputs, Some("other-sdk"), false, "llvm-pc", "pc-x86_64",)
+                .is_err()
+        );
+        assert!(
+            lane_llvm_sdk_identity(&inputs, Some("llvm-sdk"), false, "gnu-rv32", "rv32-aros",)
+                .is_err()
+        );
+        assert!(
+            lane_llvm_sdk_identity(&inputs, Some("llvm-sdk"), true, "llvm-pc", "pc-x86_64",)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn absent_lane_product_does_not_infer_an_sdk_from_bound_inputs() {
+        let inputs = llvm_inputs();
+        assert!(
+            lane_llvm_sdk_identity(&inputs, None, false, "llvm-pc", "pc-x86_64")
+                .unwrap()
+                .is_none()
+        );
+    }
 }
