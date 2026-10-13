@@ -464,6 +464,112 @@ test('committedFloorStrategy requires a Version floor', () => {
   assert.throws(() => committedFloorStrategy({}, '0.3.20'), /Missing committed version floor/);
 });
 
+test('committedFloorStrategy implements Release Please updaters and rejects a forced version at the floor', () => {
+  const floor = Version.parse('0.3.20');
+  const strategy = committedFloorStrategy({
+    bumpMinorPreMajor: true,
+    bumpPatchForMinorPreMajor: true,
+  }, floor);
+  const published = Version.parse('0.3.19');
+  const updater = strategy.determineReleaseType(published, [conventionalCommit('fix')]);
+
+  assert.equal(typeof updater.bump, 'function');
+  assert.equal(updater.bump(published).toString(), '0.3.21');
+
+  const releaseAsCommit = conventionalCommit('feat');
+  releaseAsCommit.notes = [{title: 'RELEASE AS', text: '0.3.20'}];
+  const forcedUpdater = strategy.determineReleaseType(published, [releaseAsCommit]);
+  assert.throws(
+    () => forcedUpdater.bump(published),
+    /Version override does not advance the committed floor/,
+  );
+});
+
+test('loadPreparation rejects sequential reuse of a GitHub client', async () => {
+  const github = preparationGithub();
+  await loadPreparation(github, fixtureBaseline);
+  await assert.rejects(
+    loadPreparation(github, fixtureBaseline),
+    /GitHub client already belongs to a preparation/,
+  );
+});
+
+test('loadPreparation rejects concurrent reuse after asynchronous manifest loading', async () => {
+  const github = preparationGithub();
+  const results = await Promise.allSettled([
+    loadPreparation(github, fixtureBaseline),
+    loadPreparation(github, fixtureBaseline),
+  ]);
+
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  const rejection = results.find(result => result.status === 'rejected');
+  assert.match(rejection.reason.message, /GitHub client already belongs to a preparation/);
+});
+
+test('createPullRequests rejects a second Release-As build before pull request activity', async () => {
+  let commitMessage = 'feat: build a valid candidate first';
+  let historyIterations = 0;
+  let pullRequestLookups = 0;
+  const mutations = [];
+  const github = {
+    repository: {owner: 'octo', repo: 'aros-tools', defaultBranch: 'main'},
+    async getFileJson(path, branch) {
+      assert.equal(branch, 'main');
+      if (path === 'release-please-config.json') return configDocument;
+      if (path === '.release-please-manifest.json') return committedManifest;
+      throw new Error('Unexpected manifest file: ' + path);
+    },
+    async *releaseIterator() {
+      yield {
+        id: 19,
+        tagName: fixtureBaseline.tag,
+        sha: fixtureBaseline.commit,
+        notes: 'Published baseline',
+      };
+    },
+    async *mergeCommitIterator(branch, options) {
+      assert.equal(branch, 'main');
+      assert.equal(options.backfillFiles, true);
+      historyIterations += 1;
+      yield {sha: 'b'.repeat(40), message: commitMessage, files: ['README.md']};
+      yield {
+        sha: fixtureBaseline.commit,
+        message: 'chore: release 0.3.19',
+        files: ['CHANGELOG.md'],
+      };
+    },
+    async findFilesByGlobAndRef(glob, branch) {
+      assert.equal(branch, 'main');
+      if (glob === 'Cargo.toml' || glob === 'Cargo.lock') return [glob];
+      return [];
+    },
+    async *pullRequestIterator() {
+      pullRequestLookups += 1;
+    },
+    async createPullRequest() {
+      mutations.push('create');
+      return {number: 99};
+    },
+    async updatePullRequest() {
+      mutations.push('update');
+      return {number: 99};
+    },
+  };
+
+  const manifest = await loadPreparation(github, fixtureBaseline);
+  const initialCandidates = await manifest.buildPullRequests();
+  assert.equal(initialCandidates[0].version.toString(), '0.3.21');
+
+  commitMessage = 'feat: force the committed version\n\nRelease-As: 0.3.20';
+  await assert.rejects(
+    manifest.createPullRequests(),
+    /Calculated version does not advance the committed manifest/,
+  );
+  assert.equal(historyIterations, 2);
+  assert.equal(pullRequestLookups, 0);
+  assert.deepEqual(mutations, []);
+});
+
 test('loadPreparation rejects exhaustion before the published tag appears in library releases', async () => {
   const github = preparationGithub();
   await loadPreparation(github, fixtureBaseline);

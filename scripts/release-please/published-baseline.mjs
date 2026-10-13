@@ -20,12 +20,18 @@ const VERSIONING = 'published-history-with-committed-floor';
 export function committedFloorStrategy(options, floor) {
   requireThat(floor instanceof Version, 'Missing committed version floor');
   const strategy = new DefaultVersioningStrategy(options);
+  function bump(version, commits) {
+    // The library owns Conventional Commit classification and SemVer bumps.
+    // A consumed, unpublished manifest version cannot be reused by a new PR.
+    const calculated = strategy.bump(version, commits);
+    const result = calculated.compare(floor) > 0 ? calculated : strategy.bump(floor, commits);
+    requireThat(result.compare(floor) > 0, 'Version override does not advance the committed floor');
+    return result;
+  }
   return {
-    bump(version, commits) {
-      // The library owns Conventional Commit classification and SemVer bumps.
-      // A consumed, unpublished manifest version cannot be reused by a new PR.
-      const calculated = strategy.bump(version, commits);
-      return calculated.compare(floor) > 0 ? calculated : strategy.bump(floor, commits);
+    bump,
+    determineReleaseType(_version, commits) {
+      return {bump: version => bump(version, commits)};
     },
   };
 }
@@ -108,6 +114,7 @@ export function publishedBaseline(repository, request = metadata) {
 }
 
 export async function loadPreparation(github, baseline) {
+  requireThat(!versionFloors.has(github), 'GitHub client already belongs to a preparation');
   const manifest = await Manifest.fromManifest(github, 'main',
     'release-please-config.json', '.release-please-manifest.json');
   requireThat(Object.keys(manifest.repositoryConfig).join() === '.'
@@ -116,6 +123,7 @@ export async function loadPreparation(github, baseline) {
   requireThat(!manifest.lastReleaseSha && !manifest.repositoryConfig['.'].releaseAs
     && [undefined, 'default'].includes(manifest.repositoryConfig['.'].versioning),
   'Unsupported explicit release baseline or version override');
+  requireThat(!versionFloors.has(github), 'GitHub client already belongs to a preparation');
   versionFloors.set(github, manifest.releasedVersions['.']);
   manifest.repositoryConfig['.'].versioning = VERSIONING;
   if (baseline) {
@@ -150,6 +158,14 @@ export async function loadPreparation(github, baseline) {
       requireThat(found, 'Published commit missing from bounded library history');
     };
   }
+  // createPullRequests rebuilds candidates internally. Validate every build,
+  // including that mutation's actual candidate set, not an earlier snapshot.
+  const buildPullRequests = manifest.buildPullRequests.bind(manifest);
+  manifest.buildPullRequests = async () => {
+    const candidates = await buildPullRequests();
+    requireAdvancingCandidates(manifest, candidates);
+    return candidates;
+  };
   return manifest;
 }
 
@@ -173,15 +189,14 @@ async function main() {
   const github = await GitHub.create({owner, repo, token: process.env.GH_TOKEN,
     defaultBranch: 'main', apiUrl: 'https://api.github.com', graphqlUrl: 'https://api.github.com'});
   const manifest = await loadPreparation(github, baseline);
-  const candidates = await manifest.buildPullRequests();
   if (process.argv[2] === '--dry-run') {
+    const candidates = await manifest.buildPullRequests();
     console.log(JSON.stringify({baseline, candidates: candidates.map(candidate => ({
       version: candidate.version?.toString(), title: candidate.title.toString(),
       files: candidate.updates.map(update => update.path)}))}));
     return;
   }
   requireThat(process.argv.length === 2 && process.env.GITHUB_OUTPUT, 'Invalid preparation invocation');
-  requireAdvancingCandidates(manifest, candidates);
   const pulls = (await manifest.createPullRequests()).filter(Boolean);
   requireThat(pulls.length <= 1, 'Release Please returned multiple root PRs');
   appendFileSync(process.env.GITHUB_OUTPUT,

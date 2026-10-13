@@ -143,6 +143,7 @@ jobs:
               r'(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
           )
           checks = {
+              'Release Please App author': pull.get('user', {}).get('login') == 'metaneutrons-release-please[bot]',
               'open state': pull.get('state') == 'open',
               'main base': pull.get('base', {}).get('ref') == 'main',
               'same-repository head': pull.get('head', {}).get('repo', {}).get('full_name') == expected_repository,
