@@ -7,7 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 
 use anyhow::{bail, Context, Result};
 use aros_common::elf::{Binding, Home, Object};
@@ -20,7 +20,7 @@ use crate::{extra, libreq, sets};
 mod driver_output_tests;
 mod driver_tools;
 
-use driver_tools::{resolve_driver_tools, validate_emulation, TOOL_MANIFEST_NAME};
+use driver_tools::{resolve_driver_tools, run_tool, validate_emulation, TOOL_MANIFEST_NAME};
 
 const DRIVER_NAMES: &[&str] = &["collect-aros", "collect-aros32"];
 const RESPONSE_DEPTH_LIMIT: usize = 8;
@@ -800,6 +800,10 @@ fn run_with<F>(
 where
     F: FnMut(&Path, Option<&str>, &[OsString]) -> Result<ExitStatus>,
 {
+    let linker_invocation = request
+        .driver_tool_names
+        .as_ref()
+        .map(|names| names.linker.as_str());
     let staged = adjacent(&request.output, ".collect-pre");
     let final_staged = adjacent(&request.output, ".collect-final");
     let script = request
@@ -849,15 +853,7 @@ where
         "starting first relocatable link",
         &request_context(request),
     )?;
-    let status = execute(
-        &request.linker,
-        request
-            .driver_tool_names
-            .as_ref()
-            .map(|names| names.linker.as_str()),
-        &first,
-    )
-    .map_err(|error| {
+    let status = execute(&request.linker, linker_invocation, &first).map_err(|error| {
         failure(
             DiagnosticCode::CollectorFirstLink,
             DiagnosticStage::FirstLink,
@@ -1014,15 +1010,7 @@ where
         "starting set-collection link",
         &request_context(request),
     )?;
-    let status = execute(
-        &request.linker,
-        request
-            .driver_tool_names
-            .as_ref()
-            .map(|names| names.linker.as_str()),
-        &second,
-    )
-    .map_err(|error| {
+    let status = execute(&request.linker, linker_invocation, &second).map_err(|error| {
         failure(
             DiagnosticCode::CollectorSecondLink,
             DiagnosticStage::SecondLink,
@@ -1171,22 +1159,6 @@ impl Drop for Cleanup {
 fn read_object(path: &Path) -> Result<Object> {
     let bytes = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
     aros_common::elf::read(&bytes).with_context(|| format!("cannot parse {}", path.display()))
-}
-
-fn run_tool(tool: &Path, invocation: Option<&str>, args: &[OsString]) -> Result<ExitStatus> {
-    let mut command = Command::new(tool);
-    // Execute the already validated canonical binary without reopening its
-    // alias. Multicall tools still receive the independently selected role.
-    #[cfg(unix)]
-    if let Some(invocation) = invocation {
-        use std::os::unix::process::CommandExt as _;
-        command.arg0(tool.with_file_name(invocation));
-    }
-    #[cfg(not(unix))]
-    let _ = invocation;
-    aros_common::run_status(command.args(args))
-        .map(|observed| observed.status)
-        .with_context(|| format!("cannot execute required sibling tool {}", tool.display()))
 }
 
 fn request_context(request: &EngineRequest) -> DiagnosticContext {

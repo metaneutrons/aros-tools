@@ -1,7 +1,9 @@
 //! Closed compiler-driver tool manifest and adjacent executable resolution.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer};
@@ -221,6 +223,26 @@ pub(super) fn require_sibling(bin: &Path, name: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+pub(super) fn run_tool(
+    tool: &Path,
+    invocation: Option<&str>,
+    args: &[OsString],
+) -> Result<ExitStatus> {
+    let mut command = Command::new(tool);
+    // Execute the validated canonical binary without reopening its alias.
+    // Multicall tools still receive the independently selected role.
+    #[cfg(unix)]
+    if let Some(invocation) = invocation {
+        use std::os::unix::process::CommandExt as _;
+        command.arg0(tool.with_file_name(invocation));
+    }
+    #[cfg(not(unix))]
+    let _ = invocation;
+    aros_common::run_status(command.args(args))
+        .map(|observed| observed.status)
+        .with_context(|| format!("cannot execute required sibling tool {}", tool.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,27 +357,22 @@ mod tests {
         // A native executable observes argv[0] without a shell interpreter
         // rewriting it. Native Rust development already requires a C linker.
         fs::write(&source, b"#include <string.h>\nint main(int argc, char **argv) { (void)argc; const char *name = strrchr(argv[0], '/'); return strcmp(name ? name + 1 : argv[0], \"ld.lld\") ? 17 : 0; }\n").unwrap();
-        assert!(Command::new("cc")
-            .arg(&source)
-            .arg("-o")
-            .arg(&binary)
-            .status()
+        let mut compiler = Command::new("cc");
+        compiler.arg(&source).arg("-o").arg(&binary);
+        assert!(aros_common::run_status(&mut compiler)
             .unwrap()
+            .status
             .success());
         symlink("lld", directory.path().join("ld.lld")).unwrap();
 
         let selected = require_sibling(directory.path(), "ld.lld").unwrap();
         assert_eq!(selected, fs::canonicalize(binary).unwrap());
         let arguments = [];
-        assert!(
-            super::super::run_tool(&selected, Some("ld.lld"), &arguments)
-                .unwrap()
-                .success()
-        );
+        assert!(run_tool(&selected, Some("ld.lld"), &arguments)
+            .unwrap()
+            .success());
         assert_eq!(
-            super::super::run_tool(&selected, None, &arguments)
-                .unwrap()
-                .code(),
+            run_tool(&selected, None, &arguments).unwrap().code(),
             Some(17)
         );
     }
