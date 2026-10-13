@@ -364,7 +364,7 @@ def _parse_unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _read_regular_file(path: Path, limit: int) -> bytes:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, os.O_RDONLY | nofollow)
+        descriptor = os.open(path, os.O_RDONLY | nofollow | os.O_NONBLOCK)
     except OSError as error:
         raise GateError("a required package file is missing or unsafe") from error
     try:
@@ -383,7 +383,7 @@ def _read_regular_file(path: Path, limit: int) -> bytes:
 def _hash_regular_file(path: Path, limit: int) -> tuple[int, str]:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, os.O_RDONLY | nofollow)
+        descriptor = os.open(path, os.O_RDONLY | nofollow | os.O_NONBLOCK)
     except OSError as error:
         raise GateError("a required package executable is missing or unsafe") from error
     try:

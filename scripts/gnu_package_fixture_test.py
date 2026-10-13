@@ -122,6 +122,45 @@ class GnuPackageFixtureGateTests(unittest.TestCase):
         with self.assertRaises(gate.GateError):
             gate.inspect_package(self.package)
 
+    def _assert_fifo_rejected_without_waiting(self, function, path):
+        code = (
+            "import importlib.util,sys; from pathlib import Path; "
+            "spec=importlib.util.spec_from_file_location('fifo_gate',sys.argv[1]); "
+            "module=importlib.util.module_from_spec(spec); "
+            "sys.modules[spec.name]=module; spec.loader.exec_module(module); "
+            "function=getattr(module,sys.argv[2]); "
+            "function(Path(sys.argv[3]),1048576)\n"
+        )
+        result = gate._run_bounded(
+            [sys.executable, "-c", code, str(SCRIPT), function, str(path)],
+            cwd=self.root,
+            env=gate._child_environment(),
+            timeout=3,
+        )
+        diagnostic = result.stderr.decode("utf-8", errors="replace")
+        self.assertFalse(result.timed_out, diagnostic)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GateError:", diagnostic)
+        self.assertIn("not a bounded regular file", diagnostic)
+
+    def test_package_metadata_fifos_are_rejected_without_waiting(self):
+        for name in (gate.MANIFEST_NAME, gate.LAYOUT_NAME):
+            with self.subTest(name=name):
+                path = self.package / name
+                original = path.read_bytes()
+                path.unlink()
+                os.mkfifo(path)
+                try:
+                    self._assert_fifo_rejected_without_waiting("_read_regular_file", path)
+                finally:
+                    path.unlink()
+                    path.write_bytes(original)
+
+    def test_executable_hash_fifo_is_rejected_without_waiting(self):
+        path = self.root / "executable.fifo"
+        os.mkfifo(path)
+        self._assert_fifo_rejected_without_waiting("_hash_regular_file", path)
+
     def test_wrong_declared_role_is_rejected(self):
         layout = self.load_layout()
         layout["tools"]["c"] = "missing-riscv-aros-gcc"
