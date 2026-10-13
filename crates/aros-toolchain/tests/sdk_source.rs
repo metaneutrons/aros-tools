@@ -1002,7 +1002,7 @@ fn llvm_link_selection(
 }
 
 fn synthetic_application_elf() -> Vec<u8> {
-    let names = b"\0__TOOLCHAIN_LIST__\0";
+    let names = b"\0__PROGRAM_ENTRIES_LIST__\0";
     let strings = 64 + 3 * 64;
     let symbols = strings + names.len();
     let mut bytes = vec![0; symbols + 48];
