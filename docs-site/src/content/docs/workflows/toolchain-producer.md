@@ -241,6 +241,19 @@ six phase receipts, finished record and four package measurements. Preserve its
 bytes unchanged; these receipts belong in protected evidence artifacts, not
 public package metadata. This transport does not authenticate execution.
 
+For portable readback, use `producer verify-package` with the existing independent
+recipe, source-lock, profile, host, release and build-environment selectors.
+Add all four `--package-measurement FILE`, `--package-measurement-sha256 SHA`,
+`--executor-contract-sha256 SHA` and `--executor-binary-sha256 SHA` selectors
+with explicit `--package-format family-v2`. The measurement digest binds its
+exact exported bytes; executor digests identify the original build, not the
+collector binary. Obtain them from independently authenticated owning-job
+evidence. The native verifier joins the complete retained phase chain and
+original build result to the downloaded package without reopening original
+runner paths. JSON adds `finished_candidate` with
+`assurance: portable-byte-readback-only`. This remains a byte-consistency check,
+not job authentication, new compiler execution or release admission.
+
 `producer verify-release-evidence` joins the complete indexed A/B export set to
 measured packages, comparisons, compatibility reports/logs/ELFs, final checksums
 and unchanged pre-attestation subjects. It requires external lane selections

@@ -245,6 +245,14 @@ the collectors. Guarded JSON output includes the joined result/receipt/raw-tree
 and package-tree digests. These options do not authenticate a build or qualify
 a release; ordinary packaging remains available without them.
 
+To read back that export on another host, `verify-package` accepts
+`--package-measurement FILE`, `--package-measurement-sha256 SHA`,
+`--executor-contract-sha256 SHA` and `--executor-binary-sha256 SHA` together,
+with explicit `--package-format family-v2`. Select these digests from the
+authenticated original owner, not from the export being checked. The result
+joins retained build receipts to measured package bytes without opening old
+runner paths. It does not authenticate jobs, signatures or release admission.
+
 `producer index` independently selects `--release-format legacy-v1|family-v2`.
 The default V1 path requires `--source-lock-filename`. V2 requires independent
 `--lane-inputs` and an external `--subject-manifest`; its final stage also
