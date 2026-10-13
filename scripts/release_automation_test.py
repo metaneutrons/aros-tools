@@ -153,6 +153,49 @@ class ReleaseAutomation(unittest.TestCase):
         self.assertEqual(AUTOMATION.admission()["commit"], HEAD)
         self.assertEqual(self.mutations(), [])
 
+    def test_versioned_transport_preserves_the_merged_release_commit_contract(self):
+        self.assertEqual(AUTOMATION.REST_API_VERSION, "2022-11-28")
+        fixture_api = self.gh
+        path = f"repos/{REPO}/commits/{HEAD}/pulls?per_page=100"
+
+        def versioned_transport(arguments, **kwargs):
+            self.assertEqual(kwargs["env"]["GH_TOKEN"], "synthetic-secret")
+            self.assertNotIn("GOVERNANCE_TOKEN", kwargs["env"])
+            self.assertEqual(arguments[arguments.index("--method") + 1], "GET")
+            selected = arguments[arguments.index("-H") + 1]
+            response = copy.deepcopy(self.gh.pulls)
+            if selected == "X-GitHub-Api-Version: 2026-03-10":
+                response[0][0].pop("merge_commit_sha")
+            else:
+                self.assertEqual(selected, "X-GitHub-Api-Version: 2022-11-28")
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(response), "")
+
+        def routed_api(endpoint, **kwargs):
+            if endpoint == path:
+                return REAL_API(endpoint, **kwargs)
+            return fixture_api(endpoint, **kwargs)
+
+        with patch.object(AUTOMATION, "api", side_effect=routed_api), \
+                patch.object(AUTOMATION.subprocess, "run", side_effect=versioned_transport):
+            self.assertEqual(AUTOMATION.admission()["commit"], HEAD)
+            with patch.object(AUTOMATION, "REST_API_VERSION", "2026-03-10"), \
+                    self.assertRaisesRegex(SystemExit, "pinned REST API contract"):
+                AUTOMATION.admission()
+        self.assertEqual(self.mutations(), [])
+
+    def test_missing_or_malformed_merge_sha_is_not_silently_a_nonrelease(self):
+        for value in (None, True, "", "not-an-oid"):
+            with self.subTest(value=value):
+                self.gh.pulls = [[dict(self.gh.pull, merge_commit_sha=value)]]
+                with self.assertRaisesRegex(SystemExit, "pinned REST API contract"):
+                    AUTOMATION.admission()
+        candidate = copy.deepcopy(self.gh.pull)
+        candidate.pop("merge_commit_sha")
+        self.gh.pulls = [[candidate]]
+        with self.assertRaisesRegex(SystemExit, "pinned REST API contract"):
+            AUTOMATION.admission()
+        self.assertEqual(self.mutations(), [])
+
     def test_admission_requires_explicit_governance_credential(self):
         with patch.dict(os.environ, {"GOVERNANCE_TOKEN": ""}), self.assertRaises(SystemExit):
             AUTOMATION.admission()
