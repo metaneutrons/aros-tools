@@ -1,6 +1,7 @@
 //! Source-verified reuse of one architecture object lane through a handwritten
-//! virtual MetaMake edge. The proof aliases a source group; it never creates a
-//! Make producer or changes the original architecture effect.
+//! virtual MetaMake edge. The selector can be pure virtual or compose with an
+//! already-proven physical selected-tag object lane. The proof aliases a source
+//! group; it never creates a Make producer or changes an architecture effect.
 
 use super::NativeOwnerProjection;
 use crate::arch_endpoint_effects::{ArchEndpointEffect, ArchEndpointEffectData};
@@ -19,6 +20,10 @@ type AliasCandidate<'a> = (&'a ArchEndpointEffect, String, String, String);
 /// An opaque proof that a source-owned architecture object group is selected
 /// through one exact, handwritten virtual `#MM-` edge.
 ///
+/// It covers either a
+/// pure virtual selector or a selector composed with its proven physical
+/// selected-tag object lane.
+///
 /// Instances can only be constructed by
 /// [`NativeOwnerProjection::verified_arch_lane_aliases`]. The contained
 /// effect remains the original source lane; `selected_tag` is only the CMake
@@ -26,11 +31,22 @@ type AliasCandidate<'a> = (&'a ArchEndpointEffect, String, String, String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedArchLaneAlias {
     effect: ArchEndpointEffect,
+    physical_owner: Option<VerifiedPhysicalOwner>,
     mainmmake: String,
     source_tag: String,
     selected_tag: String,
     consumer: String,
     dependency: String,
+}
+
+/// A selected-tag producer that already physically owns the alias consumer.
+/// This is included only after the native projection binds its unique owner
+/// file to the exact source-replayed object effect and its paired linklib lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifiedPhysicalOwner {
+    owner: String,
+    effect: ArchEndpointEffect,
+    pair: ArchEndpointEffect,
 }
 
 impl VerifiedArchLaneAlias {
@@ -60,11 +76,35 @@ impl VerifiedArchLaneAlias {
             &self.dependency,
         )
     }
+
+    pub(crate) fn physical_owner(
+        &self,
+    ) -> Option<(&ArchEndpointEffect, &ArchEndpointEffect, &str)> {
+        self.physical_owner
+            .as_ref()
+            .map(|owner| (&owner.effect, &owner.pair, owner.owner.as_str()))
+    }
+
+    pub(crate) fn verify_physical_pair(
+        &self,
+        effects: &[ArchEndpointEffect],
+    ) -> Result<(), String> {
+        let Some(owner) = &self.physical_owner else {
+            return Err("architecture lane composition has no physical owner proof".into());
+        };
+        if object_effect_pair(effects, &owner.effect)? != &owner.pair {
+            return Err("architecture lane composition physical linklib effect changed".into());
+        }
+        Ok(())
+    }
 }
 
 impl NativeOwnerProjection {
     /// Independently prove architecture object groups pulled in through an
     /// exact source-written virtual edge for a selected primary target tag.
+    /// The selector may be pure virtual, or may already have a physical owner
+    /// if that owner is exactly bound to its source-backed selected-tag object
+    /// effect, paired effect, and source group.
     ///
     /// CPU32 is intentionally not a selector here: a source lane may reuse
     /// another ABI's implementation, but only the selected CPU/platform/family
@@ -223,15 +263,8 @@ impl NativeOwnerProjection {
                 return Err("architecture lane alias endpoints do not share a selected module lane".into());
             }
             self.verify_handwritten_virtual_edge(root, declaration, &consumer, &dependency)?;
-            if self
-                .graph
-                .owner_files(&consumer)
-                .is_some_and(|owners| !owners.is_empty())
-            {
-                return Err(format!(
-                    "architecture lane alias selector has a physical owner: {consumer}"
-                ));
-            }
+            let physical_owner =
+                self.verified_physical_owner(&consumer, &mainmmake, &selected_tag, effects)?;
 
             for (effect, _, _, _) in source_effects {
                 let identity = (
@@ -255,8 +288,27 @@ impl NativeOwnerProjection {
                     (pair.recipe.clone(), pair.line, pair.endpoint.clone()),
                     pair.clone(),
                 );
+                if let Some(owner) = &physical_owner {
+                    proof_effects.insert(
+                        (
+                            owner.effect.recipe.clone(),
+                            owner.effect.line,
+                            owner.effect.endpoint.clone(),
+                        ),
+                        owner.effect.clone(),
+                    );
+                    proof_effects.insert(
+                        (
+                            owner.pair.recipe.clone(),
+                            owner.pair.line,
+                            owner.pair.endpoint.clone(),
+                        ),
+                        owner.pair.clone(),
+                    );
+                }
                 aliases.push(VerifiedArchLaneAlias {
                     effect: effect.clone(),
+                    physical_owner: physical_owner.clone(),
                     mainmmake: mainmmake.clone(),
                     source_tag: source_tag.clone(),
                     selected_tag: selected_tag.clone(),
@@ -275,6 +327,53 @@ impl NativeOwnerProjection {
             )?;
         }
         Ok(aliases)
+    }
+
+    fn verified_physical_owner(
+        &self,
+        consumer: &str,
+        mainmmake: &str,
+        selected_tag: &str,
+        effects: &[ArchEndpointEffect],
+    ) -> Result<Option<VerifiedPhysicalOwner>, String> {
+        let Some(owners) = self.graph.owner_files(consumer) else {
+            return Ok(None);
+        };
+        if owners.is_empty() {
+            return Ok(None);
+        }
+        if owners.len() != 1 {
+            return Err(format!(
+                "architecture lane alias selector has multiple physical owners: {consumer}"
+            ));
+        }
+        let owner = owners.first().expect("one physical owner");
+        let matching_effects = effects
+            .iter()
+            .filter(|effect| {
+                effect.endpoint == consumer
+                    && effect.recipe.strip_suffix(".src") == Some(owner.as_str())
+                    && matches!(
+                        &effect.data,
+                        ArchEndpointEffectData::ArchModuleObjects {
+                            mainmmake: effect_main,
+                            tag: effect_tag,
+                            ..
+                        } if effect_main == mainmmake && effect_tag == selected_tag
+                    )
+            })
+            .collect::<Vec<_>>();
+        let [effect] = matching_effects.as_slice() else {
+            return Err(format!(
+                "architecture lane alias selector physical owner lacks one exact selected-tag object effect: {consumer}"
+            ));
+        };
+        let pair = object_effect_pair(effects, effect)?;
+        Ok(Some(VerifiedPhysicalOwner {
+            owner: (*owner).clone(),
+            effect: (*effect).clone(),
+            pair: pair.clone(),
+        }))
     }
 
     fn verify_handwritten_virtual_edge(
@@ -504,10 +603,14 @@ mod tests {
 
     const OBJECTS_RECIPE: &str = "arch/i386-all/debug/mmakefile.src";
     const SELECTOR_RECIPE: &str = "arch/x86_64-all/debug/mmakefile.src";
+    const EXTRA_OWNER_RECIPE: &str = "arch/x86_64-all/other/mmakefile.src";
     const TEMPLATE: &str = "config/make.tmpl";
     const OWNER_OBJECTS: &str = "arch/i386-all/debug/mmakefile";
     const OWNER_SELECTOR: &str = "arch/x86_64-all/debug/mmakefile";
+    const EXTRA_OWNER: &str = "arch/x86_64-all/other/mmakefile";
     const EFFECT_SOURCE: &str = "%build_archspecific mainmmake=kernel-debug maindir=rom/debug modname=debug arch=i386 files=debug_platform linklibfiles=debug_client\n";
+    const SELECTED_EFFECT_SOURCE: &str = "%build_archspecific mainmmake=kernel-debug maindir=rom/debug modname=debug arch=x86_64 files=primary_platform linklibfiles=primary_client\n";
+    const EXTRA_OWNER_SOURCE: &str = "#MM\nkernel-debug-x86_64\n";
     const SELECTOR_EDGE: &str = "#MM- kernel-debug-x86_64 : kernel-debug-i386\n";
     const GEN_ARCHSPECIFICRULES: &str = concat!(
         "%define gen_archspecificrules mainmmake=/A target= subtarget=\n",
@@ -544,6 +647,7 @@ mod tests {
         context: TargetContext,
         effects: Vec<ArchEndpointEffect>,
         source_group: crate::arch_sources::ArchSourceDecl,
+        physical_source_group: Option<crate::arch_sources::ArchSourceDecl>,
     }
 
     fn context(cpu: &str, cpu32: Option<&str>) -> TargetContext {
@@ -556,12 +660,36 @@ mod tests {
     }
 
     fn fixture(selector: &str, generated_alias: bool) -> Fixture {
+        fixture_with_physical_owner(selector, generated_alias, false)
+    }
+
+    fn fixture_with_physical_owner(
+        selector: &str,
+        generated_alias: bool,
+        physical_owner: bool,
+    ) -> Fixture {
+        fixture_with_owner_configuration(selector, generated_alias, physical_owner, false)
+    }
+
+    fn fixture_with_duplicate_owner(selector: &str, generated_alias: bool) -> Fixture {
+        fixture_with_owner_configuration(selector, generated_alias, true, true)
+    }
+
+    fn fixture_with_owner_configuration(
+        selector: &str,
+        generated_alias: bool,
+        physical_owner: bool,
+        duplicate_owner: bool,
+    ) -> Fixture {
         let temp_root = std::env::temp_dir().canonicalize().unwrap();
         let root = tempfile::tempdir_in(temp_root).unwrap();
         let objects_dir = root.path().join("arch/i386-all/debug");
         let selector_dir = root.path().join("arch/x86_64-all/debug");
         fs::create_dir_all(&objects_dir).unwrap();
         fs::create_dir_all(&selector_dir).unwrap();
+        if duplicate_owner {
+            fs::create_dir_all(root.path().join("arch/x86_64-all/other")).unwrap();
+        }
         fs::create_dir_all(root.path().join("config")).unwrap();
 
         let context = context("x86_64", Some("i386"));
@@ -569,7 +697,7 @@ mod tests {
             "{GEN_ARCHSPECIFICRULES}{BUILD_MODULE}{}",
             include_str!("../tests/fixtures/architecture_objects.tmpl")
         );
-        let selector_source = if generated_alias {
+        let mut selector_source = if generated_alias {
             template.push_str("\n%define fixture_lane_alias\n");
             template.push_str(selector);
             template.push_str("%end\n");
@@ -577,19 +705,31 @@ mod tests {
         } else {
             selector.to_owned()
         };
+        if physical_owner {
+            selector_source.push_str(SELECTED_EFFECT_SOURCE);
+        }
         let object_path = root.path().join(OBJECTS_RECIPE);
         let selector_path = root.path().join(SELECTOR_RECIPE);
         let template_path = root.path().join(TEMPLATE);
         fs::write(&object_path, EFFECT_SOURCE).unwrap();
         fs::write(&selector_path, selector_source.as_bytes()).unwrap();
         fs::write(&template_path, template.as_bytes()).unwrap();
+        if duplicate_owner {
+            fs::write(root.path().join(EXTRA_OWNER_RECIPE), EXTRA_OWNER_SOURCE).unwrap();
+        }
 
         let mut owners = BTreeMap::new();
         owners.insert(OWNER_OBJECTS.to_owned(), OBJECTS_RECIPE.to_owned());
         owners.insert(OWNER_SELECTOR.to_owned(), SELECTOR_RECIPE.to_owned());
+        if duplicate_owner {
+            owners.insert(EXTRA_OWNER.to_owned(), EXTRA_OWNER_RECIPE.to_owned());
+        }
         let mut discovered_inputs = BTreeSet::new();
         discovered_inputs.insert(OBJECTS_RECIPE.to_owned());
         discovered_inputs.insert(SELECTOR_RECIPE.to_owned());
+        if duplicate_owner {
+            discovered_inputs.insert(EXTRA_OWNER_RECIPE.to_owned());
+        }
         let mut snapshots = BTreeMap::new();
         snapshots.insert(
             OBJECTS_RECIPE.to_owned(),
@@ -603,13 +743,23 @@ mod tests {
             TEMPLATE.to_owned(),
             aros_common::sha256_bytes(template.as_bytes()).to_string(),
         );
+        if duplicate_owner {
+            snapshots.insert(
+                EXTRA_OWNER_RECIPE.to_owned(),
+                aros_common::sha256_bytes(EXTRA_OWNER_SOURCE.as_bytes()).to_string(),
+            );
+        }
 
         let mut expanded_files = BTreeMap::new();
         let mut expansion_origins = BTreeMap::new();
-        for (owner, recipe, source) in [
+        let mut owner_sources = vec![
             (OWNER_OBJECTS, OBJECTS_RECIPE, EFFECT_SOURCE),
             (OWNER_SELECTOR, SELECTOR_RECIPE, selector_source.as_str()),
-        ] {
+        ];
+        if duplicate_owner {
+            owner_sources.push((EXTRA_OWNER, EXTRA_OWNER_RECIPE, EXTRA_OWNER_SOURCE));
+        }
+        for (owner, recipe, source) in owner_sources {
             let expanded = expand_bytes(
                 source.as_bytes(),
                 &root.path().join(recipe),
@@ -665,6 +815,32 @@ mod tests {
         )
         .unwrap();
         assert!(scan.rejected.is_empty(), "{:?}", scan.rejected);
+        let mut effects = scan.effects;
+        let physical_source_group = if physical_owner {
+            let selected_scan = crate::arch_endpoint_effects::collect_source_arch_endpoint_effects(
+                &selector_source,
+                Path::new(SELECTOR_RECIPE),
+                root.path(),
+                Some(&context),
+            )
+            .unwrap();
+            assert!(
+                selected_scan.rejected.is_empty(),
+                "{:?}",
+                selected_scan.rejected
+            );
+            effects.extend(selected_scan.effects);
+            let (mut groups, skipped) = collect_arch_sources(
+                &selector_source,
+                Path::new("arch/x86_64-all/debug"),
+                Some(&context),
+            );
+            assert!(skipped.is_empty(), "{skipped:?}");
+            assert_eq!(groups.len(), 1);
+            Some(groups.remove(0))
+        } else {
+            None
+        };
         let (mut source_groups, skipped) = collect_arch_sources(
             EFFECT_SOURCE,
             Path::new("arch/i386-all/debug"),
@@ -676,8 +852,9 @@ mod tests {
             root,
             projection,
             context,
-            effects: scan.effects,
+            effects,
             source_group: source_groups.remove(0),
+            physical_source_group,
         }
     }
 
@@ -699,6 +876,21 @@ mod tests {
             &fixture.effects,
             &fixture.context,
         )
+    }
+
+    fn physical_graph(fixture: &Fixture) -> DependencyGraph {
+        let mut graph = DependencyGraph::default();
+        graph.arch_endpoint_effects = fixture.effects.clone();
+        let mut groups = vec![fixture.source_group.clone()];
+        if let Some(group) = &fixture.physical_source_group {
+            groups.push(group.clone());
+        }
+        graph.arch_sources.insert("kernel-debug".into(), groups);
+        graph.meta_targets.insert(
+            "kernel-debug-x86_64".into(),
+            HashSet::from(["kernel-debug-i386".into()]),
+        );
+        graph
     }
 
     #[test]
@@ -737,6 +929,181 @@ mod tests {
     }
 
     #[test]
+    fn handwritten_edge_composes_with_an_exact_selected_tag_physical_owner() {
+        let fixture = fixture_with_physical_owner(SELECTOR_EDGE, false, true);
+        let aliases = aliases(&fixture).unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert!(aliases[0].physical_owner().is_some());
+
+        let original_effects = fixture.effects.clone();
+        let original_groups = vec![
+            fixture.source_group.clone(),
+            fixture.physical_source_group.clone().unwrap(),
+        ];
+        let mut graph = physical_graph(&fixture);
+        let notes = graph.apply_arch_lane_aliases(&aliases).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(graph.arch_endpoint_effects, original_effects);
+        let groups = &graph.arch_sources["kernel-debug"];
+        assert_eq!(
+            serde_json::to_value(&groups[..2]).unwrap(),
+            serde_json::to_value(&original_groups).unwrap()
+        );
+        let retagged = groups
+            .iter()
+            .filter(|group| group.tag == "x86_64" && group.files == fixture.source_group.files)
+            .collect::<Vec<_>>();
+        assert_eq!(retagged.len(), 1);
+        assert!(retagged[0].linklib_files.is_empty());
+    }
+
+    #[test]
+    fn physical_composition_requires_the_unique_selected_effect_pair_group_and_route() {
+        let fixture = fixture_with_physical_owner(SELECTOR_EDGE, false, true);
+        let aliases = aliases(&fixture).unwrap();
+
+        let mut no_route = physical_graph(&fixture);
+        no_route.meta_targets.clear();
+        assert!(no_route.apply_arch_lane_aliases(&aliases).is_err());
+
+        let mut no_selected_effect = physical_graph(&fixture);
+        no_selected_effect.arch_endpoint_effects.retain(|effect| {
+            !(effect.endpoint == "kernel-debug-x86_64"
+                && matches!(
+                    &effect.data,
+                    ArchEndpointEffectData::ArchModuleObjects { .. }
+                ))
+        });
+        assert!(no_selected_effect
+            .apply_arch_lane_aliases(&aliases)
+            .is_err());
+
+        let mut no_selected_pair = physical_graph(&fixture);
+        let selected_effect = no_selected_pair
+            .arch_endpoint_effects
+            .iter()
+            .find(|effect| {
+                effect.endpoint == "kernel-debug-x86_64"
+                    && matches!(
+                        &effect.data,
+                        ArchEndpointEffectData::ArchModuleObjects { .. }
+                    )
+            })
+            .unwrap()
+            .clone();
+        no_selected_pair.arch_endpoint_effects.retain(|candidate| {
+            !(candidate.recipe == selected_effect.recipe
+                && candidate.line == selected_effect.line
+                && candidate.endpoint != selected_effect.endpoint)
+        });
+        assert!(no_selected_pair.apply_arch_lane_aliases(&aliases).is_err());
+
+        let mut changed_pair = physical_graph(&fixture);
+        let (_, pair, _) = aliases[0].physical_owner().unwrap();
+        let changed = changed_pair
+            .arch_endpoint_effects
+            .iter_mut()
+            .find(|candidate| *candidate == pair)
+            .unwrap();
+        if let ArchEndpointEffectData::ArchClientLinklibSources { compiler, .. } = &mut changed.data
+        {
+            *compiler = "host".into();
+        } else {
+            panic!("fixture must exercise a nonempty client linklib lane");
+        }
+        let before = serde_json::to_value(&changed_pair.arch_sources).unwrap();
+        assert!(changed_pair.apply_arch_lane_aliases(&aliases).is_err());
+        assert_eq!(
+            serde_json::to_value(&changed_pair.arch_sources).unwrap(),
+            before
+        );
+
+        let mut duplicate_selected_effect = physical_graph(&fixture);
+        let selected_effect = duplicate_selected_effect
+            .arch_endpoint_effects
+            .iter()
+            .find(|effect| {
+                effect.endpoint == "kernel-debug-x86_64"
+                    && matches!(
+                        &effect.data,
+                        ArchEndpointEffectData::ArchModuleObjects { .. }
+                    )
+            })
+            .unwrap()
+            .clone();
+        duplicate_selected_effect
+            .arch_endpoint_effects
+            .push(selected_effect);
+        assert!(duplicate_selected_effect
+            .apply_arch_lane_aliases(&aliases)
+            .is_err());
+
+        let mut mismatched_group = physical_graph(&fixture);
+        mismatched_group
+            .arch_sources
+            .get_mut("kernel-debug")
+            .unwrap()[1]
+            .files[0] = "unrelated_source".into();
+        assert!(mismatched_group.apply_arch_lane_aliases(&aliases).is_err());
+    }
+
+    #[test]
+    fn physical_composition_rejects_missing_duplicate_or_stale_owner_effects() {
+        let fixture = fixture_with_physical_owner(SELECTOR_EDGE, false, true);
+        let generic_effects = fixture
+            .effects
+            .iter()
+            .filter(|effect| effect.recipe == OBJECTS_RECIPE)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(fixture
+            .projection
+            .verified_arch_lane_aliases(fixture.root.path(), &generic_effects, &fixture.context,)
+            .unwrap_err()
+            .contains("physical owner lacks one exact selected-tag object effect"));
+
+        let multiple_owners = fixture_with_duplicate_owner(SELECTOR_EDGE, false);
+        assert!(aliases(&multiple_owners)
+            .unwrap_err()
+            .contains("multiple physical owners"));
+
+        let selected = fixture
+            .effects
+            .iter()
+            .find(|effect| {
+                effect.endpoint == "kernel-debug-x86_64"
+                    && matches!(
+                        &effect.data,
+                        ArchEndpointEffectData::ArchModuleObjects { .. }
+                    )
+            })
+            .unwrap()
+            .clone();
+        let mut duplicate = fixture.effects.clone();
+        duplicate.push(selected);
+        assert!(fixture
+            .projection
+            .verified_arch_lane_aliases(fixture.root.path(), &duplicate, &fixture.context,)
+            .unwrap_err()
+            .contains("physical owner lacks one exact selected-tag object effect"));
+
+        let mut stale = fixture.effects.clone();
+        for effect in &mut stale {
+            if effect.endpoint == "kernel-debug-x86_64" {
+                if let ArchEndpointEffectData::ArchModuleObjects { module_sources, .. } =
+                    &mut effect.data
+                {
+                    module_sources[0] = "changed_source".into();
+                }
+            }
+        }
+        assert!(fixture
+            .projection
+            .verified_arch_lane_aliases(fixture.root.path(), &stale, &fixture.context)
+            .is_err());
+    }
+
+    #[test]
     fn changed_or_missing_edge_and_missing_original_effect_do_not_alias() {
         let changed = fixture("#MM- kernel-debug-x86_64 : kernel-debug-other\n", false);
         assert!(aliases(&changed).unwrap().is_empty());
@@ -761,6 +1128,10 @@ mod tests {
         assert!(aliases(&generated)
             .unwrap_err()
             .contains("handwritten source edge"));
+        let generated_with_physical_owner = fixture_with_physical_owner(SELECTOR_EDGE, true, true);
+        assert!(aliases(&generated_with_physical_owner)
+            .unwrap_err()
+            .contains("handwritten source edge"));
         let physical = fixture("#MM kernel-debug-x86_64 : kernel-debug-i386\n", false);
         assert!(aliases(&physical)
             .unwrap_err()
@@ -780,6 +1151,44 @@ mod tests {
     }
 
     #[test]
+    fn partially_overlapping_alias_plans_fail_before_graph_mutation() {
+        let fixture = fixture(SELECTOR_EDGE, false);
+        let first = aliases(&fixture).unwrap().remove(0);
+        // Application-only fixture for two already-proven routes. Production
+        // callers cannot construct or alter these opaque proofs.
+        let mut second = first.clone();
+        second.source_tag = "other".into();
+        second.dependency = "kernel-debug-other".into();
+        second.effect.endpoint = second.dependency.clone();
+        let mut other_group = fixture.source_group.clone();
+        other_group.tag = "other".into();
+        other_group.files.push("second_object".into());
+        if let ArchEndpointEffectData::ArchModuleObjects {
+            tag,
+            module_sources,
+            ..
+        } = &mut second.effect.data
+        {
+            *tag = "other".into();
+            module_sources.clone_from(&other_group.files);
+        }
+        let mut graph = DependencyGraph::default();
+        graph.arch_endpoint_effects = vec![first.effect.clone(), second.effect.clone()];
+        graph.arch_sources.insert(
+            "kernel-debug".into(),
+            vec![fixture.source_group, other_group],
+        );
+        graph.meta_targets.insert(
+            "kernel-debug-x86_64".into(),
+            HashSet::from([first.dependency.clone(), second.dependency.clone()]),
+        );
+        let before = serde_json::to_value(&graph.arch_sources).unwrap();
+        let error = graph.apply_arch_lane_aliases(&[first, second]).unwrap_err();
+        assert!(error.contains("overlap in the planned"), "{error}");
+        assert_eq!(serde_json::to_value(&graph.arch_sources).unwrap(), before);
+    }
+
+    #[test]
     fn graph_route_and_existing_destination_collisions_are_fail_closed() {
         let fixture = fixture(SELECTOR_EDGE, false);
         let aliases = aliases(&fixture).unwrap();
@@ -795,6 +1204,23 @@ mod tests {
             "kernel-debug-x86_64".into(),
             HashSet::from(["kernel-debug-i386".into()]),
         );
+        let mut unverified_provider = DependencyGraph::default();
+        unverified_provider
+            .arch_endpoint_effects
+            .push(selected_object_effect(&fixture.effects).clone());
+        unverified_provider
+            .arch_sources
+            .insert("kernel-debug".into(), vec![fixture.source_group.clone()]);
+        unverified_provider.meta_targets.insert(
+            "kernel-debug-x86_64".into(),
+            HashSet::from(["kernel-debug-i386".into()]),
+        );
+        unverified_provider
+            .make_meta_providers
+            .insert("kernel-debug-x86_64".into());
+        assert!(unverified_provider
+            .apply_arch_lane_aliases(&aliases)
+            .is_err());
         let mut collision = fixture.source_group;
         collision.tag = "x86_64".into();
         graph
