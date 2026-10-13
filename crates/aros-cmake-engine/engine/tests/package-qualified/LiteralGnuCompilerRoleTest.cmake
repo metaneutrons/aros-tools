@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 
+# Package-qualified fixture; invoked by check-workspace.sh gnu-package-test.
+include("${CMAKE_CURRENT_LIST_DIR}/BoundedProcessOutput.cmake")
+
 foreach(_required IN ITEMS ENGINE_DIR TEST_BINARY_DIR GNU_CC GNU_CXX GNU_READELF GNU_AR GNU_RANLIB)
     if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
         message(FATAL_ERROR "${_required} must be provided")
@@ -256,14 +259,13 @@ extern "C" int literal_gnu_role_cxx() { return ROLE_SEQUENCE; }
 ]=])
 
 function(_literal_gnu_expect_elf object expected_class expected_float_abi label)
-    execute_process(
-        COMMAND "${_GNU_READELF}" -h "${object}"
-        RESULT_VARIABLE _readelf_result
-        OUTPUT_VARIABLE _readelf_header
-        ERROR_VARIABLE _readelf_error
-        TIMEOUT 30)
+    _literal_gnu_execute_bounded_process(
+        _readelf_result _readelf_header _readelf_error
+        "${label} readelf" "${_test_root}" 30
+        "${_GNU_READELF}" -h "${object}")
     if(NOT _readelf_result STREQUAL "0")
-        message(FATAL_ERROR "${label}: GNU readelf failed\n${_readelf_error}")
+        message(FATAL_ERROR
+            "${label}: GNU readelf failed\nstdout:\n${_readelf_header}\nstderr:\n${_readelf_error}")
     endif()
 
     set(_class_ok FALSE)
@@ -293,6 +295,7 @@ function(_literal_gnu_expect_elf object expected_class expected_float_abi label)
 endfunction()
 
 function(_literal_gnu_verify_command_file command_file expected_sysroot)
+    _literal_gnu_check_bounded_file("${command_file}" "literal compiler command file")
     file(STRINGS "${command_file}" _command_lines)
     set(_ordered_arguments
         "-DROLE_SEQUENCE=1"
@@ -336,8 +339,10 @@ function(_literal_gnu_verify_command_file command_file expected_sysroot)
 endfunction()
 
 function(_literal_gnu_configure mode build_dir conflict)
-    execute_process(
-        COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${build_dir}" -G Ninja
+    _literal_gnu_execute_bounded_process(
+        _configure_result _configure_stdout _configure_stderr
+        "GNU ${mode} configure" "${_test_root}" 120
+        "${CMAKE_COMMAND}" -S "${_fixture}" -B "${build_dir}" -G Ninja
             "-DENGINE_DIR=${_engine_dir}"
             "-DLITERAL_ROLE_MODE=${mode}"
             "-DLITERAL_GNU_ABI_CONFLICT=${conflict}"
@@ -345,11 +350,7 @@ function(_literal_gnu_configure mode build_dir conflict)
             "-DPROBE_GNU_CXX=${_GNU_CXX}"
             "-DPROBE_GNU_AR=${_GNU_AR}"
             "-DPROBE_GNU_RANLIB=${_GNU_RANLIB}"
-            "-DCMAKE_TOOLCHAIN_FILE=${_fixture}/Toolchain.cmake"
-        RESULT_VARIABLE _configure_result
-        OUTPUT_VARIABLE _configure_stdout
-        ERROR_VARIABLE _configure_stderr
-        TIMEOUT 120)
+            "-DCMAKE_TOOLCHAIN_FILE=${_fixture}/Toolchain.cmake")
     set(_configure_log "${_configure_stdout}\n${_configure_stderr}")
     set(_configure_result "${_configure_result}" PARENT_SCOPE)
     set(_configure_log "${_configure_log}" PARENT_SCOPE)
@@ -362,12 +363,10 @@ function(_literal_gnu_positive_mode mode)
         message(FATAL_ERROR "GNU ${mode} compiler-role configure failed\n${_configure_log}")
     endif()
 
-    execute_process(
-        COMMAND "${CMAKE_COMMAND}" --build "${_build}" --target literal-role-dependencies --parallel 2
-        RESULT_VARIABLE _dependency_result
-        OUTPUT_VARIABLE _dependency_stdout
-        ERROR_VARIABLE _dependency_stderr
-        TIMEOUT 120)
+    _literal_gnu_execute_bounded_process(
+        _dependency_result _dependency_stdout _dependency_stderr
+        "GNU ${mode} dependency build" "${_test_root}" 120
+        "${CMAKE_COMMAND}" --build "${_build}" --target literal-role-dependencies --parallel 2)
     if(NOT _dependency_result STREQUAL "0")
         message(FATAL_ERROR
             "GNU ${mode} literal dependency build failed\n${_dependency_stdout}${_dependency_stderr}")
@@ -379,6 +378,7 @@ function(_literal_gnu_positive_mode mode)
            NOT EXISTS "${_depfile}" OR IS_SYMLINK "${_depfile}")
             message(FATAL_ERROR "GNU ${mode} dependency mode produced invalid output roles")
         endif()
+        _literal_gnu_check_bounded_file("${_depfile}" "GNU ${mode} dependency file")
         file(READ "${_depfile}" _dependencies)
         string(FIND "${_dependencies}" "${_object}:" _target_position)
         if(NOT _target_position EQUAL 0)
@@ -386,12 +386,10 @@ function(_literal_gnu_positive_mode mode)
         endif()
     endforeach()
 
-    execute_process(
-        COMMAND "${CMAKE_COMMAND}" --build "${_build}" --target literal-role-objects --parallel 2
-        RESULT_VARIABLE _build_result
-        OUTPUT_VARIABLE _build_stdout
-        ERROR_VARIABLE _build_stderr
-        TIMEOUT 120)
+    _literal_gnu_execute_bounded_process(
+        _build_result _build_stdout _build_stderr
+        "GNU ${mode} object build" "${_test_root}" 120
+        "${CMAKE_COMMAND}" --build "${_build}" --target literal-role-objects --parallel 2)
     if(NOT _build_result STREQUAL "0")
         message(FATAL_ERROR "GNU ${mode} literal object build failed\n${_build_stdout}${_build_stderr}")
     endif()
@@ -441,17 +439,16 @@ if(EXISTS "${_negative_build}/declared-build/gen/literal/role-c.o" OR
 endif()
 
 set(_counter_object "${_test_root}/counter-output/rv64-double.o")
-execute_process(
-    COMMAND "${_GNU_CC}"
+_literal_gnu_execute_bounded_process(
+    _counter_result _counter_stdout _counter_stderr
+    "GNU RV64 double-float counter compile" "${_test_root}" 60
+    "${_GNU_CC}"
         -march=rv64imafdc -mabi=lp64d -mcmodel=medany
         -c "${_fixture}/counter-source/counter.c"
-        -o "${_counter_object}"
-    RESULT_VARIABLE _counter_result
-    OUTPUT_VARIABLE _counter_stdout
-    ERROR_VARIABLE _counter_stderr
-    TIMEOUT 60)
+        -o "${_counter_object}")
 if(NOT _counter_result STREQUAL "0")
-    message(FATAL_ERROR "Different-ABI GNU counter compile failed\n${_counter_stdout}${_counter_stderr}")
+    message(FATAL_ERROR
+        "Different-ABI GNU counter compile failed\nstdout:\n${_counter_stdout}\nstderr:\n${_counter_stderr}")
 endif()
 _literal_gnu_expect_elf("${_counter_object}" ELF64 double "GNU RV64 double-float counter object")
 
