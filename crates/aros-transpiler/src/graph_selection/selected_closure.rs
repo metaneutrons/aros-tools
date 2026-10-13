@@ -1,11 +1,78 @@
 //! Selected dependency closure and retained native selection.
 
 use super::{
-    add, endpoint, failure, ArosError, BTreeMap, BTreeSet, DependencyGraph, Diagnostic,
-    DiagnosticSet, Edges, ModuleType, Result, SelectionEdges, TargetContext,
+    add, endpoint, failure, supports_genmodule_client_archives, ArosError, BTreeMap, BTreeSet,
+    DependencyGraph, Diagnostic, DiagnosticSet, Edges, ModuleType, Result, SelectionEdges,
+    TargetContext,
 };
 
 impl DependencyGraph {
+    fn validate_literal_text_owner(&self, name: &str) -> Result<()> {
+        let owners = self
+            .source_literal_text_rules
+            .iter()
+            .filter(|rule| rule.owner == name)
+            .count();
+        if owners > 1
+            || owners == 1
+                && (self.non_literal_text_producer(name)
+                    || self.sdk_asset_rules.iter().any(|rule| rule.owner == name)
+                    || self
+                        .sdk_program_outputs
+                        .iter()
+                        .any(|rule| rule.owner == name)
+                    || self
+                        .genmodule_writefiles_rules
+                        .iter()
+                        .any(|rule| rule.owner == name)
+                    || self
+                        .host_file_generators
+                        .iter()
+                        .any(|rule| rule.owner == name)
+                    || self
+                        .arch_endpoint_effects
+                        .iter()
+                        .any(|effect| effect.endpoint == name)
+                    || self
+                        .assembly_headers
+                        .iter()
+                        .any(|header| header.owner == name || header.aggregate_owner == name))
+        {
+            return Err(failure(format!(
+                "selected literal text rule {name} has conflicting concrete producers"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_literal_text_outputs(
+        &self,
+        selected: &BTreeSet<String>,
+        context: &TargetContext,
+    ) -> Result<()> {
+        self.validate_literal_text_claims(selected, context)
+            .map_err(failure)?;
+        let mut outputs = BTreeMap::<String, String>::new();
+        let products = self
+            .source_literal_text_rules
+            .iter()
+            .map(|rule| (&rule.owner, &rule.output))
+            .chain(
+                self.source_value_rules
+                    .iter()
+                    .map(|rule| (&rule.owner, &rule.output)),
+            );
+        for (owner, output) in products.filter(|(owner, _)| selected.contains(*owner)) {
+            let key = output.to_ascii_lowercase();
+            if let Some(previous) = outputs.insert(key, owner.clone()) {
+                return Err(failure(format!(
+                    "selected source text/value rules {previous} and {owner} both produce {output}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Compute a deterministic, fail-closed dependency closure before pruning.
     ///
     /// # Errors
@@ -58,6 +125,7 @@ impl DependencyGraph {
         while let Some(raw) = pending.pop() {
             let name = endpoint(&raw, context)?;
             self.validate_selected_assembly_owner(&name)?;
+            self.validate_literal_text_owner(&name)?;
             if let Some((owner, _)) = self.targets.iter().find(|(owner, target)| {
                 target.module_type == ModuleType::ModuleHeaders
                     && [
@@ -426,21 +494,8 @@ impl DependencyGraph {
                 pending.push(dependency.clone());
             }
         }
-        let mut source_value_outputs = BTreeMap::<String, String>::new();
+        self.validate_literal_text_outputs(&selected, context)?;
         self.validate_selected_assembly_outputs(&selected)?;
-        for declaration in self
-            .source_value_rules
-            .iter()
-            .filter(|declaration| selected.contains(&declaration.owner))
-        {
-            let key = declaration.output.to_ascii_lowercase();
-            if let Some(previous) = source_value_outputs.insert(key, declaration.owner.clone()) {
-                return Err(failure(format!(
-                    "selected source value rules {previous} and {} both produce {}",
-                    declaration.owner, declaration.output
-                )));
-            }
-        }
         let mut sfd_output_owners = BTreeMap::<String, String>::new();
         for declaration in self
             .sfd_header_rules
@@ -488,21 +543,22 @@ impl DependencyGraph {
             .filter(|group| selected.contains(&group.owner))
         {
             for object in &group.objects {
-                let key = object.output.to_ascii_lowercase();
-                if sdk_object_outputs.contains_key(&key) {
-                    return Err(failure(format!(
-                        "selected literal and SDK objects share output {}",
-                        object.output
-                    )));
-                }
-                if let Some((prior_owner, prior)) =
-                    literal_outputs.insert(key, (&group.owner, object))
-                {
-                    if prior != object {
+                for output in object.produced_outputs() {
+                    let key = output.to_ascii_lowercase();
+                    if sdk_object_outputs.contains_key(&key) {
                         return Err(failure(format!(
-                            "selected literal object groups {prior_owner} and {} conflict at {}",
-                            group.owner, object.output
+                            "selected literal and SDK objects share output {output}"
                         )));
+                    }
+                    if let Some((prior_owner, prior)) = literal_outputs.get(&key).copied() {
+                        if prior != object {
+                            return Err(failure(format!(
+                                "selected literal object groups {prior_owner} and {} conflict at {output}",
+                                group.owner
+                            )));
+                        }
+                    } else {
+                        literal_outputs.insert(key, (&group.owner, object));
                     }
                 }
             }
@@ -545,6 +601,28 @@ impl DependencyGraph {
             .arch_endpoint_effects
             .iter()
             .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
+            .filter_map(|effect| {
+                match &effect.data {
+                    crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects {
+                        mainmmake,
+                        ..
+                    }
+                    | crate::arch_endpoint_effects::ArchEndpointEffectData::ArchClientLinklibSources {
+                        mainmmake,
+                        ..
+                    } => Some(mainmmake.clone()),
+                    _ => None,
+                }
+            })
+            .collect();
+        // A source-owned architecture object endpoint selects the runtime
+        // module; a source-owned architecture client archive endpoint does
+        // not. Keep these capabilities separate even though both retain the
+        // module declaration and its architecture source metadata.
+        let architecture_runtime_owners: BTreeSet<_> = self
+            .arch_endpoint_effects
+            .iter()
+            .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
             .filter_map(|effect| match &effect.data {
                 crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects {
                     mainmmake,
@@ -553,12 +631,109 @@ impl DependencyGraph {
                 _ => None,
             })
             .collect();
+        let mut runtime_modules: BTreeSet<_> = architecture_runtime_owners.clone();
+        runtime_modules.extend(self.targets.iter().filter_map(|(name, target)| {
+            let has_runtime = !matches!(
+                target.module_type,
+                ModuleType::Abi
+                    | ModuleType::ModuleHeaders
+                    | ModuleType::LinkLib
+                    | ModuleType::Package
+                    | ModuleType::Custom
+            );
+            (has_runtime
+                && (is_selected(name)
+                    || is_selected(&format!("{name}-kobj"))
+                    || is_selected(&format!("{name}-kobj-quick"))
+                    || architecture_runtime_owners.contains(name)))
+            .then(|| name.clone())
+        }));
+
+        // Select the ordinary client archive builders independently from
+        // runtime owners. Architecture client source leaves name the concrete
+        // source endpoint, but the builder remains the module's ordinary
+        // linklib (and, when declared, relative linklib) target.
+        let mut selected_clients = BTreeSet::new();
+        for target in self.targets.values() {
+            for suffix in ["-linklib", "-linklib-rel"] {
+                let raw = format!("{}{suffix}", target.mmake_name);
+                if selected.contains(&endpoint(&raw, context)?) {
+                    selected_clients.insert(raw);
+                }
+            }
+        }
+        for effect in self
+            .arch_endpoint_effects
+            .iter()
+            .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
+        {
+            let crate::arch_endpoint_effects::ArchEndpointEffectData::ArchClientLinklibSources {
+                mainmmake,
+                tag,
+                linklib_sources,
+                directory,
+                compiler,
+                ..
+            } = &effect.data
+            else {
+                continue;
+            };
+            if compiler != "target" {
+                continue;
+            }
+            let Some(target) = self.targets.get(mainmmake) else {
+                continue;
+            };
+            if !supports_genmodule_client_archives(&target.module_type) {
+                continue;
+            }
+            let Some(linklibs) = target
+                .genmodule_linklibs
+                .as_ref()
+                .filter(|linklibs| linklibs.enabled)
+            else {
+                continue;
+            };
+            let source_pair = self.arch_sources.get(mainmmake).is_some_and(|sources| {
+                sources.iter().any(|source| {
+                    &source.tag == tag
+                        && &source.dir == directory
+                        && &source.linklib_files == linklib_sources
+                        && !source.files.is_empty()
+                })
+            });
+            if !source_pair {
+                continue;
+            }
+            selected_clients.insert(format!("{mainmmake}-linklib"));
+            if linklibs.has_relative {
+                selected_clients.insert(format!("{mainmmake}-linklib-rel"));
+            }
+        }
+        let client_archive_owners: BTreeSet<_> = selected_clients
+            .iter()
+            .filter_map(|name| {
+                name.strip_suffix("-linklib")
+                    .or_else(|| name.strip_suffix("-linklib-rel"))
+                    .map(str::to_owned)
+            })
+            .collect();
+        self.native_selected_runtime_modules = Some(runtime_modules.clone());
+        self.native_selected_client_archives = Some(selected_clients);
+
         let declaration_needed = |name: &str| {
             is_selected(name)
                 || architecture_owners.contains(name)
-                || ["-linklib", "-linklib-rel", "-includes", "-fd", "-kobj"]
-                    .iter()
-                    .any(|suffix| is_selected(&format!("{name}{suffix}")))
+                || [
+                    "-linklib",
+                    "-linklib-rel",
+                    "-includes",
+                    "-fd",
+                    "-kobj",
+                    "-kobj-quick",
+                ]
+                .iter()
+                .any(|suffix| is_selected(&format!("{name}{suffix}")))
         };
         self.targets.retain(|name, target| {
             declaration_needed(name)
@@ -572,18 +747,9 @@ impl DependencyGraph {
                         .filter_map(|source| std::path::Path::new(source).file_stem())
                         .any(|stem| is_selected(&format!("{name}-{}", stem.to_string_lossy())))
         });
-        // A module reached only through its generated includes or FD aliases
-        // is retained as a declaration, but it is not built: its runtime,
-        // client archive and KOBJ were not selected. Keep what the reach needs
-        // and drop what it does not, so the module's own link requests are not
-        // validated against providers nobody selected.
-        let runtime_selected = |name: &str| {
-            is_selected(name)
-                || architecture_owners.contains(name)
-                || ["-linklib", "-linklib-rel", "-kobj"]
-                    .iter()
-                    .any(|suffix| is_selected(&format!("{name}{suffix}")))
-        };
+        // A module reached only through generated includes/FD aliases is
+        // headers-only. A selected client archive retains the full declaration
+        // and its source metadata, but does not select the runtime owner.
         for (name, target) in &mut self.targets {
             if target.genmodule_abi
                 && matches!(
@@ -596,7 +762,8 @@ impl DependencyGraph {
                         | ModuleType::Gadget
                         | ModuleType::Mcc
                 )
-                && !runtime_selected(name)
+                && !runtime_modules.contains(name)
+                && !client_archive_owners.contains(name)
                 && ["-includes", "-fd"]
                     .iter()
                     .any(|suffix| is_selected(&format!("{name}{suffix}")))
@@ -681,6 +848,8 @@ impl DependencyGraph {
             .retain(|declaration| is_selected(&declaration.owner));
         self.source_value_rules
             .retain(|declaration| is_selected(&declaration.owner));
+        self.source_literal_text_rules
+            .retain(|declaration| is_selected(&declaration.owner));
         self.sdk_file_copies
             .retain(|declaration| is_selected(&declaration.owner));
         self.sdk_asset_rules
@@ -698,6 +867,8 @@ impl DependencyGraph {
         });
         self.script_outputs
             .retain(|declaration| is_selected(&declaration.owner));
+        self.script_output_aggregates
+            .retain(|aggregate| is_selected(&aggregate.owner));
         self.define_headers
             .retain(|declaration| is_selected(&declaration.owner));
         self.header_transforms
@@ -767,16 +938,6 @@ impl DependencyGraph {
         });
         self.arch_sources.retain(|name, _| declaration_needed(name));
         self.pending_script_outputs.clear();
-        let mut selected_clients = BTreeSet::new();
-        for target in self.targets.values() {
-            for suffix in ["-linklib", "-linklib-rel"] {
-                let raw = format!("{}{suffix}", target.mmake_name);
-                if selected.contains(&endpoint(&raw, context)?) {
-                    selected_clients.insert(raw);
-                }
-            }
-        }
-        self.native_selected_client_archives = Some(selected_clients);
         // A selected source-owned %build_linklib with the default target
         // compiler/libdir installs its declared libname in the Developer SDK.
         // Publication cannot depend on a discovered in-tree -l consumer: an

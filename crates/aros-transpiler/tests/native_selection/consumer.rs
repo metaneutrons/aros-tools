@@ -776,6 +776,7 @@ fn generated_sdk_object_groups_bind_program_inputs_for_consumer_selection() {
         file: "compiler/startup/mmakefile.src".into(),
         line: 12,
         objects: vec![SdkObjectDecl {
+            companion_cpu: None,
             source: "compiler/startup/startup.c".into(),
             intermediate: "${AROS_GENERATED_DIR}/compiler/startup/startup.o".into(),
             output: "${AROS_DEVELOPER_LIB_DIR}/startup.o".into(),

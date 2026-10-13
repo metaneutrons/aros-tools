@@ -8,6 +8,7 @@ use crate::native_consumer_contract::NativeSdkLinkProbes;
 use crate::native_consumer_graph::{validate_native_consumer_graph, NativeConsumerGraphView};
 use crate::native_host_generator::NativeHostFileGenerator;
 use crate::native_make_template::GeneratedMakeTemplateBinding;
+use crate::sdk_companion_role::validate_companion_roles;
 use crate::sdk_manifest::{SdkAbiValue, SdkTarget};
 use crate::{ArosError, Result, Sha256Digest, TargetProfile};
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,10 @@ pub struct SdkConsumerContract {
     pub host_file_generators: Vec<NativeHostFileGenerator>,
     #[serde(default)]
     pub kernel_compiler_role: Option<String>,
+    /// Explicit secondary compiler/ABI roles in this SDK. An absent or empty
+    /// list never inherits `transpiler.cpu32`; each role must be declared here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companion_roles: Vec<crate::sdk_companion_role::SdkCompanionRole>,
     /// Ordinary default-driver C and C++ links against this SDK.
     pub native_sdk_link_probes: NativeSdkLinkProbes,
 }
@@ -151,6 +156,8 @@ fn validate_contract(
         ));
     }
     validate_sdk_target(&contract.target, profile)?;
+    validate_companion_roles(&contract.companion_roles, &contract.target, profile)
+        .map_err(|reason| invalid("companion_roles", &reason))?;
     validate_native_consumer_graph(
         root,
         profile,

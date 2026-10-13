@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: scripts/check-workspace.sh [check|all|quality|docs|source-test|test|portable-test]
+Usage: scripts/check-workspace.sh [check|all|quality|docs|source-test|test|portable-test|gnu-package-test]
 
 Run the canonical aros-tools workspace gate from any directory.
   check    Run quality and portable tests for ordinary iteration (default).
@@ -15,7 +15,10 @@ Run the canonical aros-tools workspace gate from any directory.
            Run all locked Rust tests against the exact qualified AROS-NX source,
            without the CMake engine/product-build fixtures.
   test     Explicit integration checkpoint: source-test plus every compatible
-           CMake fixture (including real GRUB builds on Darwin/arm64).
+           root-level self-contained CMake fixture; package fixtures are reported.
+  gnu-package-test
+           Run only the package-qualified GNU RV32 compiler-role CMake fixture
+           against an already extracted package; this mode does not run Cargo.
   portable-test
            Run the closed cross-host suite without a qualified source checkout.
            Source-coupled transpiler/verifier tests are compiled but execute
@@ -26,6 +29,9 @@ exact qualified AROS-NX checkout used by the versioned source contract.
 check and portable-test reject that variable rather than silently ignore it.
 Use test/all at the integration checkpoints documented in CONTRIBUTING.md;
 a successful check/source-test is not complete engine qualification.
+gnu-package-test requires AROS_TEST_SOURCE_ROOT, AROS_TEST_GNU_SOURCE_PRESET,
+AROS_TEST_GNU_TOOLCHAIN_ROOT and AROS_TEST_AROS. It verifies the extracted
+schema-v2 package before and after the fixture and never installs or extracts it.
 EOF
 }
 
@@ -35,7 +41,7 @@ if [[ $# -gt 1 ]]; then
     exit 2
 fi
 case "$mode" in
-    check | all | quality | docs | source-test | test | portable-test) ;;
+    check | all | quality | docs | source-test | test | portable-test | gnu-package-test) ;;
     -h | --help)
         usage
         exit 0
@@ -148,6 +154,16 @@ run_quality() {
 # If CI keeps failing on those two after this, the containment is wrong and
 # should be reverted rather than widened.
 run_lock_binaries_serially() {
+    # Run the SDK matrix's process-boundary probes against this checkout's CLI,
+    # never an installed release or a binary left by an earlier test run.
+    cargo build --locked -p aros-cli --all-features --bin aros
+    local sdk_cli_target_root=${CARGO_TARGET_DIR:-"$repository_root/target"}
+    if [[ "$sdk_cli_target_root" != /* ]]; then
+        sdk_cli_target_root="$repository_root/$sdk_cli_target_root"
+    fi
+    local -x AROS_TEST_SDK_MATRIX_CLI
+    AROS_TEST_SDK_MATRIX_CLI="$(cd -- "$sdk_cli_target_root/debug" && pwd -P)/aros"
+    [[ -f "$AROS_TEST_SDK_MATRIX_CLI" && -x "$AROS_TEST_SDK_MATRIX_CLI" ]]
     cargo test --locked -p aros-common --all-features --lib -- --test-threads=1
     cargo test --locked -p aros-toolchain --all-features --lib -- --test-threads=1
     cargo test --locked -p aros-cli --all-features --bin aros -- --test-threads=1
@@ -333,6 +349,16 @@ run_tests() {
     fi
     printf 'engine tests passed: %d executed, %d host-qualified omission(s), %d discovered\n' \
         "$executed_count" "$skipped_count" "$discovered_count"
+    local package_fixture_directory package_fixture_count
+    package_fixture_directory="$repository_root/crates/aros-cmake-engine/engine/tests/package-qualified"
+    if [[ -d "$package_fixture_directory" ]]; then
+        package_fixture_count=$(find "$package_fixture_directory" -maxdepth 1 -type f \
+            -name '*Test.cmake' -print | wc -l | tr -d '[:space:]')
+        if [[ "$package_fixture_count" -gt 0 ]]; then
+            printf 'package-qualified engine fixtures discovered: %d; run gnu-package-test with its four required AROS_TEST_* inputs\n' \
+                "$package_fixture_count"
+        fi
+    fi
 }
 
 run_portable_tests() {
@@ -368,4 +394,7 @@ if [[ "$mode" == source-test ]]; then
 fi
 if [[ "$mode" == check || "$mode" == portable-test ]]; then
     run_portable_tests
+fi
+if [[ "$mode" == gnu-package-test ]]; then
+    python3 scripts/check-gnu-package-fixture.py
 fi

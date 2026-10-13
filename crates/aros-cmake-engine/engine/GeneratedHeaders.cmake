@@ -72,12 +72,17 @@ if(AROS_TARGET_CPU IN_LIST _softfloat_arm_family AND
     set(_softfloat_littleendian 0)
 endif()
 set(_softfloat_platform_h "${_gen}/compiler/softfloat/platform.h")
-aros_generate_defines_header(
-    OWNER linklibs-softfloat-genfiles
-    OUTPUT "${_softfloat_platform_h}"
-    DEFINES "LITTLEENDIAN ${_softfloat_littleendian}"
-    DEPENDS "${AROS_SOURCE_DIR}/compiler/softfloat/mmakefile.src")
-_aros_needs_header(linklibs-softfloat "${_softfloat_platform_h}")
+# Source contracts declare this producer from the selected mmakefile rule.
+# Let that graph own both the target name and output; this is only the legacy
+# full-build counterpart for configurations without a source contract.
+if(NOT AROS_NATIVE_BUILD_CONTRACT AND NOT AROS_NATIVE_CONSUMER_CONTRACT)
+    aros_generate_defines_header(
+        OWNER linklibs-softfloat-genfiles
+        OUTPUT "${_softfloat_platform_h}"
+        DEFINES "LITTLEENDIAN ${_softfloat_littleendian}"
+        DEPENDS "${AROS_SOURCE_DIR}/compiler/softfloat/mmakefile.src")
+    _aros_needs_header(linklibs-softfloat "${_softfloat_platform_h}")
+endif()
 
 # -----------------------------------------------------------------------------
 # libraries/mui.h

@@ -11,7 +11,7 @@ mod selected_closure;
 
 use super::{
     arch_compatible, arch_of, has_public_link_archive, inventory_has_public_link_archive,
-    inventory_runtime_name, target_runtime_name,
+    inventory_runtime_name, supports_genmodule_client_archives, target_runtime_name,
 };
 use crate::{DependencyGraph, ModuleType, TargetContext};
 use aros_common::native_build_contract::{
@@ -161,7 +161,7 @@ impl DependencyGraph {
             })
             .collect();
         for target in self.targets.values_mut() {
-            if target.module_type == ModuleType::Library
+            if supports_genmodule_client_archives(&target.module_type)
                 && required_relative.contains(&target.target_name)
             {
                 if let Some(metadata) = target.genmodule_linklibs.as_mut() {
@@ -172,7 +172,7 @@ impl DependencyGraph {
             }
         }
         for target in &mut self.inventory_targets {
-            if target.module_type == ModuleType::Library
+            if supports_genmodule_client_archives(&target.module_type)
                 && required_relative.contains(&target.target_name)
             {
                 if let Some(metadata) = target.genmodule_linklibs.as_mut() {
@@ -201,7 +201,7 @@ impl DependencyGraph {
         for declaration in &declarations {
             let owner = &declaration.mmake_name;
             let mut aliases = Vec::new();
-            match declaration.module_type {
+            match &declaration.module_type {
                 ModuleType::Abi => {
                     aliases.push((declaration.target_name.clone(), format!("{owner}-linklib")));
                     aliases.push((
@@ -212,7 +212,10 @@ impl DependencyGraph {
                 ModuleType::LinkLib => {
                     aliases.push((declaration.target_name.clone(), owner.clone()));
                 }
-                ModuleType::Library if inventory_has_public_link_archive(declaration) => {
+                module_type
+                    if supports_genmodule_client_archives(module_type)
+                        && inventory_has_public_link_archive(declaration) =>
+                {
                     for name in std::iter::once(&declaration.target_name)
                         .chain(declaration.linklib_name.iter())
                     {
@@ -562,7 +565,7 @@ impl DependencyGraph {
                 add(&mut edges, &format!("{owner}-includes"), []);
             }
             if target.module_type == ModuleType::Abi
-                || target.module_type == ModuleType::Library
+                || supports_genmodule_client_archives(&target.module_type)
                     && (target.genmodule_only
                         || target
                             .genmodule_linklibs
@@ -570,17 +573,25 @@ impl DependencyGraph {
                             .is_some_and(|metadata| metadata.enabled))
             {
                 add(&mut edges, &format!("{owner}-includes"), []);
-                let runtime = (target.module_type == ModuleType::Library)
-                    .then(|| owner.clone())
-                    .into_iter();
-                add(&mut edges, &format!("{owner}-linklib"), runtime.clone());
+                // Client archives are independent source endpoints. Their
+                // declaration may be retained without selecting the runtime
+                // module; source-written prerequisites are added below.
+                add(
+                    &mut edges,
+                    &format!("{owner}-linklib"),
+                    [format!("{owner}-includes")],
+                );
                 if !target.genmodule_only
                     && target
                         .genmodule_linklibs
                         .as_ref()
                         .is_some_and(|metadata| metadata.enabled && metadata.has_relative)
                 {
-                    add(&mut edges, &format!("{owner}-linklib-rel"), runtime);
+                    add(
+                        &mut edges,
+                        &format!("{owner}-linklib-rel"),
+                        [format!("{owner}-includes")],
+                    );
                 }
             }
             if !matches!(target.module_type, ModuleType::LinkLib | ModuleType::Abi) {
@@ -618,14 +629,13 @@ impl DependencyGraph {
                 target.dependencies.iter().chain(&target.link_libs).cloned(),
             );
             // Only aliases actually emitted by the CMake helper are endpoints.
-            // A full Library declaration also emits its runtime executable, so
-            // selecting one of its client archives must retain the runtime's
-            // dependencies. ABI aliases have no runtime module.
+            // The client archives are independent of the runtime module;
+            // preserve only source-written prerequisites through meta_targets.
             if target.genmodule_abi {
                 add(&mut edges, &format!("{owner}-includes"), []);
             }
             if target.module_type == ModuleType::Abi
-                || target.module_type == ModuleType::Library
+                || supports_genmodule_client_archives(&target.module_type)
                     && (target.genmodule_only
                         || target
                             .genmodule_linklibs
@@ -636,17 +646,22 @@ impl DependencyGraph {
                 // source #MM declaration is not an unmodelled Make recipe
                 // when this exact helper already materialises its endpoint.
                 add(&mut edges, &format!("{owner}-includes"), []);
-                let runtime = (target.module_type == ModuleType::Library)
-                    .then(|| owner.clone())
-                    .into_iter();
-                add(&mut edges, &format!("{owner}-linklib"), runtime.clone());
+                add(
+                    &mut edges,
+                    &format!("{owner}-linklib"),
+                    [format!("{owner}-includes")],
+                );
                 if !target.genmodule_only
                     && target
                         .genmodule_linklibs
                         .as_ref()
                         .is_some_and(|metadata| metadata.enabled && metadata.has_relative)
                 {
-                    add(&mut edges, &format!("{owner}-linklib-rel"), runtime);
+                    add(
+                        &mut edges,
+                        &format!("{owner}-linklib-rel"),
+                        [format!("{owner}-includes")],
+                    );
                 }
             }
             if !matches!(target.module_type, ModuleType::LinkLib | ModuleType::Abi) {
@@ -737,6 +752,9 @@ impl DependencyGraph {
             );
         }
         for declaration in &self.source_value_rules {
+            add(&mut edges, &declaration.owner, []);
+        }
+        for declaration in &self.source_literal_text_rules {
             add(&mut edges, &declaration.owner, []);
         }
         for declaration in &self.sdk_file_copies {
@@ -843,6 +861,13 @@ impl DependencyGraph {
                 &declaration.owner,
                 declaration.dependency_targets.clone(),
             );
+        }
+        for aggregate in self
+            .script_output_aggregates
+            .iter()
+            .filter(|aggregate| !aggregate.generators.is_empty())
+        {
+            add(&mut edges, &aggregate.owner, aggregate.generators.clone());
         }
         for declaration in &self.define_headers {
             consumer_edges(&mut edges, &declaration.owner, &declaration.consumers);
@@ -963,6 +988,14 @@ impl DependencyGraph {
     }
 
     pub(super) fn writefiles_has_other_producer(&self, name: &str) -> bool {
+        self.non_literal_text_producer(name)
+            || self
+                .source_literal_text_rules
+                .iter()
+                .any(|rule| rule.owner == name)
+    }
+
+    pub(super) fn non_literal_text_producer(&self, name: &str) -> bool {
         self.source_archives
             .iter()
             .any(|archive| archive.declaration.owner == name || archive.provider_target() == name)
@@ -995,6 +1028,10 @@ impl DependencyGraph {
                 .any(|rule| rule.owner == name)
             || self.python_outputs.iter().any(|rule| rule.owner == name)
             || self.script_outputs.iter().any(|rule| rule.owner == name)
+            || self
+                .script_output_aggregates
+                .iter()
+                .any(|rule| rule.owner == name && !rule.generators.is_empty())
             || self.flexcat_sources.iter().any(|rule| rule.owner == name)
             || self.flexcat_headers.iter().any(|rule| rule.owner == name)
             || self.ilbm_sources.iter().any(|rule| rule.owner == name)

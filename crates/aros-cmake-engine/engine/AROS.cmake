@@ -29,6 +29,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/HostHeaderAggregates.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SdkTextRules.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SourceTextRules.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SourceValueRules.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SourceLiteralTextRules.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SdkFileCopies.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SdkAssetRules.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SdkObjects.cmake")
@@ -551,11 +552,15 @@ add_compile_options(
 # The generated trees come first. Search the POSIX and standard-C namespaces
 # before the shared SDK root unless the compile declaration disables POSIX.
 # GNU AROS specs inject these namespaces as -idirafter paths, while the common
-# SDK root is a built-in system directory. GCC discards -I entries duplicating
-# system directories: ordinary includes therefore cannot express this order.
-# Explicit -isystem namespaces precede the built-in SDK root. Bare LLVM has no
-# such specs; retain ordinary includes there so the namespaces precede its
-# ordinary SDK -I root. Do not change private/generated directory precedence.
+# SDK root is a built-in system directory. Clang 11's AROS driver also reports
+# the sysroot namespaces as built-in system directories and discards explicit
+# duplicate -I entries, retaining the root-first order. A source-validated SDK
+# consumer therefore disables only those implicit standard include paths;
+# the explicit namespace and SDK roots below remain the complete authority.
+# -nostdlibinc leaves Clang's resource headers available, unlike -nostdinc.
+# Keep this internal to the validated LLVM SDK source contract: public toolchain
+# defaults, GNU specs, legacy builds, and native core builds retain their normal
+# driver search paths. Do not change private/generated directory precedence.
 #
 # The historic build has no -I into the source tree at all: compiler/include
 # is staged into the SDK by %copy_includes, and genmodule then writes over what
@@ -563,25 +568,50 @@ add_compile_options(
 # compiler/include ahead of the SDK inverted that, and the hand-written
 # clib/input_protos.h -- which predates genmodule and still declares
 # PeekQualifier through AROS_LP0 -- shadowed the generated one.
-set(AROS_DEFAULT_POSIXC_INCLUDE
-    "$<$<NOT:$<BOOL:$<TARGET_PROPERTY:AROS_NO_POSIXC_HEADERS>>>:${AROS_SDK_INCLUDE_DIR}/aros/posixc>")
-if(AROS_TOOLCHAIN STREQUAL "gnu")
-    include_directories(SYSTEM
-        "${AROS_DEFAULT_POSIXC_INCLUDE}"
-        "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
-    set(_aros_default_namespace_includes "")
-else()
-    set(_aros_default_namespace_includes
-        "${AROS_DEFAULT_POSIXC_INCLUDE}"
-        "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
-endif()
-include_directories(
-    "${AROS_GENINC_DIR}"
-    ${_aros_default_namespace_includes}
-    "${AROS_SDK_INCLUDE_DIR}"
-    "${AROS_SOURCE_DIR}/compiler/include"
-    "${AROS_SOURCE_DIR}/arch/all-native/include"
-)
+function(_aros_configure_default_sdk_header_context)
+    set(_aros_sdk_header_authority FALSE)
+    if(AROS_TOOLCHAIN STREQUAL "llvm" AND
+       (AROS_NATIVE_CONSUMER_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT_VALIDATED))
+        if(NOT COMMAND _aros_native_source_selection_validated)
+            message(FATAL_ERROR
+                "SDK header search order cannot verify the native consumer selection")
+        endif()
+        _aros_native_source_selection_validated(_aros_source_selected)
+        get_property(_aros_consumer_schema GLOBAL PROPERTY
+            AROS_NATIVE_CONSUMER_VALIDATED_SCHEMA)
+        if(_aros_source_selected AND
+           _aros_consumer_schema STREQUAL "aros-sdk-consumer-validation-v1")
+            set(_aros_sdk_header_authority TRUE)
+        endif()
+    endif()
+
+    if(_aros_sdk_header_authority)
+        add_compile_options(-nostdlibinc)
+    endif()
+
+    set(AROS_DEFAULT_POSIXC_INCLUDE
+        "$<$<NOT:$<BOOL:$<TARGET_PROPERTY:AROS_NO_POSIXC_HEADERS>>>:${AROS_SDK_INCLUDE_DIR}/aros/posixc>")
+    set(AROS_DEFAULT_POSIXC_INCLUDE "${AROS_DEFAULT_POSIXC_INCLUDE}" PARENT_SCOPE)
+    if(AROS_TOOLCHAIN STREQUAL "gnu")
+        include_directories(SYSTEM
+            "${AROS_DEFAULT_POSIXC_INCLUDE}"
+            "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
+        set(_aros_default_namespace_includes "")
+    else()
+        set(_aros_default_namespace_includes
+            "${AROS_DEFAULT_POSIXC_INCLUDE}"
+            "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
+    endif()
+    include_directories(
+        "${AROS_GENINC_DIR}"
+        ${_aros_default_namespace_includes}
+        "${AROS_SDK_INCLUDE_DIR}"
+        "${AROS_SOURCE_DIR}/compiler/include"
+        "${AROS_SOURCE_DIR}/arch/all-native/include"
+    )
+endfunction()
+
+_aros_configure_default_sdk_header_context()
 
 # Closed local-source runners for the audited `%build_with_configure`
 # capabilities.  Kept in a separate module because the implementation also
@@ -4082,6 +4112,34 @@ function(aros_resolve_arch_sources out_sources out_dropped module_dir)
     set(${out_dropped} "${DROPPED}" PARENT_SCOPE)
 endfunction()
 
+# Client archives preserve the source order in config/make.tmpl: generic
+# linklibfiles not shadowed by an architecture object, then the architecture
+# linklib objects, then genmodule's generated client stubs. The ordinary
+# module-source resolver puts architecture sources first, so use its exact
+# selected architecture set and replacement names while ordering this lane
+# independently.
+function(aros_resolve_arch_linklib_sources out_sources out_dropped module_dir)
+    set(oneValueArgs)
+    set(multiValueArgs SOURCES ARCH_SOURCES)
+    cmake_parse_arguments(AL "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    aros_resolve_arch_sources(_unused_sources _dropped "${module_dir}"
+        OUT_ARCH _arch_sources
+        OUT_OVERRIDES _override_names
+        SOURCES ${AL_SOURCES}
+        ARCH_SOURCES ${AL_ARCH_SOURCES})
+
+    set(_kept_generic_sources "")
+    foreach(_source IN LISTS AL_SOURCES)
+        get_filename_component(_basename "${_source}" NAME_WE)
+        if(NOT _basename IN_LIST _override_names)
+            list(APPEND _kept_generic_sources "${_source}")
+        endif()
+    endforeach()
+    set(${out_sources} "${_kept_generic_sources};${_arch_sources}" PARENT_SCOPE)
+    set(${out_dropped} "${_dropped}" PARENT_SCOPE)
+endfunction()
+
 # aros_report_arch_override_gaps()
 #
 # Names an architecture declaration asked for that no applicable architecture
@@ -5011,9 +5069,26 @@ function(aros_add_module_headers)
 endfunction()
 
 # Macro: aros_add_library
+function(_aros_publish_library_client_aliases owner target linklib_name includes_target)
+    _aros_genmodule_alias("includes-${target}" "${owner}-includes")
+    _aros_genmodule_alias("includes-${target}_rel" "${owner}-includes")
+    foreach(name IN ITEMS "${target}" "${linklib_name}")
+        if(NOT name STREQUAL "")
+            if(TARGET "${owner}-linklib")
+                _aros_genmodule_alias("linklibs-${name}" "${owner}-linklib")
+            endif()
+            if(TARGET "${owner}-linklib-rel")
+                _aros_genmodule_alias("linklibs-${name}_rel" "${owner}-linklib-rel")
+            endif()
+        endif()
+    endforeach()
+    _aros_genmodule_alias(includes-all "${owner}-includes")
+    _aros_register_genmodule_public_includes("${includes_target}")
+endfunction()
+
 function(aros_add_library)
     set(options ALWAYS_CXX_LINK GENMODULE_ONLY GENMODULE_LINKLIBS NO_CLIENT_ARCHIVES
-        NO_NORMAL_CLIENT_ARCHIVE NO_RELATIVE_CLIENT_ARCHIVE)
+        NO_NORMAL_CLIENT_ARCHIVE NO_RELATIVE_CLIENT_ARCHIVE CLIENTS_ONLY)
     # DEFAULT_MODTYPE belongs here, and its absence was not harmless. It is
     # read at :4067, so it looked declared; it was not, so `DEFAULT_MODTYPE mcc`
     # from aros_add_mcc extended whatever multi-value argument came before it in
@@ -5030,14 +5105,41 @@ function(aros_add_library)
         LIBS USELIBS INCLUDES ARCH_INCLUDES
         DEFINES UNDEFINES COMPILE_OPTIONS ARCH_SOURCES
         ARCH_DEFINES ARCH_COMPILE_OPTIONS LINK_OPTIONS
-        LINKLIB_SOURCES LINKLIB_OBJECT_SOURCES KICKSTART_MEMBER)
+        LINKLIB_SOURCES ARCH_LINKLIB_SOURCES LINKLIB_OBJECT_SOURCES KICKSTART_MEMBER)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    if(ARG_CLIENTS_ONLY)
+        _aros_native_source_selection_validated(_source_selected)
+        if(NOT _source_selected OR ARG_NO_CLIENT_ARCHIVES OR
+           (ARG_NO_NORMAL_CLIENT_ARCHIVE AND ARG_NO_RELATIVE_CLIENT_ARCHIVE) OR
+           (NOT ARG_GENMODULE_ONLY AND NOT ARG_GENMODULE_LINKLIBS AND NOT ARG_LINKLIB_NAME))
+            message(FATAL_ERROR "${ARG_MMAKE_ID}: CLIENTS_ONLY requires a source-selected client archive")
+        endif()
+        if(TARGET "${ARG_MMAKE_ID}")
+            message(FATAL_ERROR "${ARG_MMAKE_ID}: CLIENTS_ONLY cannot reuse a runtime target")
+        endif()
+    endif()
+
+    if(ARG_ARCH_LINKLIB_SOURCES AND
+       (ARG_GENMODULE_ONLY OR
+        (NOT ARG_GENMODULE_LINKLIBS AND NOT ARG_LINKLIB_NAME)))
+        message(FATAL_ERROR
+            "${ARG_MMAKE_ID}: ARCH_LINKLIB_SOURCES requires sourceful client archives")
+    endif()
 
     # make.tmpl puts a module's client archives in its libdir=, or privately
     # below $(GENDIR)/$(CURDIR) when the module has a suffix, and only
     # otherwise in the SDK library directory. The transpiler resolves that
     # rule and passes a private directory as OUTPUT_DIR.
     set(_client_archive_dir "${AROS_DEVELOPER_LIB_DIR}")
+    if(ARG_DEFAULT_MODTYPE)
+        set(_library_modtype "${ARG_DEFAULT_MODTYPE}")
+    else()
+        set(_library_modtype "library")
+    endif()
+    set(_client_libsuffix "")
+    if(NOT _library_modtype STREQUAL "library")
+        set(_client_libsuffix ".${_library_modtype}")
+    endif()
     if(ARG_OUTPUT_DIR)
         _aros_validate_linklib_output_directory(
             _client_archive_dir "${ARG_MMAKE_ID}" "${ARG_OUTPUT_DIR}")
@@ -5075,14 +5177,16 @@ function(aros_add_library)
             TARGET "${ARG_TARGET}"
             MMAKE_ID "${ARG_MMAKE_ID}"
             DIRECTORY "${ARG_DIRECTORY}"
-            MODTYPE library
+            MODTYPE "${_library_modtype}"
             MODSUFFIX "${ARG_MODSUFFIX}")
 
         _aros_genmodule_alias("${ARG_MMAKE_ID}-includes"
             "${_gm_INCLUDES_TARGET}")
+        _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
+            "${_client_archive_dir}" "${ARG_TARGET}${_client_libsuffix}")
         add_library("${ARG_MMAKE_ID}-linklib" STATIC ${_gm_STUB_SOURCES})
         set_target_properties("${ARG_MMAKE_ID}-linklib" PROPERTIES
-            OUTPUT_NAME "${ARG_TARGET}"
+            OUTPUT_NAME "${ARG_TARGET}${_client_libsuffix}"
             ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
             LINKER_LANGUAGE C)
         target_include_directories("${ARG_MMAKE_ID}-linklib" BEFORE PRIVATE
@@ -5106,6 +5210,11 @@ function(aros_add_library)
             ARCH_DEFINES ${ARG_ARCH_DEFINES}
             ARCH_COMPILE_OPTIONS ${ARG_ARCH_COMPILE_OPTIONS})
         add_dependencies("${ARG_MMAKE_ID}-linklib" "${ARG_MMAKE_ID}-includes")
+        if(ARG_CLIENTS_ONLY)
+            _aros_publish_library_client_aliases("${ARG_MMAKE_ID}" "${ARG_TARGET}"
+                "${ARG_LINKLIB_NAME}" "${_gm_INCLUDES_TARGET}")
+            return()
+        endif()
 
         if(ARG_DEFAULT_INSTALL_DIR)
             set(_default_install_dir "${ARG_DEFAULT_INSTALL_DIR}")
@@ -5192,7 +5301,7 @@ function(aros_add_library)
             TARGET "${ARG_TARGET}"
             MMAKE_ID "${ARG_MMAKE_ID}"
             DIRECTORY "${ARG_DIRECTORY}"
-            MODTYPE library
+            MODTYPE "${_library_modtype}"
             MODSUFFIX "${ARG_MODSUFFIX}")
         set(_has_genmodule TRUE)
 
@@ -5210,6 +5319,15 @@ function(aros_add_library)
         aros_resolve_source_lanes(_linklib_sources "${ARG_DIRECTORY}"
             MMAKE_ID "${ARG_MMAKE_ID}-linklib-inputs"
             SOURCES ${ARG_LINKLIB_SOURCES})
+        set(_generic_linklib_sources "${_linklib_sources}")
+        if(ARG_ARCH_LINKLIB_SOURCES)
+            aros_resolve_arch_linklib_sources(_arch_linklib_sources
+                _arch_linklib_dropped "${ARG_DIRECTORY}"
+                SOURCES ${_linklib_sources}
+                ARCH_SOURCES ${ARG_ARCH_LINKLIB_SOURCES})
+            set(_linklib_sources "${_arch_linklib_sources}")
+            list(REMOVE_ITEM _linklib_sources "")
+        endif()
         aros_resolve_source_lanes(_linklib_object_sources "${ARG_DIRECTORY}"
             MMAKE_ID "${ARG_MMAKE_ID}-linklib-object-inputs"
             SOURCES ${ARG_LINKLIB_OBJECT_SOURCES})
@@ -5275,8 +5393,9 @@ function(aros_add_library)
                 "${_linklib_object_target}")
         endif()
 
-        # make.tmpl archives declaration linklibfiles first, generated client
-        # stubs second, and precompiled linklibobjs last. CMake places
+        # make.tmpl archives generic linklibfiles that survive basename
+        # replacement first, architecture linklib objects second, generated
+        # client stubs next, and precompiled linklibobjs last. CMake places
         # $<TARGET_OBJECTS:...> before ordinary sources regardless of its
         # textual position, so linklibobjs are appended explicitly below.
         # Classic publishes linklibname as the primary archive, with the
@@ -5288,20 +5407,36 @@ function(aros_add_library)
         endif()
         string(TOLOWER "${_client_archive_name}" _client_archive_name_lower)
         string(TOLOWER "${ARG_TARGET}" _client_module_name_lower)
+        set(_normal_archive_name "${_client_archive_name}${_client_libsuffix}")
+        set(_relative_archive_name "${_client_archive_name}_rel${_client_libsuffix}")
+        set(_normal_client_has_archive FALSE)
+        set(_relative_client_has_archive FALSE)
         set(_client_link_targets "")
         if(NOT ARG_NO_NORMAL_CLIENT_ARCHIVE)
         set(_normal_client_sources
             ${_linklib_sources}
             ${_gm_NORMAL_LINKLIB_SOURCES})
+        if(NOT _normal_client_sources AND NOT _linklib_object_sources)
+            # make.tmpl:2586 leaves LINKLIB empty when the source-owned
+            # client lists are empty. Its phony endpoint still orders ABI
+            # generation; it does not manufacture an empty SDK archive.
+            add_custom_target("${ARG_MMAKE_ID}-linklib")
+            add_dependencies("${ARG_MMAKE_ID}-linklib"
+                "${ARG_MMAKE_ID}-includes" "${_gm_GENMODFILES_TARGET}")
+        else()
+        set(_normal_client_has_archive TRUE)
         _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
-            "${_client_archive_dir}" "${_client_archive_name}")
+            "${_client_archive_dir}" "${_normal_archive_name}")
         add_library("${ARG_MMAKE_ID}-linklib" STATIC
             ${_normal_client_sources})
+        set_property(TARGET "${ARG_MMAKE_ID}-linklib" PROPERTY
+            AROS_GENERIC_LINKLIB_SOURCES "${_generic_linklib_sources}")
         set_target_properties("${ARG_MMAKE_ID}-linklib" PROPERTIES
-            OUTPUT_NAME "${_client_archive_name}"
+            OUTPUT_NAME "${_normal_archive_name}"
             ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
             LINKER_LANGUAGE C)
         list(APPEND _client_link_targets "${ARG_MMAKE_ID}-linklib")
+        endif()
         endif()
 
         set(_client_namespace_includes "")
@@ -5316,16 +5451,25 @@ function(aros_add_library)
             set(_rel_client_sources
                 ${_linklib_sources}
                 ${_gm_REL_LINKLIB_SOURCES})
+            if(NOT _rel_client_sources AND NOT _linklib_object_sources)
+                add_custom_target("${ARG_MMAKE_ID}-linklib-rel")
+                add_dependencies("${ARG_MMAKE_ID}-linklib-rel"
+                    "${ARG_MMAKE_ID}-includes" "${_gm_GENMODFILES_TARGET}")
+            else()
+            set(_relative_client_has_archive TRUE)
             _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib-rel"
-                "${_client_archive_dir}" "${_client_archive_name}_rel")
+                "${_client_archive_dir}" "${_relative_archive_name}")
             add_library("${ARG_MMAKE_ID}-linklib-rel" STATIC
                 ${_rel_client_sources})
+            set_property(TARGET "${ARG_MMAKE_ID}-linklib-rel" PROPERTY
+                AROS_GENERIC_LINKLIB_SOURCES "${_generic_linklib_sources}")
             set_target_properties("${ARG_MMAKE_ID}-linklib-rel" PROPERTIES
-                OUTPUT_NAME "${_client_archive_name}_rel"
+                OUTPUT_NAME "${_relative_archive_name}"
                 ARCHIVE_OUTPUT_DIRECTORY "${_client_archive_dir}"
                 LINKER_LANGUAGE C)
             list(APPEND _client_link_targets
                 "${ARG_MMAKE_ID}-linklib-rel")
+            endif()
         endif()
 
         foreach(_client_target IN LISTS _client_link_targets)
@@ -5393,11 +5537,11 @@ function(aros_add_library)
         # Both required source spellings share one compilation owner per
         # variant. Never suppress the module spelling to conceal a collision.
         if(NOT _client_archive_name_lower STREQUAL _client_module_name_lower)
-            if(TARGET "${ARG_MMAKE_ID}-linklib")
+            if(_normal_client_has_archive)
             _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib"
-                "${_client_archive_dir}" "${ARG_TARGET}")
+                "${_client_archive_dir}" "${ARG_TARGET}${_client_libsuffix}")
             set(_linklib_alias
-                "${_client_archive_dir}/lib${ARG_TARGET}.a")
+                "${_client_archive_dir}/lib${ARG_TARGET}${_client_libsuffix}.a")
             add_custom_command(TARGET "${ARG_MMAKE_ID}-linklib" POST_BUILD
                 BYPRODUCTS "${_linklib_alias}"
                 COMMAND "${CMAKE_COMMAND}" -E copy_if_different
@@ -5406,11 +5550,11 @@ function(aros_add_library)
                 COMMENT "Publishing ${ARG_TARGET} client link library"
                 VERBATIM)
             endif()
-            if(TARGET "${ARG_MMAKE_ID}-linklib-rel")
+            if(_relative_client_has_archive)
                 _aros_claim_linklib_archive("${ARG_MMAKE_ID}-linklib-rel"
-                    "${_client_archive_dir}" "${ARG_TARGET}_rel")
+                    "${_client_archive_dir}" "${ARG_TARGET}_rel${_client_libsuffix}")
                 set(_rel_linklib_alias
-                    "${_client_archive_dir}/lib${ARG_TARGET}_rel.a")
+                    "${_client_archive_dir}/lib${ARG_TARGET}_rel${_client_libsuffix}.a")
                 add_custom_command(
                     TARGET "${ARG_MMAKE_ID}-linklib-rel" POST_BUILD
                     BYPRODUCTS "${_rel_linklib_alias}"
@@ -5422,6 +5566,16 @@ function(aros_add_library)
             endif()
         endif()
         endif()
+    endif()
+
+    if(ARG_CLIENTS_ONLY)
+        if(NOT _has_genmodule OR
+           (NOT TARGET "${ARG_MMAKE_ID}-linklib" AND NOT TARGET "${ARG_MMAKE_ID}-linklib-rel"))
+            message(FATAL_ERROR "${ARG_MMAKE_ID}: CLIENTS_ONLY produced no client archive")
+        endif()
+        _aros_publish_library_client_aliases("${ARG_MMAKE_ID}" "${ARG_TARGET}"
+            "${ARG_LINKLIB_NAME}" "${_gm_INCLUDES_TARGET}")
+        return()
     endif()
 
     aros_resolve_source_lanes(RESOLVED_SOURCES "${ARG_DIRECTORY}"
@@ -5565,30 +5719,8 @@ function(aros_add_library)
         endif()
 
         if(_has_genmodule)
-            _aros_genmodule_alias("includes-${ARG_TARGET}"
-                "${ARG_MMAKE_ID}-includes")
-            _aros_genmodule_alias("includes-${ARG_TARGET}_rel"
-                "${ARG_MMAKE_ID}-includes")
-            if(TARGET "${ARG_MMAKE_ID}-linklib")
-                _aros_genmodule_alias("linklibs-${ARG_TARGET}"
-                    "${ARG_MMAKE_ID}-linklib")
-            endif()
-            if(TARGET "${ARG_MMAKE_ID}-linklib-rel")
-                _aros_genmodule_alias("linklibs-${ARG_TARGET}_rel"
-                    "${ARG_MMAKE_ID}-linklib-rel")
-            endif()
-            if(ARG_LINKLIB_NAME)
-                if(TARGET "${ARG_MMAKE_ID}-linklib")
-                    _aros_genmodule_alias("linklibs-${ARG_LINKLIB_NAME}"
-                        "${ARG_MMAKE_ID}-linklib")
-                endif()
-                if(TARGET "${ARG_MMAKE_ID}-linklib-rel")
-                    _aros_genmodule_alias("linklibs-${ARG_LINKLIB_NAME}_rel"
-                        "${ARG_MMAKE_ID}-linklib-rel")
-                endif()
-            endif()
-            _aros_genmodule_alias(includes-all "${ARG_MMAKE_ID}-includes")
-            _aros_register_genmodule_public_includes("${_gm_INCLUDES_TARGET}")
+            _aros_publish_library_client_aliases("${ARG_MMAKE_ID}" "${ARG_TARGET}"
+                "${ARG_LINKLIB_NAME}" "${_gm_INCLUDES_TARGET}")
         endif()
     endif()
 endfunction()

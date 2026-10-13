@@ -102,6 +102,120 @@ pub(crate) fn collect_directory_setups_with_context(
     collect_directory_setups_internal(content, rel_dir, line_states, Some((scope, dirs, root)))
 }
 
+/// A native directory recipe uses the same sealed, positional configuration
+/// as native compiler recipes. Included configuration contributes values but
+/// cannot manufacture physical directory-rule owners.
+#[allow(clippy::too_many_arguments)] // Physical ownership and evaluation scope are deliberately separate.
+pub(crate) fn collect_native_directory_setups(
+    physical: &str,
+    fallback_text: &str,
+    rel_dir: &Path,
+    scope: &VarScope,
+    dirs: &DirVars,
+    root: &Path,
+    line_states: Option<&[ConditionalTruth]>,
+    target: Option<&crate::TargetContext>,
+) -> (Vec<DirectorySetupDecl>, Vec<DirectorySetupRejection>) {
+    let fallback = || {
+        collect_directory_setups_with_context(
+            fallback_text,
+            rel_dir,
+            scope,
+            dirs,
+            root,
+            line_states,
+        )
+    };
+    let Some(target) = target.filter(|target| !target.native_configuration_inputs.is_empty())
+    else {
+        return fallback();
+    };
+    if !physical.contains("%rule_makedirs") && !physical.contains("%mkdirs_q") {
+        let candidates = fallback();
+        if candidates.0.is_empty() && candidates.1.is_empty() {
+            return candidates;
+        }
+    }
+    let snapshot = match crate::assembly_headers::native_configuration_snapshot(
+        physical,
+        target,
+        dirs,
+        root,
+        &rel_dir.join("mmakefile.src"),
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(reason) => {
+            let (declarations, rejections) = fallback();
+            let owners = declarations
+                .into_iter()
+                .map(|declaration| declaration.owner)
+                .chain(rejections.into_iter().map(|rejection| rejection.owner))
+                .collect::<std::collections::BTreeSet<_>>();
+            return (
+                Vec::new(),
+                owners
+                    .into_iter()
+                    .map(|owner| DirectorySetupRejection {
+                        owner,
+                        reason: format!("native directory configuration is unproven: {reason}"),
+                    })
+                    .collect(),
+            );
+        }
+    };
+    let (native_scope, states) =
+        crate::make_vars::collect_vars_impl(&snapshot.joined, Some(target));
+    let rules = snapshot
+        .joined
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            if snapshot
+                .physical_owner_lines
+                .get(index)
+                .is_some_and(Option::is_some)
+            {
+                line
+            } else {
+                ""
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let collected = collect_directory_setups_with_context(
+        &rules,
+        rel_dir,
+        &native_scope,
+        dirs,
+        root,
+        Some(&states),
+    );
+    if has_malformed_conditional_controls(&snapshot.joined) {
+        let owners = collected
+            .0
+            .into_iter()
+            .map(|declaration| declaration.owner)
+            .chain(collected.1.into_iter().map(|rejection| rejection.owner))
+            .collect::<std::collections::BTreeSet<_>>();
+        return (
+            Vec::new(),
+            owners
+                .into_iter()
+                .map(|owner| DirectorySetupRejection {
+                    owner,
+                    reason: "native directory configuration has malformed conditional controls"
+                        .into(),
+                })
+                .collect(),
+        );
+    }
+    collected
+}
+
+#[cfg(test)]
+#[path = "directory_setup_native_tests.rs"]
+mod native_tests;
+
 fn collect_directory_setups_internal(
     content: &str,
     rel_dir_path: &Path,
@@ -774,6 +888,20 @@ fn map_configured_directory(
     dirs: &DirVars,
     rel_dir: &str,
 ) -> Result<String, String> {
+    // Additional Developer roots require explicit source-contract compiler
+    // roles. They are not inferred from CPU32 or from a directory spelling.
+    if let Some(developer) = dirs.expand("$(AROS_DEVELOPER)") {
+        for role in dirs.sdk_companion_roles() {
+            let root = format!("{developer}/{}", role.library_dir);
+            if expanded == root {
+                return Ok(expanded.to_owned());
+            }
+            if let Some(tail) = expanded.strip_prefix(&format!("{root}/")) {
+                validate_relative_path(tail)?;
+                return Ok(expanded.to_owned());
+            }
+        }
+    }
     let gendir = dirs
         .expand("$(GENDIR)")
         .ok_or_else(|| "configured GENDIR root cannot be resolved".to_owned())?;

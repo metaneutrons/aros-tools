@@ -7,7 +7,8 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
-use aros_common::{sha256_bytes, Sha256Digest};
+use aros_common::sdk_manifest::{SdkAbiValue, SdkIdentity, SdkSourceIdentity, SdkTarget};
+use aros_common::{sha256_bytes, toolchain_tree_inventory_excluding, Sha256Digest};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -15,9 +16,10 @@ use super::portable_tests::{
     copy_package, guarded_gnu_package_for_host, guarded_package_for_host, GuardedPackage,
 };
 use super::{
-    readback_release_builds_v2, ReleaseBuildLaneRequestV2, ReleaseBuildReadbackRequestV2,
-    ReleaseBuildSideRequestV2,
+    export_finished_package_measurement, package_finished_candidate, readback_release_builds_v2,
+    ReleaseBuildLaneRequestV2, ReleaseBuildReadbackRequestV2, ReleaseBuildSideRequestV2,
 };
+use crate::package_verify::PackageVerificationRequest;
 use crate::release_attestation_manifest_v2::write_attestation_manifest_v2;
 use crate::release_checksums_v2_writer::write_final_checksums_v2;
 use crate::release_index::{compare_package_sets, write_package_comparison_report};
@@ -26,17 +28,22 @@ use crate::release_index_v2_builder::MeasuredReleaseIndexRequestV2;
 use crate::release_index_v2_readback::IndexedPackageReadbackRequestV2;
 use crate::release_index_v2_writer::write_measured_index_v2;
 use crate::release_inputs::{ReleaseInputs, ACTIVE_HOSTS};
+use crate::sdk_package::{self, SdkPackageRequest, SdkVerificationRequest};
+use crate::sdk_sbom::build_measured_sdk_sbom;
 
 const RELEASE_ID: &str = "finished-candidate-test";
 const BASE_URL: &str = "https://example.invalid/releases/portable-build-v2";
+const SDK_RELEASE_ID: &str = "v1.2.3";
+const SDK_BASE_URL: &str = "https://example.invalid/releases/v1.2.3";
 const INPUTS_NAME: &str = "toolchain-release-inputs-v2.json";
 const MANIFEST_SCHEMA_NAME: &str = "toolchain-manifest-v2.schema.json";
 const TREE_FIXTURE_NAME: &str = "tree-digest-v1.fixture.json";
 
-struct InputFixture {
+pub(super) struct InputFixture {
     inputs: ReleaseInputs,
     collection: Vec<u8>,
     documents: BTreeMap<String, Vec<u8>>,
+    sdk_identity: Option<SdkIdentity>,
 }
 
 struct ExpectedLane {
@@ -47,7 +54,7 @@ struct ExpectedLane {
     comparison: Sha256Digest,
 }
 
-pub(super) struct PreparedRelease {
+pub struct PreparedRelease {
     _release_root: TempDir,
     _transport_root: TempDir,
     pub(super) packages: IndexedPackageReadbackRequestV2,
@@ -124,23 +131,154 @@ fn input_fixture_for(group_id: &str, source_lock: Vec<u8>, profiles: Vec<u8>) ->
         inputs,
         collection,
         documents,
+        sdk_identity: None,
     }
 }
 
+fn input_fixture_with_sdk(group_id: &str, source_lock: Vec<u8>, profiles: Vec<u8>) -> InputFixture {
+    let mut fixture = input_fixture_for(group_id, source_lock, profiles);
+    let identity = SdkIdentity {
+        sdk_id: "fixture-sdk".into(),
+        version: "1.2.3".into(),
+        target: SdkTarget {
+            target_triple: "riscv32-aros".into(),
+            abi: BTreeMap::from([("data_model".into(), SdkAbiValue::Text("ilp32".into()))]),
+        },
+        source: SdkSourceIdentity {
+            commit: "7777777777777777777777777777777777777777".into(),
+            git_tree: "8888888888888888888888888888888888888888".into(),
+            content_sha256: sha256_bytes(b"synthetic SDK source"),
+            contract_sha256: sha256_bytes(b"synthetic SDK contract"),
+        },
+        source_date_epoch: 946_684_800,
+    };
+    let identity_file = "fixture-sdk-identity.json";
+    let identity_bytes = serde_json::to_vec(&identity).unwrap();
+    fixture
+        .documents
+        .insert(identity_file.to_owned(), identity_bytes.clone());
+    let mut collection: Value = serde_json::from_slice(&fixture.collection).unwrap();
+    collection["sdks"] = json!([{
+        "id": identity.sdk_id,
+        "identity": {
+            "file": identity_file,
+            "sha256": sha256_bytes(&identity_bytes).as_str(),
+        },
+        "source_preset": "fixture-sdk",
+        "compiler_profiles": [{
+            "group_id": group_id,
+            "profile": if group_id == "gnu-rv32" { "rv32-aros" } else { "pc-x86_64" },
+        }],
+    }]);
+    fixture.collection = serde_json::to_vec(&collection).unwrap();
+    fixture.inputs = ReleaseInputs::parse(&fixture.collection, &fixture.documents).unwrap();
+    fixture.sdk_identity = Some(identity);
+    fixture
+}
+
 pub(super) fn prepare_release() -> PreparedRelease {
-    prepare_release_for_family(false)
+    prepare_release_for_family(false, false)
 }
 
 pub(super) fn prepare_gnu_release() -> PreparedRelease {
-    prepare_release_for_family(true)
+    prepare_release_for_family(true, false)
 }
 
-fn prepare_release_for_family(gnu: bool) -> PreparedRelease {
-    let input = if gnu {
+fn prepare_release_with_sdk() -> PreparedRelease {
+    prepare_release_for_family(false, true)
+}
+
+fn prepare_release_for_family(gnu: bool, with_sdk: bool) -> PreparedRelease {
+    let input = if gnu && with_sdk {
+        input_fixture_with_sdk(
+            "gnu-rv32",
+            super::tests::fixture_gnu_source_lock(),
+            super::tests::fixture_gnu_profiles(),
+        )
+    } else if gnu {
         gnu_input_fixture()
+    } else if with_sdk {
+        input_fixture_with_sdk(
+            "llvm-pc",
+            super::tests::fixture_source_lock(),
+            super::tests::fixture_profiles(),
+        )
     } else {
         input_fixture()
     };
+    prepare_release_from_input(gnu, with_sdk, input, None, None)
+}
+
+pub fn prepare_gnu_matrix_release(
+    collection: Vec<u8>,
+    documents: BTreeMap<String, Vec<u8>>,
+    sdk_identity: SdkIdentity,
+    packages_by_host: BTreeMap<String, (GuardedPackage, GuardedPackage)>,
+    generated_sdk: &crate::sdk_package::SdkPackageOutput,
+    generated_tree_sha256: &Sha256Digest,
+) -> PreparedRelease {
+    prepare_matrix_release(
+        true,
+        collection,
+        documents,
+        sdk_identity,
+        packages_by_host,
+        generated_sdk,
+        generated_tree_sha256,
+    )
+}
+
+pub fn prepare_llvm_matrix_release(
+    collection: Vec<u8>,
+    documents: BTreeMap<String, Vec<u8>>,
+    sdk_identity: SdkIdentity,
+    packages_by_host: BTreeMap<String, (GuardedPackage, GuardedPackage)>,
+    generated_sdk: &crate::sdk_package::SdkPackageOutput,
+    generated_tree_sha256: &Sha256Digest,
+) -> PreparedRelease {
+    prepare_matrix_release(
+        false,
+        collection,
+        documents,
+        sdk_identity,
+        packages_by_host,
+        generated_sdk,
+        generated_tree_sha256,
+    )
+}
+
+fn prepare_matrix_release(
+    gnu: bool,
+    collection: Vec<u8>,
+    documents: BTreeMap<String, Vec<u8>>,
+    sdk_identity: SdkIdentity,
+    packages_by_host: BTreeMap<String, (GuardedPackage, GuardedPackage)>,
+    generated_sdk: &crate::sdk_package::SdkPackageOutput,
+    generated_tree_sha256: &Sha256Digest,
+) -> PreparedRelease {
+    let inputs = ReleaseInputs::parse(&collection, &documents).unwrap();
+    let input = InputFixture {
+        inputs,
+        collection,
+        documents,
+        sdk_identity: Some(sdk_identity),
+    };
+    prepare_release_from_input(
+        gnu,
+        true,
+        input,
+        Some(packages_by_host),
+        Some((generated_sdk, generated_tree_sha256)),
+    )
+}
+
+fn prepare_release_from_input(
+    gnu: bool,
+    with_sdk: bool,
+    input: InputFixture,
+    mut packages_by_host: Option<BTreeMap<String, (GuardedPackage, GuardedPackage)>>,
+    generated_sdk: Option<(&crate::sdk_package::SdkPackageOutput, &Sha256Digest)>,
+) -> PreparedRelease {
     let release_root = tempfile::tempdir().unwrap();
     let release_dir = release_root.path().canonicalize().unwrap();
     for (name, bytes) in &input.documents {
@@ -174,15 +312,36 @@ fn prepare_release_for_family(gnu: bool) -> PreparedRelease {
     let mut required_paths = BTreeMap::new();
 
     for (host_index, host) in ACTIVE_HOSTS.iter().copied().enumerate() {
-        let left = if gnu {
-            guarded_gnu_package_for_host(host)
+        let (left, right, already_sdk_release) = packages_by_host.as_mut().map_or_else(
+            || {
+                let left = if gnu {
+                    guarded_gnu_package_for_host(host)
+                } else {
+                    guarded_package_for_host(host)
+                };
+                let right = if gnu {
+                    guarded_gnu_package_for_host(host)
+                } else {
+                    guarded_package_for_host(host)
+                };
+                (left, right, false)
+            },
+            |packages| {
+                let (left, right) = packages
+                    .remove(host)
+                    .unwrap_or_else(|| panic!("missing test package pair for {host}"));
+                (left, right, true)
+            },
+        );
+        let left = if with_sdk && !already_sdk_release {
+            repackage_for_sdk_release(left, host_index, "left")
         } else {
-            guarded_package_for_host(host)
+            left
         };
-        let right = if gnu {
-            guarded_gnu_package_for_host(host)
+        let right = if with_sdk && !already_sdk_release {
+            repackage_for_sdk_release(right, host_index, "right")
         } else {
-            guarded_package_for_host(host)
+            right
         };
         let asset = left
             .package
@@ -291,19 +450,32 @@ fn prepare_release_for_family(gnu: bool) -> PreparedRelease {
         owners.push(right);
     }
 
+    let sdk_packages = match (input.sdk_identity.as_ref(), generated_sdk) {
+        (Some(identity), Some((generated, tree_sha256))) => BTreeMap::from([(
+            identity.sdk_id.clone(),
+            prepare_generated_sdk_package(identity, generated, tree_sha256, &release_dir),
+        )]),
+        (Some(identity), None) => BTreeMap::from([(
+            identity.sdk_id.clone(),
+            prepare_sdk_package(identity, &release_dir, &transport_dir),
+        )]),
+        (None, None) => BTreeMap::new(),
+        (None, Some(_)) => panic!("generated SDK fixture requires an indexed SDK identity"),
+    };
+
     let measured_request = MeasuredReleaseIndexRequestV2 {
-        sdk_packages: BTreeMap::new(),
+        sdk_packages: sdk_packages.clone(),
         directory: release_dir.clone(),
         inputs: input.inputs.clone(),
-        release_id: RELEASE_ID.into(),
-        base_url: BASE_URL.into(),
+        release_id: if with_sdk { SDK_RELEASE_ID } else { RELEASE_ID }.into(),
+        base_url: if with_sdk { SDK_BASE_URL } else { BASE_URL }.into(),
         build_environments: build_environments.clone(),
         required_paths,
         forbidden_prefixes: Vec::new(),
     };
     let written_index = write_measured_index_v2(&measured_request).unwrap();
     let packages = IndexedPackageReadbackRequestV2 {
-        sdk_packages: BTreeMap::new(),
+        sdk_packages,
         directory: release_dir,
         inputs: input.inputs,
         index: written_index.index().clone(),
@@ -359,6 +531,38 @@ fn prepare_release_for_family(gnu: bool) -> PreparedRelease {
     }
 }
 
+fn repackage_for_sdk_release(
+    mut guarded: GuardedPackage,
+    host_index: usize,
+    side: &str,
+) -> GuardedPackage {
+    let mut package_request = guarded.package_request.clone();
+    package_request.release_id = SDK_RELEASE_ID.into();
+    // Keep the repackaged fixture inside the root already owned by GuardedPackage.
+    package_request.output_dir = package_request
+        .output_dir
+        .parent()
+        .unwrap()
+        .join(format!("sdk-{host_index}-{side}"));
+    let package = package_finished_candidate(&package_request, &guarded.candidate).unwrap();
+    let verification = PackageVerificationRequest {
+        package_dir: package.package_output().output_dir.clone(),
+        release_id: package_request.release_id.clone(),
+        host: package_request.host.clone(),
+        recipe: package_request.recipe.clone(),
+        source_lock: package_request.source_lock.clone(),
+        profile: package_request.profile.clone(),
+        build_environment: package_request.build_environment.clone(),
+        forbidden_prefixes: package_request.forbidden_prefixes.clone(),
+    };
+    let measurement = export_finished_package_measurement(&guarded.candidate, &package).unwrap();
+    guarded.package_request = package_request;
+    guarded.package = package;
+    guarded.verification = verification;
+    guarded.measurement = measurement;
+    guarded
+}
+
 fn copy_package_to_flat_release(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).unwrap() {
         let entry = entry.unwrap();
@@ -370,6 +574,95 @@ fn copy_package_to_flat_release(source: &Path, destination: &Path) {
             output.display()
         );
         fs::copy(entry.path(), output).unwrap();
+    }
+}
+
+fn prepare_sdk_package(
+    identity: &SdkIdentity,
+    release_dir: &Path,
+    transport_dir: &Path,
+) -> SdkVerificationRequest {
+    let candidate = transport_dir.join("sdk-candidate");
+    fs::create_dir(&candidate).unwrap();
+    fs::create_dir(candidate.join("include")).unwrap();
+    fs::create_dir(candidate.join("lib")).unwrap();
+    fs::write(candidate.join("include/aros.h"), b"#define FIXTURE_SDK 1\n").unwrap();
+    fs::write(
+        candidate.join("lib/libfixture.a"),
+        b"synthetic SDK library\n",
+    )
+    .unwrap();
+    let (tree_sha256, _) =
+        toolchain_tree_inventory_excluding(&candidate, &["sdk-manifest.json"]).unwrap();
+    let tree_sha256 = Sha256Digest::parse(&tree_sha256).unwrap();
+    let package_dir = transport_dir.join("sdk-package");
+    let package_request = SdkPackageRequest {
+        candidate_root: candidate,
+        output_dir: package_dir.clone(),
+        identity: identity.clone(),
+        expected_tree_sha256: tree_sha256.clone(),
+        forbidden_prefixes: Vec::new(),
+    };
+    let output = sdk_package::package(&package_request).unwrap();
+    let standalone_request = SdkVerificationRequest {
+        package_dir,
+        identity: identity.clone(),
+        expected_tree_sha256: tree_sha256.clone(),
+        expected_archive_sha256: output.archive_sha256.clone(),
+        expected_archive_size: output.archive_size,
+        forbidden_prefixes: Vec::new(),
+    };
+    let asset = identity.asset_name().unwrap();
+    for (source, name) in [
+        (&output.archive, asset.clone()),
+        (&output.manifest, format!("{asset}.manifest.json")),
+        (&output.checksum, format!("{asset}.sha256")),
+    ] {
+        fs::copy(source, release_dir.join(name)).unwrap();
+    }
+    let spdx = build_measured_sdk_sbom(&standalone_request).unwrap();
+    fs::write(release_dir.join(format!("{asset}.spdx.json")), spdx).unwrap();
+    SdkVerificationRequest {
+        package_dir: release_dir.to_path_buf(),
+        identity: identity.clone(),
+        expected_tree_sha256: tree_sha256,
+        expected_archive_sha256: output.archive_sha256,
+        expected_archive_size: output.archive_size,
+        forbidden_prefixes: Vec::new(),
+    }
+}
+
+fn prepare_generated_sdk_package(
+    identity: &SdkIdentity,
+    output: &crate::sdk_package::SdkPackageOutput,
+    tree_sha256: &Sha256Digest,
+    release_dir: &Path,
+) -> SdkVerificationRequest {
+    let generated = SdkVerificationRequest {
+        package_dir: output.output_dir.clone(),
+        identity: identity.clone(),
+        expected_tree_sha256: tree_sha256.clone(),
+        expected_archive_sha256: output.archive_sha256.clone(),
+        expected_archive_size: output.archive_size,
+        forbidden_prefixes: Vec::new(),
+    };
+    let asset = identity.asset_name().unwrap();
+    for (source, name) in [
+        (&output.archive, asset.clone()),
+        (&output.manifest, format!("{asset}.manifest.json")),
+        (&output.checksum, format!("{asset}.sha256")),
+    ] {
+        fs::copy(source, release_dir.join(name)).unwrap();
+    }
+    let spdx = build_measured_sdk_sbom(&generated).unwrap();
+    fs::write(release_dir.join(format!("{asset}.spdx.json")), spdx).unwrap();
+    SdkVerificationRequest {
+        package_dir: release_dir.to_path_buf(),
+        identity: identity.clone(),
+        expected_tree_sha256: tree_sha256.clone(),
+        expected_archive_sha256: output.archive_sha256.clone(),
+        expected_archive_size: output.archive_size,
+        forbidden_prefixes: Vec::new(),
     }
 }
 
@@ -446,6 +739,7 @@ fn reads_complete_three_host_v2_build_evidence_after_dropping_original_roots() {
     );
     assert_eq!(readback.lanes().len(), ACTIVE_HOSTS.len());
     assert_eq!(readback.lanes().len(), 3);
+    assert!(readback.sdk_packages().is_empty());
     for (asset, expected) in &prepared.expected_lanes {
         let lane = readback
             .lanes()
@@ -470,6 +764,59 @@ fn reads_complete_three_host_v2_build_evidence_after_dropping_original_roots() {
         );
         assert_eq!(lane.comparison_sha256(), &expected.comparison);
     }
+}
+
+#[test]
+fn retains_measured_sdk_packages_at_the_release_build_readback_boundary() {
+    let prepared = prepare_release_with_sdk();
+    let request = prepared.request();
+    let expected_lock = &request.packages.index.sdks()[0];
+
+    let readback = readback_release_builds_v2(&request).unwrap();
+    assert_eq!(readback.sdk_packages().len(), 1);
+    let sdk = &readback.sdk_packages()[0];
+    assert_eq!(sdk.lock(), expected_lock);
+    assert_eq!(sdk.package().archive_sha256, expected_lock.archive.sha256);
+    assert_eq!(sdk.package().archive_size, expected_lock.archive.size);
+    assert_eq!(sdk.package().manifest.identity, expected_lock.identity);
+}
+
+#[test]
+fn rejects_changed_sdk_bytes_and_changed_sdk_selection_at_release_readback() {
+    let prepared = prepare_release_with_sdk();
+    let request = prepared.request();
+    let lock = &request.packages.index.sdks()[0];
+    let asset = lock.identity.asset_name().unwrap();
+
+    let archive = prepared.release_dir().join(&asset);
+    let original = fs::read(&archive).unwrap();
+    fs::write(&archive, b"mutated SDK archive bytes\n").unwrap();
+    assert_rejected_without_mutation(
+        &request,
+        "selected SDK package failed shared release measurement",
+    );
+    fs::write(&archive, original).unwrap();
+
+    let spdx = prepared.release_dir().join(format!("{asset}.spdx.json"));
+    let original = fs::read(&spdx).unwrap();
+    fs::write(&spdx, b"mutated SDK SPDX bytes\n").unwrap();
+    assert_rejected_without_mutation(
+        &request,
+        "SDK SPDX metadata differs from its exact measured package",
+    );
+    fs::write(&spdx, original).unwrap();
+
+    let mut wrong_selection = prepared.request();
+    wrong_selection
+        .packages
+        .sdk_packages
+        .get_mut("fixture-sdk")
+        .unwrap()
+        .expected_archive_sha256 = sha256_bytes(b"wrong selected SDK archive");
+    assert_rejected_without_mutation(
+        &wrong_selection,
+        "selected SDK package failed shared release measurement",
+    );
 }
 
 #[test]

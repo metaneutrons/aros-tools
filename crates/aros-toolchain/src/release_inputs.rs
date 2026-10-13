@@ -1156,6 +1156,58 @@ mod tests {
         fixture
     }
 
+    fn sdk_generation_fixture() -> Fixture {
+        let mut fixture = two_family_fixture();
+        let mut collection: Value = serde_json::from_slice(&fixture.collection).unwrap();
+        let selections = [
+            ("gnu-sdk", vec![("gnu-rv32", "rv32-aros")]),
+            ("llvm-sdk", vec![("llvm-pc", "pc-x86_64")]),
+            (
+                "multi-sdk",
+                vec![("gnu-rv32", "rv32-aros"), ("llvm-pc", "pc-x86_64")],
+            ),
+        ];
+        let mut sdk_records = Vec::with_capacity(selections.len());
+        for (variant, (id, compiler_profiles)) in selections.into_iter().enumerate() {
+            let triple = "i686-unknown-aros";
+            let identity = json!({
+                "sdk_id": id,
+                "version": "1.2.3",
+                "target": {
+                    "target_triple": triple,
+                    "abi": {
+                        "target_triple": triple,
+                        "data_model": "ilp32"
+                    }
+                },
+                "source": {
+                    "commit": format!("{:040x}", variant + 3),
+                    "git_tree": format!("{:040x}", variant + 13),
+                    "content_sha256": format!("{:064x}", variant + 23),
+                    "contract_sha256": format!("{:064x}", variant + 33)
+                },
+                "source_date_epoch": 1234_u64 + variant as u64
+            });
+            let identity_bytes = serde_json::to_vec(&identity).unwrap();
+            let identity_file = format!("{id}-identity.json");
+            fixture
+                .documents
+                .insert(identity_file.clone(), identity_bytes.clone());
+            sdk_records.push(json!({
+                "id": id,
+                "identity": reference(&identity_file, &identity_bytes),
+                "source_preset": "aros-sdk-source-v1",
+                "compiler_profiles": compiler_profiles
+                    .into_iter()
+                    .map(|(group_id, profile)| json!({"group_id":group_id,"profile":profile}))
+                    .collect::<Vec<_>>()
+            }));
+        }
+        collection["sdks"] = json!(sdk_records);
+        fixture.collection = serde_json::to_vec(&collection).unwrap();
+        fixture
+    }
+
     fn reference(file: &str, bytes: &[u8]) -> Value {
         json!({"file": file, "sha256": sha256_bytes(bytes)})
     }
@@ -1204,6 +1256,7 @@ mod tests {
         assert_eq!(inputs.groups().len(), 1);
         assert_eq!(inputs.groups()[0].id(), "gnu-rv32");
         assert_eq!(inputs.expected_lanes().len(), ACTIVE_HOSTS.len());
+        assert!(inputs.expected_sdk_generation_lanes().is_empty());
         assert!(inputs
             .expected_lanes()
             .iter()
@@ -1238,6 +1291,54 @@ mod tests {
             .expected_lanes()
             .iter()
             .any(|lane| lane.profile() == "pc-x86_64"));
+    }
+
+    #[test]
+    fn expected_sdk_generation_lanes_expand_only_bound_references_over_selected_hosts() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = real_temp_path(&directory);
+        let fixture = sdk_generation_fixture();
+        write_fixture(&root, &fixture);
+
+        let inputs = ReleaseInputs::load(&root).unwrap();
+        let lanes = inputs.expected_sdk_generation_lanes();
+        let actual = lanes
+            .iter()
+            .map(|lane| (lane.sdk_id(), lane.group_id(), lane.profile(), lane.host()))
+            .collect::<Vec<_>>();
+        let expected = [
+            ("gnu-sdk", "gnu-rv32", "rv32-aros", "linux-aarch64"),
+            ("gnu-sdk", "gnu-rv32", "rv32-aros", "linux-x86_64"),
+            ("gnu-sdk", "gnu-rv32", "rv32-aros", "macos-aarch64"),
+            ("llvm-sdk", "llvm-pc", "pc-x86_64", "linux-aarch64"),
+            ("llvm-sdk", "llvm-pc", "pc-x86_64", "linux-x86_64"),
+            ("llvm-sdk", "llvm-pc", "pc-x86_64", "macos-aarch64"),
+            ("multi-sdk", "gnu-rv32", "rv32-aros", "linux-aarch64"),
+            ("multi-sdk", "gnu-rv32", "rv32-aros", "linux-x86_64"),
+            ("multi-sdk", "gnu-rv32", "rv32-aros", "macos-aarch64"),
+            ("multi-sdk", "llvm-pc", "pc-x86_64", "linux-aarch64"),
+            ("multi-sdk", "llvm-pc", "pc-x86_64", "linux-x86_64"),
+            ("multi-sdk", "llvm-pc", "pc-x86_64", "macos-aarch64"),
+        ];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn expected_sdk_generation_lanes_require_existing_bound_membership() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = real_temp_path(&directory);
+        let mut fixture = sdk_generation_fixture();
+        let mut collection: Value = serde_json::from_slice(&fixture.collection).unwrap();
+        collection["sdks"][2]["compiler_profiles"][1]["profile"] = json!("unbound-profile");
+        fixture.collection = serde_json::to_vec(&collection).unwrap();
+        write_fixture(&root, &fixture);
+
+        assert_load_error(
+            ReleaseInputs::load(&root),
+            DiagnosticCode::ProducerIdentity,
+            "SDK references an unbound compiler profile",
+        );
     }
 
     #[test]

@@ -108,6 +108,7 @@ pub(super) struct ExpectedRetainedEvidence {
     ports: Vec<NativeCompatibilityExpectedPortSource>,
     cmake_build_required: bool,
     native_sdk: Option<crate::compatibility::NativeSdkLinkSelection>,
+    llvm_sdk: Option<crate::compatibility::LlvmSdkLinkSelection>,
 }
 
 impl ExpectedRetainedEvidence {
@@ -134,6 +135,7 @@ impl ExpectedRetainedEvidence {
             gnu_source_preset: request.source_preset.as_deref(),
             cmake_build_required: self.cmake_build_required,
             native_sdk: self.native_sdk.as_ref(),
+            llvm_sdk: self.llvm_sdk.as_ref(),
             sdk_consumer_source_tree_sha256: &request.preparation.source_tree_sha256,
             engine_api_version: request.preparation.engine_api_version,
             engine_sha256: &request.preparation.engine_sha256,
@@ -189,14 +191,41 @@ impl ExpectedRetainedEvidence {
             .as_ref()
             .map(crate::compatibility::native_sdk_portable::select)
             .transpose()?;
+        let llvm_sdk = if let Some(source) = &request.llvm_sdk_source {
+            super::llvm_sdk::select(request, &inputs.compiler)?;
+            let drivers =
+                super::llvm_sdk::drivers(request, &inputs.compiler, &CancellationToken::default())?
+                    .ok_or_else(|| {
+                        ContractError::compatibility("LLVM SDK retained selection lost its drivers")
+                    })?;
+            Some(crate::compatibility::llvm_sdk_portable::select(
+                &crate::compatibility::LlvmSdkGeneratedRootRequest {
+                    source: source.clone(),
+                    preparation: request.preparation.clone(),
+                    cmake_build_root: request.cmake_build_root.clone(),
+                    timeout: request.timeout,
+                },
+                &drivers,
+                &request.reports_root.join("llvm-sdk-links"),
+                &CancellationToken::default(),
+            )?)
+        } else {
+            None
+        };
+        if native_sdk.is_some() && llvm_sdk.is_some() {
+            return Err(ContractError::compatibility(
+                "retained compatibility mixes GNU and LLVM SDK requirements",
+            ));
+        }
         Ok(Self {
             compiler: inputs.compiler,
             upstream_tree: inputs.upstream_source_tree,
             environments,
             helpers,
             ports,
-            cmake_build_required: inputs.native_consumer_contract.is_some(),
+            cmake_build_required: inputs.native_consumer_contract.is_some() || llvm_sdk.is_some(),
             native_sdk,
+            llvm_sdk,
         })
     }
 
@@ -275,7 +304,14 @@ impl ExpectedRetainedEvidence {
             }
             logs.insert(phase, command_logs);
         }
-        verify_report_inventory(&reports_root, &paths, self.native_sdk.is_some())?;
+        let sdk_namespace = if self.llvm_sdk.is_some() {
+            Some("llvm-sdk-links")
+        } else if self.native_sdk.is_some() {
+            Some("native-sdk-links")
+        } else {
+            None
+        };
+        verify_report_inventory(&reports_root, &paths, sdk_namespace)?;
         let native_sdk = if let Some(selection) = &self.native_sdk {
             let inputs = validate_inputs(request)?;
             let sdk_request = super::native_sdk_request(request, &inputs)?.ok_or_else(|| {
@@ -318,6 +354,55 @@ impl ExpectedRetainedEvidence {
         } else {
             None
         };
+        let llvm_sdk = if let Some(selection) = &self.llvm_sdk {
+            let source = request.llvm_sdk_source.as_ref().ok_or_else(|| {
+                ContractError::compatibility("retained LLVM SDK lost its verified source selection")
+            })?;
+            super::llvm_sdk::select(request, &self.compiler)?;
+            let drivers =
+                super::llvm_sdk::drivers(request, &self.compiler, &CancellationToken::default())?
+                    .ok_or_else(|| {
+                    ContractError::compatibility("retained LLVM SDK lost its measured drivers")
+                })?;
+            let generated_request = crate::compatibility::LlvmSdkGeneratedRootRequest {
+                source: source.clone(),
+                preparation: request.preparation.clone(),
+                cmake_build_root: request.cmake_build_root.clone(),
+                timeout: request.timeout,
+            };
+            let current = crate::compatibility::llvm_sdk_portable::select(
+                &generated_request,
+                &drivers,
+                &request.reports_root.join("llvm-sdk-links"),
+                &CancellationToken::default(),
+            )?;
+            if current != *selection {
+                return Err(ContractError::compatibility(
+                    "retained LLVM SDK selection changed after execution",
+                ));
+            }
+            let files = super::portable::read_llvm_sdk_members(request, selection)?;
+            let proof = crate::compatibility::llvm_sdk_portable::readback(
+                &files,
+                selection,
+                &crate::compatibility::llvm_sdk_portable::LlvmSdkPortableExpectations {
+                    engine_api_version: request.preparation.engine_api_version,
+                    engine_sha256: &request.preparation.engine_sha256,
+                    helpers: &self.helpers,
+                },
+            )?;
+            crate::compatibility::readback_llvm_sdk_build_links(
+                &generated_request,
+                &drivers,
+                &request.reports_root.join("llvm-sdk-links"),
+                proof.binding_sha256(),
+                proof.receipt_sha256(),
+                &CancellationToken::default(),
+            )?;
+            Some(proof)
+        } else {
+            None
+        };
         let receipt = super::super::read_regular_bounded(
             &reports_root.join(super::COMPATIBILITY_RECEIPT_FILE),
             "retained aggregate compatibility receipt",
@@ -330,6 +415,7 @@ impl ExpectedRetainedEvidence {
                 &logs,
                 &standalone,
                 native_sdk.as_ref(),
+                llvm_sdk.as_ref(),
             )
     }
 }
@@ -396,7 +482,7 @@ fn read_log(path: &Path) -> Result<Vec<u8>, ContractError> {
 fn verify_report_inventory(
     root: &Path,
     expected: &BTreeSet<PathBuf>,
-    native_sdk: bool,
+    sdk_namespace: Option<&str>,
 ) -> Result<(), ContractError> {
     // The common durable publisher intentionally retains a persistent empty
     // advisory lock for each published file. Admit only names derived from
@@ -412,9 +498,9 @@ fn verify_report_inventory(
         super::super::read_regular_bounded(&lock, "retained report publication lock", 0)?;
         expected_with_locks.insert(relative_name(&lock)?);
     }
-    if native_sdk {
-        expected_with_locks.insert(PathBuf::from("native-sdk-links"));
-        super::checked_directory(&root.join("native-sdk-links"), "retained native SDK proof")?;
+    if let Some(namespace) = sdk_namespace {
+        expected_with_locks.insert(PathBuf::from(namespace));
+        super::checked_directory(&root.join(namespace), "retained SDK proof")?;
     }
     verify_directory_inventory(root, &expected_with_locks)
 }

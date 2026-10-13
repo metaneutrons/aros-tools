@@ -3201,7 +3201,7 @@ fn non_library_module_needing_a_client_archive_is_reported() {
 }
 
 #[test]
-fn non_library_module_preserves_rellibs_from_explicit_config_and_override() {
+fn datatype_preserves_client_archive_metadata_and_rellibs_from_config_override() {
     let tree = TempTree::new();
     let module = tree.0.join("workbench/classes/datatypes/png");
     fs::create_dir_all(&module).unwrap();
@@ -3250,7 +3250,13 @@ fn non_library_module_preserves_rellibs_from_explicit_config_and_override() {
         target.config_override_file.as_deref(),
         Some("${AROS_SOURCE_DIR}/workbench/classes/datatypes/png/pngdt.override")
     );
-    assert!(target.genmodule_linklibs.is_none());
+    let metadata = target
+        .genmodule_linklibs
+        .as_ref()
+        .expect("datatype uses the library-backed genmodule client builder");
+    assert!(metadata.enabled && metadata.inputs_exact);
+    assert!(!metadata.has_relative);
+    assert_eq!(metadata.relative_libraries, ["png", "z1"]);
     assert!(parsed.skipped_client_archives.is_empty(), "{parsed:#?}");
 }
 
@@ -3312,7 +3318,13 @@ fn default_module_configs_merge_rellibs_from_confoverride() {
         .expect("datatype module using default png.conf");
     assert_eq!(datatype.config_file, None);
     assert_eq!(datatype.config_relative_libraries, ["png", "z1"]);
-    assert!(datatype.genmodule_linklibs.is_none());
+    let metadata = datatype
+        .genmodule_linklibs
+        .as_ref()
+        .expect("datatype client-link metadata");
+    assert!(metadata.enabled && metadata.inputs_exact);
+    assert!(!metadata.has_relative);
+    assert_eq!(metadata.relative_libraries, ["png", "z1"]);
 
     let library =
         super::parse_mmakefile_with_dirs_and_context(&library_mmake, &tree.0, &dirs, &context)
@@ -3733,7 +3745,7 @@ fn real_tree_module_output_metadata_has_expected_coverage() {
 }
 
 #[test]
-fn a_library_client_archive_goes_where_make_puts_it() {
+fn module_client_archives_go_where_make_puts_them() {
     let tree = TempTree::new();
     let module = tree.0.join("workbench/plugins");
     fs::create_dir_all(&module).unwrap();
@@ -3742,6 +3754,8 @@ fn a_library_client_archive_goes_where_make_puts_it() {
         ("MUI.MiamiPanel", "MiamiPanel"),
         ("explicit", "Explicit"),
         ("thing", "Thing"),
+        ("datatype", "PNGDT"),
+        ("explicit-datatype", "PNGDTExplicit"),
     ] {
         fs::write(
             module.join(format!("{name}.conf")),
@@ -3749,7 +3763,14 @@ fn a_library_client_archive_goes_where_make_puts_it() {
         )
         .unwrap();
     }
-    for source in ["plain", "panel", "explicit", "thing"] {
+    for source in [
+        "plain",
+        "panel",
+        "explicit",
+        "thing",
+        "datatype",
+        "explicit-datatype",
+    ] {
         fs::write(module.join(format!("{source}.c")), "").unwrap();
     }
     let file = module.join("mmakefile.src");
@@ -3761,6 +3782,10 @@ fn a_library_client_archive_goes_where_make_puts_it() {
     conffile=MUI.MiamiPanel.conf files=panel
 %build_module mmake=explicit-lib modname=explicit modtype=library \\
     libdir=$(GENDIR)/lib/private conffile=explicit.conf files=explicit
+%build_module mmake=datatype modname=datatype modtype=datatype \\
+    conffile=datatype.conf files=datatype
+%build_module mmake=explicit-datatype modname=custom modtype=datatype \\
+    libdir=$(GENDIR)/datatype/private conffile=explicit-datatype.conf files=explicit-datatype
 %build_module mmake=suffixed-resource modname=thing modtype=resource modsuffix=extra \\
     conffile=thing.conf files=thing
 ",
@@ -3792,7 +3817,18 @@ fn a_library_client_archive_goes_where_make_puts_it() {
         targets["explicit-lib"].linklib_output_dir.as_deref(),
         Some("${AROS_BUILD_DIR}/gen/lib/private")
     );
-    // Only libraries have client archives here; the rule leaves others alone.
+    // make.tmpl:2569 defaults datatype client archives to the module's private
+    // build directory even when no explicit modsuffix= is present.
+    assert_eq!(
+        targets["datatype"].linklib_output_dir.as_deref(),
+        Some("${AROS_BUILD_DIR}/gen/workbench/plugins")
+    );
+    // An explicit libdir= still overrides the datatype default.
+    assert_eq!(
+        targets["explicit-datatype"].linklib_output_dir.as_deref(),
+        Some("${AROS_BUILD_DIR}/gen/datatype/private")
+    );
+    // Resource targets do not use this library-backed module client archive.
     assert_eq!(targets["suffixed-resource"].linklib_output_dir, None);
     assert!(
         parsed.unresolved_output_paths.is_empty(),

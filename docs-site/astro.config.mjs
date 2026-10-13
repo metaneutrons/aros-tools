@@ -40,6 +40,7 @@ export default defineConfig({
           items: [
             { label: 'Manage source checkouts', slug: 'workflows/source' },
             { label: 'Choose and verify a toolchain', slug: 'workflows/toolchains' },
+            { label: 'Build and manage SDKs', slug: 'workflows/sdks' },
             { label: 'Inspect cache state', slug: 'workflows/cache' },
             { label: 'Build a local toolchain candidate', slug: 'workflows/toolchain-producer' },
             { label: 'Pristine upstream AROS', slug: 'workflows/upstream-aros' },

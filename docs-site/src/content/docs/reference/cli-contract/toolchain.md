@@ -230,6 +230,10 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer verify-package` | forbidden_prefixes | `--forbidden-prefix` | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | input_dir | `--input-dir` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | package_format | `--package-format` | — | optional | 1 |  | legacy-v1, family-v2 | — |  |
+| `aros toolchain producer verify-package` | package_measurement | `--package-measurement` | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer verify-package` | package_measurement_sha256 | `--package-measurement-sha256` | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer verify-package` | executor_contract_sha256 | `--executor-contract-sha256` | — | optional | 1 |  |  | — |  |
+| `aros toolchain producer verify-package` | executor_binary_sha256 | `--executor-binary-sha256` | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | format | `--format` | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer verify-qualification` | directory | `--directory` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer verify-qualification` | release_id | `--release-id` | — | required | 1 |  |  | — |  |
@@ -298,3 +302,7 @@ Source identity: select --recipe OR both --source-commit and --source-tree. Neit
 ### `aros toolchain producer repackage`
 
 Format selection: omitted or --release-format legacy-v1 requires --source-package-dir, --recipe, --source-lock, --profiles, --preset, --host and --build-environment. Explicit family-v2 requires the complete release/evidence selection and all independently retained digests, plus one exact --asset; it derives package context from that selected input group. Do not mix V1 and V2 selectors. All five output/extraction/comparison destinations must be absent, nonoverlapping and outside selected evidence, with existing nonsymlink parents. This command executes two local packaging operations, not compiler A/B builds, signing or publication.
+
+### `aros toolchain producer verify-package`
+
+Portable original-build readback: pass all four --package-measurement, --package-measurement-sha256, --executor-contract-sha256 and --executor-binary-sha256 selectors with explicit --package-format family-v2. Digests must be selected outside the export; this read-only byte join does not authenticate original jobs, signatures or publication. Without these selectors, ordinary package verification is unchanged.

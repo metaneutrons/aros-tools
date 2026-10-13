@@ -2,10 +2,10 @@
 
 use super::{
     add, arch_compatible, arch_of, endpoint, failure, has_public_link_archive,
-    inventory_has_public_link_archive, inventory_runtime_name, target_runtime_name, ArosError,
-    BTreeMap, BTreeSet, DependencyGraph, Diagnostic, DiagnosticCode, DiagnosticSet,
-    DiagnosticStage, Edges, ModuleType, NativeBuildContract, NativeMetaAbsence,
-    NativeOptionalMetaDependency, Result, TargetContext,
+    inventory_has_public_link_archive, inventory_runtime_name, supports_genmodule_client_archives,
+    target_runtime_name, ArosError, BTreeMap, BTreeSet, DependencyGraph, Diagnostic,
+    DiagnosticCode, DiagnosticSet, DiagnosticStage, Edges, ModuleType, NativeBuildContract,
+    NativeMetaAbsence, NativeOptionalMetaDependency, Result, TargetContext,
 };
 
 impl DependencyGraph {
@@ -297,6 +297,12 @@ impl DependencyGraph {
             self.sfd_header_rules.iter().map(|rule| rule.owner.as_str())
         );
         family!(
+            "source-literal-text",
+            self.source_literal_text_rules
+                .iter()
+                .map(|rule| rule.owner.as_str())
+        );
+        family!(
             "header-copy",
             self.copy_includes.iter().map(|rule| rule.name.as_str())
         );
@@ -312,7 +318,7 @@ impl DependencyGraph {
                     target.module_type == ModuleType::ModuleHeaders
                         || target.genmodule_abi
                         || target.module_type == ModuleType::Abi
-                        || target.module_type == ModuleType::Library
+                        || supports_genmodule_client_archives(&target.module_type)
                             && (target.genmodule_only
                                 || target
                                     .genmodule_linklibs
@@ -327,7 +333,7 @@ impl DependencyGraph {
                 .iter()
                 .filter(|(_, target)| {
                     target.module_type == ModuleType::Abi
-                        || target.module_type == ModuleType::Library
+                        || supports_genmodule_client_archives(&target.module_type)
                             && (target.genmodule_only
                                 || target
                                     .genmodule_linklibs
@@ -342,7 +348,8 @@ impl DependencyGraph {
                 .iter()
                 .filter(|(_, target)| {
                     !target.genmodule_only
-                        && matches!(target.module_type, ModuleType::Abi | ModuleType::Library)
+                        && (target.module_type == ModuleType::Abi
+                            || supports_genmodule_client_archives(&target.module_type))
                         && target
                             .genmodule_linklibs
                             .as_ref()
@@ -410,6 +417,13 @@ impl DependencyGraph {
         family!(
             "script-output",
             self.script_outputs.iter().map(|rule| rule.owner.as_str())
+        );
+        family!(
+            "script-output-aggregate",
+            self.script_output_aggregates
+                .iter()
+                .filter(|rule| !rule.generators.is_empty())
+                .map(|rule| rule.owner.as_str())
         );
         family!(
             "define-header",
@@ -623,11 +637,14 @@ impl DependencyGraph {
                         && has_public_link_archive(target)
                         && arch_compatible(arch_of(&target.dir_path).as_ref(), Some(&arch))
                 })
-                .map(|target| match target.module_type {
-                    ModuleType::Abi | ModuleType::Library => {
+                .map(|target| {
+                    if target.module_type == ModuleType::Abi
+                        || supports_genmodule_client_archives(&target.module_type)
+                    {
                         format!("{}-linklib", target.mmake_name)
+                    } else {
+                        target.mmake_name.clone()
                     }
-                    _ => target.mmake_name.clone(),
                 })
                 .chain(
                     self.inventory_targets
@@ -639,11 +656,14 @@ impl DependencyGraph {
                                 && inventory_has_public_link_archive(target)
                                 && arch_compatible(arch_of(&target.dir_path).as_ref(), Some(&arch))
                         })
-                        .map(|target| match target.module_type {
-                            ModuleType::Abi | ModuleType::Library => {
+                        .map(|target| {
+                            if target.module_type == ModuleType::Abi
+                                || supports_genmodule_client_archives(&target.module_type)
+                            {
                                 format!("{}-linklib", target.mmake_name)
+                            } else {
+                                target.mmake_name.clone()
                             }
-                            _ => target.mmake_name.clone(),
                         }),
                 )
                 .chain(

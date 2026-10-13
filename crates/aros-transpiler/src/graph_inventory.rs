@@ -1,5 +1,6 @@
 //! Target/catalog/fetch/header inventory resolution.
 
+use super::supports_genmodule_client_archives;
 use super::{
     catalog_compile_target_for_source, define_header_compile_targets, normalize_root_relative_path,
     relative_catalog_source_parent, source_is_flexcat_product, source_shares_logical_directory,
@@ -572,7 +573,7 @@ impl DependencyGraph {
                     continue;
                 }
                 transform.consumers.push(mmake.clone());
-                if *module_type == ModuleType::Library && *has_client_linklib {
+                if supports_genmodule_client_archives(module_type) && *has_client_linklib {
                     transform.consumers.push(format!("{mmake}-linklib"));
                 }
             }
@@ -734,6 +735,6 @@ fn target_has_compile_inputs(target: &TargetDefinition) -> bool {
         || !target.objc_source_files.is_empty()
         || !target.asm_source_files.is_empty()
         || !target.arch_sources.is_empty()
-        || (target.module_type == ModuleType::Library && target.genmodule_only)
+        || (supports_genmodule_client_archives(&target.module_type) && target.genmodule_only)
         || (target.module_type == ModuleType::LinkLib && target.empty_archive)
 }

@@ -118,6 +118,12 @@ pub fn validation_document(
         LoadedNativeSelection::SdkConsumer(loaded) => {
             object.insert("schema".into(), json!("aros-sdk-consumer-validation-v1"));
             object.insert("target".into(), json!(loaded.contract.target));
+            if !loaded.contract.companion_roles.is_empty() {
+                object.insert(
+                    "companion_roles".into(),
+                    json!(loaded.contract.companion_roles),
+                );
+            }
         }
         LoadedNativeSelection::Build(_) => {
             return Err(invalid("an explicit consumer selection is required"));

@@ -35,6 +35,7 @@ use crate::observability;
 
 mod compatibility_export;
 mod finished_package;
+mod finished_package_readback;
 pub mod native_compatibility;
 mod qualification_bytes;
 mod recovery_family;
@@ -311,6 +312,9 @@ struct PackageArgs {
 
 /// Inputs for native package read-back verification.
 #[derive(Args)]
+#[command(
+    after_help = "Portable original-build readback: pass all four --package-measurement, --package-measurement-sha256, --executor-contract-sha256 and --executor-binary-sha256 selectors with explicit --package-format family-v2. Digests must be selected outside the export; this read-only byte join does not authenticate original jobs, signatures or publication. Without these selectors, ordinary package verification is unchanged."
+)]
 struct VerifyPackageArgs {
     #[command(flatten)]
     context: PackageContextArgs,
@@ -320,6 +324,9 @@ struct VerifyPackageArgs {
     /// Package metadata format; omitted selects the existing compiler-family default
     #[arg(long, value_enum)]
     package_format: Option<PackageFormatArg>,
+    /// Explicit portable original-build byte readback, not execution authentication
+    #[command(flatten)]
+    portable: finished_package_readback::ReadbackArgs,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -957,6 +964,7 @@ fn parse_build_result_digest(value: &str) -> Result<Sha256Digest, &'static str> 
 }
 
 fn verify_package(args: VerifyPackageArgs) -> miette::Result<()> {
+    args.portable.preflight(args.package_format)?;
     let context = package_context(args.context)?;
     let request = package_verify::PackageVerificationRequest {
         package_dir: args.input_dir,
@@ -968,24 +976,41 @@ fn verify_package(args: VerifyPackageArgs) -> miette::Result<()> {
         build_environment: context.build_environment,
         forbidden_prefixes: context.forbidden_prefixes,
     };
-    let result = args.package_format.map_or_else(
-        || package_verify::verify(&request),
-        |format| package_verify::verify_with_format(&request, format.into()),
-    );
-    let output = result.map_err(|error| native_error(&error))?;
+    let (output, portable) = if args.portable.requested() {
+        finished_package_readback::run(&request, &args.portable)?
+    } else {
+        let result = args.package_format.map_or_else(
+            || package_verify::verify(&request),
+            |format| package_verify::verify_with_format(&request, format.into()),
+        );
+        (result.map_err(|error| native_error(&error))?, None)
+    };
     match args.format {
-        ResultFormat::Human => aros_common::outputln!(
-            "Native package verified\nSHA-256: {}\nSize: {}",
-            output.archive_sha256,
-            output.archive_size
-        ),
-        ResultFormat::Json => print_json(&serde_json::json!({
-            "schema": "aros-toolchain-producer-stage-v1",
-            "operation": "verify-package",
-            "sha256": output.archive_sha256,
-            "size": output.archive_size,
-            "manifest": output.manifest,
-        }))?,
+        ResultFormat::Human => {
+            aros_common::outputln!(
+                "Native package verified\nSHA-256: {}\nSize: {}",
+                output.archive_sha256,
+                output.archive_size
+            );
+            if portable.is_some() {
+                aros_common::outputln!(
+                    "Portable original-build bytes only; execution, signatures and publication are not authenticated."
+                );
+            }
+        }
+        ResultFormat::Json => {
+            let mut document = serde_json::json!({
+                "schema": "aros-toolchain-producer-stage-v1",
+                "operation": "verify-package",
+                "sha256": output.archive_sha256,
+                "size": output.archive_size,
+                "manifest": output.manifest,
+            });
+            if let Some(portable) = portable {
+                document["finished_candidate"] = portable;
+            }
+            print_json(&document)?;
+        }
     }
     Ok(())
 }

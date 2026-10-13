@@ -22,6 +22,75 @@ use support::{Fixture, BASE_URL, RELEASE_ID};
 
 const RECOVERED_RELEASE_ID: &str = "release-evidence-v2-recovered";
 
+#[test]
+fn process_refuses_sdk_packages_without_complete_generation_and_qualification() {
+    let fixture = Fixture::with_sdk_products(&["core-sdk", "secondary-sdk"]);
+    let _ = fixture.write_selection("sdk-positive", &fixture.selection);
+    // Correct shared package bytes cannot replace the complete host-bound
+    // generation matrix. Actual GNU/LLVM matrix positives use executed fixture
+    // generations in the library's CLI-process probes.
+    assert_unchanged_after_failure(
+        &fixture,
+        &fixture.selection,
+        "sdk-incomplete-generation",
+        "SDK generation selection must exactly cover",
+        &[],
+    );
+
+    let mut missing = fixture.selection.clone();
+    missing.as_object_mut().unwrap().remove("sdk_packages");
+    assert_unchanged_after_failure(
+        &fixture,
+        &missing,
+        "sdk-missing",
+        "SDK package selection must exactly cover",
+        &[],
+    );
+    let mut extra = fixture.selection.clone();
+    extra["sdk_packages"]["unselected-sdk"] = extra["sdk_packages"]["core-sdk"].clone();
+    assert_unchanged_after_failure(
+        &fixture,
+        &extra,
+        "sdk-extra",
+        "SDK package selection must exactly cover",
+        &[],
+    );
+
+    // Successful shared package measurements must not bypass the still-missing
+    // SDK generation/original-job qualification join or create a claim file.
+    let claim_path = fixture.transport_directory.join("sdk-qualification.json");
+    let mut record = record_qualification_command(
+        &fixture,
+        &fixture.selection,
+        "sdk-qualification-blocked",
+        &claim_path,
+    );
+    let _ = fixture.write_selection(
+        "record-sdk-qualification-blocked-selection.json",
+        &fixture.selection,
+    );
+    let release_before = support::snapshot_tree(&fixture.release_directory);
+    let transport_before = support::snapshot_tree(&fixture.transport_directory);
+    let rejected = record.output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
+    let diagnostic: Value = serde_json::from_slice(&rejected.stderr).unwrap();
+    assert_eq!(diagnostic["diagnostics"][0]["code"], "AX0901");
+    assert_eq!(
+        diagnostic["diagnostics"][0]["message"],
+        "SDK generation selection must exactly cover the independently selected release lanes"
+    );
+    assert!(!claim_path.exists());
+    assert_eq!(
+        support::snapshot_tree(&fixture.release_directory),
+        release_before
+    );
+    assert_eq!(
+        support::snapshot_tree(&fixture.transport_directory),
+        transport_before
+    );
+}
+
 fn command(fixture: &Fixture, selection: &Value, name: &str) -> Output {
     let (selection_path, selection_sha256) = fixture.write_selection(name, selection);
     Command::new(env!("CARGO_BIN_EXE_aros"))

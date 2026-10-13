@@ -110,7 +110,7 @@ function(_literal_assert_native_roots build_dir label should_include)
     endif()
     foreach(_command IN LISTS _commands)
         file(READ "${_command}" _contents)
-        foreach(_root GENINCDIR "${_sdk}/aros/stdc" "${_sdk}")
+        foreach(_root GENINCDIR "${_sdk}/aros/posixc" "${_sdk}/aros/stdc" "${_sdk}")
             string(FIND "${_contents}"
                 "-I${build_dir}/declared-build/${_root}]==]" _found)
             if(should_include AND _found LESS 0)
@@ -254,15 +254,22 @@ endif()
 
 foreach(_runtime_case runtime-output-symlink runtime-parent-symlink
         runtime-root-symlink runtime-source-symlink runtime-include-symlink
-        runtime-sysroot-symlink runtime-compiler-symlink runtime-source-disappeared)
+        runtime-sysroot-symlink runtime-compiler-symlink runtime-compiler-bytes
+        runtime-source-disappeared)
     if(_runtime_case STREQUAL "runtime-sysroot-symlink" OR
-       _runtime_case STREQUAL "runtime-compiler-symlink")
+       _runtime_case STREQUAL "runtime-compiler-symlink" OR
+       _runtime_case STREQUAL "runtime-compiler-bytes")
         _literal_configure("${_runtime_case}" TRUE "")
     else()
         _literal_configure(success TRUE "")
     endif()
     set(_runtime_build "${_LITERAL_TEST_BUILD}")
-    if(_runtime_case STREQUAL "runtime-source-disappeared")
+    if(_runtime_case STREQUAL "runtime-compiler-bytes")
+        file(APPEND "${_runtime_build}/selected-compiler-dir/selected-compiler" "changed bytes\n")
+        _literal_verify_target("${_runtime_build}" literal-c-check "runtime-compiler-bytes"
+            "compiler driver bytes changed")
+        continue()
+    elseif(_runtime_case STREQUAL "runtime-source-disappeared")
         file(RENAME "${_runtime_build}/source-real/src/main.c"
             "${_runtime_build}/source-real/src/main.saved")
         _literal_verify_target("${_runtime_build}" literal-c-check "runtime-source-disappeared"
@@ -310,4 +317,4 @@ foreach(_runtime_case runtime-output-symlink runtime-parent-symlink
     _literal_build("${_runtime_build}" "${_runtime_case}" FALSE "${_expected}")
 endforeach()
 
-message(STATUS "Literal object engine: 42 configure cases and 23 build/preflight checks passed")
+message(STATUS "Literal object engine: configure and build/preflight checks passed")

@@ -333,6 +333,24 @@ pub(super) fn select(
 }
 
 impl NativeSdkLinkSelection {
+    /// Exact source preset selected before generation.
+    #[must_use]
+    pub fn source_profile(&self) -> &str {
+        &self.source_profile
+    }
+
+    /// Selected source projection digest; this getter performs no authentication.
+    #[must_use]
+    pub const fn source_tree_sha256(&self) -> &Sha256Digest {
+        &self.source_tree_sha256
+    }
+
+    /// Source-owned consumer contract digest selected before generation.
+    #[must_use]
+    pub const fn contract_sha256(&self) -> &Sha256Digest {
+        &self.contract_sha256
+    }
+
     /// Recheck closed selection claims without opening any recorded root.
     pub(super) fn validate(&self) -> Result<(), ContractError> {
         if self.schema != SELECTION_SCHEMA
@@ -856,7 +874,7 @@ fn validate_receipt_shapes(
     Ok(())
 }
 
-struct BoundedInventory(Vec<ArosToolchainManifestEntry>);
+pub(super) struct BoundedInventory(pub(super) Vec<ArosToolchainManifestEntry>);
 
 impl<'de> Deserialize<'de> for BoundedInventory {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -1041,8 +1059,15 @@ fn validate_trace_and_map<B: AsRef<[u8]>>(
     Ok(())
 }
 
-fn validate_inventory(
+pub(super) fn validate_inventory(
     entries: &[ArosToolchainManifestEntry],
+) -> Result<BTreeMap<String, &ArosToolchainManifestEntry>, ContractError> {
+    validate_inventory_with_limit(entries, MAX_INVENTORY_FILE_BYTES)
+}
+
+pub(super) fn validate_inventory_with_limit(
+    entries: &[ArosToolchainManifestEntry],
+    maximum_file_bytes: u64,
 ) -> Result<BTreeMap<String, &ArosToolchainManifestEntry>, ContractError> {
     if entries.len() > MAX_INVENTORY_ENTRIES {
         return Err(error(
@@ -1092,7 +1117,7 @@ fn validate_inventory(
                 file_bytes = file_bytes
                     .checked_add(entry.size.unwrap_or_default())
                     .ok_or_else(|| error("portable SDK inventory file-byte count overflowed"))?;
-                if file_bytes > MAX_INVENTORY_FILE_BYTES {
+                if file_bytes > maximum_file_bytes {
                     return Err(error("portable SDK inventory exceeds its file-byte limit"));
                 }
             }
@@ -1142,7 +1167,7 @@ fn validate_inventory(
     Ok(index)
 }
 
-fn resolve_inventory_path(
+pub(super) fn resolve_inventory_path(
     relative: &str,
     index: &BTreeMap<String, &ArosToolchainManifestEntry>,
 ) -> Result<String, ContractError> {

@@ -17,6 +17,7 @@ mod ownership_trace;
 
 use macro_edges::add_verified_macro_edges;
 use native_macros::verify_native_macros;
+pub use native_macros::CompileMultiTemplateContract;
 use ownership_trace::attribute_graph_outputs;
 #[cfg(test)]
 use {

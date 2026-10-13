@@ -24,8 +24,9 @@ class WorkspaceGateTests(unittest.TestCase):
         self.log = self.root / "calls.jsonl"
         self.source = self.root / "source"
         self.source.mkdir()
+        # The fake build writes a CLI fixture. Never inherit a real Cargo tree.
         self.env = {key: value for key, value in os.environ.items()
-                    if not key.startswith(("AROS_", "GIT_"))}
+                    if not key.startswith(("AROS_", "GIT_")) and key != "CARGO_TARGET_DIR"}
         self.env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
         self.git("init", "--quiet")
         self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
@@ -53,6 +54,11 @@ class WorkspaceGateTests(unittest.TestCase):
         self.fixtures.mkdir(parents=True)
         for name in ("AhiBuildTest.cmake", "GrubBuildTest.cmake", "NewTest.cmake"):
             (self.fixtures / name).write_text("# inert routing fixture\n")
+        self.package_fixtures = self.fixtures / "package-qualified"
+        self.package_fixtures.mkdir()
+        (self.package_fixtures / "LiteralGnuCompilerRoleTest.cmake").write_text(
+            "# inert package-qualified routing fixture\n"
+        )
         # Quality policy is independently tested by its actual fixtures. These
         # inert commands prove mode routing without invoking compilers/network.
         for name in ("check-development-runtimes.py", "check-environment-contract.py"):
@@ -77,6 +83,17 @@ class WorkspaceGateTests(unittest.TestCase):
             "if (root / 'fail-docs-audit').exists():\n"
             "    sys.exit(31)\n",
         )
+        self.write(
+            "scripts/check-gnu-package-fixture.py",
+            "import json, os, pathlib\n"
+            f"root = pathlib.Path({str(self.root)!r})\n"
+            "with (root / 'calls.jsonl').open('a') as stream:\n"
+            "    stream.write(json.dumps(['check-gnu-package-fixture', "
+            "os.environ.get('AROS_TEST_SOURCE_ROOT'), "
+            "os.environ.get('AROS_TEST_GNU_SOURCE_PRESET'), "
+            "os.environ.get('AROS_TEST_GNU_TOOLCHAIN_ROOT'), "
+            "os.environ.get('AROS_TEST_AROS')]) + '\\n')\n",
+        )
         program = f'''#!{sys.executable}
 import json
 import os
@@ -89,12 +106,26 @@ with (root / "calls.jsonl").open("a") as stream:
 if name in ("cargo", "cmake"):
     with (root / "sources.jsonl").open("a") as stream:
         stream.write(json.dumps({{"tool": name,
+            "args": sys.argv[1:],
             "current": os.environ.get("AROS_TEST_SOURCE_ROOT"),
             "mesa20": os.environ.get("AROS_TEST_MESA20_SOURCE_ROOT"),
-            "mesa26": os.environ.get("AROS_TEST_MESA26_SOURCE_ROOT")}}) + "\\n")
+            "mesa26": os.environ.get("AROS_TEST_MESA26_SOURCE_ROOT"),
+            "sdk_cli": os.environ.get("AROS_TEST_SDK_MATRIX_CLI")}}) + "\\n")
 if name == "uname":
     linux = (root / "linux").exists()
     print(("Linux" if linux else "Darwin") if sys.argv[1:] == ["-s"] else ("x86_64" if linux else "arm64"))
+if (name == "cargo" and sys.argv[1:2] == ["build"]
+        and "-p" in sys.argv and sys.argv[sys.argv.index("-p") + 1] == "aros-cli"
+        and "--bin" in sys.argv and sys.argv[sys.argv.index("--bin") + 1] == "aros"):
+    if (root / "fail-rust-build").exists():
+        sys.exit(23)
+    target_root = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    if not target_root.is_absolute():
+        target_root = Path.cwd() / target_root
+    cli = target_root / "debug" / "aros"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("#!/bin/sh\\nexit 0\\n")
+    cli.chmod(0o755)
 if name == "cargo" and sys.argv[1:2] == ["test"] and (root / "fail-rust").exists():
     sys.exit(23)
 if name == "cmake" and (root / "fail-engine").exists():
@@ -123,10 +154,11 @@ if name == "cmake" and (root / "fail-engine").exists():
         return subprocess.run(["git", "-C", str(self.source), *args],
                               env=self.env, check=True, capture_output=True, text=True, timeout=30)
 
-    def run_gate(self, *args, source=False):
+    def run_gate(self, *args, source=False, extra_env=None):
         self.log.unlink(missing_ok=True)
         (self.root / "sources.jsonl").unlink(missing_ok=True)
         env = {**self.env}
+        env.update(extra_env or {})
         if source:
             env["AROS_TEST_SOURCE_ROOT"] = str(self.source)
             env["AROS_TEST_MESA20_SOURCE_ROOT"] = str(self.legacy_source)
@@ -164,6 +196,9 @@ if name == "cmake" and (root / "fail-engine").exists():
         "test", "--locked", "-p", "aros-common", "-p", "aros-toolchain", "-p", "aros-cli",
         "--all-features", "--test", "*",
     ]
+    SDK_CLI_BUILD_CALL = [
+        "build", "--locked", "-p", "aros-cli", "--all-features", "--bin", "aros",
+    ]
 
     def test_source_stage_keeps_exact_rust_suite_without_cmake(self):
         result = self.run_gate("source-test", source=True)
@@ -179,6 +214,7 @@ if name == "cmake" and (root / "fail-engine").exists():
                 ["test", "--workspace", "--all-features", "--locked",
                  "--exclude", "aros-common", "--exclude", "aros-toolchain",
                  "--exclude", "aros-cli"],
+                self.SDK_CLI_BUILD_CALL,
                 *self.SERIAL_UNIT_CALLS,
                 self.INTEGRATION_CALL,
             ],
@@ -190,6 +226,7 @@ if name == "cmake" and (root / "fail-engine").exists():
         result = self.run_gate("portable-test")
         self.assert_ok(result)
         calls = self.calls("cargo")
+        self.assertIn(self.SDK_CLI_BUILD_CALL, calls)
         for expected in self.SERIAL_UNIT_CALLS:
             self.assertIn(expected, calls)
         self.assertIn(self.INTEGRATION_CALL, calls)
@@ -200,12 +237,74 @@ if name == "cmake" and (root / "fail-engine").exists():
             for package in self.SERIAL_PACKAGES:
                 self.assertIn(package, args)
 
+    def test_sdk_matrix_cli_uses_target_dir_and_reaches_toolchain_tests(self):
+        self.assertNotIn("CARGO_TARGET_DIR", self.env)
+        target_dirs = (
+            (None, self.repo / "target"),
+            ("relative-target", self.repo / "relative-target"),
+            (str(self.root / "absolute-target"), self.root / "absolute-target"),
+        )
+        for configured_target, target_root in target_dirs:
+            with self.subTest(target_dir=configured_target):
+                extra_env = ({} if configured_target is None
+                             else {"CARGO_TARGET_DIR": configured_target})
+                result = self.run_gate("portable-test", extra_env=extra_env)
+                self.assert_ok(result)
+                expected_cli = target_root / "debug" / "aros"
+                self.assertTrue(expected_cli.is_file())
+                self.assertTrue(os.access(expected_cli, os.X_OK))
+                records = [json.loads(line) for line in
+                           (self.root / "sources.jsonl").read_text().splitlines()]
+                toolchain_tests = [
+                    record for record in records
+                    if record["tool"] == "cargo"
+                    and record["args"] == self.SERIAL_UNIT_CALLS[1]
+                ]
+                self.assertEqual(len(toolchain_tests), 1)
+                self.assertEqual(toolchain_tests[0]["sdk_cli"], str(expected_cli.resolve()))
+
+    def test_failed_sdk_cli_build_does_not_create_binary_or_run_tests(self):
+        (self.root / "fail-rust-build").touch()
+        result = self.run_gate("portable-test")
+        self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
+        self.assertEqual(
+            self.calls("cargo"),
+            [
+                ["test", "--workspace", "--all-features", "--locked",
+                 "--exclude", "aros-transpiler", "--exclude", "aros-verify",
+                 "--exclude", "aros-common", "--exclude", "aros-toolchain",
+                 "--exclude", "aros-cli"],
+                self.SDK_CLI_BUILD_CALL,
+            ],
+        )
+        self.assertFalse((self.repo / "target/debug/aros").exists())
+
     def test_explicit_integration_discovers_all_fixtures_including_grub(self):
         result = self.run_gate("test", source=True)
         self.assert_ok(result)
         self.assertEqual(len(self.calls("cmake")), 3)
         self.assertIn("GrubBuildTest.cmake", json.dumps(self.calls("cmake")))
         self.assertIn("3 executed, 0 host-qualified omission(s), 3 discovered", result.stdout)
+        self.assertIn("package-qualified engine fixtures discovered: 1", result.stdout)
+        self.assertNotIn("LiteralGnuCompilerRoleTest.cmake", json.dumps(self.calls("cmake")))
+        self.assertFalse(self.calls("npm"))
+
+    def test_explicit_gnu_package_mode_routes_only_to_its_bounded_helper(self):
+        inputs = {
+            "AROS_TEST_SOURCE_ROOT": str(self.source),
+            "AROS_TEST_GNU_SOURCE_PRESET": "fixture-rv32",
+            "AROS_TEST_GNU_TOOLCHAIN_ROOT": str(self.root / "extracted-package"),
+            "AROS_TEST_AROS": str(self.root / "target/debug/aros"),
+        }
+        result = self.run_gate("gnu-package-test", extra_env=inputs)
+        self.assert_ok(result)
+        self.assertEqual(
+            self.calls("check-gnu-package-fixture"),
+            [[inputs["AROS_TEST_SOURCE_ROOT"], inputs["AROS_TEST_GNU_SOURCE_PRESET"],
+              inputs["AROS_TEST_GNU_TOOLCHAIN_ROOT"], inputs["AROS_TEST_AROS"]]],
+        )
+        self.assertFalse(self.calls("cargo"))
+        self.assertFalse(self.calls("cmake"))
         self.assertFalse(self.calls("npm"))
 
     def test_current_and_historical_sources_remain_distinct_in_every_stage(self):
@@ -266,7 +365,8 @@ if name == "cmake" and (root / "fail-engine").exists():
 
     def test_empty_engine_inventory_cannot_pass_integration(self):
         for fixture in self.fixtures.iterdir():
-            fixture.unlink()
+            if fixture.is_file():
+                fixture.unlink()
         result = self.run_gate("test", source=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no CMake engine contract tests", result.stderr)

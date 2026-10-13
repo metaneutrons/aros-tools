@@ -827,14 +827,28 @@ fn physical_architecture_fixture(
     suffix: &str,
     extra: &str,
 ) -> (Fixture, DependencyGraph, Vec<String>, HookEdge) {
+    physical_architecture_fixture_with_linklib(family, suffix, extra, "")
+}
+
+fn physical_architecture_fixture_with_linklib(
+    family: &'static str,
+    suffix: &str,
+    extra: &str,
+    linklib_files: &str,
+) -> (Fixture, DependencyGraph, Vec<String>, HookEdge) {
     let template = format!(
         "{}{}",
         standard_template(),
         include_str!("../tests/fixtures/architecture_objects.tmpl")
     );
+    let linklib_argument = if linklib_files.is_empty() {
+        String::new()
+    } else {
+        format!(" linklibfiles={linklib_files}")
+    };
     let source = format!(
         "%build_module mainmmake=demo\n\
-         %build_archspecific mainmmake=demo maindir=rom/demo modname=demo arch=esp32p4-riscv files=base\n{extra}"
+         %build_archspecific mainmmake=demo maindir=rom/demo modname=demo arch=esp32p4-riscv files=base{linklib_argument}\n{extra}"
     );
     let mut fixture = fixture_from_text(&[family], &source, &template);
     fixture.projection.architecture_context = fixture.context.clone();
@@ -874,6 +888,43 @@ fn physical_object_parent_omits_only_its_generated_variant_slot() {
     }));
     assert_eq!(graph.arch_endpoint_effects, original_effects);
     assert!(!missing(&graph, &fixture, &roots, &[]).contains(&edge.dependency));
+}
+
+#[test]
+fn architecture_module_objects_pair_with_the_exact_nonempty_client_lane() {
+    let (fixture, mut graph, roots, _) =
+        physical_architecture_fixture_with_linklib("module", "", "", "client_init");
+    let object_effect = graph
+        .arch_endpoint_effects
+        .iter()
+        .find(|effect| effect.endpoint == "demo-esp32p4-riscv")
+        .expect("module object effect");
+    assert!(matches!(
+        &object_effect.data,
+        crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects {
+            linklib_sources,
+            ..
+        } if linklib_sources == &["client_init"]
+    ));
+    bind(&fixture, &mut graph, &roots, &[], &BTreeMap::new()).unwrap();
+
+    let (fixture, mut graph, roots, _) =
+        physical_architecture_fixture_with_linklib("module", "", "", "client_init");
+    let source_effect = graph
+        .arch_endpoint_effects
+        .iter_mut()
+        .find(|effect| effect.endpoint.ends_with("-linklib"))
+        .expect("client-linklib source effect");
+    if let crate::arch_endpoint_effects::ArchEndpointEffectData::ArchClientLinklibSources {
+        linklib_sources,
+        ..
+    } = &mut source_effect.data
+    {
+        linklib_sources.push("forged_source".into());
+    } else {
+        panic!("nonempty client lane has the typed source effect");
+    }
+    assert!(bind(&fixture, &mut graph, &roots, &[], &BTreeMap::new()).is_err());
 }
 
 #[test]

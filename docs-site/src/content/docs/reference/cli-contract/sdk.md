@@ -97,6 +97,16 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros sdk verify` | lock_sha256 | `--lock-sha256` | — | optional | 1 |  |  | — | project_lock |
 | `aros sdk verify` | project_lock | `--project-lock` | — | optional | 1 |  |  | — | release_lock, lock_sha256 |
 | `aros sdk verify` | store | `--store` | — | optional | 1 |  |  | — |  |
+| `aros sdk verify-generation` | inputs_dir | `--inputs-dir` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-generation` | inputs_sha256 | `--inputs-sha256` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-generation` | sdk_id | `--sdk-id` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-generation` | compiler_group | `--compiler-group` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-generation` | compiler_profile | `--compiler-profile` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-generation` | host | `--host` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-generation` | release_id | `--release-id` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-generation` | selection | `--selection` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-generation` | selection_sha256 | `--selection-sha256` | — | required | 1 |  |  | — |  |
+| `aros sdk verify-generation` | forbidden_prefixes | `--forbidden-prefix` | — | required | 1 |  |  | — |  |
 | `aros sdk verify-package` | identity | `--identity` | — | required | 1 |  |  | — |  |
 | `aros sdk verify-package` | identity_sha256 | `--identity-sha256` | — | required | 1 |  |  | — |  |
 | `aros sdk verify-package` | tree_sha256 | `--tree-sha256` | — | required | 1 |  |  | — |  |

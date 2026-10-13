@@ -91,40 +91,61 @@ impl NativeOwnerProjection {
             self.verify_one_arch_endpoint_effect(root, effect, &mut definitions)?;
         }
 
-        // The object-lane candidate is derived only beside the empty
-        // linklib-object candidate from the same exact macro invocation.
+        // The object-lane candidate is derived only beside its exact,
+        // separately typed client-linklib lane from the same invocation.
         for effect in effects {
             if let ArchEndpointEffectData::ArchModuleObjects {
                 mainmmake,
                 tag,
                 module_sources,
+                linklib_sources,
                 ..
             } = &effect.data
             {
                 let paired = effects.iter().filter(|candidate| {
                     candidate.recipe == effect.recipe
                         && candidate.line == effect.line
-                        && matches!(
-                            &candidate.data,
+                        && match &candidate.data {
                             ArchEndpointEffectData::EmptyLinklibAggregate {
                                 mainmmake: pair_main,
                                 tag: pair_tag,
                                 module_sources: pair_sources,
                                 compiler: pair_compiler,
+                            } => {
+                                linklib_sources.is_empty()
+                                    && pair_main == mainmmake
+                                    && pair_tag == tag
+                                    && pair_sources == module_sources
+                                    && (pair_compiler == "target"
+                                        || pair_compiler == "kernel"
+                                            && self
+                                                .architecture_context
+                                                .native_kernel_sources_in_target_role)
+                            }
+                            ArchEndpointEffectData::ArchClientLinklibSources {
+                                mainmmake: pair_main,
+                                tag: pair_tag,
+                                module_sources: pair_sources,
+                                linklib_sources: pair_linklib_sources,
+                                compiler: pair_compiler,
                                 ..
-                            } if pair_main == mainmmake
-                                && pair_tag == tag
-                                && pair_sources == module_sources
-                                && (pair_compiler == "target"
-                                    || pair_compiler == "kernel"
-                                        && self
-                                            .architecture_context
-                                            .native_kernel_sources_in_target_role)
-                        )
+                            } => {
+                                pair_main == mainmmake
+                                    && pair_tag == tag
+                                    && pair_sources == module_sources
+                                    && pair_linklib_sources == linklib_sources
+                                    && (pair_compiler == "target"
+                                        || pair_compiler == "kernel"
+                                            && self
+                                                .architecture_context
+                                                .native_kernel_sources_in_target_role)
+                            }
+                            _ => false,
+                        }
                 });
                 if paired.count() != 1 {
                     return Err(format!(
-                        "architecture object effect lacks its unique empty-linklib proof: {}:{} {}",
+                        "architecture object effect lacks its unique client-linklib lane proof: {}:{} {}",
                         effect.recipe, effect.line, effect.endpoint
                     ));
                 }
@@ -169,16 +190,19 @@ impl NativeOwnerProjection {
         // scope. This prevents a caller from substituting effect data that was
         // not produced by the source invocation at this line.
         let configuration =
-            crate::local_make_includes::inline_native_make_configuration_with_templates(
+            crate::local_make_includes::inline_native_make_configuration_for_context(
                 &source,
                 root,
                 Path::new(recipe),
                 crate::local_make_includes::LocalMakeIncludeLimits::default(),
-                &self.architecture_context.make_include_bindings,
-                &self.architecture_context.generated_make_templates,
+                &self.architecture_context,
             );
         if configuration.issues.is_empty() {
             for fragment in &configuration.fragments {
+                if fragment.is_proven_absent() {
+                    crate::local_make_includes::verify_absent_source_options(root, &fragment.path)?;
+                    continue;
+                }
                 let path = fragment
                     .path
                     .to_str()
@@ -255,7 +279,8 @@ impl NativeOwnerProjection {
         let expected_shapes = match &effect.data {
             ArchEndpointEffectData::SetArchIncludes { .. } => (0, 1),
             ArchEndpointEffectData::ArchModuleObjects { .. }
-            | ArchEndpointEffectData::EmptyLinklibAggregate { .. } => (1, 1),
+            | ArchEndpointEffectData::EmptyLinklibAggregate { .. }
+            | ArchEndpointEffectData::ArchClientLinklibSources { .. } => (1, 1),
         };
         let mut dependency_declarations = 0usize;
         let mut owner_declarations = 0usize;
@@ -796,6 +821,7 @@ fn expected_effect_identity(
             mainmmake,
             tag,
             module_sources,
+            linklib_sources,
             directory,
         } => {
             validate_component(mainmmake)?;
@@ -803,9 +829,12 @@ fn expected_effect_identity(
             if module_sources.is_empty()
                 || module_sources
                     .iter()
-                    .any(|source| validate_component(source).is_err())
+                    .any(|source| validate_relative_path(source).is_err())
             {
                 return Err("architecture module effect has invalid source evidence".into());
+            }
+            for source in linklib_sources {
+                validate_relative_path(source)?;
             }
             let expected_directory = recipe_directory(&effect.recipe);
             if directory.as_str() != expected_directory {
@@ -824,12 +853,43 @@ fn expected_effect_identity(
             if module_sources.is_empty()
                 || module_sources
                     .iter()
-                    .any(|source| validate_component(source).is_err())
+                    .any(|source| validate_relative_path(source).is_err())
             {
                 return Err("empty linklib effect has invalid source evidence".into());
             }
             if !matches!(compiler.as_str(), "host" | "kernel" | "target") {
                 return Err("empty linklib effect has an invalid compiler".into());
+            }
+            ("build_archspecific", mainmmake, tag, "-linklib")
+        }
+        ArchEndpointEffectData::ArchClientLinklibSources {
+            mainmmake,
+            tag,
+            module_sources,
+            linklib_sources,
+            directory,
+            compiler,
+        } => {
+            validate_component(mainmmake)?;
+            validate_component(tag)?;
+            if module_sources.is_empty()
+                || module_sources
+                    .iter()
+                    .any(|source| validate_relative_path(source).is_err())
+                || linklib_sources.is_empty()
+                || linklib_sources
+                    .iter()
+                    .any(|source| validate_relative_path(source).is_err())
+            {
+                return Err(
+                    "architecture client-linklib effect has invalid source evidence".into(),
+                );
+            }
+            if !matches!(compiler.as_str(), "host" | "kernel" | "target") {
+                return Err("architecture client-linklib effect has an invalid compiler".into());
+            }
+            if directory.as_str() != recipe_directory(&effect.recipe) {
+                return Err("architecture client-linklib directory differs from its recipe".into());
             }
             ("build_archspecific", mainmmake, tag, "-linklib")
         }
@@ -898,10 +958,47 @@ fn verify_frame_arguments(
                 Some("kernel")
             }
             ArchEndpointEffectData::ArchModuleObjects { .. } => Some("target"),
-            ArchEndpointEffectData::EmptyLinklibAggregate { compiler, .. } => {
+            ArchEndpointEffectData::EmptyLinklibAggregate { compiler, .. }
+            | ArchEndpointEffectData::ArchClientLinklibSources { compiler, .. } => {
                 Some(compiler.as_str())
             }
             ArchEndpointEffectData::SetArchIncludes { .. } => None,
+        };
+        let expected_linklib_sources = match &effect.data {
+            ArchEndpointEffectData::ArchModuleObjects {
+                linklib_sources, ..
+            }
+            | ArchEndpointEffectData::ArchClientLinklibSources {
+                linklib_sources, ..
+            } => linklib_sources.as_slice(),
+            ArchEndpointEffectData::EmptyLinklibAggregate { .. } => &[],
+            ArchEndpointEffectData::SetArchIncludes { .. } => {
+                return Err("build_archspecific effect has the wrong data kind".into())
+            }
+        };
+        let mut resolved_linklib_sources = Vec::new();
+        for source in arg("linklibfiles")?.split_whitespace() {
+            if !resolved_linklib_sources
+                .iter()
+                .any(|previous: &String| previous == source)
+            {
+                resolved_linklib_sources.push(source.to_owned());
+            }
+        }
+        // GenMF substitutes macro parameters, not GNU Make variables. A
+        // source expression such as $(STDC_LINKLIB_FILES) remains an expression
+        // in this frame. Its finite semantic list was independently rederived
+        // from the sealed source above; additionally require this exact raw
+        // expression to remain bound to the verified physical invocation.
+        let source_linklib_expression = frame
+            .arguments
+            .get("linklibfiles")
+            .and_then(Option::as_deref)
+            .unwrap_or("");
+        let linklib_sources_match = if arg("linklibfiles")?.contains('$') {
+            arg("linklibfiles")? == source_linklib_expression
+        } else {
+            resolved_linklib_sources.as_slice() == expected_linklib_sources
         };
         if mainmmake.is_empty()
             || tag.is_empty()
@@ -909,17 +1006,26 @@ fn verify_frame_arguments(
             || arg("compiler")? != target_compiler.unwrap_or_default()
             || arg("maindir")?.trim().is_empty()
             || !arg("cxxfiles")?.trim().is_empty()
-            || !arg("linklibfiles")?.trim().is_empty()
+            || !linklib_sources_match
             || !arg("linklibobjs")?.trim().is_empty()
             || (arg("files")?.trim().is_empty() && arg("asmfiles")?.trim().is_empty())
         {
             return Err(
-                "build_archspecific frame arguments do not prove an empty linklib lane".into(),
+                format!("build_archspecific frame arguments do not prove the exact linklib lane \
+                    (compiler_matches={}, maindir_present={}, cxx_empty={}, linklib_sources_match={}, \
+                    linklib_objects_empty={}, module_sources_present={})",
+                    arg("compiler")? == target_compiler.unwrap_or_default(),
+                    !arg("maindir")?.trim().is_empty(),
+                    arg("cxxfiles")?.trim().is_empty(),
+                    linklib_sources_match,
+                    arg("linklibobjs")?.trim().is_empty(),
+                    !arg("files")?.trim().is_empty() || !arg("asmfiles")?.trim().is_empty()),
             );
         }
         let (effect_mainmmake, effect_tag, declaration_target) = match &effect.data {
             ArchEndpointEffectData::ArchModuleObjects { mainmmake, tag, .. }
-            | ArchEndpointEffectData::EmptyLinklibAggregate { mainmmake, tag, .. } => {
+            | ArchEndpointEffectData::EmptyLinklibAggregate { mainmmake, tag, .. }
+            | ArchEndpointEffectData::ArchClientLinklibSources { mainmmake, tag, .. } => {
                 (mainmmake.as_str(), tag.as_str(), effect.endpoint.as_str())
             }
             ArchEndpointEffectData::SetArchIncludes { .. } => {
@@ -1114,6 +1220,72 @@ fn recipe_directory(recipe: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn make_list_expression_stays_bound_to_its_physical_genmf_argument() {
+        use super::*;
+        let values: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::from([
+                ("mainmmake".into(), "compiler-stdc".into()),
+                ("maindir".into(), "compiler/crt/stdc".into()),
+                ("arch".into(), "x86_64".into()),
+                ("compiler".into(), "target".into()),
+                ("files".into(), "fenv".into()),
+                ("asmfiles".into(), "math/e_fmod".into()),
+                ("cxxfiles".into(), String::new()),
+                ("linklibfiles".into(), "$(CLIENT_FILES)".into()),
+                ("linklibobjs".into(), String::new()),
+            ]);
+        let frame = MacroExpansionFrame {
+            name: "build_archspecific".into(),
+            template_path: "config/make.tmpl".into(),
+            definition_line: 1,
+            invocation: None,
+            arguments: values
+                .iter()
+                .map(|(key, value)| (key.clone(), Some(value.clone())))
+                .collect(),
+            resolved_arguments: values,
+        };
+        let effect = ArchEndpointEffect {
+            recipe: "arch/x86_64-all/stdc/mmakefile.src".into(),
+            line: 1,
+            endpoint: "compiler-stdc-x86_64".into(),
+            dependencies: vec!["compiler-stdc-x86_64-includes".into()],
+            data: ArchEndpointEffectData::ArchModuleObjects {
+                mainmmake: "compiler-stdc".into(),
+                tag: "x86_64".into(),
+                module_sources: vec!["fenv".into(), "math/e_fmod".into()],
+                linklib_sources: vec!["__stdc_mathinit".into()],
+                directory: "arch/x86_64-all/stdc".into(),
+            },
+        };
+        let physical = "%build_archspecific mainmmake=compiler-stdc maindir=compiler/crt/stdc arch=x86_64 files=fenv asmfiles=math/e_fmod linklibfiles=$(CLIENT_FILES)\n";
+        assert!(verify_invocation_arguments(physical, 1, "build_archspecific", &frame).is_ok());
+        assert!(verify_frame_arguments(&frame, &effect, "build_archspecific", false).is_ok());
+        assert!(expected_effect_identity(&effect).is_ok());
+        let mut changed = frame.clone();
+        changed
+            .resolved_arguments
+            .insert("linklibfiles".into(), "$(OTHER_FILES)".into());
+        assert!(verify_frame_arguments(&changed, &effect, "build_archspecific", false).is_err());
+        changed
+            .arguments
+            .insert("linklibfiles".into(), Some("$(OTHER_FILES)".into()));
+        assert!(verify_invocation_arguments(physical, 1, "build_archspecific", &changed).is_err());
+        let mut literal = frame;
+        literal
+            .resolved_arguments
+            .insert("linklibfiles".into(), "different".into());
+        assert!(verify_frame_arguments(&literal, &effect, "build_archspecific", false).is_err());
+        let mut traversal = effect;
+        if let ArchEndpointEffectData::ArchModuleObjects { module_sources, .. } =
+            &mut traversal.data
+        {
+            module_sources.push("math/../escape".into());
+        }
+        assert!(expected_effect_identity(&traversal).is_err());
+    }
+
     use super::{
         verify_direct_source_dependency, verify_macro_definition, GET_ARCHINCLUDES_SHA256,
     };

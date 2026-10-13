@@ -13,6 +13,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 
+pub mod arm;
 pub mod riscv;
 
 /// ELF class, which fixes the width of every offset below.

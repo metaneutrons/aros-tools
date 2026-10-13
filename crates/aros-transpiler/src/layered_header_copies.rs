@@ -169,13 +169,12 @@ pub(crate) fn collect(
         }
     };
     let physical_joined = crate::parser::join_continuations(&physical_source);
-    let bound_source = crate::local_make_includes::inline_native_make_configuration_with_templates(
+    let bound_source = crate::local_make_includes::inline_native_make_configuration_for_context(
         &physical_joined,
         &source_root,
         Path::new(&makefile_relative),
         crate::local_make_includes::LocalMakeIncludeLimits::default(),
-        &target.make_include_bindings,
-        &target.generated_make_templates,
+        target,
     );
     let supplied_joined = crate::parser::join_continuations(content);
     let source_matches =

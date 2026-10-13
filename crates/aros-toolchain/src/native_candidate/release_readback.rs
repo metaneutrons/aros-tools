@@ -18,6 +18,8 @@ use crate::release_attestation_manifest_v2::{
 use crate::release_checksums_v2::{verify_final_checksums_v2, FinalChecksumsReadbackV2};
 use crate::release_index::{compare_package_sets, PackageComparisonReport};
 use crate::release_index_v2::{NativeReleaseArtifactV2, PROVENANCE_NAME};
+#[cfg(unix)]
+use crate::release_index_v2_readback::IndexedSdkPackageV2;
 use crate::release_index_v2_readback::{
     validate_directory_path, IndexedPackageReadbackRequestV2, MAX_METADATA_BYTES,
 };
@@ -75,6 +77,8 @@ pub struct ReleaseBuildReadbackV2 {
     checksums: FinalChecksumsReadbackV2,
     subject_manifest_sha256: Sha256Digest,
     provenance_sha256: Sha256Digest,
+    #[cfg(unix)]
+    sdk_packages: Vec<IndexedSdkPackageV2>,
 }
 
 impl ReleaseBuildReadbackV2 {
@@ -82,6 +86,14 @@ impl ReleaseBuildReadbackV2 {
     #[must_use]
     pub fn lanes(&self) -> &[ReleaseBuildLaneReadbackV2] {
         &self.lanes
+    }
+
+    /// Fully measured indexed SDK packages. This records byte consistency only;
+    /// it does not establish SDK generation, origin, authenticity or publication.
+    #[must_use]
+    #[cfg(unix)]
+    pub fn sdk_packages(&self) -> &[IndexedSdkPackageV2] {
+        &self.sdk_packages
     }
 
     /// Exact final checksum document measured during this read-back.
@@ -200,10 +212,18 @@ pub fn readback_release_builds_v2(
     )?;
     let final_checksums =
         verify_final_checksums_v2(&request.packages.directory, &request.packages.index)?;
+    #[cfg(unix)]
+    let sdk_packages_unchanged = sdk_packages_match(
+        initial_subjects.sdk_packages(),
+        final_subjects.sdk_packages(),
+    );
+    #[cfg(not(unix))]
+    let sdk_packages_unchanged = true;
     if final_subjects.sha256() != initial_subjects.sha256()
         || final_subjects.members() != initial_subjects.members()
         || final_checksums.checksums_sha256() != checksums.checksums_sha256()
         || final_checksums.members() != checksums.members()
+        || !sdk_packages_unchanged
     {
         return Err(error("release build final bytes changed during read-back"));
     }
@@ -238,7 +258,24 @@ pub fn readback_release_builds_v2(
         checksums,
         subject_manifest_sha256: final_subjects.sha256().clone(),
         provenance_sha256,
+        #[cfg(unix)]
+        sdk_packages: final_subjects.sdk_packages().to_vec(),
     })
+}
+
+#[cfg(unix)]
+fn sdk_packages_match(
+    initial: &[IndexedSdkPackageV2],
+    final_packages: &[IndexedSdkPackageV2],
+) -> bool {
+    initial.len() == final_packages.len()
+        && initial
+            .iter()
+            .zip(final_packages)
+            .all(|(initial, final_package)| {
+                initial.lock() == final_package.lock()
+                    && initial.package() == final_package.package()
+            })
 }
 
 // Reobserve exact bytes already parsed by the complete factory. This internal

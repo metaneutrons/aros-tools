@@ -7,8 +7,9 @@ use super::{
 };
 use crate::dirs::DirVars;
 use crate::make_expr::{evaluate_make_expr, MakeExprContext};
-use crate::make_vars::VarScope;
+use crate::make_vars::{strip_make_comment, variable_assignment, VarScope};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,19 @@ const BUILD_PROG_SHA256: &str = "e276e953080db3a15e844057a5d2454c0c537da800904c9
 
 pub(super) const COMPILE_MULTI_SHA256: &str =
     "a55875ba53ff3445e8083c15f07348e7c294cf08c42235b142caf6af9ee50bc7";
+
+pub(super) const BUILD_ARCHSPECIFIC_SHA256: &str =
+    "f3f12399d993765cff710f8f37caba7ffb0eb240f02ca1c93a6d619a208c7db8";
+
+const BUILDID_SHA256: &str = "687e8f395eaf67e61c8e982e3463c0ef1f4ea5560d43541fc62130aad7cd504b";
+
+const COMMON_SHA256: &str = "abe606c53628bc8e8cda94bc822d326ffeb78937e6a610dc2c7706031d478ead";
+
+const COMMON_MAKE_TAIL_SHA256: &str =
+    "a41f7759ce714a16dbf0627bc3e392f68b5ee70024a2a72d561f5e14bd895cf0";
+
+const COMMON_GENMODULE_DEPS_SHA256: &str =
+    "1107a4ed21b886f2d04decfcaca9c4b3e510f0f0340cdb03aad10ba6b750c653";
 
 const ASSEMBLE_MULTI_SHA256: &str =
     "b8718f311b850bb70a5c20a9ab5c703ee9e96858d15956b255bc065e7affeb36";
@@ -43,6 +57,11 @@ const LINK_Q_SHA256: &str = "3b10e411a1974ff5c0b29b038e9db3a916826ce4abf8b682d17
 
 const MKDEPEND_Q_SHA256: &str = "3e6afefd7813acc49f0c80df32b99f9ae3e0976420f04ffbf6be7872d2ff1c66";
 
+const MKDEP_SCRIPT_SHA256: &str =
+    "b1c53e301d009b32540090f13cca94bdaa0d4ba5ea76ae5edb076ee8a0b9dd11";
+
+const MAX_MKDEP_SCRIPT_BYTES: usize = 64 * 1024;
+
 const MKDIR_Q_SHA256: &str = "9c2abcb165988c8032728270f471abf11fd80b3ac2b3c64841b2b8ff8126c5f9";
 
 const RULE_COMPILE_CXX_MULTI_SHA256: &str =
@@ -62,6 +81,7 @@ const STRIP_Q_SHA256: &str = "94bf874bbdf35a70dc73feaba1f3f562126f27c27a47bf46bf
 const TRUSTED_TEMPLATE_CLOSURE_REFERENCES: &[&str] = &[
     "add_compilerlinkflags",
     "assemble_q",
+    "buildid",
     "compile_q",
     "fileactionmsg",
     "gen_archspecificrules",
@@ -123,6 +143,443 @@ pub(super) struct MacroArgumentSpec {
     pub(super) required: bool,
 }
 
+/// Source-template proof for the two closed GenMF calls needed by a
+/// compile-multi source projection. The parsed arguments remain raw Make
+/// expressions; callers may expand them only in their own invocation scope.
+#[must_use]
+#[derive(Debug)]
+pub struct CompileMultiTemplateContract {
+    compile_multi: MacroContract,
+    include_deps: MacroContract,
+    build_archspecific: Result<MacroContract, String>,
+    build_archspecific_variable_effects: Result<Vec<TemplateVariableEffect>, String>,
+    common_variable_effects: Result<Vec<TemplateVariableEffect>, String>,
+}
+
+#[derive(Debug, Clone)]
+struct TemplateVariableEffect {
+    prefix: String,
+    dynamic_suffix: bool,
+}
+
+impl CompileMultiTemplateContract {
+    /// Reads one bounded, no-follow native template set and verifies the exact
+    /// compile-multi and dependency-include contracts plus the mkdep script.
+    /// Neighbor contracts are retained as deferred proof results so ordinary
+    /// compile-multi sources do not depend on unrelated arch/common macros.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the source root, template closure, or mkdep script
+    /// cannot be read and verified within the configured bounds.
+    pub(crate) fn read(root: &Path) -> Result<Self, String> {
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|error| format!("could not resolve source root: {error}"))?;
+        let (template, definitions) =
+            read_native_template_set(&canonical_root).ok_or_else(|| {
+                "native Make template set is unavailable or outside its limits".to_owned()
+            })?;
+
+        let compile_multi =
+            verified_macro_contract(&template, "rule_compile_multi", COMPILE_MULTI_SHA256)
+                .ok_or_else(|| {
+                    "rule_compile_multi does not match the trusted source contract".to_owned()
+                })?;
+        if !verified_macro_closure("rule_compile_multi", &definitions) {
+            return Err("rule_compile_multi helper closure is not fully verified".to_owned());
+        }
+
+        let include_deps = verified_macro_contract(&template, "include_deps", INCLUDE_DEPS_SHA256)
+            .ok_or_else(|| "include_deps does not match the trusted source contract".to_owned())?;
+        if !verified_macro_closure("include_deps", &definitions) {
+            return Err("include_deps helper closure is not fully verified".to_owned());
+        }
+
+        let (build_archspecific, build_archspecific_variable_effects) =
+            match verified_build_archspecific(&template, &definitions) {
+                Ok((contract, effects)) => (Ok(contract), Ok(effects)),
+                Err(error) => (Err(error.clone()), Err(error)),
+            };
+        let common_variable_effects =
+            verified_definition_effects(&template, &definitions, "common", COMMON_SHA256);
+
+        verify_mkdep_script(&canonical_root)?;
+        Ok(Self {
+            compile_multi,
+            include_deps,
+            build_archspecific,
+            build_archspecific_variable_effects,
+            common_variable_effects,
+        })
+    }
+
+    /// Parses closed GenMF arguments and supplies only verified source
+    /// defaults. Values are returned unevaluated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed arguments, unknown or repeated names, or
+    /// missing required fields.
+    pub(crate) fn arguments(&self, raw: &str) -> Result<BTreeMap<String, String>, String> {
+        closed_contract_arguments(raw, &self.compile_multi)
+    }
+
+    /// Parses closed GenMF arguments for `%include_deps` and supplies only
+    /// verified source defaults. Values are returned unevaluated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed arguments, unknown or repeated names, or
+    /// missing required fields.
+    pub(crate) fn include_arguments(&self, raw: &str) -> Result<BTreeMap<String, String>, String> {
+        closed_contract_arguments(raw, &self.include_deps)
+    }
+
+    /// Parses the verified arch-specific build context without expanding its
+    /// values. The caller must bind every value at the physical invocation.
+    pub(crate) fn build_archspecific_arguments(
+        &self,
+        raw: &str,
+    ) -> Result<BTreeMap<String, String>, String> {
+        closed_contract_arguments(raw, self.build_archspecific.as_ref().map_err(Clone::clone)?)
+    }
+
+    /// Verifies the exact files included by `%common` and proves their
+    /// assignment names do not overlap the compile-multi namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either source file is missing, unsafe, oversized,
+    /// or differs from the reviewed bytes.
+    pub(crate) fn prove_common_namespace_disjoint(
+        &self,
+        root: &Path,
+        namespace: &str,
+        include_build_archspecific: bool,
+    ) -> Result<(), String> {
+        let make_tail = read_verified_raw_file(
+            root,
+            Path::new("config/make.tail"),
+            COMMON_MAKE_TAIL_SHA256,
+            MAX_TEMPLATE_BYTES,
+            "common make.tail",
+        )?;
+        let genmodule_deps = read_verified_raw_file(
+            root,
+            Path::new("tools/genmodule/Makefile.deps"),
+            COMMON_GENMODULE_DEPS_SHA256,
+            MAX_TEMPLATE_BYTES,
+            "common Makefile.deps",
+        )?;
+        let make_tail = std::str::from_utf8(&make_tail)
+            .map_err(|error| format!("common make.tail is not UTF-8: {error}"))?;
+        let genmodule_deps = std::str::from_utf8(&genmodule_deps)
+            .map_err(|error| format!("common Makefile.deps is not UTF-8: {error}"))?;
+        let mut effects = self
+            .common_variable_effects
+            .as_ref()
+            .map_err(Clone::clone)?
+            .clone();
+        if include_build_archspecific {
+            effects.extend(
+                self.build_archspecific_variable_effects
+                    .as_ref()
+                    .map_err(Clone::clone)?
+                    .iter()
+                    .cloned(),
+            );
+        }
+        effects.extend(template_variable_effects(
+            &make_tail.lines().map(str::to_owned).collect::<Vec<_>>(),
+        ));
+        effects.extend(template_variable_effects(
+            &genmodule_deps
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        ));
+        let compile_variables = compile_multi_variable_names(namespace);
+        let reserved_prefixes = reserved_variable_prefixes(&effects);
+        if let Some(prefix) = reserved_prefixes.iter().find(|prefix| {
+            compile_variables
+                .iter()
+                .any(|name| name.starts_with(&format!("{prefix}_")))
+        }) {
+            return Err(format!(
+                "compile-multi namespace overlaps verified common/build namespace {prefix}"
+            ));
+        }
+        if let Some(effect) = effects.iter().find(|effect| {
+            compile_variables.iter().any(|name| {
+                if effect.dynamic_suffix {
+                    name.starts_with(&effect.prefix)
+                } else {
+                    name == &effect.prefix
+                }
+            })
+        }) {
+            return Err(format!(
+                "compile-multi namespace overlaps verified common/build variables at {}",
+                effect.prefix
+            ));
+        }
+        Ok(())
+    }
+
+    /// GenMF scans raw source lines before Make comments/control are read.
+    /// Unknown inline forms are refused rather than treated as inert text.
+    pub(crate) fn has_inline_reference(line: &str) -> bool {
+        has_inline_genmf_template_reference(line, None)
+    }
+}
+
+fn closed_contract_arguments(
+    raw: &str,
+    contract: &MacroContract,
+) -> Result<BTreeMap<String, String>, String> {
+    let supplied = closed_macro_arguments(raw)
+        .ok_or_else(|| "arguments do not match the closed GenMF name=value grammar".to_owned())?;
+    if supplied.keys().any(|key| !contract.contains_key(key)) {
+        return Err("arguments contain a name outside the verified source contract".to_owned());
+    }
+    if contract
+        .iter()
+        .any(|(key, spec)| spec.required && !supplied.contains_key(key))
+    {
+        return Err("arguments omit a required verified source field".to_owned());
+    }
+
+    Ok(contract
+        .iter()
+        .map(|(key, spec)| {
+            (
+                key.clone(),
+                supplied
+                    .get(key)
+                    .cloned()
+                    .or_else(|| spec.default.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect())
+}
+
+fn verified_build_archspecific(
+    template: &str,
+    definitions: &NativeMacroDefinitions,
+) -> Result<(MacroContract, Vec<TemplateVariableEffect>), String> {
+    let contract =
+        verified_macro_contract(template, "build_archspecific", BUILD_ARCHSPECIFIC_SHA256)
+            .ok_or_else(|| {
+                "build_archspecific does not match the trusted source contract".to_owned()
+            })?;
+    let closure = verified_macro_closure_members("build_archspecific", definitions)
+        .ok_or_else(|| "build_archspecific helper closure is not fully verified".to_owned())?;
+    let mut effects = Vec::new();
+    for name in closure {
+        let Some(matches) = definitions.get(&name) else {
+            return Err(format!(
+                "{name} helper is missing from the verified template set"
+            ));
+        };
+        if matches.len() != 1 {
+            return Err(format!("{name} has competing template definitions"));
+        }
+        effects.extend(template_variable_effects(&matches[0].body_lines));
+    }
+    Ok((contract, effects))
+}
+
+fn verified_definition_effects(
+    template: &str,
+    definitions: &NativeMacroDefinitions,
+    name: &str,
+    expected_sha256: &str,
+) -> Result<Vec<TemplateVariableEffect>, String> {
+    if !verified_macro_definition(template, name, expected_sha256) {
+        return Err(format!("{name} does not match the trusted source contract"));
+    }
+    let Some(matches) = definitions.get(name) else {
+        return Err(format!(
+            "{name} helper is missing from the verified template set"
+        ));
+    };
+    if matches.len() != 1 {
+        return Err(format!("{name} has competing template definitions"));
+    }
+    Ok(template_variable_effects(&matches[0].body_lines))
+}
+
+fn verify_mkdep_script(root: &Path) -> Result<(), String> {
+    let path = root.join("scripts/mkdep");
+    let mut file = aros_common::open_regular_file_nofollow(&path)
+        .map_err(|error| format!("could not open the source mkdep script safely: {error}"))?;
+    let before = file
+        .metadata()
+        .map_err(|error| format!("could not inspect the source mkdep script: {error}"))?;
+    if !before.is_file() || before.len() > MAX_MKDEP_SCRIPT_BYTES as u64 {
+        return Err("source mkdep script is not a bounded regular file".to_owned());
+    }
+
+    let expected_len = usize::try_from(before.len())
+        .map_err(|_| "source mkdep script size is outside the supported range".to_owned())?;
+    let mut bytes = Vec::with_capacity(expected_len);
+    file.by_ref()
+        .take(MAX_MKDEP_SCRIPT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read the source mkdep script: {error}"))?;
+    let after = file
+        .metadata()
+        .map_err(|error| format!("could not recheck the source mkdep script: {error}"))?;
+    if bytes.len() > MAX_MKDEP_SCRIPT_BYTES
+        || bytes.len() != expected_len
+        || after.len() != before.len()
+        || !after.is_file()
+    {
+        return Err("source mkdep script changed or exceeded its byte limit".to_owned());
+    }
+    if aros_common::sha256_bytes(&bytes).as_str() != MKDEP_SCRIPT_SHA256 {
+        return Err("source mkdep script does not match its trusted raw hash".to_owned());
+    }
+    Ok(())
+}
+
+fn read_verified_raw_file(
+    root: &Path,
+    relative_path: &Path,
+    expected_sha256: &str,
+    max_bytes: usize,
+    description: &str,
+) -> Result<Vec<u8>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("could not resolve source root for {description}: {error}"))?;
+    let path = root.join(relative_path);
+    let mut file = aros_common::open_regular_file_nofollow(&path)
+        .map_err(|error| format!("{description} is unavailable or unsafe: {error}"))?;
+    let before = file
+        .metadata()
+        .map_err(|error| format!("could not inspect {description}: {error}"))?;
+    if !before.is_file() || before.len() > max_bytes as u64 {
+        return Err(format!("{description} is not a bounded regular file"));
+    }
+    let expected_len = usize::try_from(before.len())
+        .map_err(|_| format!("{description} size is outside the supported range"))?;
+    let mut bytes = Vec::with_capacity(expected_len);
+    file.by_ref()
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read {description}: {error}"))?;
+    let after = file
+        .metadata()
+        .map_err(|error| format!("could not recheck {description}: {error}"))?;
+    if bytes.len() > max_bytes
+        || bytes.len() != expected_len
+        || after.len() != before.len()
+        || !after.is_file()
+    {
+        return Err(format!("{description} changed or exceeded its byte limit"));
+    }
+    if aros_common::sha256_bytes(&bytes).as_str() != expected_sha256 {
+        return Err(format!("{description} does not match its trusted raw hash"));
+    }
+    Ok(bytes)
+}
+
+fn template_variable_effects(lines: &[String]) -> Vec<TemplateVariableEffect> {
+    let mut effects = BTreeSet::<(String, bool)>::new();
+    for raw in lines {
+        let line = strip_make_comment(raw).trim();
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with('%')
+            || ["ifeq", "ifneq", "ifdef", "ifndef", "else", "endif"]
+                .iter()
+                .any(|directive| line == *directive || line.starts_with(&format!("{directive} ")))
+        {
+            continue;
+        }
+        if let Some((_, target_specific)) = line.split_once(':') {
+            if let Some((name, _, _)) = variable_assignment(target_specific) {
+                effects.insert((name.to_owned(), false));
+                continue;
+            }
+        }
+        if let Some((name, _, _)) = variable_assignment(line) {
+            effects.insert((name.to_owned(), false));
+            continue;
+        }
+        let Some((at, _)) = assignment_operator(line) else {
+            continue;
+        };
+        let lhs = line[..at].trim();
+        let prefix = lhs
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })
+            .collect::<String>();
+        if !prefix.is_empty() {
+            effects.insert((prefix, true));
+        }
+    }
+    effects
+        .into_iter()
+        .map(|(prefix, dynamic_suffix)| TemplateVariableEffect {
+            prefix,
+            dynamic_suffix,
+        })
+        .collect()
+}
+
+fn assignment_operator(line: &str) -> Option<(usize, &'static str)> {
+    ["::=", ":=", "+=", "?=", "="]
+        .into_iter()
+        .filter_map(|operator| line.find(operator).map(|at| (at, operator)))
+        .min_by_key(|(at, _)| *at)
+}
+
+fn compile_multi_variable_names(namespace: &str) -> BTreeSet<String> {
+    let mut names = std::iter::once("CMD".to_owned()).collect::<BTreeSet<_>>();
+    for suffix in [
+        "MC_SRCWILDCARD",
+        "MC_TARGETS",
+        "MC_DTARGETS",
+        "MC_TGTWILDCARD",
+        "MC_SRCDIR",
+        "MC_BASEDIRS",
+        "MC_DIRS",
+        "MC_CPPFLAGS",
+        "MC_EXTRA_CPPFLAGS",
+        "CFLAGS",
+        "DFLAGS",
+        "LINK",
+        "LD_OPTS",
+        "LDFLAGS",
+        "STRIP",
+        "ASSEMBLER",
+        "IQUOTE",
+        "IQUOTE_END",
+    ] {
+        names.insert(format!("{namespace}_{suffix}"));
+    }
+    names
+}
+
+fn reserved_variable_prefixes(effects: &[TemplateVariableEffect]) -> BTreeSet<String> {
+    let mut dynamic_components = BTreeMap::<String, usize>::new();
+    for effect in effects.iter().filter(|effect| effect.dynamic_suffix) {
+        if let Some((prefix, _)) = effect.prefix.split_once('_') {
+            *dynamic_components.entry(prefix.to_owned()).or_default() += 1;
+        }
+    }
+    dynamic_components
+        .into_iter()
+        .filter_map(|(prefix, count)| (count >= 2).then_some(prefix))
+        .collect()
+}
+
 pub(super) fn verify_native_macros(root: &Path) -> VerifiedMacros {
     let Some((template, definitions)) = read_native_template_set(root) else {
         return VerifiedMacros::default();
@@ -142,26 +599,7 @@ pub(super) fn verified_macro(template: &str, name: &str, expected_sha256: &str) 
 }
 
 fn read_native_make_template(root: &Path) -> Option<String> {
-    let path = root.join("config/make.tmpl");
-    // This is diagnostic attribution, but the hash-bound source read must
-    // still be bounded and must not accept a symlink in place of the template.
-    let metadata = fs::symlink_metadata(&path).ok()?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_TEMPLATE_BYTES as u64 {
-        return None;
-    }
-    let file = fs::File::open(path).ok()?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    if file
-        .take(MAX_TEMPLATE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .is_err()
-        || bytes.len() > MAX_TEMPLATE_BYTES
-    {
-        return None;
-    }
-    String::from_utf8(bytes)
-        .ok()
-        .map(|template| template.replace("\r\n", "\n"))
+    read_included_native_template(root, Path::new("make.tmpl"))
 }
 
 fn read_native_template_set(root: &Path) -> Option<(String, NativeMacroDefinitions)> {
@@ -214,32 +652,24 @@ fn read_included_native_template(root: &Path, relative_path: &Path) -> Option<St
     if !safe_template_relative_path(relative_path) {
         return None;
     }
-    let config = root.join("config");
-    let mut path = config.clone();
-    for component in relative_path.components() {
-        let std::path::Component::Normal(part) = component else {
-            return None;
-        };
-        path.push(part);
-        let metadata = fs::symlink_metadata(&path).ok()?;
-        let is_final = path == config.join(relative_path);
-        if is_final {
-            if !metadata.file_type().is_file() || metadata.len() > MAX_TEMPLATE_BYTES as u64 {
-                return None;
-            }
-        } else if !metadata.file_type().is_dir() {
-            return None;
-        }
+    // Resolve only the caller's source root (which may have a platform alias
+    // such as /var). Open every component below it without following links.
+    // A prior path metadata check followed by File::open is not sufficient:
+    // either the leaf or its config directory could be replaced in between.
+    let root = root.canonicalize().ok()?;
+    let file =
+        aros_common::open_regular_file_nofollow(&root.join("config").join(relative_path)).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_TEMPLATE_BYTES as u64 {
+        return None;
     }
-
-    let metadata = fs::symlink_metadata(&path).ok()?;
-    let file = fs::File::open(path).ok()?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     if file
         .take(MAX_TEMPLATE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .is_err()
         || bytes.len() > MAX_TEMPLATE_BYTES
+        || bytes.len() as u64 != metadata.len()
     {
         return None;
     }
@@ -342,10 +772,20 @@ fn native_define_name(line: &str) -> Option<&str> {
 }
 
 fn verified_macro_closure(root_name: &str, definitions: &NativeMacroDefinitions) -> bool {
+    verified_macro_closure_members(root_name, definitions).is_some()
+}
+
+fn verified_macro_closure_members(
+    root_name: &str,
+    definitions: &NativeMacroDefinitions,
+) -> Option<BTreeSet<String>> {
     let mut verifier = MacroClosureVerifier::new(definitions, |name| {
         trusted_template_hash(name).map(str::to_owned)
     });
-    verifier.visit(root_name, 0)
+    if !verifier.visit(root_name, 0) {
+        return None;
+    }
+    Some(verifier.visited)
 }
 
 #[cfg(test)]
@@ -516,6 +956,8 @@ fn trusted_template_hash(name: &str) -> Option<&'static str> {
     Some(match name {
         "add_compilerlinkflags" => ADD_COMPILERLINKFLAGS_SHA256,
         "assemble_q" => ASSEMBLE_Q_SHA256,
+        "build_archspecific" => BUILD_ARCHSPECIFIC_SHA256,
+        "buildid" => BUILDID_SHA256,
         "build_prog" => BUILD_PROG_SHA256,
         "compile_q" => COMPILE_Q_SHA256,
         "fileactionmsg" => FILEACTIONMSG_SHA256,
@@ -565,6 +1007,32 @@ fn verified_macro_contract(
     parse_macro_header(&lines, start, name)
 }
 
+fn verified_macro_definition(template: &str, name: &str, expected_sha256: &str) -> bool {
+    let lines = template.lines().collect::<Vec<_>>();
+    if lines.len() > MAX_LINES {
+        return false;
+    }
+    let mut matches = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| native_define_name(line) == Some(name));
+    let Some((start, _)) = matches.next() else {
+        return false;
+    };
+    if matches.next().is_some() {
+        return false;
+    }
+    let Some(end) = lines[start + 1..]
+        .iter()
+        .position(|line| line.starts_with("%end"))
+        .map(|offset| offset + start + 1)
+    else {
+        return false;
+    };
+    let body = lines[start..=end].join("\n");
+    aros_common::sha256_bytes(body.as_bytes()).as_str() == expected_sha256
+}
+
 fn parse_macro_header(lines: &[&str], start: usize, expected_name: &str) -> Option<MacroContract> {
     let mut header = String::new();
     let mut cursor = start;
@@ -595,10 +1063,10 @@ fn parse_macro_header(lines: &[&str], start: usize, expected_name: &str) -> Opti
     if name != expected_name || arguments.len() > MAX_MACRO_ARGUMENT_BYTES {
         return None;
     }
-    parse_macro_argument_specs(arguments.trim())
+    parse_macro_argument_specs(arguments.trim(), expected_name == "include_deps")
 }
 
-fn parse_macro_argument_specs(raw: &str) -> Option<MacroContract> {
+fn parse_macro_argument_specs(raw: &str, named_multi: bool) -> Option<MacroContract> {
     let bytes = raw.as_bytes();
     let mut cursor = 0usize;
     let mut specs = MacroContract::new();
@@ -654,9 +1122,14 @@ fn parse_macro_argument_specs(raw: &str) -> Option<MacroContract> {
                 value.truncate(value.len() - 2);
                 required = true;
             } else if value.ends_with("/M") {
-                // These four source graph macros have no GenMF multiarg field;
-                // do not approximate its remainder-capture semantics.
-                return None;
+                // The separately verified include-deps contract admits only
+                // fully named arguments. Its /M default is therefore safe to
+                // strip without accepting GenMF's bare remainder capture.
+                // The four source graph macros keep refusing multiarg forms.
+                if !named_multi || key != "deps" {
+                    return None;
+                }
+                value.truncate(value.len() - 2);
             }
         }
         if specs
@@ -762,4 +1235,323 @@ pub(super) fn test_macro_contract(index: usize) -> Option<MacroContract> {
     let header = test_macro_header(index)?;
     let lines = header.lines().collect::<Vec<_>>();
     parse_macro_header(&lines, 0, macro_contract_identity(index)?.0)
+}
+
+#[cfg(test)]
+mod source_read_tests {
+    use super::*;
+
+    fn fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("config")).unwrap();
+        fs::write(
+            root.path().join("config/make.tmpl"),
+            "%include helper.tmpl\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("config/helper.tmpl"),
+            "%define helper name=/A\r\nvalue := %(name)\r\n%end\r\n",
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn reads_a_bounded_regular_template_closure() {
+        let root = fixture();
+        let (template, definitions) = read_native_template_set(root.path()).unwrap();
+        assert_eq!(template, "%include helper.tmpl\n");
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions["helper"].len(), 1);
+        assert_eq!(definitions["helper"][0].body_lines, ["value := %(name)"]);
+    }
+
+    #[test]
+    fn refuses_noncanonical_oversized_and_invalid_text_inputs() {
+        let root = fixture();
+        for relative in [
+            "../helper.tmpl",
+            "nested/../helper.tmpl",
+            "/helper.tmpl",
+            "helper.mk",
+        ] {
+            assert!(read_included_native_template(root.path(), Path::new(relative)).is_none());
+        }
+        fs::write(root.path().join("config/helper.tmpl"), [0xff]).unwrap();
+        assert!(read_native_template_set(root.path()).is_none());
+        fs::write(
+            root.path().join("config/helper.tmpl"),
+            vec![b' '; MAX_TEMPLATE_BYTES + 1],
+        )
+        .unwrap();
+        assert!(read_native_template_set(root.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_template_leaf_parent_and_config_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = fixture();
+        let config = root.path().join("config");
+        fs::rename(config.join("helper.tmpl"), root.path().join("helper.tmpl")).unwrap();
+        symlink("../helper.tmpl", config.join("helper.tmpl")).unwrap();
+        assert!(read_native_template_set(root.path()).is_none());
+        fs::remove_file(config.join("helper.tmpl")).unwrap();
+        fs::create_dir(root.path().join("templates")).unwrap();
+        fs::write(root.path().join("templates/helper.tmpl"), "").unwrap();
+        symlink("../templates", config.join("nested")).unwrap();
+        assert!(
+            read_included_native_template(root.path(), Path::new("nested/helper.tmpl")).is_none()
+        );
+        fs::rename(config.join("make.tmpl"), root.path().join("make.tmpl")).unwrap();
+        symlink("../make.tmpl", config.join("make.tmpl")).unwrap();
+        assert!(read_native_make_template(root.path()).is_none());
+        fs::rename(&config, root.path().join("real-config")).unwrap();
+        symlink("real-config", &config).unwrap();
+        assert!(read_native_make_template(root.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_fifo_instead_of_blocking_on_open() {
+        let root = fixture();
+        let path = root.path().join("config/fifo.tmpl");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(read_included_native_template(root.path(), Path::new("fifo.tmpl")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod compile_multi_contract_tests {
+    use super::*;
+
+    fn fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let fixture_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compile-multi-contract");
+        fs::create_dir(root.path().join("config")).unwrap();
+        fs::create_dir(root.path().join("scripts")).unwrap();
+        fs::copy(
+            fixture_root.join("config/make.tmpl"),
+            root.path().join("config/make.tmpl"),
+        )
+        .unwrap();
+        fs::copy(
+            fixture_root.join("scripts/mkdep"),
+            root.path().join("scripts/mkdep"),
+        )
+        .unwrap();
+        root
+    }
+
+    fn definition(template: &str, name: &str) -> String {
+        let prefix = format!("%define {name}");
+        let lines = template.lines().collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|line| {
+                line.strip_prefix(&prefix)
+                    .is_some_and(|tail| tail.chars().next().is_none_or(char::is_whitespace))
+            })
+            .unwrap();
+        let end = lines[start..]
+            .iter()
+            .position(|line| line.starts_with("%end"))
+            .unwrap()
+            + start;
+        lines[start..=end].join("\n")
+    }
+
+    fn remove_definition(template: &str, name: &str) -> String {
+        let prefix = format!("%define {name}");
+        let lines = template.lines().collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|line| {
+                line.strip_prefix(&prefix)
+                    .is_some_and(|tail| tail.chars().next().is_none_or(char::is_whitespace))
+            })
+            .unwrap();
+        let end = lines[start..]
+            .iter()
+            .position(|line| line.starts_with("%end"))
+            .unwrap()
+            + start;
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| (!(start..=end).contains(&index)).then_some(*line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn reads_verified_templates_and_returns_raw_source_defaults() {
+        let root = fixture();
+        let contract = CompileMultiTemplateContract::read(root.path()).unwrap();
+
+        let arguments = contract.arguments("basenames=alpha.c").unwrap();
+        assert_eq!(arguments.len(), 10);
+        assert_eq!(arguments["mmake"], "TMP");
+        assert_eq!(arguments["basenames"], "alpha.c");
+        assert_eq!(arguments["cppflags"], "$(CPPFLAGS)");
+        assert_eq!(arguments["cflags"], "$(CFLAGS)");
+        assert_eq!(arguments["dflags"], "");
+        assert_eq!(arguments["srcdir"], "");
+        assert_eq!(arguments["targetdir"], "");
+        assert_eq!(arguments["compiler"], "target");
+        assert_eq!(arguments["usetree"], "no");
+        assert_eq!(arguments["incextra"], "$(TOP)/$(CURDIR)");
+
+        let overridden = contract
+            .arguments("basenames=alpha.c cflags=\"$(CUSTOM_CFLAGS)\"")
+            .unwrap();
+        assert_eq!(overridden["cflags"], "$(CUSTOM_CFLAGS)");
+
+        let include_defaults = contract.include_arguments("").unwrap();
+        assert_eq!(include_defaults.len(), 2);
+        assert_eq!(include_defaults["deps"], "$(DEPS)");
+        assert_eq!(include_defaults["depstargets"], "");
+
+        let include_arguments = contract
+            .include_arguments("depstargets=\"$(LOCAL_TARGETS)\"")
+            .unwrap();
+        assert_eq!(include_arguments.len(), 2);
+        assert_eq!(include_arguments["deps"], "$(DEPS)");
+        assert_eq!(include_arguments["depstargets"], "$(LOCAL_TARGETS)");
+    }
+
+    #[test]
+    fn refuses_the_diagnostic_test_fallback_without_source_templates() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_changed_root_helper_include_and_script_contracts() {
+        let root = fixture();
+        let make = root.path().join("config/make.tmpl");
+        let source = fs::read_to_string(&make).unwrap();
+        fs::write(
+            &make,
+            source.replace("%(mmake)_MC_TARGETS", "%(mmake)_MC_TGTCHANGED"),
+        )
+        .unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        let make = root.path().join("config/make.tmpl");
+        let source = fs::read_to_string(&make).unwrap();
+        fs::write(&make, source.replace("Compiling", "Compilinh")).unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        let make = root.path().join("config/make.tmpl");
+        let source = fs::read_to_string(&make).unwrap();
+        fs::write(
+            &make,
+            source.replace("-include %(deps)", "-include %(depstargets)"),
+        )
+        .unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        let script = root.path().join("scripts/mkdep");
+        let mut contents = fs::read(&script).unwrap();
+        contents.push(b'\n');
+        fs::write(&script, contents).unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_and_duplicate_root_or_helper_definitions() {
+        for name in ["rule_compile_multi", "include_deps", "compile_q"] {
+            let root = fixture();
+            let make = root.path().join("config/make.tmpl");
+            let source = fs::read_to_string(&make).unwrap();
+            fs::write(&make, remove_definition(&source, name)).unwrap();
+            assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+        }
+
+        for name in ["rule_compile_multi", "include_deps", "compile_q"] {
+            let root = fixture();
+            let make = root.path().join("config/make.tmpl");
+            let source = fs::read_to_string(&make).unwrap();
+            let duplicate = definition(&source, name);
+            fs::write(&make, format!("{source}\n{duplicate}\n")).unwrap();
+            assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_unknown_duplicate_and_missing_arguments() {
+        let root = fixture();
+        let contract = CompileMultiTemplateContract::read(root.path()).unwrap();
+        for arguments in [
+            "basenames=\"unterminated",
+            "basenames=alpha.c surprise=bad",
+            "cflags=$(CUSTOM_CFLAGS)",
+            "basenames=first.c basenames=second.c",
+        ] {
+            assert!(
+                contract.arguments(arguments).is_err(),
+                "accepted {arguments:?}"
+            );
+        }
+        for arguments in [
+            "deps=one extra=bad",
+            "deps=one deps=two",
+            "deps=\"unterminated",
+            "depstargets=owner unlabelled.d",
+            "deps=one another-unlabelled.d",
+        ] {
+            assert!(
+                contract.include_arguments(arguments).is_err(),
+                "accepted {arguments:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_mkdep_leaf_and_parent_symlinks_fifos_and_oversized_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture();
+        let script = root.path().join("scripts/mkdep");
+        let elsewhere = root.path().join("mkdep-copy");
+        fs::rename(&script, &elsewhere).unwrap();
+        symlink(&elsewhere, &script).unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        let scripts = root.path().join("scripts");
+        let real_scripts = root.path().join("real-scripts");
+        fs::rename(&scripts, &real_scripts).unwrap();
+        symlink(&real_scripts, &scripts).unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        let script = root.path().join("scripts/mkdep");
+        fs::remove_file(&script).unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&script)
+            .status()
+            .unwrap()
+            .success());
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+
+        let root = fixture();
+        fs::write(
+            root.path().join("scripts/mkdep"),
+            vec![b'x'; MAX_MKDEP_SCRIPT_BYTES + 1],
+        )
+        .unwrap();
+        assert!(CompileMultiTemplateContract::read(root.path()).is_err());
+    }
 }

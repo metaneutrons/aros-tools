@@ -1,5 +1,5 @@
 use crate::ast::ModuleType;
-use crate::graph::DependencyGraph;
+use crate::graph::{supports_genmodule_client_archives, DependencyGraph};
 use std::collections::HashSet;
 
 /// Collects every name the generated file declares as a CMake target or
@@ -36,6 +36,12 @@ pub(super) fn collect_endpoint_names(graph: &DependencyGraph) -> HashSet<String>
                     .map(|rule| rule.owner.clone()),
             )
             .chain(graph.sdk_file_copies.iter().map(|rule| rule.owner.clone()))
+            .chain(
+                graph
+                    .source_literal_text_rules
+                    .iter()
+                    .map(|rule| rule.owner.clone()),
+            )
             .chain(graph.sdk_asset_rules.iter().map(|rule| rule.owner.clone()))
             .chain(
                 graph
@@ -204,16 +210,17 @@ pub(super) fn collect_endpoint_names(graph: &DependencyGraph) -> HashSet<String>
     // consumer after `compiler-stdc-linklib`. Keep these generated products in
     // the endpoint registry so the meta-edge filter cannot discard them.
     for (mmake, target) in &graph.targets {
-        match target.module_type {
+        match &target.module_type {
             ModuleType::Abi => {
                 all_targets.insert(format!("{mmake}-linklib"));
             }
-            ModuleType::Library
-                if target.genmodule_only
-                    || target
-                        .genmodule_linklibs
-                        .as_ref()
-                        .is_some_and(|metadata| metadata.enabled) =>
+            module_type
+                if supports_genmodule_client_archives(module_type)
+                    && (target.genmodule_only
+                        || target
+                            .genmodule_linklibs
+                            .as_ref()
+                            .is_some_and(|metadata| metadata.enabled)) =>
             {
                 all_targets.insert(format!("{mmake}-linklib"));
                 if !target.genmodule_only

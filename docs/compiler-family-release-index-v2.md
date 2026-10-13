@@ -50,9 +50,11 @@ are omitted in canonical serialization, preserving compiler-only index bytes.
 
 SDK locks here are declarations, not verified packages. The Unix measured
 builder and readback APIs additionally verify the complete selected SDK package
-set; qualification still rejects SDK-selected releases until authenticated
-SDK generation/job-origin evidence is joined. A compiler-only candidate cannot
-qualify a release which selects SDKs.
+set. In the current unreleased source, explicit V2 qualification requires the
+full input-derived generation tuple matrix on the same complete compiler
+request, joined to measured bytes; compiler-only evidence fails. This is byte
+consistency only; owning-job and signature authentication and production
+qualification remain separate gates.
 
 Archive hashes, sizes and tree digests are producer declarations here; the
 parser does not independently measure or verify them. The expected inventory

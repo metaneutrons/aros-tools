@@ -114,6 +114,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros sdk build` | Verify source, generate and link its SDK, package that generation and optionally export complete local execution evidence |
 | `aros sdk package` | Package a source-produced Developer tree against an explicit source/ABI identity and inventory digest; local only |
 | `aros sdk verify-package` | Read back all local package members and payload bytes against independent archive, tree and identity selections |
+| `aros sdk verify-generation` | Read back the selected compiler, SDK package, generation record and complete portable link evidence without executing builds; not job authentication or release admission |
 | `aros sdk sbom` | Verify one local SDK package and write deterministic SPDX metadata to an absent file outside that package; no release admission |
 | `aros sdk extract` | Verify then extract into one absent directory and recheck the payload; not managed installation |
 | `aros sdk download` | Acquire the exact lock-selected archive and manifest, then verify the complete payload without installation |
@@ -146,10 +147,17 @@ or publication. Its JSON assurance is
 `build` uses the same source/identity selectors plus explicit compiler-package,
 native execution and output inputs. Its generation epoch comes from the verified
 SDK identity; there is no separate `--consumer-source-date-epoch`, candidate-root
-or SDK tree-digest selector. Generic SDK source contracts can be verified but
-are rejected by `build` before preparation until their execution adapters exist.
-Generation currently requires a family-v2 GNU
-compiler matching the source preset's compiler profile.
+or SDK tree-digest selector. Generation requires a family-v2 compiler matching
+the source preset's compiler profile: GNU for a native-consumer-v2 contract,
+LLVM for a generic SDK-consumer-v1 contract. Mixed selections are rejected
+before compatibility preparation.
+LLVM library validation supports original/relocated C/C++ links and
+source-selected CMake SDK roots, with independent retained readback.
+Its opt-in six-phase SDK executor records source-bound v6 evidence and exports
+closed LLVM link proofs for rootless readback. These proofs check the selected
+commands and retained bytes; they do not authenticate CI jobs or SDK packages.
+LLVM generation records additionally bind the source-derived CMake SDK binding.
+Local generation and link validation are not CI or release qualification.
 `--generation-record FILE`, `--output-dir DIR` and
 repeatable `--sdk-forbidden-prefix DIR` are required. The record and package
 destinations must be absent and disjoint from source and execution inputs.
@@ -237,6 +245,14 @@ the collectors. Guarded JSON output includes the joined result/receipt/raw-tree
 and package-tree digests. These options do not authenticate a build or qualify
 a release; ordinary packaging remains available without them.
 
+To read back that export on another host, `verify-package` accepts
+`--package-measurement FILE`, `--package-measurement-sha256 SHA`,
+`--executor-contract-sha256 SHA` and `--executor-binary-sha256 SHA` together,
+with explicit `--package-format family-v2`. Select these digests from the
+authenticated original owner, not from the export being checked. The result
+joins retained build receipts to measured package bytes without opening old
+runner paths. It does not authenticate jobs, signatures or release admission.
+
 `producer index` independently selects `--release-format legacy-v1|family-v2`.
 The default V1 path requires `--source-lock-filename`. V2 requires independent
 `--lane-inputs` and an external `--subject-manifest`; its final stage also
@@ -264,11 +280,20 @@ inventory, an external closed lane selection and independently retained raw
 digests for the selection, input collection, index and subject manifest. It
 checks every selected A/B package and compatibility report/log/ELF closure,
 without executing builds or modifying files. Its result is not release admission.
+SDK-bearing inputs also require the exact `sdk_generations` host/profile matrix,
+with generation records, four-link evidence and cross-host SDK package equality.
+LLVM SDK-style compiler compatibility selects `lanes[asset].llvm_sdk_id` explicitly;
+the product must reference that compiler group/profile in the bound release inputs.
+The reader never infers this identity from a report.
+Recording, qualification verification and recovery require that same matrix;
+none accepts a compiler-only selection for an SDK-bearing release.
 
 `producer verify-qualification` adds `--qualification-evidence`,
 `--qualification-sha256`, `--policy` and `--policy-sha256` to those arguments.
 It requires complete V2 coverage and joins report claims to raw measured files,
-including the final checksum, subject-list and provenance bytes. A positive
+including the final checksum, subject-list and provenance bytes.
+SDK generation claims bind each product/compiler-profile/host tuple and its
+generation, compatibility and link-receipt digests to reacquired bytes. A positive
 run attempt is required but not authenticated here. The command is read-only;
 signatures, job/artifact origin and publication authorization remain separate.
 

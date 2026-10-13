@@ -17,6 +17,7 @@ use crate::qualification_evidence::{
     canonical_https_url, canonical_repository, safe_segment, safe_signer, safe_workflow_path,
     validate_policy, EvidenceCoverage, EvidencePolicy,
 };
+use crate::qualification_sdk_v2::QualificationSdkGenerationV2;
 use crate::recipe::GitObjectId;
 use crate::release_index_v2::NativeReleaseIndexV2;
 use crate::release_inputs::ReleaseInputs;
@@ -46,6 +47,10 @@ pub struct QualificationEvidenceV2 {
     pub attestation: AttestationClaimV2,
     /// Canonical asset-sorted report claims for input-derived lanes.
     pub lanes: Vec<QualificationLaneV2>,
+    /// Input-derived SDK generation claims, measured separately for every host.
+    /// Omitted for compiler-only V2 documents to preserve their exact encoding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sdk_generations: Vec<QualificationSdkGenerationV2>,
     /// Diagnostic subsets never qualify a complete release candidate.
     pub coverage: EvidenceCoverage,
 }
@@ -190,9 +195,7 @@ impl QualificationEvidenceV2 {
         inputs: &ReleaseInputs,
         policy: &EvidencePolicy,
     ) -> Result<(), ContractError> {
-        crate::release_index_v2::require_compiler_only_inputs(inputs).map_err(|_| {
-            error("SDK-selected release requires complete authenticated SDK qualification, not compiler-only lanes")
-        })?;
+        crate::qualification_sdk_v2::validate_against_inputs(&self.sdk_generations, inputs)?;
         self.validate_structure()?;
         validate_policy(policy)?;
         if self.created_at > policy.now || self.expires_at <= policy.now {
@@ -274,6 +277,7 @@ impl QualificationEvidenceV2 {
     }
 
     fn validate_structure(&self) -> Result<(), ContractError> {
+        crate::qualification_sdk_v2::validate_structure(&self.sdk_generations)?;
         if self.schema != QUALIFICATION_EVIDENCE_V2_SCHEMA
             || self.created_at == 0
             || self.expires_at <= self.created_at

@@ -47,6 +47,11 @@ pub struct ArchSourceDecl {
     /// Source base names. Extensions are resolved by the build, so a `.S` file
     /// overriding a `.c` file needs no special handling here.
     pub files: Vec<String>,
+    /// Architecture-specific client-linklib sources. This is a distinct lane:
+    /// it is merged into the declaring module's normal and relative client
+    /// archives, never into the module's runtime object list.
+    #[serde(default)]
+    pub linklib_files: Vec<String>,
     /// Explicit `incextra=` quote-only search path for this declaration's
     /// architecture sources. Bound in declaration-local scope before emission.
     #[serde(default)]
@@ -351,9 +356,10 @@ pub fn collect_arch_sources(
             continue;
         };
 
-        // files, cxxfiles and asmfiles all land in the module's arch object
-        // directory. linklibfiles go to linklib/arch and are not part of the
-        // module's own object list, so they are not overrides.
+        // files, cxxfiles and asmfiles land in the module's arch object
+        // directory. linklibfiles are a separate client-archive lane; keeping
+        // them separate is required because linklib/arch is not in the
+        // module's own ARCHOBJS list.
         let mut files = Vec::new();
         for key in ["files", "cxxfiles", "asmfiles", "objcfiles"] {
             let raw = crate::includes::arg_value_quoted(&body, key)
@@ -367,7 +373,24 @@ pub fn collect_arch_sources(
             }
         }
 
-        if files.is_empty() {
+        let mut linklib_files = Vec::new();
+        let raw_linklib_files = crate::includes::arg_value_quoted(&body, "linklibfiles")
+            .or_else(|| crate::includes::arg_value(&body, "linklibfiles"));
+        if let Some(raw) = raw_linklib_files {
+            for file in expand_list(&raw, &vars) {
+                if !linklib_files.contains(&file) {
+                    linklib_files.push(file);
+                }
+            }
+        }
+        if crate::includes::arg_value_quoted(&body, "linklibobjs")
+            .or_else(|| crate::includes::arg_value(&body, "linklibobjs"))
+            .is_some_and(|raw| !raw.trim().is_empty())
+        {
+            skipped.push(format!("{dir}: mainmmake={mainmmake} arch={tag}: prebuilt architecture linklib objects are unsupported"));
+            continue;
+        }
+        if files.is_empty() && linklib_files.is_empty() {
             skipped.push(format!("{dir}: mainmmake={mainmmake} arch={tag}"));
             continue;
         }
@@ -385,6 +408,7 @@ pub fn collect_arch_sources(
             tag,
             dir: dir.clone(),
             files,
+            linklib_files,
             extra_quote_include: crate::includes::arg_value_quoted(&body, "incextra")
                 .or_else(|| crate::includes::arg_value(&body, "incextra")),
             // Filled in by the caller, which has already collected them.
@@ -523,6 +547,52 @@ pub(crate) fn collect_arch_sources_with_scope(
             continue;
         }
 
+        let linklib_files = match crate::sources::evaluate_linklib_list(
+            &body,
+            "linklibfiles",
+            &no_legacy_fallback,
+            &expr_context,
+        ) {
+            Ok(files) => files,
+            Err(error) => {
+                rejected.push(arch_source_rejection(
+                    &dir,
+                    line,
+                    &format!("mainmmake={mainmmake} arch={tag}: {error}"),
+                    target,
+                ));
+                continue;
+            }
+        };
+        match crate::sources::evaluate_linklib_list(
+            &body,
+            "linklibobjs",
+            &no_legacy_fallback,
+            &expr_context,
+        ) {
+            Ok(objects) if objects.is_empty() => {}
+            Ok(_) => {
+                rejected.push(arch_source_rejection(
+                    &dir,
+                    line,
+                    &format!(
+                        "mainmmake={mainmmake} arch={tag}: nonempty linklibobjs= is not modeled"
+                    ),
+                    target,
+                ));
+                continue;
+            }
+            Err(error) => {
+                rejected.push(arch_source_rejection(
+                    &dir,
+                    line,
+                    &format!("mainmmake={mainmmake} arch={tag}: {error}"),
+                    target,
+                ));
+                continue;
+            }
+        }
+
         let maindir = match resolve_arch_source_scalar(&body, "maindir", &expr_context) {
             Ok(value) => value,
             Err(error) => {
@@ -555,6 +625,7 @@ pub(crate) fn collect_arch_sources_with_scope(
             tag,
             dir: dir.clone(),
             files,
+            linklib_files,
             extra_quote_include: crate::includes::arg_value_quoted(&body, "incextra")
                 .or_else(|| crate::includes::arg_value(&body, "incextra")),
             // The parser pipeline binds these from the very same declaration
@@ -756,13 +827,35 @@ AFILES := \
     }
 
     #[test]
-    fn linklibfiles_are_not_overrides() {
-        // linklibfiles land in linklib/arch, which the module's ARCHOBJS
-        // wildcard does not cover.
+    fn linklibfiles_are_a_distinct_client_archive_lane() {
+        // linklibfiles land in linklib/arch, outside the module's ARCHOBJS
+        // wildcard, so they must not be merged into the runtime source lane.
         let src =
             "%build_archspecific mainmmake=m arch=pc linklibfiles=\"x\" files=\"y\" maindir=d\n";
         let (decls, _) = collect_arch_sources(src, &PathBuf::from("arch/all-pc/d"), None);
         assert_eq!(decls[0].files, vec!["y"]);
+        assert_eq!(decls[0].linklib_files, vec!["x"]);
+    }
+
+    #[test]
+    fn scoped_linklibfiles_resolve_in_the_declaration_scope_and_objs_fail_closed() {
+        let content = "\
+LINK_SOURCES := arch_init arch_extra
+OBJECTS := ignored.o
+%build_archspecific mainmmake=stdc arch=x86_64 files=runtime linklibfiles=$(LINK_SOURCES) maindir=compiler/crt/stdc modname=stdc
+";
+        let (declarations, rejected) = collect_scoped(content, None);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(declarations[0].files, ["runtime"]);
+        assert_eq!(declarations[0].linklib_files, ["arch_init", "arch_extra"]);
+
+        let (declarations, rejected) = collect_scoped(
+            "OBJECTS := ignored.o\n%build_archspecific mainmmake=stdc arch=x86_64 files=runtime linklibfiles=arch_init linklibobjs=$(OBJECTS) maindir=compiler/crt/stdc\n",
+            None,
+        );
+        assert!(declarations.is_empty());
+        assert_eq!(rejected.len(), 1);
+        assert!(rejected[0].contains("nonempty linklibobjs"));
     }
 
     #[test]

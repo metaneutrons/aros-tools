@@ -59,6 +59,19 @@ mod comparison_guard_tests;
 mod portable_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use portable_tests::{
+    guarded_gnu_package_from_payload_for_host, guarded_llvm_package_from_payload_for_host,
+    GuardedPackage,
+};
+#[cfg(test)]
+pub(crate) use release_compatibility_tests::with_gnu_matrix_complete_request;
+#[cfg(test)]
+pub(crate) use release_compatibility_tests::with_llvm_matrix_complete_request;
+#[cfg(test)]
+pub(crate) use release_readback_tests::prepare_gnu_matrix_release;
+#[cfg(test)]
+pub(crate) use release_readback_tests::prepare_llvm_matrix_release;
 pub(crate) const PHASES: [&str; 6] = [
     "preflight",
     "environment",
@@ -589,7 +602,9 @@ fn validate_phase_receipt(
         || receipt.previous_receipt_sha256.as_ref()
             != index.checked_sub(1).map(|previous| &expected[previous])
     {
-        return Err(ContractError::state("native phase receipt differs from independently selected identity, phase, root or predecessor"));
+        return Err(ContractError::state(
+            "native phase receipt differs from independently selected identity, phase, root or predecessor",
+        ));
     }
     let mut paths = BTreeSet::new();
     for item in &receipt.outputs {

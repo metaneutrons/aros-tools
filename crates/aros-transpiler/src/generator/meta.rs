@@ -50,6 +50,42 @@ pub(super) fn emit_meta_declarations(
     writeln!(out).unwrap();
 }
 
+/// Binds proved dependency-only providers after their targets exist.
+pub(super) fn emit_script_output_aggregates(out: &mut String, graph: &DependencyGraph) {
+    for aggregate in &graph.script_output_aggregates {
+        if aggregate.generators.is_empty() {
+            writeln!(
+                out,
+                "message(FATAL_ERROR {})",
+                cmake_arg(&format!(
+                    "{}: script aggregate has no concrete generator",
+                    aggregate.owner
+                ))
+            )
+            .unwrap();
+            continue;
+        }
+        writeln!(
+            out,
+            "# Source script aggregate from {}:{}",
+            aggregate.file, aggregate.line
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "add_dependencies({} {})",
+            cmake_arg(&aggregate.owner),
+            aggregate
+                .generators
+                .iter()
+                .map(|owner| cmake_arg(owner))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .unwrap();
+    }
+}
+
 /// Emits assembly header rules.
 pub(super) fn emit_assembly_header_rules(out: &mut String, graph: &DependencyGraph) {
     for header in &graph.assembly_headers {
@@ -131,6 +167,40 @@ pub(super) fn emit_arch_endpoint_effects(out: &mut String, graph: &DependencyGra
                     cmake_arg(&effect.dependencies[0])
                 )
                 .unwrap();
+            }
+            ArchEndpointEffectData::ArchClientLinklibSources {
+                mainmmake,
+                linklib_sources,
+                directory,
+                ..
+            } => {
+                writeln!(out, "aros_bind_arch_linklib_source_endpoint(").unwrap();
+                writeln!(out, "    ENDPOINT {}", cmake_arg(&effect.endpoint)).unwrap();
+                writeln!(
+                    out,
+                    "    INCLUDE_OWNER {}",
+                    cmake_arg(&effect.dependencies[0])
+                )
+                .unwrap();
+                writeln!(out, "    DIRECTORY \"${{AROS_SOURCE_DIR}}/{directory}\"").unwrap();
+                writeln!(
+                    out,
+                    "    ARCHIVE_TARGETS {} {}",
+                    cmake_arg(&format!("{mainmmake}-linklib")),
+                    cmake_arg(&format!("{mainmmake}-linklib-rel"))
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    BASENAMES {}",
+                    linklib_sources
+                        .iter()
+                        .map(|name| cmake_arg(name))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+                .unwrap();
+                writeln!(out, ")").unwrap();
             }
             ArchEndpointEffectData::SetArchIncludes {
                 tag,

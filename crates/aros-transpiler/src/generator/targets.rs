@@ -1,6 +1,6 @@
 use super::{cmake_arg, cmake_literal_arg, emit_configure_builds};
 use crate::ast::ModuleType;
-use crate::graph::DependencyGraph;
+use crate::graph::{supports_genmodule_client_archives, DependencyGraph};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
@@ -85,6 +85,27 @@ pub(super) fn emit_concrete_targets(
         if target.genmodule_only {
             writeln!(out, "    GENMODULE_ONLY").unwrap();
         }
+        let selected_client_builder =
+            graph
+                .native_selected_client_archives
+                .as_ref()
+                .is_some_and(|selected| {
+                    selected.contains(&format!("{}-linklib", target.mmake_name))
+                        || selected.contains(&format!("{}-linklib-rel", target.mmake_name))
+                });
+        let runtime_selected = graph
+            .native_selected_runtime_modules
+            .as_ref()
+            .is_some_and(|selected| selected.contains(&target.mmake_name));
+        if supports_genmodule_client_archives(&target.module_type)
+            && selected_client_builder
+            && !runtime_selected
+        {
+            // Keep the original source declaration (including generic and
+            // architecture client inputs), but let CMake materialise only its
+            // selected client archive lane rather than the runtime module.
+            writeln!(out, "    CLIENTS_ONLY").unwrap();
+        }
         if target.always_cxx_link {
             writeln!(out, "    ALWAYS_CXX_LINK").unwrap();
         }
@@ -110,11 +131,9 @@ pub(super) fn emit_concrete_targets(
         if let Some(linklib_name) = &target.linklib_name {
             writeln!(out, "    LINKLIB_NAME {}", cmake_arg(linklib_name)).unwrap();
         }
-        if let Some(selected) = graph
-            .native_selected_client_archives
-            .as_ref()
-            .filter(|_| target.module_type == ModuleType::Library && !target.genmodule_only)
-        {
+        if let Some(selected) = graph.native_selected_client_archives.as_ref().filter(|_| {
+            supports_genmodule_client_archives(&target.module_type) && !target.genmodule_only
+        }) {
             // Public ABI headers are still needed by the runtime. Native
             // selection must not publish an unrequested client archive into
             // the same namespace as a selected implementation archive.
@@ -148,6 +167,32 @@ pub(super) fn emit_concrete_targets(
                     .map(|source| cmake_arg(source))
                     .collect();
                 writeln!(out, "    LINKLIB_OBJECT_SOURCES {}", sources.join(" ")).unwrap();
+            }
+        }
+        if supports_genmodule_client_archives(&target.module_type) {
+            let arch_linklib_sources: Vec<_> = graph
+                .arch_sources
+                .get(&target.mmake_name)
+                .into_iter()
+                .flatten()
+                .filter(|declaration| !declaration.linklib_files.is_empty())
+                .collect();
+            if !arch_linklib_sources.is_empty() {
+                // Client-linklib overrides are a separate lane from
+                // ARCH_SOURCES: the CMake library builder applies this list
+                // to both normal and relative archives only.
+                let entries: Vec<String> = arch_linklib_sources
+                    .iter()
+                    .map(|declaration| {
+                        cmake_arg(&format!(
+                            "{}|{}|{}",
+                            declaration.tag,
+                            declaration.dir,
+                            declaration.linklib_files.join(",")
+                        ))
+                    })
+                    .collect();
+                writeln!(out, "    ARCH_LINKLIB_SOURCES {}", entries.join(" ")).unwrap();
             }
         }
         if target.canonical_linklib_output {

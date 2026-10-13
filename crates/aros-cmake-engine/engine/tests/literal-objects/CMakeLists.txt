@@ -71,25 +71,41 @@ if(NOT LITERAL_CASE STREQUAL "native-missing-helper")
     endfunction()
 endif()
 
+if(LITERAL_CASE STREQUAL "native-build-includes" OR
+   LITERAL_CASE STREQUAL "native-consumer-includes")
+    # These header-only admission fixtures do not configure a target ABI.
+    # Compiler-role execution and rejection are covered independently by
+    # LiteralCompilerRoleTest; do not claim this double validates that role.
+    function(_aros_literal_compiler_role_arguments out_arguments)
+        set(${out_arguments} "" PARENT_SCOPE)
+    endfunction()
+endif()
+
 set(_source "${AROS_SOURCE_DIR}/src/main.c")
 set(_cpp_source "${AROS_SOURCE_DIR}/src/helper.cpp")
 if(LITERAL_CASE STREQUAL "native-build-includes" OR
    LITERAL_CASE STREQUAL "native-consumer-includes")
     file(MAKE_DIRECTORY
         "${AROS_GENINC_DIR}"
+        "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
         "${AROS_SDK_INCLUDE_DIR}/aros/stdc"
         "${AROS_SDK_INCLUDE_DIR}")
     file(WRITE "${AROS_GENINC_DIR}/literal-generated-only.h"
         "#define LITERAL_GEN_VALUE 17\n")
+    file(WRITE "${AROS_SDK_INCLUDE_DIR}/aros/posixc/literal-namespace.h"
+        "#define LITERAL_NAMESPACE_VALUE 41\n")
+    file(WRITE "${AROS_SDK_INCLUDE_DIR}/aros/stdc/literal-namespace.h"
+        "#error POSIX namespace must precede stdc for default native compilation\n")
     file(WRITE "${AROS_SDK_INCLUDE_DIR}/aros/stdc/literal-aros-stdc-only.h"
         "#define LITERAL_STDC_VALUE 23\n")
     file(WRITE "${AROS_SDK_INCLUDE_DIR}/literal-sdk-only.h"
         "#define LITERAL_SDK_VALUE 31\n")
     file(WRITE "${_source}" [=[
 #include <literal-generated-only.h>
+#include <literal-namespace.h>
 #include <literal-aros-stdc-only.h>
 #include <literal-sdk-only.h>
-#if LITERAL_GEN_VALUE != 17 || LITERAL_STDC_VALUE != 23 || LITERAL_SDK_VALUE != 31
+#if LITERAL_GEN_VALUE != 17 || LITERAL_STDC_VALUE != 23 || LITERAL_SDK_VALUE != 31 || LITERAL_NAMESPACE_VALUE != 41
 #error "native generated SDK include roots are required"
 #endif
 int literal_c_value(void)
@@ -99,9 +115,10 @@ int literal_c_value(void)
 ]=])
     file(WRITE "${_cpp_source}" [=[
 #include <literal-generated-only.h>
+#include <literal-namespace.h>
 #include <literal-aros-stdc-only.h>
 #include <literal-sdk-only.h>
-#if LITERAL_GEN_VALUE != 17 || LITERAL_STDC_VALUE != 23 || LITERAL_SDK_VALUE != 31
+#if LITERAL_GEN_VALUE != 17 || LITERAL_STDC_VALUE != 23 || LITERAL_SDK_VALUE != 31 || LITERAL_NAMESPACE_VALUE != 41
 #error "native generated SDK include roots are required"
 #endif
 extern "C" int literal_cpp_value()
@@ -128,7 +145,8 @@ endif()
 if(LITERAL_CASE STREQUAL "compiler-symlink")
     file(CREATE_LINK "${_fixture_real_c_compiler}" "${CMAKE_BINARY_DIR}/compiler-alias" SYMBOLIC)
     set(CMAKE_C_COMPILER "${CMAKE_BINARY_DIR}/compiler-alias")
-elseif(LITERAL_CASE STREQUAL "runtime-compiler-symlink")
+elseif(LITERAL_CASE STREQUAL "runtime-compiler-symlink" OR
+       LITERAL_CASE STREQUAL "runtime-compiler-bytes")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/selected-compiler-dir")
     file(COPY_FILE "${_fixture_real_c_compiler}"
         "${CMAKE_BINARY_DIR}/selected-compiler-dir/selected-compiler")
@@ -174,9 +192,11 @@ elseif(LITERAL_CASE STREQUAL "source-file-symlink" OR
        LITERAL_CASE STREQUAL "output-parent-symlink" OR
        LITERAL_CASE STREQUAL "compiler-symlink" OR
        LITERAL_CASE STREQUAL "runtime-compiler-symlink" OR
+       LITERAL_CASE STREQUAL "runtime-compiler-bytes" OR
        LITERAL_CASE STREQUAL "compiler-launcher")
     _add_c_object()
-    if(LITERAL_CASE STREQUAL "runtime-compiler-symlink")
+    if(LITERAL_CASE STREQUAL "runtime-compiler-symlink" OR
+       LITERAL_CASE STREQUAL "runtime-compiler-bytes")
         _add_cpp_object()
         aros_literal_object_group(NAME literal-objects OBJECTS "${_output}" "${_cpp_output}")
     endif()

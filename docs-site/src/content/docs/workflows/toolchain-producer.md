@@ -27,20 +27,35 @@ The examples below retain the existing PC/LLVM selection.
 The unreleased V2 release-input collection can explicitly select a
 host-independent SDK identity and its required compiler profiles. Its source,
 target/ABI and product version stay separate from compiler and host identities.
-This selection alone does not enable SDK publication: qualification rejects
-SDK-bearing inputs until the complete shared evidence and owning-job pipeline
-is implemented. See the [SDK commands](/aros-tools/reference/cli-contract/sdk/)
+The shared index can verify selected SDK package bytes. See the
+[SDK commands](/aros-tools/reference/cli-contract/sdk/)
 for current local generation and management options.
+
+The unreleased explicit family-v2 path supports the full compiler/SDK
+generation matrix. Compiler-only evidence remains insufficient. Byte checks
+remain separate from original-job and signature authentication and production
+release gates.
 
 SDK source profiles can declare a target-generic `sdk_consumer_contract`.
 The transpiler uses it for strict inventory and graph export; CMake checks the
 LLVM driver triples, pointer width and ARM float ABI against the source
 selection. Read-only `producer profile --source-dir … --source-preset …`
 verifies the committed contract and sealed inputs and marks SDK evidence as
-required. This does not yet enable generic
-`aros sdk build`: ordinary C/C++
-link and retained-evidence adapters are still required. GNU/RV32 local SDK
-generation retains its existing native-consumer-v2 path.
+required. The LLVM library adapter also measures both payload drivers and checks
+their version and selected triple; this is not package authentication or SDK
+link qualification. The library executes four normal C/C++ links from sealed
+probes against original and relocated SDK trees and rechecks their retained
+outputs. A CMake binding selects the SDK path from source configuration.
+The source ABI selects `compiler_arch` or `compiler_cpu`, optional
+`compiler_fpu` and `compiler_code_model`, and the optional boolean switches
+`compiler_red_zone`, `compiler_pic` and `compiler_pie`. SDK generation and
+application links use the same declared options; the tools do not infer them
+from a board name. An absent switch adds no option.
+Conflicting environment or configuration flags are rejected.
+`aros sdk build` selects the source-owned LLVM SDK contract or GNU native
+consumer contract matching the family-v2 compiler. It generates and packages
+the SDK and can export portable compatibility evidence. Owning-job
+authentication and complete release qualification remain separate gates.
 
 - A clean AROS source checkout, an `aros-toolchains` producer checkout, and an
   `aros-tools` checkout at the commits selected by the producer declaration.
@@ -229,10 +244,30 @@ six phase receipts, finished record and four package measurements. Preserve its
 bytes unchanged; these receipts belong in protected evidence artifacts, not
 public package metadata. This transport does not authenticate execution.
 
+For portable readback, use `producer verify-package` with the existing independent
+recipe, source-lock, profile, host, release and build-environment selectors.
+Add all four `--package-measurement FILE`, `--package-measurement-sha256 SHA`,
+`--executor-contract-sha256 SHA` and `--executor-binary-sha256 SHA` selectors
+with explicit `--package-format family-v2`. The measurement digest binds its
+exact exported bytes; executor digests identify the original build, not the
+collector binary. Obtain them from independently authenticated owning-job
+evidence. The native verifier joins the complete retained phase chain and
+original build result to the downloaded package without reopening original
+runner paths. JSON adds `finished_candidate` with
+`assurance: portable-byte-readback-only`. This remains a byte-consistency check,
+not job authentication, new compiler execution or release admission.
+
 `producer verify-release-evidence` joins the complete indexed A/B export set to
 measured packages, comparisons, compatibility reports/logs/ELFs, final checksums
 and unchanged pre-attestation subjects. It requires external lane selections
-and retained raw digests; it does not qualify a release or authenticate jobs.
+and retained raw digests. Selected SDKs require an exact product map with independent
+tree/archive digests and archive sizes. Identities come from release inputs.
+The result retains measured SDK packages, not generation or origin proof.
+It does not qualify a release or authenticate jobs.
+
+The unreleased library checks downloaded SDK generation records against
+selected inputs, measured packages and complete compatibility/link evidence
+without opening original runner roots.
 
 A local file hash is not authenticated execution provenance. Hashing an
 untrusted result does not make it trusted; a release workflow must separately

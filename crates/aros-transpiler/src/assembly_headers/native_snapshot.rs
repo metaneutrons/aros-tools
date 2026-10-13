@@ -89,13 +89,12 @@ pub(super) fn prepare_native_scope(
     if !canonical_root.is_dir() {
         return Err("native source root is not a directory".into());
     }
-    let scan = crate::local_make_includes::inline_native_make_configuration_with_templates(
+    let scan = crate::local_make_includes::inline_native_make_configuration_for_context(
         snapshot,
         &canonical_root,
         relative_recipe,
         crate::local_make_includes::LocalMakeIncludeLimits::default(),
-        &target.make_include_bindings,
-        &target.generated_make_templates,
+        target,
     );
     if !scan.issues.is_empty() {
         return Err(format!(

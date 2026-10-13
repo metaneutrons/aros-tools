@@ -1,7 +1,9 @@
 //! Closed compiler-driver tool manifest and adjacent executable resolution.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer};
@@ -46,9 +48,16 @@ enum ToolFamily {
 pub(super) struct DriverTools {
     pub(super) linker: PathBuf,
     pub(super) strip: PathBuf,
+    pub(super) names: DriverToolNames,
     pub(super) emulation: Option<String>,
     pub(super) driver_emulation: Option<String>,
     pub(super) default_output: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub(super) struct DriverToolNames {
+    pub(super) linker: String,
+    pub(super) strip: String,
 }
 
 pub(super) fn resolve_driver_tools(
@@ -83,11 +92,13 @@ pub(super) fn resolve_driver_tools(
             "prefixed collector '{invocation_filename}' requires an adjacent {TOOL_MANIFEST_NAME} manifest"
         ),
     };
-    let linker = require_sibling(bin, &linker)?;
-    let strip = require_sibling(bin, &strip)?;
+    let names = DriverToolNames { linker, strip };
+    let linker = require_sibling(bin, &names.linker)?;
+    let strip = require_sibling(bin, &names.strip)?;
     Ok(DriverTools {
         linker,
         strip,
+        names,
         emulation,
         driver_emulation,
         default_output,
@@ -212,6 +223,26 @@ pub(super) fn require_sibling(bin: &Path, name: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+pub(super) fn run_tool(
+    tool: &Path,
+    invocation: Option<&str>,
+    args: &[OsString],
+) -> Result<ExitStatus> {
+    let mut command = Command::new(tool);
+    // Execute the validated canonical binary without reopening its alias.
+    // Multicall tools still receive the independently selected role.
+    #[cfg(unix)]
+    if let Some(invocation) = invocation {
+        use std::os::unix::process::CommandExt as _;
+        command.arg0(tool.with_file_name(invocation));
+    }
+    #[cfg(not(unix))]
+    let _ = invocation;
+    aros_common::run_status(command.args(args))
+        .map(|observed| observed.status)
+        .with_context(|| format!("cannot execute required sibling tool {}", tool.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +343,37 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("outside the collector executable directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sibling_tool_resolution_preserves_multicall_invocation_name() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("lld");
+        let source = directory.path().join("multicall.c");
+        // A native executable observes argv[0] without a shell interpreter
+        // rewriting it. Native Rust development already requires a C linker.
+        fs::write(&source, b"#include <string.h>\nint main(int argc, char **argv) { (void)argc; const char *name = strrchr(argv[0], '/'); return strcmp(name ? name + 1 : argv[0], \"ld.lld\") ? 17 : 0; }\n").unwrap();
+        let mut compiler = Command::new("cc");
+        compiler.arg(&source).arg("-o").arg(&binary);
+        assert!(aros_common::run_status(&mut compiler)
+            .unwrap()
+            .status
+            .success());
+        symlink("lld", directory.path().join("ld.lld")).unwrap();
+
+        let selected = require_sibling(directory.path(), "ld.lld").unwrap();
+        assert_eq!(selected, fs::canonicalize(binary).unwrap());
+        let arguments = [];
+        assert!(run_tool(&selected, Some("ld.lld"), &arguments)
+            .unwrap()
+            .success());
+        assert_eq!(
+            run_tool(&selected, None, &arguments).unwrap().code(),
+            Some(17)
+        );
     }
 }

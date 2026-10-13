@@ -989,9 +989,21 @@ struct ReleasePlanFixture {
 
 impl ReleasePlanFixture {
     fn new() -> Self {
+        Self::with_sdk(false)
+    }
+
+    fn new_with_sdk() -> Self {
+        Self::with_sdk(true)
+    }
+
+    fn with_sdk(include_sdk: bool) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().canonicalize().unwrap();
-        let (collection, documents) = target_scope_input_documents();
+        let (collection, documents) = if include_sdk {
+            sdk_target_scope_input_documents()
+        } else {
+            target_scope_input_documents()
+        };
         let collection_bytes = serde_json::to_vec(&collection).unwrap();
         fs::write(root.join(RELEASE_INPUTS_FILENAME), &collection_bytes).unwrap();
         for (name, bytes) in &documents {
@@ -1119,6 +1131,8 @@ fn release_plan_cli_projects_the_exact_mixed_matrix_deterministically() {
     assert_eq!(first["tools_commit"], fixture.collection["tools_commit"]);
     assert_eq!(first["hosts"], fixture.collection["hosts"]);
     assert_eq!(first["groups"], json!(release_plan_group_records(&fixture)));
+    assert_eq!(first["sdk_count"], 0);
+    assert_eq!(first["sdks"], json!([]));
 
     let fields = first
         .as_object()
@@ -1136,6 +1150,8 @@ fn release_plan_cli_projects_the_exact_mixed_matrix_deterministically() {
         "tools_commit",
         "hosts",
         "groups",
+        "sdk_count",
+        "sdks",
         "lane_count",
         "lanes",
     ]
@@ -1178,6 +1194,28 @@ fn release_plan_cli_projects_the_exact_mixed_matrix_deterministically() {
         }
     }
     assert_eq!(actual_lanes, expected_lanes);
+}
+
+#[test]
+fn release_plan_cli_projects_validated_sdk_selections() {
+    let fixture = ReleasePlanFixture::new_with_sdk();
+    let inputs_sha256 = fixture.inputs_sha256();
+    let output = fixture.invoke(&inputs_sha256);
+    let plan = successful_json(&output, "family-v2 release plan with SDK selection");
+
+    assert_eq!(plan["sdk_count"], 1);
+    assert_eq!(
+        plan["sdks"],
+        json!([{
+            "id": "core-sdk",
+            "identity": fixture.collection["sdks"][0]["identity"],
+            "source_preset": "aros-core",
+            "compiler_profiles": [
+                {"group_id": "gnu-riscv", "profile": "rv32-esp32p4"},
+                {"group_id": "llvm-pc", "profile": "pc-x86_64"}
+            ]
+        }])
+    );
 }
 
 #[test]

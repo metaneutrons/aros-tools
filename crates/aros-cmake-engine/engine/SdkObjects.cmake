@@ -1,12 +1,13 @@
 include_guard(GLOBAL)
 include("${CMAKE_CURRENT_LIST_DIR}/NativeConsumerContract.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SdkCompanionObjects.cmake")
 
 # Source-declared standalone compilation and exact Developer-library staging.
 # No Make intermediate is read: each object has a private CMake compilation
 # owner. Language, flags, prerequisites and object sets must come from the
 # transpiler's closed source proof, not from a board or filename heuristic.
 function(aros_compile_sdk_object)
-    cmake_parse_arguments(PARSE_ARGV 0 O "" "NAME;SOURCE;INTERMEDIATE;OUTPUT;LANGUAGE"
+    cmake_parse_arguments(PARSE_ARGV 0 O "" "NAME;SOURCE;INTERMEDIATE;OUTPUT;LANGUAGE;COMPANION_CPU"
         "DEFINES;UNDEFINES;OPTIONS;INCLUDES")
     if(O_UNPARSED_ARGUMENTS OR O_KEYWORDS_MISSING_VALUES)
         message(FATAL_ERROR "SDK object: invalid or incomplete arguments")
@@ -16,6 +17,18 @@ function(aros_compile_sdk_object)
             message(FATAL_ERROR "SDK object: missing ${key}")
         endif()
     endforeach()
+    if(DEFINED O_COMPANION_CPU)
+        set(companion_arguments)
+        foreach(key DEFINES UNDEFINES OPTIONS INCLUDES)
+            if(O_${key})
+                list(APPEND companion_arguments ${key} ${O_${key}})
+            endif()
+        endforeach()
+        aros_compile_sdk_companion_object(NAME "${O_NAME}" SOURCE "${O_SOURCE}"
+            INTERMEDIATE "${O_INTERMEDIATE}" OUTPUT "${O_OUTPUT}" LANGUAGE "${O_LANGUAGE}"
+            COMPANION_CPU "${O_COMPANION_CPU}" ${companion_arguments})
+        return()
+    endif()
     if(NOT O_NAME MATCHES "^[A-Za-z0-9][A-Za-z0-9_-]*$" OR TARGET "${O_NAME}")
         message(FATAL_ERROR "SDK object: unsafe or duplicate owner")
     endif()

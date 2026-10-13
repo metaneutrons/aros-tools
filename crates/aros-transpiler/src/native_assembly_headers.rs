@@ -181,15 +181,18 @@ impl NativeOwnerProjection {
             }
             let text = aros_common::decode_source_bytes(bytes);
             let configuration =
-                crate::local_make_includes::inline_native_make_configuration_with_templates(
+                crate::local_make_includes::inline_native_make_configuration_for_context(
                     &text,
                     root,
                     recipe,
                     crate::local_make_includes::LocalMakeIncludeLimits::default(),
-                    &context.make_include_bindings,
-                    &context.generated_make_templates,
+                    &context,
                 );
             for fragment in &configuration.fragments {
+                if fragment.is_proven_absent() {
+                    crate::local_make_includes::verify_absent_source_options(root, &fragment.path)?;
+                    continue;
+                }
                 let relative = fragment
                     .path
                     .to_str()
