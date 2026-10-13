@@ -52,7 +52,7 @@ class ReleasePleaseApp(unittest.TestCase):
         self.policy()
 
     def test_builtin_token(self):
-        self.policy("token: ${{ steps.app-token.outputs.token }}", "token: ${{ github.token }}",
+        self.policy("GH_TOKEN: ${{ steps.app-token.outputs.token }}", "GH_TOKEN: ${{ github.token }}",
                     "forbidden Release Please credential")
 
     def test_wrong_environment(self):
@@ -72,7 +72,11 @@ class ReleasePleaseApp(unittest.TestCase):
                     "forbidden Release Please credential")
 
     def test_no_automatic_release(self):
-        self.policy("skip-github-release: true", "skip-github-release: false",
+        self.policy("node scripts/release-please/published-baseline.mjs", "node scripts/release-please/create-release.mjs",
+                    "missing Release Please App contract")
+
+    def test_preparation_uses_frozen_dependencies(self):
+        self.policy("install --frozen-lockfile --ignore-scripts", "install --ignore-scripts",
                     "missing Release Please App contract")
 
     def test_no_duplicate_dispatch(self):
