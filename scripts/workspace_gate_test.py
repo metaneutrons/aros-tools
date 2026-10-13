@@ -54,6 +54,11 @@ class WorkspaceGateTests(unittest.TestCase):
         self.fixtures.mkdir(parents=True)
         for name in ("AhiBuildTest.cmake", "GrubBuildTest.cmake", "NewTest.cmake"):
             (self.fixtures / name).write_text("# inert routing fixture\n")
+        self.package_fixtures = self.fixtures / "package-qualified"
+        self.package_fixtures.mkdir()
+        (self.package_fixtures / "LiteralGnuCompilerRoleTest.cmake").write_text(
+            "# inert package-qualified routing fixture\n"
+        )
         # Quality policy is independently tested by its actual fixtures. These
         # inert commands prove mode routing without invoking compilers/network.
         for name in ("check-development-runtimes.py", "check-environment-contract.py"):
@@ -77,6 +82,17 @@ class WorkspaceGateTests(unittest.TestCase):
             "    stream.write(json.dumps(['check-docs-audit', *sys.argv]) + '\\n')\n"
             "if (root / 'fail-docs-audit').exists():\n"
             "    sys.exit(31)\n",
+        )
+        self.write(
+            "scripts/check-gnu-package-fixture.py",
+            "import json, os, pathlib\n"
+            f"root = pathlib.Path({str(self.root)!r})\n"
+            "with (root / 'calls.jsonl').open('a') as stream:\n"
+            "    stream.write(json.dumps(['check-gnu-package-fixture', "
+            "os.environ.get('AROS_TEST_SOURCE_ROOT'), "
+            "os.environ.get('AROS_TEST_GNU_SOURCE_PRESET'), "
+            "os.environ.get('AROS_TEST_GNU_TOOLCHAIN_ROOT'), "
+            "os.environ.get('AROS_TEST_AROS')]) + '\\n')\n",
         )
         program = f'''#!{sys.executable}
 import json
@@ -269,6 +285,26 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertEqual(len(self.calls("cmake")), 3)
         self.assertIn("GrubBuildTest.cmake", json.dumps(self.calls("cmake")))
         self.assertIn("3 executed, 0 host-qualified omission(s), 3 discovered", result.stdout)
+        self.assertIn("package-qualified engine fixtures discovered: 1", result.stdout)
+        self.assertNotIn("LiteralGnuCompilerRoleTest.cmake", json.dumps(self.calls("cmake")))
+        self.assertFalse(self.calls("npm"))
+
+    def test_explicit_gnu_package_mode_routes_only_to_its_bounded_helper(self):
+        inputs = {
+            "AROS_TEST_SOURCE_ROOT": str(self.source),
+            "AROS_TEST_GNU_SOURCE_PRESET": "fixture-rv32",
+            "AROS_TEST_GNU_TOOLCHAIN_ROOT": str(self.root / "extracted-package"),
+            "AROS_TEST_AROS": str(self.root / "target/debug/aros"),
+        }
+        result = self.run_gate("gnu-package-test", extra_env=inputs)
+        self.assert_ok(result)
+        self.assertEqual(
+            self.calls("check-gnu-package-fixture"),
+            [[inputs["AROS_TEST_SOURCE_ROOT"], inputs["AROS_TEST_GNU_SOURCE_PRESET"],
+              inputs["AROS_TEST_GNU_TOOLCHAIN_ROOT"], inputs["AROS_TEST_AROS"]]],
+        )
+        self.assertFalse(self.calls("cargo"))
+        self.assertFalse(self.calls("cmake"))
         self.assertFalse(self.calls("npm"))
 
     def test_current_and_historical_sources_remain_distinct_in_every_stage(self):
@@ -329,7 +365,8 @@ if name == "cmake" and (root / "fail-engine").exists():
 
     def test_empty_engine_inventory_cannot_pass_integration(self):
         for fixture in self.fixtures.iterdir():
-            fixture.unlink()
+            if fixture.is_file():
+                fixture.unlink()
         result = self.run_gate("test", source=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no CMake engine contract tests", result.stderr)

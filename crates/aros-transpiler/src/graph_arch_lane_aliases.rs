@@ -1,25 +1,27 @@
 //! Apply opaque, independently verified architecture lane aliases as CMake
-//! source-selection declarations. This creates no MetaMake endpoint/provider.
+//! source-selection declarations. A selector may be pure virtual or may
+//! compose with an existing, verified physical selected-tag object lane. This
+//! creates no MetaMake endpoint/provider.
 
 use super::{ArchSourceDecl, DependencyGraph};
 use crate::arch_endpoint_effects::{ArchEndpointEffect, ArchEndpointEffectData};
 use crate::native_owner_projection::VerifiedArchLaneAlias;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_ALIASES: usize = 128;
 
 impl DependencyGraph {
     /// Retag exact original architecture source groups through verified
-    /// handwritten MetaMake edges. Original effects and source declarations
-    /// remain intact; only the cloned CMake source tag changes.
+    /// handwritten MetaMake edges. A physical selected-tag lane is retained
+    /// and checked when present; only the cloned CMake source tag changes.
     ///
     /// The graph must already retain each original effect selected by the
     /// native binder. The opaque proofs are also checked against this graph's
     /// exact MetaMake route and source group before any mutation occurs.
     ///
     /// # Errors
-    /// Refuses stale/missing graph routes, mismatched source groups, physical
-    /// owners at the selector endpoint, duplicate aliases, and file collisions.
+    /// Refuses stale/missing graph routes, mismatched source groups, unverified
+    /// physical owners, duplicate aliases, and file collisions.
     pub fn apply_arch_lane_aliases(
         &mut self,
         aliases: &[VerifiedArchLaneAlias],
@@ -30,6 +32,7 @@ impl DependencyGraph {
         let mut plans = Vec::with_capacity(aliases.len());
         let mut seen = BTreeSet::new();
         let mut planned_destinations = BTreeSet::new();
+        let mut planned_files: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
 
         for alias in aliases {
             let (mainmmake, source_tag, selected_tag, consumer, dependency) = alias.route();
@@ -64,14 +67,6 @@ impl DependencyGraph {
             {
                 return Err("verified architecture lane alias effect identity changed".into());
             }
-            // A virtual selector must not become a second physical owner
-            // through a different graph declaration.
-            if self.make_meta_providers.contains(consumer) {
-                return Err(format!(
-                    "architecture lane alias selector has a physical provider: {consumer}"
-                ));
-            }
-
             let source_groups = self
                 .arch_sources
                 .get(mainmmake)
@@ -85,6 +80,13 @@ impl DependencyGraph {
                     "verified architecture lane alias has no unique exact source group: {mainmmake} {source_tag}"
                 ));
             };
+            if alias.physical_owner().is_some() {
+                verify_physical_owner_binding(self, alias, source_groups)?;
+            } else if self.make_meta_providers.contains(consumer) {
+                return Err(format!(
+                    "architecture lane alias selector has an unverified physical provider: {consumer}"
+                ));
+            }
             let mut files = source.files.clone();
             files.sort();
             let identity = (
@@ -106,6 +108,19 @@ impl DependencyGraph {
                     "architecture lane alias collides with an existing {selected_tag} source group"
                 ));
             }
+            let destination_files = planned_files
+                .entry((mainmmake.to_owned(), selected_tag.to_owned()))
+                .or_default();
+            if source
+                .files
+                .iter()
+                .any(|file| destination_files.contains(file))
+            {
+                return Err(format!(
+                    "architecture lane aliases overlap in the planned {selected_tag} source groups"
+                ));
+            }
+            destination_files.extend(source.files.iter().cloned());
             plans.push((
                 mainmmake.to_owned(),
                 (**source).clone(),
@@ -141,6 +156,69 @@ impl DependencyGraph {
         }
         Ok(notes)
     }
+}
+
+fn verify_physical_owner_binding(
+    graph: &DependencyGraph,
+    alias: &VerifiedArchLaneAlias,
+    source_groups: &[ArchSourceDecl],
+) -> Result<(), String> {
+    let (mainmmake, _, selected_tag, consumer, _) = alias.route();
+    let Some((effect, _, owner)) = alias.physical_owner() else {
+        return Err("architecture lane composition has no physical owner proof".into());
+    };
+    // make_meta_providers records literal nonvirtual source markers, not
+    // macro-expanded architecture producers. The sealed owner proof and the
+    // exact retained object effect/pair/group are the witnesses here.
+    let ArchEndpointEffectData::ArchModuleObjects {
+        mainmmake: effect_main,
+        tag: effect_tag,
+        ..
+    } = &effect.data
+    else {
+        return Err("verified selector owner is not an architecture object effect".into());
+    };
+    if effect.endpoint != consumer
+        || effect_main != mainmmake
+        || effect_tag != selected_tag
+        || effect.recipe.strip_suffix(".src") != Some(owner)
+    {
+        return Err(format!(
+            "verified architecture lane alias physical owner identity changed: {consumer}"
+        ));
+    }
+    let object_effects = graph
+        .arch_endpoint_effects
+        .iter()
+        .filter(|candidate| {
+            candidate.endpoint == consumer
+                && matches!(
+                    &candidate.data,
+                    ArchEndpointEffectData::ArchModuleObjects { .. }
+                )
+        })
+        .collect::<Vec<_>>();
+    let [graph_effect] = object_effects.as_slice() else {
+        return Err(format!(
+            "architecture lane alias selector does not have one graph object effect: {consumer}"
+        ));
+    };
+    if *graph_effect != effect {
+        return Err(format!(
+            "architecture lane alias selector graph object effect changed: {consumer}"
+        ));
+    }
+    alias.verify_physical_pair(&graph.arch_endpoint_effects)?;
+    let matching_groups = source_groups
+        .iter()
+        .filter(|source| source_group_matches_effect(source, effect))
+        .count();
+    if matching_groups != 1 {
+        return Err(format!(
+            "architecture lane alias selector has no unique physical source group: {consumer}"
+        ));
+    }
+    Ok(())
 }
 
 fn source_group_matches_effect(source: &ArchSourceDecl, effect: &ArchEndpointEffect) -> bool {

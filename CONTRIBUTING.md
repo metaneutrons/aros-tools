@@ -58,7 +58,8 @@ The previous full default remains available only through explicit `all`.
 | Ordinary local iteration / before pushing | `scripts/check-workspace.sh` | Quality + portable Rust; no source checkout or product build. |
 | Source/transpiler behavior changes and PR source lane | `AROS_TEST_SOURCE_ROOT=... AROS_TEST_MESA20_SOURCE_ROOT=... AROS_TEST_MESA26_SOURCE_ROOT=... scripts/check-workspace.sh source-test` | Full locked Rust suite; the current source and historical Mesa 20 regression trees are validated separately. No CMake fixtures. |
 | Documentation changes | `scripts/check-workspace.sh docs` | Locked npm/Astro build, generated links and deployment dry-run. |
-| Integrated `main` or explicit integration run | `AROS_TEST_SOURCE_ROOT=... AROS_TEST_MESA20_SOURCE_ROOT=... AROS_TEST_MESA26_SOURCE_ROOT=... scripts/check-workspace.sh test` | Full Rust suite + every host-compatible CMake fixture. |
+| Integrated `main` or explicit integration run | `AROS_TEST_SOURCE_ROOT=... AROS_TEST_MESA20_SOURCE_ROOT=... AROS_TEST_MESA26_SOURCE_ROOT=... scripts/check-workspace.sh test` | Full Rust suite + every host-compatible self-contained root CMake fixture. Package-qualified fixtures are reported separately. |
+| GNU compiler-package fixture after extraction | `AROS_TEST_SOURCE_ROOT=... AROS_TEST_GNU_SOURCE_PRESET=... AROS_TEST_GNU_TOOLCHAIN_ROOT=... AROS_TEST_AROS=... scripts/check-workspace.sh gnu-package-test` | Runs only the GNU RV32 compiler-role fixture against the already extracted schema-v2 package. It does not run Cargo or install/extract the package. |
 | Feature/milestone acceptance or release candidate | `AROS_TEST_SOURCE_ROOT=... AROS_TEST_MESA20_SOURCE_ROOT=... AROS_TEST_MESA26_SOURCE_ROOT=... scripts/check-workspace.sh all` | Quality + docs + integration; requires the host coverage below. |
 
 Every pull request retains commit hygiene, the stable Linux x86-64 check,
@@ -99,8 +100,9 @@ it rather than accepting a green partial stage.
 The real GRUB fixture builds PC, EFI64 and EFI32 host tools **only on
 Darwin/arm64**; Linux explicitly reports that host-qualified omission. A green
 Linux CI run alone is therefore not the complete macOS/GRUB evidence. The
-explicit `test`/`all` gate discovers every `*Test.cmake`, so newly added fixtures
-cannot silently fall out of the integration inventory. `clang`, `cmake` and
+explicit `test`/`all` gate discovers every root-level self-contained
+`*Test.cmake`. It reports package-qualified fixtures separately; they run only
+through their documented package-specific gate. `clang`, `cmake` and
 `ninja` are required; the native-core fixture also needs `ld.lld`, and the
 module source-group fixture needs a host compiler that builds Objective-C
 (`gobjc` on Debian and Ubuntu). The local invocation is:
@@ -128,6 +130,39 @@ Workspace tests normally find all six required real
 build-tool executables in the Cargo target directory; set
 `AROS_TEST_TOOLS_DIR` explicitly when testing prebuilt binaries from another
 directory.
+
+The package-qualified GNU engine fixture is invoked with
+`scripts/check-workspace.sh gnu-package-test` after its compiler package has
+already been extracted. Set `AROS_TEST_SOURCE_ROOT` to the canonical Git root,
+`AROS_TEST_GNU_SOURCE_PRESET` to the selected source preset,
+`AROS_TEST_GNU_TOOLCHAIN_ROOT` to that package root, and `AROS_TEST_AROS` to the
+canonical executable CLI path. The gate runs `aros toolchain verify --preset
+<preset> --local <package-root>` from the selected source root before and after
+the fixture. That CLI verifies the schema-v2 manifest, full tree inventory and
+GNU executable layout; the fixture selector also requires the GNU RV32
+`rv32imafc` baseline and `ilp32f` ABI, resolves C/C++/archive/ranlib from the
+verified `toolchain-tools.json`, and selects the target-triple `readelf` only
+when its regular executable bytes match the measured manifest inventory. The
+fixture checks CMake compiler-role behavior for this extracted package; it
+does not qualify SDK generation or the complete source SDK.
+Nested readelf/configure/build/counter output is captured to separate scratch
+files and size-checked at 1 MiB per stream before CMake reads it; the fixture
+process tree also inherits an 8 MiB per-file limit.
+The producer caller is responsible for supplying its privately owned,
+already-extracted `execution/first` package root; this mode neither extracts
+nor copies the package. Its pre/post verification detects persistent package
+drift, not privileged concurrent mutation. Publisher/source authenticity and
+immutable-asset verification remain separate authorities and are not proven by
+this compiler-role fixture.
+
+```sh
+AROS_TEST_SOURCE_ROOT=/absolute/path/to/current/AROS-NX \
+AROS_TEST_GNU_SOURCE_PRESET=source-preset \
+AROS_TEST_GNU_TOOLCHAIN_ROOT=/absolute/path/to/extracted/gnu-package \
+AROS_TEST_AROS=/absolute/path/to/aros \
+  scripts/check-workspace.sh gnu-package-test
+```
+
 The current source must match `[integration]` in `contracts/aros-source-v1.toml`
 (or `[source]` in an older contract without that table). The `[source]` and
 `[producer]` pins remain the paired identities of the qualified toolchain
