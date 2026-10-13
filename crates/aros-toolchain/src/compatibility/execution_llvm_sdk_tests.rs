@@ -760,7 +760,7 @@ fn install_link_capable_drivers(request: &mut NativeCompatibilityRequest, root: 
     let c32 = root.join("c-i386.elf");
     let cxx32 = root.join("cxx-i386.elf");
     let application = root.join("llvm-sdk-application.elf");
-    let mut application_bytes = super::tests::fixture_elf64("__TOOLCHAIN_LIST__");
+    let mut application_bytes = super::tests::fixture_elf64("__PROGRAM_ENTRIES_LIST__");
     application_bytes[16..18].copy_from_slice(&1_u16.to_le_bytes());
     application_bytes[18..20].copy_from_slice(&62_u16.to_le_bytes());
     fs::write(&application, application_bytes).unwrap();

@@ -199,7 +199,7 @@ fn arm_target() -> SdkTarget {
 // Add an independently encoded aeabi section to the ordinary collector fixture.
 // No CPU name or object flag determines the attribute bytes.
 fn arm_elf(attributes: &[(u8, u8)]) -> Vec<u8> {
-    let mut bytes = elf_fixture(32, 40, 0x0500_0000, REQUIRED_COLLECTOR_SYMBOL);
+    let mut bytes = elf_fixture(32, 40, 0x0500_0000, REQUIRED_STARTUP_SYMBOL);
     let prior_headers = bytes[52..172].to_vec();
     let old_names_offset = u32::from_le_bytes(bytes[108..112].try_into().unwrap()) as usize;
     let old_names_size = u32::from_le_bytes(bytes[112..116].try_into().unwrap()) as usize;
@@ -256,7 +256,7 @@ fn arm_attributes_are_measured_instead_of_inferred_from_identical_elf_flags() {
     }
     assert_rejection(
         verify_application_elf(
-            &elf_fixture(32, 40, 0x0500_0000, REQUIRED_COLLECTOR_SYMBOL),
+            &elf_fixture(32, 40, 0x0500_0000, REQUIRED_STARTUP_SYMBOL),
             &target,
         ),
         "LLVM SDK application ARM attributes are absent or invalid",
@@ -1049,7 +1049,7 @@ fn verifies_source_selected_elf_class_machine_flags_and_aros_identity() {
                 width,
                 machine,
                 value | (0x80 & !mask),
-                REQUIRED_COLLECTOR_SYMBOL,
+                REQUIRED_STARTUP_SYMBOL,
             ),
             &target,
         )
@@ -1057,7 +1057,7 @@ fn verifies_source_selected_elf_class_machine_flags_and_aros_identity() {
     }
 
     let target = target32();
-    let wrong_class = elf_fixture(32, 243, 1, REQUIRED_COLLECTOR_SYMBOL);
+    let wrong_class = elf_fixture(32, 243, 1, REQUIRED_STARTUP_SYMBOL);
     let target_64 = target_with_facts(
         "futurecpu-vendor-aros",
         Some(unsigned(64)),
@@ -1072,29 +1072,29 @@ fn verifies_source_selected_elf_class_machine_flags_and_aros_identity() {
     );
 
     assert_rejection(
-        verify_application_elf(&elf_fixture(32, 244, 1, REQUIRED_COLLECTOR_SYMBOL), &target),
+        verify_application_elf(&elf_fixture(32, 244, 1, REQUIRED_STARTUP_SYMBOL), &target),
         "LLVM SDK application ELF class or machine differs from the source target",
     );
     assert_rejection(
-        verify_application_elf(&elf_fixture(32, 243, 0, REQUIRED_COLLECTOR_SYMBOL), &target),
+        verify_application_elf(&elf_fixture(32, 243, 0, REQUIRED_STARTUP_SYMBOL), &target),
         "LLVM SDK application ELF flags differ from the source mask/value",
     );
 
-    let mut wrong_osabi = elf_fixture(32, 243, 1, REQUIRED_COLLECTOR_SYMBOL);
+    let mut wrong_osabi = elf_fixture(32, 243, 1, REQUIRED_STARTUP_SYMBOL);
     wrong_osabi[7] = 0;
     assert_rejection(
         verify_application_elf(&wrong_osabi, &target),
         "LLVM SDK application ELF lacks the selected AROS ABI marking",
     );
 
-    let mut wrong_version = elf_fixture(32, 243, 1, REQUIRED_COLLECTOR_SYMBOL);
+    let mut wrong_version = elf_fixture(32, 243, 1, REQUIRED_STARTUP_SYMBOL);
     wrong_version[8] = AROS_ABI_VERSION + 1;
     assert_rejection(
         verify_application_elf(&wrong_version, &target),
         "LLVM SDK application ELF lacks the selected AROS ABI marking",
     );
 
-    let mut wrong_type = elf_fixture(32, 243, 1, REQUIRED_COLLECTOR_SYMBOL);
+    let mut wrong_type = elf_fixture(32, 243, 1, REQUIRED_STARTUP_SYMBOL);
     wrong_type[16..18].copy_from_slice(&2_u16.to_le_bytes());
     assert_rejection(
         verify_application_elf(&wrong_type, &target),
@@ -1103,7 +1103,28 @@ fn verifies_source_selected_elf_class_machine_flags_and_aros_identity() {
 
     assert_rejection(
         verify_application_elf(&elf_fixture(32, 243, 1, "OTHER_SYMBOL"), &target),
-        "LLVM SDK application ELF lacks its required defined collector symbol",
+        "LLVM SDK application ELF lacks its required defined startup list symbol",
+    );
+}
+
+#[test]
+fn requires_a_defined_program_entries_startup_list_not_a_toolchain_list() {
+    let target = target32();
+
+    verify_application_elf(&elf_fixture(32, 243, 1, REQUIRED_STARTUP_SYMBOL), &target).unwrap();
+
+    assert_rejection(
+        verify_application_elf(&elf_fixture(32, 243, 1, "__TOOLCHAIN_LIST__"), &target),
+        "LLVM SDK application ELF lacks its required defined startup list symbol",
+    );
+
+    let mut undefined = elf_fixture(32, 243, 1, REQUIRED_STARTUP_SYMBOL);
+    // The 32-bit fixture's final word is st_shndx for the defined symbol.
+    let symbol_section_offset = undefined.len() - 2;
+    undefined[symbol_section_offset..].copy_from_slice(&0_u16.to_le_bytes());
+    assert_rejection(
+        verify_application_elf(&undefined, &target),
+        "LLVM SDK application ELF lacks its required defined startup list symbol",
     );
 }
 

@@ -1,8 +1,8 @@
 //! Source-fact-driven LLVM commands and narrow ordinary-application ELF checks.
 //!
 //! These helpers preserve LLVM's normal link defaults. They validate only the
-//! source-selected target facts and one required common collector symbol; they
-//! do not authenticate the source, prove every scalar ABI fact, demonstrate
+//! source-selected target facts and the defined startup `PROGRAM_ENTRIES` list;
+//! they do not authenticate the source, prove every scalar ABI fact, demonstrate
 //! C++ initialization, or qualify SDK usability.
 
 use std::collections::BTreeSet;
@@ -20,7 +20,7 @@ const MAX_ADDITIONAL_LIBRARIES: usize = 64;
 const MAX_LIBRARY_BYTES: usize = 64;
 const MAX_COMPILER_OPTION_BYTES: usize = 64;
 const MAX_APPLICATION_ARGUMENTS: usize = 256;
-const REQUIRED_COLLECTOR_SYMBOL: &str = "__TOOLCHAIN_LIST__";
+const REQUIRED_STARTUP_SYMBOL: &str = "__PROGRAM_ENTRIES_LIST__";
 
 /// Build one ordinary C or C++ LLVM SDK application-link command.
 ///
@@ -126,10 +126,10 @@ pub(super) fn validate_target(target: &SdkTarget) -> Result<(), ContractError> {
 
 /// Check the measured ordinary-link ELF identity against source facts.
 ///
-/// This requires only the common defined collector list symbol. It does not
-/// infer a C++ initialization proof from that symbol or validate ABI facts
-/// beyond the selected class, machine, flags mask, ARM file attributes and
-/// AROS marking. ISA intentions are not execution on physical hardware.
+/// This requires the defined startup `PROGRAM_ENTRIES` list. It does not
+/// establish C++ initialization from that list or validate ABI facts beyond
+/// the selected class, machine, flags mask, ARM file attributes and AROS
+/// marking. ISA intentions are not execution on physical hardware.
 ///
 /// # Errors
 /// Rejects malformed ELF or disagreement with the source-selected facts.
@@ -171,7 +171,7 @@ pub(super) fn verify_application_elf(
         }
     }
     if !object.symbols.iter().any(|symbol| {
-        symbol.name == REQUIRED_COLLECTOR_SYMBOL
+        symbol.name == REQUIRED_STARTUP_SYMBOL
             && match symbol.home {
                 Home::Absolute => true,
                 Home::Undefined => false,
@@ -181,7 +181,7 @@ pub(super) fn verify_application_elf(
             }
     }) {
         return Err(error(
-            "LLVM SDK application ELF lacks its required defined collector symbol",
+            "LLVM SDK application ELF lacks its required defined startup list symbol",
         ));
     }
     Ok(())
