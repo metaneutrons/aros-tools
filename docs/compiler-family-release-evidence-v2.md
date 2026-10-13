@@ -98,12 +98,14 @@ self-digests are labeled separately from raw file digests.
 
 For SDK-bearing selections, JSON also returns `sdk_count` and an ID-sorted
 `sdks` array with source-owned identity and measured tree, archive and manifest
-digests/sizes. Compiler-only selections omit these fields. These are package
-byte measurements. `sdk_generation_count` and `sdk_generations` additionally
-report the complete generation-record and compatibility/link receipt byte join.
-These measurements do not authenticate their original jobs. Qualification,
-recording and recovery still reject SDK-bearing releases until that separate
-authenticated generation join is implemented.
+digests/sizes. Compiler-only selections omit these fields.
+`sdk_generation_count` and `sdk_generations` report the complete generation-
+record and compatibility/link receipt byte join. In the current unreleased
+source, explicit family-v2 recording, qualification-readback and recovery
+require the full input-derived generation matrix on the same compiler request,
+with claims matched to measured bytes; compiler-only evidence fails.
+Owning-job and signature authentication and production release qualification
+remain separate gates.
 
 Every lane is returned together or the operation fails. A rehashed report is
 not enough to admit changed package, log or ELF bytes. A valid selection still

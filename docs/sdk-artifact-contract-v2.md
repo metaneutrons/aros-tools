@@ -337,10 +337,12 @@ four-link proof. Compatibility, SDK-link and LLVM binding digests must match
 the downloaded evidence. Package and compatibility bytes are observed again
 before returning measured results. The operation writes nothing.
 
-This is one byte-consistency join, not SDK generation execution or authenticated
-qualification. Other required compiler profiles/hosts, original owning-job
-origin, signatures and the final shared release inventory remain separate gates.
-The compiler-only qualification path still rejects SDK-selected releases.
+This is a byte-consistency join, not SDK generation execution. The current
+unreleased explicit family-v2 path requires the full input-derived generation
+matrix on the same compiler request; compiler-only evidence fails. Other
+compiler profiles/hosts and the final shared release inventory must also be
+covered. Owning-job and signature authentication and production qualification
+remain separate gates.
 
 ## Complete local package
 
@@ -456,10 +458,10 @@ construction and readback verify independently selected SDK packages, exact
 identity documents and deterministic SPDX. Final checksum/attestation stages
 include all selected SDK members; archive and manifest hashes/sizes must equal
 the indexed locks even if a checksum document is freshly regenerated.
-Qualification still rejects SDK-bearing releases until authenticated generation
-and owning-job evidence are joined. Compiler-only lanes cannot qualify a release
-which selects SDKs. A selected ABI descriptor or compiler profile is not proof
-of binary compatibility.
+The explicit family-v2 qualification path requires the complete input-derived
+generation matrix joined to the same complete compiler readback; compiler-only
+evidence fails. A selected ABI descriptor or compiler profile is not proof of
+binary compatibility.
 
 The release-evidence collector accepts an independent `sdk_packages` map with
 exact product-ID coverage and tree/archive digests plus archive sizes. It
@@ -478,9 +480,8 @@ all hosts must produce the same canonical indexed SDK package bytes. Records
 and compatibility receipts remain host-bound. Canonical, disjoint roots and
 repeated readbacks reject aliases and observed changes.
 
-The API reads existing bytes only. Its opaque result is not CI authentication,
-an atomic filesystem snapshot or release admission; SDK qualification still
-requires verified original owning-job provenance.
+The API reads existing bytes only; external owning-job authentication remains
+separate.
 
 `aros-sdk-lock-v2` selects an exact release tag, canonical credential-free
 HTTPS base URL, SDK identity, payload tree digest, archive SHA-256/size and

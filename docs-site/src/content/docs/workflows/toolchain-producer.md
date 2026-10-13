@@ -27,11 +27,14 @@ The examples below retain the existing PC/LLVM selection.
 The unreleased V2 release-input collection can explicitly select a
 host-independent SDK identity and its required compiler profiles. Its source,
 target/ABI and product version stay separate from compiler and host identities.
-The shared index can verify selected SDK package bytes. Qualification still
-rejects SDK-bearing releases until generation and authenticated owning-job
-evidence are joined. See the
+The shared index can verify selected SDK package bytes. See the
 [SDK commands](/aros-tools/reference/cli-contract/sdk/)
 for current local generation and management options.
+
+The unreleased explicit family-v2 path supports the full compiler/SDK
+generation matrix. Compiler-only evidence remains insufficient. Byte checks
+remain separate from original-job and signature authentication and production
+release gates.
 
 SDK source profiles can declare a target-generic `sdk_consumer_contract`.
 The transpiler uses it for strict inventory and graph export; CMake checks the
@@ -262,10 +265,9 @@ tree/archive digests and archive sizes. Identities come from release inputs.
 The result retains measured SDK packages, not generation or origin proof.
 It does not qualify a release or authenticate jobs.
 
-The unreleased library also checks downloaded SDK generation records against
-selected inputs, measured packages and complete compatibility/link evidence,
-without opening old runner roots. Original job authentication and the complete
-compiler/SDK qualification matrix are still required before publication.
+The unreleased library checks downloaded SDK generation records against
+selected inputs, measured packages and complete compatibility/link evidence
+without opening original runner roots.
 
 A local file hash is not authenticated execution provenance. Hashing an
 untrusted result does not make it trusted; a release workflow must separately
