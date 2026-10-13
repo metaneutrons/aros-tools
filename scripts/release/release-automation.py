@@ -24,6 +24,9 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[2]
 SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 OID = re.compile(r"[0-9a-f]{40}")
+# Admission consumes merge_commit_sha from the reviewed PR response contract.
+# GitHub removed that field in 2026-03-10; this supported version retains it.
+REST_API_VERSION = "2022-11-28"
 BOT = {"metaneutrons-release-please[bot]", "app/metaneutrons-release-please"}
 FILES = {".release-please-manifest.json", "CHANGELOG.md", "Cargo.toml", "Cargo.lock"}
 REQUIRED_JOBS = {
@@ -40,7 +43,7 @@ def fail(message: str) -> "NoReturn":
 def api(path: str, *, method: str = "GET", payload: dict | None = None,
         pages: bool = False, absent: bool = False, governance: bool = False):
     args = ["gh", "api", "--method", method,
-            "-H", "X-GitHub-Api-Version: 2026-03-10", path]
+            "-H", f"X-GitHub-Api-Version: {REST_API_VERSION}", path]
     if pages:
         args.extend(["--paginate", "--slurp"])
     if payload is not None:
@@ -170,6 +173,13 @@ def admission(*, expected_draft: int | None = None, governance_receipt: dict | N
     # merges a release candidate, without creating any draft or tag.
     governance = tag_policy(repo, governance_receipt)
     pulls = api(f"repos/{repo}/commits/{head}/pulls?per_page=100", pages=True)
+    for pull in (pull for page in pulls for pull in page):
+        if (pull.get("state") == "closed" and pull.get("merged_at")
+                and pull.get("user", {}).get("login") in BOT
+                and pull.get("title") == f"chore(main): release {version}"):
+            merged_commit = pull.get("merge_commit_sha")
+            if not isinstance(merged_commit, str) or OID.fullmatch(merged_commit) is None:
+                fail("merged release PR lacks merge_commit_sha from the pinned REST API contract")
     matches = [p for page in pulls for p in page if
                p.get("state") == "closed" and p.get("merged_at")
                and p.get("merge_commit_sha") == head and p.get("base", {}).get("ref") == "main"
