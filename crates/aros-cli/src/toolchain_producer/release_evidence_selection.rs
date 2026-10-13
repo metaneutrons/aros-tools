@@ -255,8 +255,15 @@ pub(super) fn require_sdk_generation_lanes(
         || required.len() != expected.len()
         || actual != required
     {
-        return Err(miette::miette!(
-            "SDK generation selection must exactly cover the independently selected release lanes"
+        return Err(crate::observability::native_diagnostic(
+            aros_common::Diagnostic::error(
+                aros_common::DiagnosticCode::ProducerRecovery,
+                aros_common::DiagnosticStage::Configuration,
+                "SDK generation selection must exactly cover the independently selected release lanes",
+            )
+            .with_hint(
+                "do not repackage, retarget a tag, or alter a release handoff; restore complete immutable evidence and use a fresh qualification when the failed stage was not packaging alone",
+            ),
         ));
     }
     Ok(())

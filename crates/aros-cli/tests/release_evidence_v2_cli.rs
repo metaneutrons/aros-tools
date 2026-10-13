@@ -76,7 +76,10 @@ fn process_refuses_sdk_packages_without_complete_generation_and_qualification() 
     assert!(rejected.stdout.is_empty());
     let diagnostic: Value = serde_json::from_slice(&rejected.stderr).unwrap();
     assert_eq!(diagnostic["diagnostics"][0]["code"], "AX0901");
-    assert_eq!(diagnostic["diagnostics"][0]["message"], "SDK-selected release requires complete authenticated SDK qualification, not compiler-only lanes");
+    assert_eq!(
+        diagnostic["diagnostics"][0]["message"],
+        "SDK generation selection must exactly cover the independently selected release lanes"
+    );
     assert!(!claim_path.exists());
     assert_eq!(
         support::snapshot_tree(&fixture.release_directory),
