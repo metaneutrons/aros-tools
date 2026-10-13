@@ -334,6 +334,8 @@ pub(super) struct ConsumerBinding {
     pub(super) contract_sha256: Sha256Digest,
     pub(super) profile: String,
     pub(super) target: SdkTarget,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) companion_roles: Vec<aros_common::sdk_companion_role::SdkCompanionRole>,
     pub(super) exec_smp: bool,
     pub(super) input_paths: Vec<String>,
     pub(super) sdk_include_relative: String,
@@ -438,7 +440,7 @@ fn validate_response(
                 _ => {
                     return Err(error(
                         "LLVM SDK source has an invalid Exec SMP substitution",
-                    ))
+                    ));
                 }
             };
             if exec_smp.is_some_and(|previous| previous != selected) {
@@ -460,6 +462,7 @@ fn validate_response(
         || binding.contract_sha256 != loaded.sha256
         || binding.profile != loaded.contract.profile
         || binding.target != request.source.identity().target
+        || binding.companion_roles != loaded.contract.companion_roles
         || binding.exec_smp != exec_smp.unwrap_or(false)
         || binding.input_paths != paths
     {

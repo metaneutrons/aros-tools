@@ -10,6 +10,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use aros_common::sdk_manifest::{SdkIdentity, SdkSourceIdentity, SdkTarget};
 use aros_common::{
@@ -162,6 +163,111 @@ fn executes_six_phases_and_four_llvm_sdk_links_with_schema_v6_digest_binding() {
         })
         .count();
     assert_eq!(matching_link_receipts, 1, "retained LLVM link receipt");
+}
+
+#[test]
+fn llvm_sdk_binding_exactly_checks_source_declared_companion_roles() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let mut fixture = fixture(root, BindingMode::Valid, "x86_64", 62);
+
+    let role_source_root = root.join("companion-role-fixture");
+    fs::create_dir(&role_source_root).unwrap();
+    let (source_root, materialized_source_root, identity, _) =
+        generic_source(&role_source_root, "x86_64", 62, PROFILE_NAME, true);
+    let source = verify_sdk_source(&SdkSourceVerificationRequest {
+        source_root,
+        materialized_source_root,
+        source_preset: PROFILE_NAME.into(),
+        identity,
+    })
+    .unwrap();
+    bind_fixture_to_shared_source(&mut fixture, &source);
+
+    let request = crate::compatibility::LlvmSdkGeneratedRootRequest {
+        source: source.clone(),
+        preparation: fixture.request.preparation.clone(),
+        cmake_build_root: fixture.request.cmake_build_root.clone(),
+        timeout: Duration::from_secs(30),
+    };
+    let sdk_root = request.cmake_build_root.join(SDK_RELATIVE_ROOT);
+    fs::create_dir_all(sdk_root.join("include")).unwrap();
+    fs::write(sdk_root.join("include/public.h"), b"/* synthetic SDK */\n").unwrap();
+
+    let expected = source_binding_response(source.materialized_source_root(), source.identity());
+    fs::write(
+        &fixture.binding_path,
+        crate::canonical::bytes(&expected).unwrap(),
+    )
+    .unwrap();
+    let bound =
+        crate::compatibility::bind_llvm_sdk_generated_root(&request, &CancellationToken::default())
+            .unwrap();
+    assert_eq!(bound.sdk_root(), sdk_root.canonicalize().unwrap());
+
+    let helper_response_path = fixture
+        .cmake_log
+        .parent()
+        .unwrap()
+        .join("sdk-source-binding-response.json");
+    let mut fresh_missing = expected.clone();
+    fresh_missing
+        .as_object_mut()
+        .unwrap()
+        .remove("companion_roles");
+    fs::write(
+        &helper_response_path,
+        crate::canonical::bytes(&fresh_missing).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        crate::compatibility::bind_llvm_sdk_generated_root(
+            &request,
+            &CancellationToken::default(),
+        )
+        .is_err(),
+        "accepted an absent source-declared role from fresh validation"
+    );
+    fs::write(
+        &helper_response_path,
+        crate::canonical::bytes(&expected).unwrap(),
+    )
+    .unwrap();
+
+    let mut absent = expected.clone();
+    absent.as_object_mut().unwrap().remove("companion_roles");
+    assert_rejects_companion_role_binding(&fixture, &request, &absent, "absent roles");
+
+    let mut changed = expected.clone();
+    changed["companion_roles"][0]["library_dir"] = json!("lib64");
+    assert_rejects_companion_role_binding(&fixture, &request, &changed, "changed role");
+
+    let mut extra = expected.clone();
+    let role = extra["companion_roles"][0].clone();
+    extra["companion_roles"].as_array_mut().unwrap().push(role);
+    assert_rejects_companion_role_binding(&fixture, &request, &extra, "extra role");
+
+    let mut unknown = expected;
+    unknown["companion_roles"][0]["inferred_role"] = json!(true);
+    assert_rejects_companion_role_binding(&fixture, &request, &unknown, "unknown role field");
+}
+
+fn assert_rejects_companion_role_binding(
+    fixture: &Fixture,
+    request: &crate::compatibility::LlvmSdkGeneratedRootRequest,
+    binding: &Value,
+    probe: &str,
+) {
+    fs::write(
+        &fixture.binding_path,
+        crate::canonical::bytes(binding).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        crate::compatibility::bind_llvm_sdk_generated_root(request, &CancellationToken::default(),)
+            .is_err(),
+        "accepted {probe} in the retained source binding"
+    );
 }
 
 #[test]
@@ -352,7 +458,7 @@ fn fixture_for_host_with_toolchain_profile(
     install_link_capable_drivers(&mut llvm.request, compiler_root);
 
     let (source_root, materialized_source_root, identity, response_path) =
-        generic_source(root, arch, machine, toolchain_profile);
+        generic_source(root, arch, machine, toolchain_profile, false);
     let helper_path = llvm.request.preparation.helpers["aros-transpiler"]
         .path
         .clone();
@@ -457,6 +563,7 @@ fn generic_source(
     arch: &str,
     machine: u16,
     toolchain_profile: &str,
+    with_companion_role: bool,
 ) -> (PathBuf, PathBuf, SdkIdentity, PathBuf) {
     let source_root = root.join("generic-sdk-source");
     fs::create_dir(&source_root).unwrap();
@@ -464,8 +571,9 @@ fn generic_source(
 
     let source_cpu = arch;
     let target_triple = format!("{source_cpu}-unknown-aros");
+    let cpu32 = if with_companion_role { "i386" } else { "" };
     let profile = format!(
-        "[[targets]]\nname='{PROFILE_NAME}'\ntoolchain_profile='{toolchain_profile}'\narch='{arch}'\nplatform='pc'\nbsp='generic'\nsdk_consumer_contract='consumer.json'\n[targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='llvm'\ncpu32=''\nuse_mmu=true\nmesa_version='26.0.0'\n[targets.bootstrap_abi]\nflavour='native'\nplatform_smp=true\n"
+        "[[targets]]\nname='{PROFILE_NAME}'\ntoolchain_profile='{toolchain_profile}'\narch='{arch}'\nplatform='pc'\nbsp='generic'\nsdk_consumer_contract='consumer.json'\n[targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='llvm'\ncpu32='{cpu32}'\nuse_mmu=true\nmesa_version='26.0.0'\n[targets.bootstrap_abi]\nflavour='native'\nplatform_smp=true\n"
     );
     let abi = json!({
         "source_cpu": source_cpu,
@@ -515,7 +623,7 @@ fn generic_source(
         target_triple,
         abi: serde_json::from_value(abi).unwrap(),
     };
-    let contract = json!({
+    let mut contract = json!({
         "schema": "aros-sdk-consumer-contract-v1",
         "profile": PROFILE_NAME,
         "source_baseline": "0123456789abcdef0123456789abcdef01234567",
@@ -528,6 +636,9 @@ fn generic_source(
             "cxx": {"source": "probe.cpp", "libraries": ["fixture"]},
         },
     });
+    if with_companion_role {
+        contract["companion_roles"] = json!([i386_companion_role()]);
+    }
     let contract_bytes = serde_json::to_vec(&contract).unwrap();
     fs::write(source_root.join("consumer.json"), &contract_bytes).unwrap();
     fs::create_dir(source_root.join("cmake")).unwrap();
@@ -577,7 +688,7 @@ fn generic_source(
 fn source_binding_response(materialized_root: &Path, identity: &SdkIdentity) -> Value {
     let contract_path = materialized_root.join("consumer.json");
     let contract: Value = serde_json::from_slice(&fs::read(&contract_path).unwrap()).unwrap();
-    json!({
+    let mut response = json!({
         "schema": "aros-sdk-consumer-validation-v1",
         "qualification": "source-binding-not-graph-or-build-proof",
         "source_dir": materialized_root,
@@ -588,6 +699,29 @@ fn source_binding_response(materialized_root: &Path, identity: &SdkIdentity) -> 
         "exec_smp": false,
         "input_paths": contract["inputs"].as_array().unwrap().iter().map(|input| input["path"].clone()).collect::<Vec<_>>(),
         "sdk_include_relative": SDK_INCLUDE_RELATIVE,
+    });
+    if let Some(companion_roles) = contract.get("companion_roles") {
+        response["companion_roles"] = companion_roles.clone();
+    }
+    response
+}
+
+fn i386_companion_role() -> Value {
+    json!({
+        "selector_cpu": "i386",
+        "target": {
+            "target_triple": "i386-unknown-aros",
+            "abi": {
+                "source_cpu": "i386",
+                "pointer_width": 32,
+                "elf_class": 1,
+                "elf_machine": 3,
+                "endian": "little",
+            },
+        },
+        "compiler_options": ["--target=i386-unknown-aros"],
+        "library_dir": "lib32",
+        "required_runtime_library": "builtins-i386",
     })
 }
 
