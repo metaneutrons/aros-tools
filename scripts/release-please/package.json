@@ -1,0 +1,12 @@
+{
+  "name": "aros-tools-release-please-adapter",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.11.2",
+  "scripts": {
+    "test": "node --test published-baseline.test.mjs"
+  },
+  "dependencies": {
+    "release-please": "17.6.0"
+  }
+}
