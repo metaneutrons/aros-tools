@@ -26,10 +26,10 @@ Documentation: [start here](https://aros.metaneutrons.cc/aros-tools/) ·
 [command reference](https://aros.metaneutrons.cc/aros-tools/reference/cli/) ·
 [release status](https://aros.metaneutrons.cc/aros-tools/reference/release-status/)
 
-> **Project status:** the workspace and its release engineering are under
-> active qualification. Build from source is the supported installation path.
-> Package-manager commands and download URLs are published only after their
-> artifacts have passed the documented clean-room and supply-chain gates.
+> **Availability:** see [release status](https://aros.metaneutrons.cc/aros-tools/reference/release-status/)
+> for published native archives and package channels. Current-source compiler
+> and SDK features can exceed the published runtime; the initial SDK set is
+> not published yet.
 
 ## Why this exists
 
@@ -56,7 +56,7 @@ experience.
 
 ### Prerequisites
 
-- Rust 1.98.0 and Cargo (selected by `rust-toolchain.toml`)
+- Rust 1.99.0 and Cargo (selected by `rust-toolchain.toml`)
 - Git, CMake and Ninja
 - Python 3.11 or newer, curl, a POSIX `patch`, and platform CA certificates used by public
   source-fetch, verification, and build workflows
@@ -106,6 +106,8 @@ staged and never reuses an existing destination.
 | Area | Commands / crates | Responsibility |
 | --- | --- | --- |
 | Frontend | `aros`, `aros-cli` | repository discovery, orchestration, host compilers, released toolchains and board presentation |
+| Cross-compilers | `aros toolchain` | lock-selected download, installation, verification and management; [toolchain guide](https://aros.metaneutrons.cc/aros-tools/workflows/toolchains/) |
+| Developer SDKs | `aros sdk` | source-bound generation, package verification, explicit lock-selected installation and project selection; [SDK guide](https://aros.metaneutrons.cc/aros-tools/workflows/sdks/) |
 | Translation and verification | `aros-transpiler`, `aros-verify` | transactional MetaMake-to-CMake publication and an independent historic-semantics oracle |
 | Linking and SDK generation | `aros-collect`, `aros-genmodule`, `aros-romtool` | two-pass AROS linking, ABI checks, module sources and kickstart PKG containers |
 | Inputs and external contracts | `aros-fetch`, `aros-ahi-runner` | verified source transport, safe extraction, patches and validated AHI builds |
@@ -125,6 +127,13 @@ separate from ordinary toolchain installation: a local candidate is not a
 release, has no provenance claim, and never publishes. The complete, offline
 workflow and its prerequisites are documented in the
 [local native-producer guide](https://aros.metaneutrons.cc/aros-tools/workflows/toolchain-producer/).
+
+A compiler is a host executable; an SDK supplies target headers and libraries
+for a selected ABI. Installing one does not install or select the other. SDK
+products have independent versions: the initial PC x86-64, Raspberry Pi ARM32,
+Raspberry Pi ARM64 and ESP32-P4 RV32 SDKs each start at `0.1.0` and are intended
+to ship together with compilers through `aros-toolchains`. Local generation
+does not qualify or publish that release.
 
 ## Trust, reproducibility, and failure behavior
 
@@ -217,9 +226,10 @@ Please PR, successful Workspace CI and CodeQL runs, and the immutable tag policy
 It emits a short-lived candidate receipt. A separate write job runs only when
 admission is ready; it rechecks that receipt and source before Release Please
 creates the private draft, then rechecks the exact Release Please outputs before
-creating one annotated tag and dispatching qualification once. Admission uses
-the governance credential only for read-only ruleset requests; the writer has
-no repository-secret access. The qualification workflow has no tag-push
+creating one annotated tag and dispatching qualification once. Admission reads
+tag governance with its repository-scoped workflow token; no separate
+governance secret is required. The writer has no repository-secret access.
+The qualification workflow has no tag-push
 trigger, and independently verifies the tag object and exact source SHA.
 
 The first stable tag required every supported native archive and downstream
