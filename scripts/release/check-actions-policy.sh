@@ -34,6 +34,7 @@ trusted_actions = {
     'github/codeql-action/analyze',
     'github/codeql-action/init',
     'googleapis/release-please-action',
+    'pnpm/action-setup',
     'sigstore/cosign-installer',
 }
 local_actions = root.parent / 'actions'
@@ -491,11 +492,13 @@ if rp_path.exists():
         'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
         'client-id: ${{ vars.RELEASE_PLEASE_CLIENT_ID }}',
         'private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}',
-        'token: ${{ steps.app-token.outputs.token }}',
         'GH_TOKEN: ${{ steps.app-token.outputs.token }}',
         'installation/repositories?per_page=100',
         '--paginate --slurp',
-        'skip-github-release: true',
+        'node scripts/release-please/published-baseline.mjs',
+        'pnpm --dir scripts/release-please install --frozen-lockfile --ignore-scripts',
+        'pnpm --dir scripts/release-please test',
+        'pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413',
         'scripts/validate-version-contract.py',
     )
     for marker in required_rp:
@@ -511,7 +514,8 @@ if rp_path.exists():
     ]:
         errors.append(f'{rp_path}: Release Please App must request only Contents and Pull requests write')
     for forbidden in ('github.token', 'secrets.GITHUB_TOKEN', 'skip-token-revoke',
-                      'gh workflow run', 'actions: write', 'issues: write'):
+                      'gh workflow run', 'actions: write', 'issues: write',
+                      'googleapis/release-please-action@'):
         if forbidden in rp_job:
             errors.append(f'{rp_path}: forbidden Release Please credential or duplicate dispatch: {forbidden}')
     if set(re.findall(r'secrets\.([A-Z_]+)', rp_job)) != {'RELEASE_PLEASE_APP_PRIVATE_KEY'}:

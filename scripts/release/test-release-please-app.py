@@ -52,7 +52,7 @@ class ReleasePleaseApp(unittest.TestCase):
         self.policy()
 
     def test_builtin_token(self):
-        self.policy("token: ${{ steps.app-token.outputs.token }}", "token: ${{ github.token }}",
+        self.policy("GH_TOKEN: ${{ steps.app-token.outputs.token }}", "GH_TOKEN: ${{ github.token }}",
                     "forbidden Release Please credential")
 
     def test_wrong_environment(self):
@@ -72,7 +72,11 @@ class ReleasePleaseApp(unittest.TestCase):
                     "forbidden Release Please credential")
 
     def test_no_automatic_release(self):
-        self.policy("skip-github-release: true", "skip-github-release: false",
+        self.policy("node scripts/release-please/published-baseline.mjs", "node scripts/release-please/create-release.mjs",
+                    "missing Release Please App contract")
+
+    def test_preparation_uses_frozen_dependencies(self):
+        self.policy("install --frozen-lockfile --ignore-scripts", "install --ignore-scripts",
                     "missing Release Please App contract")
 
     def test_no_duplicate_dispatch(self):
@@ -212,7 +216,8 @@ class ReleasePleaseApp(unittest.TestCase):
     def test_real_preflight_missing_repository(self):
         self.probe([], code="AP7141")
 
-    def probe_release_pr(self, heads, *, files=None, expected_success=True):
+    def probe_release_pr(self, heads, *, files=None, expected_success=True,
+                         author='metaneutrons-release-please[bot]'):
         # Exercise the workflow step with a stateful GitHub API fake. A freshly
         # updated App branch can precede the pull-request API's head refresh.
         job = SOURCE.split("  release-pr:\n", 1)[1].split("\n  release-admission:\n", 1)[0]
@@ -241,6 +246,7 @@ class ReleasePleaseApp(unittest.TestCase):
             else:
                 print(json.dumps({
                     'state': 'open', 'title': 'chore(main): release 0.3.14',
+                    'user': {'login': os.environ['API_AUTHOR']},
                     'base': {'ref': 'main'},
                     'head': {'sha': sha, 'ref': 'release-please--branches--main--components--aros-tools',
                              'repo': {'full_name': 'example/tools'}},
@@ -253,6 +259,7 @@ class ReleasePleaseApp(unittest.TestCase):
                                        'release-please--branches--main--components--aros-tools',
                                        'baseBranchName': 'main'}),
                    API_HEADS=json.dumps(heads), API_COUNTER=str(self.work / 'api-count'),
+                   API_AUTHOR=author,
                    API_FILES=json.dumps(files or ['.release-please-manifest.json', 'CHANGELOG.md',
                                                   'Cargo.lock', 'Cargo.toml']))
         result = subprocess.run(["bash", "-c", run], env=env, capture_output=True,
@@ -270,6 +277,11 @@ class ReleasePleaseApp(unittest.TestCase):
         old, new = 'a' * 40, 'b' * 40
         result = self.probe_release_pr([old, new] * 8, expected_success=False)
         self.assertIn('did not stabilize', result.stdout + result.stderr)
+
+    def test_release_pr_rejects_wrong_author(self):
+        result = self.probe_release_pr(['b' * 40], author='unexpected-user',
+                                       expected_success=False)
+        self.assertIn('Release Please App author', result.stdout + result.stderr)
 
     def test_release_pr_rejects_unexpected_file_after_convergence(self):
         result = self.probe_release_pr(['b' * 40],
