@@ -425,7 +425,7 @@ jobs:
           rm -f "$handoff/pages.json" "$handoff/matches.json"
           printf 'kind=%s\nrelease_id=%s\n' "$kind" "$release_id" >> "$GITHUB_OUTPUT"
       - name: Seal verified recovery state
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: recovered-release-state
           path: ${{ runner.temp }}/recovered-release-state/
@@ -706,7 +706,7 @@ jobs:
               --source-date-epoch "$SOURCE_DATE_EPOCH" --syft "$SYFT"
           fi
       - name: Upload qualified native artifact set
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: native-${{ matrix.name }}
           path: dist/*
@@ -771,7 +771,7 @@ jobs:
             --source-date-epoch "$SOURCE_DATE_EPOCH" --target "$TARGET" \
             --bin-dir "target/${TARGET}/release" --repository-root . \
             --output-dir reproduced
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: native-${{ matrix.name }}
           path: original
@@ -832,11 +832,11 @@ jobs:
             --tag-object "$TAG_OBJECT" \
             --source-commit "$SOURCE_COMMIT" \
             --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: native-${{ matrix.name }}
           path: dist
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: recovered-release-state
           path: recovered
@@ -875,7 +875,7 @@ jobs:
         with:
           subject-path: dist/*
       - name: Upload signed native artifact set
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: signed-native-${{ matrix.name }}
           path: dist/*
@@ -906,13 +906,13 @@ jobs:
           toolchain=$(scripts/release/read-rust-toolchain.sh)
           rustup toolchain install "$toolchain" --profile minimal
       - if: needs.metadata.outputs.is_release != 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: native-*
           path: release
           merge-multiple: true
       - if: needs.metadata.outputs.is_release == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: signed-native-*
           path: release
@@ -1036,14 +1036,14 @@ jobs:
           VERSION: ${{ needs.metadata.outputs.version }}
         run: scripts/release/verify-candidate-inventory.sh --directory release --version "$VERSION" --signed false
       - if: needs.metadata.outputs.is_release != 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: qualified-release-staging
           path: release/*
           if-no-files-found: error
           retention-days: 14
       - if: needs.metadata.outputs.is_release == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: aggregate-release-candidate
           path: release/*
@@ -1080,11 +1080,11 @@ jobs:
             --tag-object "$TAG_OBJECT" \
             --source-commit "$SOURCE_COMMIT" \
             --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: aggregate-release-candidate
           path: release
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: recovered-release-state
           path: recovered
@@ -1167,7 +1167,7 @@ jobs:
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
         run: scripts/release/verify-candidate-inventory.sh --directory release --version "$VERSION" --signed true
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: qualified-release-staging
           path: release/*
@@ -1196,7 +1196,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: qualified-release-staging
           path: candidate
@@ -1300,7 +1300,7 @@ jobs:
           - arch: aarch64
             target: aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: qualified-release-staging
           path: candidate
@@ -1425,7 +1425,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: qualified-release-staging
           path: candidate
@@ -1607,7 +1607,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: qualified-release-staging
           path: candidate
@@ -2071,7 +2071,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: qualified-release-staging
           path: candidate
