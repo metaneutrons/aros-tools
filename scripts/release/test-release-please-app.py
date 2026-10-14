@@ -112,13 +112,20 @@ class ReleasePleaseApp(unittest.TestCase):
                                  "set -euo pipefail\n          echo ${{ secrets.EXTRA_TOKEN }}")
         self.policy_source(source, "must not access repository secrets")
 
-    def test_release_admission_uses_only_governance_read_secret(self):
+    def test_release_admission_rejects_additional_governance_secret(self):
         source = self.mutate_job(
             "release-admission",
-            "GOVERNANCE_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}",
-            "GOVERNANCE_TOKEN: ${{ secrets.EXTRA_TOKEN }}",
+            "GH_TOKEN: ${{ github.token }}",
+            "GH_TOKEN: ${{ github.token }}\n          GOVERNANCE_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}",
         )
-        self.policy_source(source, "release-admission must use only the release governance read token")
+        self.policy_source(source, "release-admission must use only its read-only job token, without secrets")
+
+    def test_release_admission_rejects_secret_token_replacement(self):
+        source = self.mutate_job(
+            "release-admission", "GH_TOKEN: ${{ github.token }}",
+            "GH_TOKEN: ${{ secrets.EXTRA_TOKEN }}",
+        )
+        self.policy_source(source, "release-admission must use only its read-only job token, without secrets")
 
     def test_release_admission_is_bound_to_its_environment(self):
         source = self.mutate_job("release-admission", "environment: release\n",

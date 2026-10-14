@@ -220,10 +220,9 @@ jobs:
         id: admission
         env:
           GH_TOKEN: ${{ github.token }}
-          GOVERNANCE_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}
         run: |
           set -euo pipefail
-          cleanup() { unset GOVERNANCE_TOKEN GH_TOKEN; }
+          cleanup() { unset GH_TOKEN; }
           trap cleanup EXIT
           trap 'exit 130' HUP INT TERM
           python3 scripts/release/release-automation.py admit \
