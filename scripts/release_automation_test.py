@@ -19,9 +19,11 @@ SPEC = importlib.util.spec_from_file_location("release_automation", ROOT / "scri
 AUTOMATION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUTOMATION)
 REAL_API = AUTOMATION.api
+REAL_GRAPHQL = AUTOMATION.ruleset_bypass_connection
 REPO = "metaneutrons/aros-tools"
 HEAD = "a" * 40
 TAG = "v0.3.20"
+RULESET_NODE_ID = "RRS_lACqUmVwb3NpdG9yeXJ1bGVzZXQ="
 
 
 class GitHub:
@@ -36,9 +38,13 @@ class GitHub:
         self.pulls = [[self.pull]]
         self.pending = [[{"number": 328, "merged_at": "2026-10-09T10:00:00Z",
                           "labels": [{"name": "autorelease: pending"}]}]]
-        self.ruleset = {"id": 42, "target": "tag", "enforcement": "active", "bypass_actors": [],
+        self.ruleset = {"id": 42, "node_id": RULESET_NODE_ID, "target": "tag", "enforcement": "active",
                         "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
                         "rules": [{"type": "update"}, {"type": "deletion"}]}
+        self.graphql_node = {
+            "id": RULESET_NODE_ID, "databaseId": 42, "__typename": "RepositoryRuleset",
+            "bypassActors": {"totalCount": 0, "nodes": [], "pageInfo": {"hasNextPage": False}},
+        }
         self.files = [[{"filename": p, "status": "modified"} for p in AUTOMATION.FILES]]
         self.runs = {}
         self.jobs = {}
@@ -58,12 +64,12 @@ class GitHub:
         self.bad_object = False
         self.bad_ref = False
         self.dispatch_failure = False
-        self.hide_public_bypass = False
-        self.credential_calls = []
+        # Ordinary REST reads can hide bypass_actors even when configured.
+        self.hide_public_bypass = True
+        self.graphql_calls = []
 
-    def __call__(self, path, *, method="GET", payload=None, pages=False, absent=False, governance=False):
+    def __call__(self, path, *, method="GET", payload=None, pages=False, absent=False):
         self.calls.append((method, path, payload))
-        self.credential_calls.append((method, path, governance))
         if method == "PATCH":
             self.release.update(payload)
             if self.bad_normalization:
@@ -85,10 +91,10 @@ class GitHub:
         if path.endswith("/branches/main"):
             return copy.deepcopy(self.branch)
         if "/rulesets?" in path:
-            return [[{"id": 42}]]
+            return [[{"id": 42, "node_id": RULESET_NODE_ID}]]
         if path.endswith("/rulesets/42"):
             result = copy.deepcopy(self.ruleset)
-            if self.hide_public_bypass and not governance:
+            if self.hide_public_bypass:
                 result.pop("bypass_actors", None)
             return result
         if f"/commits/{HEAD}/pulls?" in path:
@@ -112,6 +118,10 @@ class GitHub:
             return copy.deepcopy(self.release)
         raise AssertionError(path)
 
+    def ruleset_bypass_connection(self, node_id):
+        self.graphql_calls.append(node_id)
+        return copy.deepcopy(self.graphql_node)
+
 
 class ReleaseAutomation(unittest.TestCase):
     def setUp(self):
@@ -128,11 +138,11 @@ class ReleaseAutomation(unittest.TestCase):
         self.gh = GitHub()
         for context in (patch.object(AUTOMATION, "ROOT", self.root),
                         patch.object(AUTOMATION, "api", self.gh),
+                        patch.object(AUTOMATION, "ruleset_bypass_connection", self.gh.ruleset_bypass_connection),
                         patch.object(AUTOMATION.subprocess, "check_output", return_value=HEAD + "\n"),
                         patch.dict(os.environ, {"GITHUB_REPOSITORY": REPO, "GITHUB_REF": "refs/heads/main",
                                                 "GITHUB_EVENT_NAME": "workflow_dispatch",
-                                                "GH_TOKEN": "synthetic-secret",
-                                                "GOVERNANCE_TOKEN": "synthetic-governance-secret"})):
+                                                "GH_TOKEN": "synthetic-secret"})):
             context.start()
             self.addCleanup(context.stop)
 
@@ -196,29 +206,83 @@ class ReleaseAutomation(unittest.TestCase):
             AUTOMATION.admission()
         self.assertEqual(self.mutations(), [])
 
-    def test_admission_requires_explicit_governance_credential(self):
-        with patch.dict(os.environ, {"GOVERNANCE_TOKEN": ""}), self.assertRaises(SystemExit):
+    def test_admission_uses_the_job_token_without_a_governance_fallback(self):
+        with patch.dict(os.environ, {"GOVERNANCE_TOKEN": "synthetic-governance-secret"}):
+            self.assertIsNotNone(AUTOMATION.admission())
+        with patch.dict(os.environ, {"GH_TOKEN": "", "GOVERNANCE_TOKEN": "synthetic-governance-secret"}), \
+                self.assertRaises(SystemExit):
             AUTOMATION.admission()
         self.assertEqual(self.mutations(), [])
 
-    def test_nonrelease_main_probes_governance_before_a_release_is_merged(self):
+    def test_nonrelease_main_probes_live_graphql_governance_before_a_release_is_merged(self):
         self.gh.pulls = [[]]
         self.assertIsNone(AUTOMATION.admission())
-        self.assertTrue(any(privileged for _, _, privileged in self.gh.credential_calls))
-        self.gh.ruleset.pop("bypass_actors")
-        with self.assertRaisesRegex(SystemExit, "explicit empty bypass list"):
+        self.assertEqual(self.gh.graphql_calls, [RULESET_NODE_ID])
+        self.gh.graphql_node["bypassActors"] = {
+            "totalCount": 1, "nodes": [{"__typename": "Team"}], "pageInfo": {"hasNextPage": False}}
+        with self.assertRaisesRegex(SystemExit, "configured or incompletely reported"):
             AUTOMATION.admission()
+        self.assertEqual(self.mutations(), [])
+
+    def test_hidden_rest_bypass_field_is_accepted_only_when_graphql_proves_zero(self):
+        candidate = AUTOMATION.admission()
+        self.assertIsNotNone(candidate)
+        self.assertNotIn("bypass_actors", self.gh.ruleset)
+        self.assertEqual(candidate["governance"]["ruleset_id"], 42)
+        self.assertEqual(self.gh.graphql_calls, [RULESET_NODE_ID])
+
+    def test_bypass_hidden_by_rest_is_rejected_when_graphql_reports_known_actor(self):
+        self.gh.graphql_node["bypassActors"] = {
+            "totalCount": 1, "nodes": [{"__typename": "Team"}], "pageInfo": {"hasNextPage": False}}
+        with self.assertRaisesRegex(SystemExit, "configured or incompletely reported"):
+            AUTOMATION.admission()
+        self.assertNotIn("bypass_actors", self.gh.ruleset)
+        self.assertEqual(self.mutations(), [])
+
+    def test_explicit_rest_bypass_data_cannot_contradict_graphql_zero(self):
+        self.gh.hide_public_bypass = False
+        self.gh.ruleset["bypass_actors"] = [{"actor_id": 7}]
+        with self.assertRaisesRegex(SystemExit, "REST tag ruleset reports"):
+            AUTOMATION.admission()
+        self.assertEqual(self.gh.graphql_calls, [RULESET_NODE_ID])
+        self.assertEqual(self.mutations(), [])
+
+    def test_graphql_bypass_connection_must_be_complete_and_well_typed(self):
+        base = copy.deepcopy(self.gh.graphql_node)
+        malformed = [
+            None,
+            dict(base, id="RRS_another"),
+            dict(base, __typename="Repository"),
+            dict(base, databaseId="42"),
+            dict(base, databaseId=True),
+            dict(base, databaseId=43),
+            dict(base, bypassActors=None),
+            dict(base, bypassActors={"totalCount": False, "nodes": [],
+                                     "pageInfo": {"hasNextPage": False}}),
+            dict(base, bypassActors={"totalCount": 1, "nodes": [],
+                                     "pageInfo": {"hasNextPage": False}}),
+            dict(base, bypassActors={"totalCount": 0, "nodes": [{"__typename": "Team"}],
+                                     "pageInfo": {"hasNextPage": False}}),
+            dict(base, bypassActors={"totalCount": 0, "nodes": [], "pageInfo": None}),
+            dict(base, bypassActors={"totalCount": 0, "nodes": [],
+                                     "pageInfo": {"hasNextPage": True}}),
+            dict(base, bypassActors={"totalCount": 0, "nodes": []}),
+        ]
+        for node in malformed:
+            with self.subTest(node=node), \
+                    patch.object(AUTOMATION, "ruleset_bypass_connection", return_value=node), \
+                    self.assertRaises(SystemExit):
+                AUTOMATION.admission()
         self.assertEqual(self.mutations(), [])
 
     def test_writer_rechecks_receipt_without_governance_credential(self):
         candidate = AUTOMATION.admission()
-        self.gh.hide_public_bypass = True
-        self.gh.credential_calls.clear()
+        self.gh.graphql_calls.clear()
         output = self.root / "restored.json"
-        with patch.dict(os.environ, {"GOVERNANCE_TOKEN": "", "ADMISSION_JSON": json.dumps(candidate)}):
+        with patch.dict(os.environ, {"ADMISSION_JSON": json.dumps(candidate)}):
             AUTOMATION.recheck(output)
         self.assertEqual(json.loads(output.read_text()), candidate)
-        self.assertFalse(any(privileged for _, _, privileged in self.gh.credential_calls))
+        self.assertEqual(self.gh.graphql_calls, [RULESET_NODE_ID])
         self.assertEqual(self.mutations(), [])
 
     def test_stale_malformed_or_changed_governance_receipt_rejected(self):
@@ -231,7 +295,7 @@ class ReleaseAutomation(unittest.TestCase):
                    dict(receipt, policy_sha256="0" * 64), None]
         for changed in invalid:
             with self.subTest(receipt=changed), patch.dict(os.environ, {
-                    "GOVERNANCE_TOKEN": "", "ADMISSION_JSON": json.dumps(dict(candidate, governance=changed))
+                    "ADMISSION_JSON": json.dumps(dict(candidate, governance=changed))
             }), self.assertRaises(SystemExit):
                 AUTOMATION.recheck(self.root / "restored.json")
         for malformed in ("", "not json", "[]", "{}", "null"):
@@ -241,19 +305,21 @@ class ReleaseAutomation(unittest.TestCase):
 
     def test_public_policy_change_blocks_writer_before_draft(self):
         candidate = AUTOMATION.admission()
-        self.gh.hide_public_bypass = True
         self.gh.ruleset["rules"].append({"type": "non_fast_forward"})
-        with patch.dict(os.environ, {"GOVERNANCE_TOKEN": "", "ADMISSION_JSON": json.dumps(candidate)}), \
+        with patch.dict(os.environ, {"ADMISSION_JSON": json.dumps(candidate)}), \
                 self.assertRaises(SystemExit):
             AUTOMATION.recheck(self.root / "restored.json")
         self.assertEqual(self.mutations(), [])
 
-    def test_admission_governance_credential_is_used_only_for_ruleset_reads(self):
-        AUTOMATION.admission()
-        self.assertNotIn("GOVERNANCE_TOKEN", AUTOMATION.subprocess.check_output.call_args.kwargs["env"])
-        privileged = [(method, path) for method, path, governance in self.gh.credential_calls if governance]
-        self.assertEqual(len(privileged), 2)
-        self.assertTrue(all(method == "GET" and "/rulesets" in path for method, path in privileged))
+    def test_writer_rechecks_live_bypass_before_tag_mutation(self):
+        path = self.prepare()
+        self.gh.graphql_calls.clear()
+        self.gh.graphql_node["bypassActors"] = {
+            "totalCount": 1, "nodes": [{"__typename": "Team"}], "pageInfo": {"hasNextPage": False}}
+        with self.assertRaisesRegex(SystemExit, "configured or incompletely reported"):
+            AUTOMATION.start(path)
+        self.assertEqual(self.gh.graphql_calls, [RULESET_NODE_ID])
+        self.assertEqual(self.mutations(), [])
 
     def test_context_requires_own_protected_main(self):
         for key, value in (("GITHUB_REPOSITORY", "foreign/tools"), ("GITHUB_REF", "refs/heads/feature"),
@@ -341,10 +407,9 @@ class ReleaseAutomation(unittest.TestCase):
         with self.assertRaises(SystemExit):
             AUTOMATION.admission()
 
-    def test_tag_policy_must_be_active_closed_and_without_bypass_before_any_write(self):
+    def test_tag_policy_must_be_active_and_closed_before_any_write(self):
         original = copy.deepcopy(self.gh.ruleset)
         for key, value in (("enforcement", "evaluate"), ("target", "branch"),
-                           ("bypass_actors", [{"actor_id": 1}]), ("bypass_actors", None),
                            ("rules", [{"type": "update"}]),
                            ("conditions", {"ref_name": {"include": ["refs/tags/v*"], "exclude": [TAG]}}),
                            ("conditions", {"ref_name": {"include": ["refs/tags/v0.3.20"], "exclude": []}})):
@@ -352,7 +417,8 @@ class ReleaseAutomation(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(SystemExit):
                 AUTOMATION.admission()
         self.gh.ruleset = dict(original)
-        del self.gh.ruleset["bypass_actors"]
+        self.gh.graphql_node["bypassActors"] = {
+            "totalCount": 1, "nodes": [{"__typename": "Team"}], "pageInfo": {"hasNextPage": False}}
         with self.assertRaises(SystemExit):
             AUTOMATION.admission()
         self.assertEqual(self.mutations(), [])
@@ -366,9 +432,9 @@ class ReleaseAutomation(unittest.TestCase):
 
     def test_exact_candidate_creates_annotated_ref_and_one_tag_dispatch(self):
         admission = self.prepare()
-        self.gh.hide_public_bypass = True
-        self.gh.credential_calls.clear()
-        with patch.dict(os.environ, {"GOVERNANCE_TOKEN": ""}), redirect_stdout(io.StringIO()) as output:
+        self.gh.graphql_calls.clear()
+        with patch.dict(os.environ, {"GOVERNANCE_TOKEN": "synthetic-governance-secret"}), \
+                redirect_stdout(io.StringIO()) as output:
             AUTOMATION.start(admission)
         writes = self.mutations()
         self.assertEqual([p.split(f"repos/{REPO}/")[1] for _, p, _ in writes],
@@ -380,7 +446,7 @@ class ReleaseAutomation(unittest.TestCase):
         self.assertEqual(self.gh.release["body"], "## 0.3.20\n\nA reviewed fix.\n")
         self.assertNotIn("synthetic-secret", output.getvalue())
         self.assertNotIn("synthetic-governance-secret", output.getvalue())
-        self.assertFalse(any(privileged for _, _, privileged in self.gh.credential_calls))
+        self.assertEqual(self.gh.graphql_calls, [RULESET_NODE_ID])
         self.assertIsNone(AUTOMATION.admission())
 
     def test_release_please_output_mismatch_never_writes(self):
@@ -472,27 +538,50 @@ class ReleaseAutomation(unittest.TestCase):
                         with self.assertRaises(SystemExit):
                             AUTOMATION.api("repos/example/releases/tags/v1", absent=True)
 
-    def test_real_transport_isolates_governance_token_from_other_calls(self):
+    def test_real_graphql_transport_uses_static_query_and_the_job_token(self):
+        result = {"data": {"node": copy.deepcopy(self.gh.graphql_node)}}
+        response = subprocess.CompletedProcess([], 0, json.dumps(result), "")
+        with patch.dict(os.environ, {"GOVERNANCE_TOKEN": "synthetic-governance-secret"}), \
+                patch.object(AUTOMATION.subprocess, "run", return_value=response) as run:
+            node = REAL_GRAPHQL(RULESET_NODE_ID)
+        self.assertEqual(node, self.gh.graphql_node)
+        arguments = run.call_args.args[0]
+        self.assertEqual(arguments[:3], ["gh", "api", "graphql"])
+        self.assertIn("query=" + AUTOMATION.RULESET_BYPASS_QUERY, arguments)
+        self.assertIn("nodeID=" + RULESET_NODE_ID, arguments)
+        self.assertEqual(run.call_args.kwargs["env"]["GH_TOKEN"], "synthetic-secret")
+        self.assertNotIn("GOVERNANCE_TOKEN", run.call_args.kwargs["env"])
+
+    def test_rest_transport_never_inherits_the_retired_governance_token(self):
         response = subprocess.CompletedProcess([], 0, "{}", "")
-        with patch.object(AUTOMATION.subprocess, "run", return_value=response) as run:
-            REAL_API(f"repos/{REPO}/rulesets/42", governance=True)
-            environment = run.call_args.kwargs["env"]
-            self.assertEqual(environment["GH_TOKEN"], "synthetic-governance-secret")
-            self.assertNotIn("GOVERNANCE_TOKEN", environment)
-            for method, path in (("GET", f"repos/{REPO}/branches/main"),
-                                 ("POST", f"repos/{REPO}/git/tags")):
-                REAL_API(path, method=method)
+        with patch.dict(os.environ, {"GOVERNANCE_TOKEN": "synthetic-governance-secret"}), \
+                patch.object(AUTOMATION.subprocess, "run", return_value=response) as run:
+            for method, endpoint in (("GET", f"repos/{REPO}/rulesets/42"),
+                                     ("GET", f"repos/{REPO}/branches/main"),
+                                     ("POST", f"repos/{REPO}/git/tags")):
+                REAL_API(endpoint, method=method)
                 environment = run.call_args.kwargs["env"]
                 self.assertEqual(environment["GH_TOKEN"], "synthetic-secret")
                 self.assertNotIn("GOVERNANCE_TOKEN", environment)
-            for method, path in (("POST", f"repos/{REPO}/rulesets"),
-                                 ("GET", f"repos/{REPO}/branches/main"),
-                                 ("GET", "repos/foreign/project/rulesets/42"),
-                                 ("GET", f"repos/{REPO}/rulesets/42/foreign-endpoint")):
-                run.reset_mock()
-                with self.assertRaises(SystemExit):
-                    REAL_API(path, method=method, governance=True)
-                run.assert_not_called()
+
+    def test_real_graphql_transport_rejects_http_200_errors_null_and_malformed_json(self):
+        successful_data = {"data": {"node": copy.deepcopy(self.gh.graphql_node)}}
+        responses = (
+            json.dumps({"data": successful_data["data"], "errors": [{"message": "private detail"}]}),
+            json.dumps({"data": {"node": None}}),
+            "not json",
+        )
+        for output in responses:
+            response = subprocess.CompletedProcess([], 0, output, "")
+            with self.subTest(output=output), \
+                    patch.object(AUTOMATION.subprocess, "run", return_value=response), \
+                    self.assertRaises(SystemExit) as raised:
+                REAL_GRAPHQL(RULESET_NODE_ID)
+            self.assertNotIn("private detail", str(raised.exception))
+        with patch.object(AUTOMATION.subprocess, "run", return_value=
+                          subprocess.CompletedProcess([], 1, "", "forbidden (HTTP 403)")), \
+                self.assertRaisesRegex(SystemExit, r"GraphQL failed \(HTTP 403\)"):
+            REAL_GRAPHQL(RULESET_NODE_ID)
 
 
 if __name__ == "__main__":
