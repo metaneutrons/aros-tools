@@ -27,6 +27,20 @@ OID = re.compile(r"[0-9a-f]{40}")
 # Admission consumes merge_commit_sha from the reviewed PR response contract.
 # GitHub removed that field in 2026-03-10; this supported version retains it.
 REST_API_VERSION = "2022-11-28"
+RULESET_BYPASS_QUERY = """query($nodeID: ID!) {
+  node(id: $nodeID) {
+    __typename
+    ... on RepositoryRuleset {
+      id
+      databaseId
+      bypassActors(first: 100) {
+        totalCount
+        nodes { __typename }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+}"""
 BOT = {"metaneutrons-release-please[bot]", "app/metaneutrons-release-please"}
 FILES = {".release-please-manifest.json", "CHANGELOG.md", "Cargo.toml", "Cargo.lock"}
 REQUIRED_JOBS = {
@@ -41,7 +55,7 @@ def fail(message: str) -> "NoReturn":
 
 
 def api(path: str, *, method: str = "GET", payload: dict | None = None,
-        pages: bool = False, absent: bool = False, governance: bool = False):
+        pages: bool = False, absent: bool = False):
     args = ["gh", "api", "--method", method,
             "-H", f"X-GitHub-Api-Version: {REST_API_VERSION}", path]
     if pages:
@@ -49,15 +63,9 @@ def api(path: str, *, method: str = "GET", payload: dict | None = None,
     if payload is not None:
         args.extend(["--input", "-"])
     environment = dict(os.environ)
-    # Only the separate read-only job may possess this credential. Never let
-    # it reach ordinary API calls, a mutation, or an unrelated child process.
+    # Ignore the retired privileged credential if an older workflow still
+    # supplies it. All API requests use the job-scoped GH_TOKEN.
     environment.pop("GOVERNANCE_TOKEN", None)
-    if governance:
-        if (method != "GET" or re.fullmatch(
-                r"repos/metaneutrons/aros-tools/rulesets(?:/[1-9][0-9]*|\?includes_parents=true&targets=tag&per_page=100)",
-                path) is None or not os.environ.get("GOVERNANCE_TOKEN")):
-            fail("governance credential is restricted to authenticated ruleset reads")
-        environment["GH_TOKEN"] = os.environ["GOVERNANCE_TOKEN"]
     try:
         result = subprocess.run(args, input=json.dumps(payload) if payload is not None else None,
                                 capture_output=True, text=True, timeout=45, check=False, env=environment)
@@ -76,6 +84,56 @@ def api(path: str, *, method: str = "GET", payload: dict | None = None,
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         fail(f"GitHub {method} returned invalid JSON for {path}")
+
+
+def ruleset_bypass_connection(node_id: str) -> dict:
+    """Read bypass actors through GraphQL using the ordinary job token."""
+    if not isinstance(node_id, str) or not node_id or not os.environ.get("GH_TOKEN"):
+        fail("tag ruleset GraphQL lookup lacks a REST node ID or job-scoped token")
+    args = ["gh", "api", "graphql", "-H", f"X-GitHub-Api-Version: {REST_API_VERSION}",
+            "-f", f"query={RULESET_BYPASS_QUERY}", "-f", f"nodeID={node_id}"]
+    environment = dict(os.environ)
+    environment.pop("GOVERNANCE_TOKEN", None)
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=45,
+                                check=False, env=environment)
+    except (OSError, subprocess.TimeoutExpired):
+        fail("GitHub GraphQL transport failed for tag ruleset bypass lookup")
+    if result.returncode:
+        status = re.search(r"\(HTTP ([0-9]{3})\)", result.stderr)
+        detail = f" (HTTP {status[1]})" if status else ""
+        fail(f"GitHub GraphQL failed{detail} for tag ruleset bypass lookup")
+    try:
+        response = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        fail("GitHub GraphQL returned invalid JSON for tag ruleset bypass lookup")
+    # GitHub can report resolver errors in an HTTP 200 response. Never print
+    # their potentially sensitive messages, and do not accept partial data.
+    if not isinstance(response, dict) or "errors" in response:
+        fail("GitHub GraphQL returned errors or a malformed response")
+    data = response.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("node"), dict):
+        fail("GitHub GraphQL returned a null or malformed tag ruleset node")
+    return data["node"]
+
+
+def has_no_ruleset_bypass(node_id: str, identifier: int) -> bool:
+    node = ruleset_bypass_connection(node_id)
+    if (not isinstance(node, dict) or node.get("id") != node_id
+            or node.get("__typename") != "RepositoryRuleset"
+            or type(node.get("databaseId")) is not int or node.get("databaseId") != identifier):
+        fail("GraphQL tag ruleset identity does not match the REST ruleset")
+    connection = node.get("bypassActors")
+    if not isinstance(connection, dict):
+        fail("GraphQL tag ruleset bypass connection is null or malformed")
+    count = connection.get("totalCount")
+    nodes = connection.get("nodes")
+    page_info = connection.get("pageInfo")
+    if type(count) is not int or not isinstance(nodes, list) or not isinstance(page_info, dict):
+        fail("GraphQL tag ruleset bypass connection is malformed")
+    if count != 0 or nodes != [] or page_info.get("hasNextPage") is not False:
+        fail("tag ruleset has configured or incompletely reported bypass actors")
+    return True
 
 
 def context() -> tuple[str, str, str]:
@@ -126,37 +184,54 @@ def tag_policy(repo: str, receipt: dict | None = None) -> dict:
                 or type(receipt["checked_at"]) is not int
                 or not -60 <= int(time.time()) - receipt["checked_at"] <= 900):
             fail("governance receipt is malformed, expired or from the future")
-    elif not os.environ.get("GOVERNANCE_TOKEN"):
-        fail("the read-only admission job requires RELEASE_ADMIN_READ_TOKEN")
-    privileged = receipt is None
     pages = api(f"repos/{repo}/rulesets?includes_parents=true&targets=tag&per_page=100",
-                pages=True, governance=privileged)
+                pages=True)
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        fail("tag ruleset list response is malformed")
     for item in (item for page in pages for item in page):
+        if not isinstance(item, dict):
+            fail("tag ruleset identity is malformed")
         identifier = item.get("id")
         if type(identifier) is not int or identifier <= 0:
             fail("tag ruleset identity is malformed")
-        ruleset = api(f"repos/{repo}/rulesets/{identifier}", governance=privileged)
-        refs = ruleset.get("conditions", {}).get("ref_name", {})
-        types = {rule.get("type") for rule in ruleset.get("rules", [])}
-        if (ruleset.get("id") == identifier and ruleset.get("target") == "tag"
+        ruleset = api(f"repos/{repo}/rulesets/{identifier}")
+        if not isinstance(ruleset, dict):
+            fail("tag ruleset response is malformed")
+        conditions = ruleset.get("conditions")
+        rules = ruleset.get("rules")
+        if not isinstance(conditions, dict) or not isinstance(rules, list) or any(
+            not isinstance(rule, dict) for rule in rules
+        ):
+            fail("tag ruleset policy is malformed")
+        refs = conditions.get("ref_name")
+        if not isinstance(refs, dict):
+            continue
+        types = {rule.get("type") for rule in rules}
+        if (type(ruleset.get("id")) is int and ruleset.get("id") == identifier
+                and ruleset.get("target") == "tag"
                 and ruleset.get("enforcement") == "active"
                 and refs.get("include") == ["refs/tags/v*"] and refs.get("exclude") == []
                 and {"update", "deletion"} <= types):
+            node_id = ruleset.get("node_id")
+            if not isinstance(node_id, str) or not node_id:
+                fail("tag ruleset REST node identity is malformed")
+            listed_node_id = item.get("node_id")
+            if "node_id" in item and (not isinstance(listed_node_id, str) or listed_node_id != node_id):
+                fail("tag ruleset REST node identity changed between list and detail")
+            has_no_ruleset_bypass(node_id, identifier)
+            if "bypass_actors" in ruleset and (
+                type(ruleset["bypass_actors"]) is not list or ruleset["bypass_actors"] != []
+            ):
+                fail("REST tag ruleset reports malformed or nonempty bypass actors")
             public_policy = {key: ruleset[key] for key in ("id", "target", "enforcement", "conditions")}
             public_policy["rules"] = sorted(ruleset["rules"], key=lambda rule: json.dumps(rule, sort_keys=True))
             digest = hashlib.sha256(json.dumps(public_policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            if privileged and ruleset.get("bypass_actors") == []:
+            if receipt is None:
                 return {"ruleset_id": identifier, "policy_sha256": digest, "checked_at": int(time.time())}
-            if (receipt is not None and receipt["ruleset_id"] == identifier
-                    and receipt["policy_sha256"] == digest
-                    and ("bypass_actors" not in ruleset or ruleset["bypass_actors"] == [])):
-                # Hidden bypass data is not inferred empty. It was proven by
-                # the trusted read-only job; this is a short-lived receipt-bound
-                # public policy recheck. Full governance is checked again by
-                # the release workflow before signing or publication.
+            if (receipt["ruleset_id"] == identifier
+                    and receipt["policy_sha256"] == digest):
                 return receipt
-    # An omitted bypass list cannot authorize the initial authenticated read.
-    fail("no visible active immutable v* tag ruleset with an explicit empty bypass list")
+    fail("no active immutable v* tag ruleset with a verified empty bypass connection")
 
 
 def admission(*, expected_draft: int | None = None, governance_receipt: dict | None = None) -> dict | None:

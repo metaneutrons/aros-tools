@@ -527,7 +527,6 @@ if rp_path.exists():
         'ref: main',
         'persist-credentials: false',
         'GH_TOKEN: ${{ github.token }}',
-        'GOVERNANCE_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}',
         'trap cleanup EXIT',
         "trap 'exit 130' HUP INT TERM",
         'python3 scripts/release/release-automation.py admit',
@@ -546,8 +545,8 @@ if rp_path.exists():
         errors.append(
             f'{rp_path}: release-admission must request exactly Contents, Pull requests and Actions read'
         )
-    if set(re.findall(r'secrets\.([A-Z_]+)', release_admission)) != {'RELEASE_ADMIN_READ_TOKEN'}:
-        errors.append(f'{rp_path}: release-admission must use only the release governance read token')
+    if 'secrets.' in release_admission or 'GOVERNANCE_TOKEN' in release_admission:
+        errors.append(f'{rp_path}: release-admission must use only its read-only job token, without secrets')
     for forbidden in ('actions/create-github-app-token@', 'googleapis/release-please-action@',
                       'gh workflow run', 'git push ', 'issues: write', 'contents: write',
                       'pull-requests: write', 'actions: write'):
