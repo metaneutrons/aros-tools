@@ -35,7 +35,7 @@ use crate::native_declaration::NativeExecutorDeclaration;
 use crate::plan::{self, Identity, PlanRequest};
 use crate::preflight::{self, HostPreflight};
 use crate::producer_environment::{ProducerEnvironment, ReproducibilityRoots};
-use crate::python_environment::{PythonEnvironment, PythonInterpreter};
+use crate::python_environment::PythonEnvironment;
 use crate::snapshot::{SourceRole, SourceSnapshot};
 use crate::source_cache;
 use crate::source_cache_request::SourceCacheRequest;
@@ -246,7 +246,7 @@ fn run_owned(
         None,
     )?;
 
-    let interpreter = python_interpreter(&host)?;
+    let interpreter = host.python_interpreter()?;
     let python = PythonEnvironment::prepare_with_interpreter(
         bound.source_lock(),
         &request.cache_dir,
@@ -1073,24 +1073,6 @@ fn read_regular(path: PathBuf, label: &str) -> Result<Vec<u8>, ContractError> {
         )));
     }
     fs::read(path).map_err(|_| ContractError::identity(format!("cannot read {label}")))
-}
-
-fn python_interpreter(host: &HostPreflight) -> Result<PythonInterpreter, ContractError> {
-    let tool = host
-        .tools
-        .iter()
-        .find(|candidate| candidate.name == "python3")
-        .ok_or_else(|| ContractError::prerequisite("native preflight omitted python3"))?;
-    let version = tool.version.clone();
-    if !version.starts_with("Python 3.") {
-        return Err(ContractError::environment(
-            "native host python3 observation is not Python 3",
-        ));
-    }
-    Ok(PythonInterpreter {
-        path: tool.path.clone(),
-        version,
-    })
 }
 
 fn host_tool(host: &HostPreflight, name: &str) -> Result<PathBuf, ContractError> {

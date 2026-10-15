@@ -95,6 +95,12 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer environment` | host | `--host` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer environment` | output | `--output` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer environment` | format | `--format` | — | optional | 1 | human | human, json | — |  |
+| `aros toolchain producer host-preflight` | source_lock | `--source-lock` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer host-preflight` | profiles | `--profiles` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer host-preflight` | preset | `--preset` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer host-preflight` | host | `--host` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer host-preflight` | cache_dir | `--cache-dir` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer host-preflight` | python_env_dir | `--python-env-dir` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer index` | directory | `--directory` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer index` | release_id | `--release-id` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer index` | base_url | `--base-url` | — | required | 1 |  |  | — |  |

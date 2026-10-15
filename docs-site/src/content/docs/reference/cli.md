@@ -207,6 +207,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer recipe` | Construct one non-overwriting recipe from committed source, producer and tools inputs |
 | `aros toolchain producer environment` | Write a deterministic build-environment receipt |
 | `aros toolchain producer profile` | Read one recipe-bound profile; paired source selectors additionally inspect the committed SDK policy |
+| `aros toolchain producer host-preflight` | Probe one profile's native tools and isolated lock-owned Python imports from a prepared cache; no configure, compiler build or release qualification |
 | `aros toolchain producer release-plan` | Derive every family-v2 group and host/profile lane from the digest-selected input collection; read-only, no build or qualification |
 | `aros toolchain producer materialize-engine-free-source` | Materialize an audited compatibility snapshot without the source-tree engine |
 | `aros toolchain producer package` | Create one deterministic local package set from a completed candidate |

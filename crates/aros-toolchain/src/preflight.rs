@@ -51,6 +51,33 @@ pub struct HostPreflight {
 }
 
 impl HostPreflight {
+    /// Select the exact observed Python interpreter for locked module probes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the host observation omits Python 3 or records a
+    /// different interpreter family. Preflight-only and build execution share
+    /// this selection rather than rediscovering Python from ambient `PATH`.
+    pub fn python_interpreter(
+        &self,
+    ) -> Result<crate::python_environment::PythonInterpreter, ContractError> {
+        let tool = self
+            .tools
+            .iter()
+            .find(|candidate| candidate.name == "python3")
+            .ok_or_else(|| ContractError::prerequisite("native preflight omitted python3"))?;
+        let version = tool.version.clone();
+        if !version.starts_with("Python 3.") {
+            return Err(ContractError::environment(
+                "native host python3 observation is not Python 3",
+            ));
+        }
+        Ok(crate::python_environment::PythonInterpreter {
+            path: tool.path.clone(),
+            version,
+        })
+    }
+
     /// Directories, in selected-tool precedence order, for `ProducerEnvironment`.
     #[must_use]
     pub fn tool_directories(&self) -> Vec<PathBuf> {
@@ -369,6 +396,27 @@ mod tests {
             invocation_path,
             version: version.to_owned(),
         }
+    }
+
+    #[test]
+    fn python_selection_preserves_the_measured_interpreter_and_rejects_missing_or_wrong_family() {
+        let mut host = HostPreflight {
+            host: "test-host",
+            profile: "test-profile".to_owned(),
+            capabilities: Vec::new(),
+            tools: vec![test_host_tool(
+                "python3",
+                "/selected/python3",
+                "Python 3.14.0",
+            )],
+        };
+        let selected = host.python_interpreter().unwrap();
+        assert_eq!(selected.path, std::path::PathBuf::from("/selected/python3"));
+        assert_eq!(selected.version, "Python 3.14.0");
+        host.tools[0].version = "Python 2.7.0".to_owned();
+        assert!(host.python_interpreter().is_err());
+        host.tools.clear();
+        assert!(host.python_interpreter().is_err());
     }
 
     #[test]
