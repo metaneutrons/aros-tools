@@ -18,7 +18,7 @@ use flate2::read::GzDecoder;
 use serde::Serialize;
 use tar::{Archive, EntryType};
 
-use crate::source_lock::{CompilerFamily, HostPythonPackage, SourceLock};
+use crate::source_lock::{HostPythonPackage, SourceLock};
 use crate::ContractError;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -282,12 +282,10 @@ fn verify_selected_package_contract(lock: &SourceLock) -> Result<(), ContractErr
         .collect::<BTreeSet<_>>();
     let required = BTreeSet::from(["mako", "markupsafe"]);
     let mut allowed = required.clone();
-    if lock.family() == CompilerFamily::Gnu {
-        allowed.insert("yaml");
-    }
+    allowed.insert("yaml");
     if !required.is_subset(&packages) || !packages.is_subset(&allowed) {
         return Err(ContractError::environment(
-            "selected AROS source contract requires mako and markupsafe; only GNU permits optional yaml",
+            "selected AROS source contract requires mako and markupsafe; only yaml is optional",
         ));
     }
     if !lock
