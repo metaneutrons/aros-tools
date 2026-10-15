@@ -36,6 +36,7 @@ use crate::observability;
 mod compatibility_export;
 mod finished_package;
 mod finished_package_readback;
+mod host_preflight;
 pub mod native_compatibility;
 mod qualification_bytes;
 mod recovery_family;
@@ -66,6 +67,7 @@ impl ProducerArgs {
             ProducerCommand::Recipe(_) => "toolchain.producer.recipe",
             ProducerCommand::Environment(_) => "toolchain.producer.environment",
             ProducerCommand::Profile(_) => "toolchain.producer.profile",
+            ProducerCommand::HostPreflight(_) => "toolchain.producer.host-preflight",
             ProducerCommand::MaterializeEngineFreeSource(_) => {
                 "toolchain.producer.materialize-engine-free-source"
             }
@@ -100,6 +102,8 @@ enum ProducerCommand {
     Environment(EnvironmentArgs),
     /// Read one recipe-bound producer profile without duplicating its selectors
     Profile(ProfileArgs),
+    /// Probe native host tools and isolated lock-owned Python imports without compiling
+    HostPreflight(host_preflight::HostPreflightArgs),
     /// Materialize an audited source snapshot without its source-tree CMake engine
     MaterializeEngineFreeSource(MaterializeEngineFreeSourceArgs),
     /// Create one deterministic local package set from a completed candidate
@@ -694,6 +698,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::Recipe(args) => recipe(args),
         ProducerCommand::Environment(args) => environment(&args),
         ProducerCommand::Profile(args) => profile(&args),
+        ProducerCommand::HostPreflight(args) => host_preflight::run(&args),
         ProducerCommand::MaterializeEngineFreeSource(args) => {
             materialize_engine_free_source_stage(args)
         }

@@ -84,7 +84,8 @@ cache subdirectories are stamp namespaces, not alternative source locations.
 Both compiler families give the Rust fetcher a private verified source copy and
 enforce offline checksum validation. The bridge translates the source's
 MetaMake fetch arguments without executing its `fetch.sh`; patch paths must
-remain inside the measured source snapshot. LLVM keeps its two-package Python closure.
+remain inside the measured source snapshot. Both families use their declared,
+lock-owned Python closure.
 Empty source-template checksum placeholders are filled from the exact lock.
 Nonempty declarations must match it; repeated checksum options fail. Direct
 downloads in source recipes are not covered by this bridge and must be replaced
@@ -173,6 +174,25 @@ lifecycle then accepts only that exact generation, copies it into a private
 runtime directory and invokes its collector with `--locked --offline`. Never
 repair a missing generation during an offline build; use `cache cargo fetch
 --offline` only to require a previously verified one.
+
+## Check native prerequisites before compiler fan-out
+
+The unreleased `aros toolchain producer host-preflight` command checks one
+selected profile's native tools and imports its lock-owned Python modules from
+an already prepared cache. Pass explicit `--source-lock`, `--profiles`,
+`--preset`, `--host`, `--cache-dir` and an absent `--python-env-dir` outside
+those inputs. Its parent must already exist without symlink components.
+The command writes only the private Python environment and prints a JSON
+observation; it does not fetch packages, install dependencies or start a build.
+If extraction or an import probe fails, its private directory remains for
+diagnosis. Inspect that directory and choose a fresh destination for a retry;
+the command never overwrites or automatically deletes it.
+
+This reuses the native lifecycle's tool and Python checks. It does not run
+`configure`, infer undeclared Python requirements, verify Cargo generations,
+authenticate a producer checkout or qualify a compiler/SDK. The workflow must
+select and verify input and runtime bytes separately. Every actual build still
+repeats its own checks; an earlier preflight is not transferable build evidence.
 
 ## Construct the recipe and inspect readiness
 
