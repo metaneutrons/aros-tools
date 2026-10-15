@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-use aros_common::{sha256_file, DiagnosticCode};
+use aros_common::sha256_file;
 #[cfg(unix)]
 use aros_toolchain::python_environment::PythonInterpreter;
 use aros_toolchain::{python_environment::PythonEnvironment, source_lock::SourceLock};
@@ -68,6 +68,13 @@ fn gnu_lock_with_packages(host_python_packages: &[Value]) -> SourceLock {
         serde_json::from_slice(include_bytes!("fixtures/gnu-source-lock-v3.json")).unwrap();
     document["host_python_packages"] = json!(host_python_packages);
     SourceLock::parse(&serde_json::to_vec(&document).unwrap()).unwrap()
+}
+
+fn locks_with_packages(host_python_packages: &[Value]) -> [(&'static str, SourceLock); 2] {
+    [
+        ("llvm", lock_with_packages(host_python_packages)),
+        ("gnu", gnu_lock_with_packages(host_python_packages)),
+    ]
 }
 
 fn required_package_records(cache: &Path) -> Vec<Value> {
@@ -232,25 +239,45 @@ fn prepares_and_probes_the_exact_private_mako_environment() {
 }
 
 #[test]
-fn llvm_keeps_its_exact_two_package_contract() {
+fn prepares_and_probes_an_optional_locked_yaml_module_for_llvm() {
     let temporary = tempfile::tempdir().unwrap();
     let cache = temporary.path().join("cache");
     fs::create_dir(&cache).unwrap();
     write_required_archives(&cache);
     archive(
         &cache.join("pyyaml-6.0.2.tar.gz"),
-        &[("pyyaml-6.0.2/yaml/__init__.py", b"__version__ = '6.0.2'\n")],
+        &[(
+            "pyyaml-6.0.2/yaml/__init__.py",
+            b"__version__ = '6.0.2'\nORIGIN = 'locked'\n",
+        )],
     );
     let mut packages = required_package_records(&cache);
     packages.push(optional_yaml_record(&cache));
     let lock = lock_with_packages(&packages);
-    let destination = temporary.path().join("environment");
-    let error = PythonEnvironment::prepare(&lock, &cache, &destination).unwrap_err();
+    let environment =
+        PythonEnvironment::prepare(&lock, &cache, &temporary.path().join("environment")).unwrap();
+
+    assert_eq!(environment.import_roots().len(), 3);
     assert_eq!(
-        error.diagnostics().diagnostics[0].code,
-        DiagnosticCode::ProducerEnvironment
+        environment
+            .packages()
+            .iter()
+            .map(|package| package.name.as_str())
+            .collect::<Vec<_>>(),
+        ["mako", "markupsafe", "yaml"]
     );
-    assert!(!destination.exists());
+    let mut command = Command::new(&environment.interpreter().path);
+    environment.apply_to(&mut command);
+    command.args([
+        "-s",
+        "-B",
+        "-P",
+        "-c",
+        "import yaml; print(yaml.__version__, yaml.ORIGIN)",
+    ]);
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "6.0.2 locked\n");
 }
 
 #[test]
@@ -295,6 +322,63 @@ fn prepares_and_probes_an_optional_locked_yaml_module() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "6.0.2 locked\n");
 }
 
+#[test]
+fn rejects_a_missing_locked_yaml_archive_for_both_families() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cache = temporary.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    write_required_archives(&cache);
+    archive(
+        &cache.join("pyyaml-6.0.2.tar.gz"),
+        &[("pyyaml-6.0.2/yaml/__init__.py", b"__version__ = '6.0.2'\n")],
+    );
+    let mut packages = required_package_records(&cache);
+    packages.push(optional_yaml_record(&cache));
+    fs::remove_file(cache.join("pyyaml-6.0.2.tar.gz")).unwrap();
+
+    for (family, lock) in locks_with_packages(&packages) {
+        let error = PythonEnvironment::prepare(
+            &lock,
+            &cache,
+            &temporary.path().join(format!("{family}-environment")),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code.to_string(),
+            "AX0401"
+        );
+    }
+}
+
+#[test]
+fn rejects_a_yaml_archive_hash_that_differs_from_the_lock_for_both_families() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cache = temporary.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    write_required_archives(&cache);
+    archive(
+        &cache.join("pyyaml-6.0.2.tar.gz"),
+        &[("pyyaml-6.0.2/yaml/__init__.py", b"__version__ = '6.0.2'\n")],
+    );
+    let mut packages = required_package_records(&cache);
+    let mut yaml = optional_yaml_record(&cache);
+    yaml["sha256"] = json!("f".repeat(64));
+    packages.push(yaml);
+
+    for (family, lock) in locks_with_packages(&packages) {
+        let error = PythonEnvironment::prepare(
+            &lock,
+            &cache,
+            &temporary.path().join(format!("{family}-environment")),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code.to_string(),
+            "AX0401"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn rejects_an_ambient_module_that_shadows_locked_yaml() {
@@ -319,20 +403,21 @@ fn rejects_an_ambient_module_that_shadows_locked_yaml() {
     .unwrap();
     let mut packages = required_package_records(&cache);
     packages.push(optional_yaml_record(&cache));
-    let lock = gnu_lock_with_packages(&packages);
     let interpreter = write_interpreter_wrapper(temporary.path(), &ambient);
-    let error = PythonEnvironment::prepare_with_interpreter(
-        &lock,
-        &cache,
-        &temporary.path().join("environment"),
-        &interpreter,
-    )
-    .unwrap_err();
+    for (family, lock) in locks_with_packages(&packages) {
+        let error = PythonEnvironment::prepare_with_interpreter(
+            &lock,
+            &cache,
+            &temporary.path().join(format!("{family}-environment")),
+            &interpreter,
+        )
+        .unwrap_err();
 
-    assert_eq!(
-        error.diagnostics().diagnostics[0].code.to_string(),
-        "AX0401"
-    );
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code.to_string(),
+            "AX0401"
+        );
+    }
 }
 
 #[test]
@@ -349,14 +434,19 @@ fn rejects_a_yaml_version_that_differs_from_the_lock() {
     let mut yaml = optional_yaml_record(&cache);
     yaml["version"] = json!("6.0.1");
     packages.push(yaml);
-    let lock = gnu_lock_with_packages(&packages);
-    let error =
-        PythonEnvironment::prepare(&lock, &cache, &temporary.path().join("env")).unwrap_err();
+    for (family, lock) in locks_with_packages(&packages) {
+        let error = PythonEnvironment::prepare(
+            &lock,
+            &cache,
+            &temporary.path().join(format!("{family}-environment")),
+        )
+        .unwrap_err();
 
-    assert_eq!(
-        error.diagnostics().diagnostics[0].code.to_string(),
-        "AX0401"
-    );
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code.to_string(),
+            "AX0401"
+        );
+    }
 }
 
 #[test]
@@ -423,24 +513,30 @@ fn rejects_unknown_modules_even_when_required_modules_are_declared() {
 }
 
 #[test]
-fn rejects_a_missing_mandatory_module_before_cache_access() {
+fn rejects_a_missing_mandatory_module_before_cache_access_for_both_families() {
     let temporary = tempfile::tempdir().unwrap();
     let cache = temporary.path().join("cache");
     fs::create_dir(&cache).unwrap();
     fs::write(cache.join("mako.tar.gz"), b"locked Mako placeholder").unwrap();
-    let lock = lock_with_packages(&[package(
+    let packages = [package(
         &cache,
         "mako",
         "1.3.10",
         "mako.tar.gz",
         "mako",
         ".",
-    )]);
-    let error =
-        PythonEnvironment::prepare(&lock, &cache, &temporary.path().join("env")).unwrap_err();
+    )];
+    for (family, lock) in locks_with_packages(&packages) {
+        let error = PythonEnvironment::prepare(
+            &lock,
+            &cache,
+            &temporary.path().join(format!("{family}-environment")),
+        )
+        .unwrap_err();
 
-    assert_eq!(
-        error.diagnostics().diagnostics[0].code.to_string(),
-        "AX0401"
-    );
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code.to_string(),
+            "AX0401"
+        );
+    }
 }
