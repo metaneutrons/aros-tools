@@ -31,6 +31,8 @@ function(_configure case expect_success expected_message)
         "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
         ${AROS_TEST_TOOL_ARGS} -G Ninja
+            # These private archives and partial links target ELF, not Darwin.
+            -DCMAKE_SYSTEM_NAME=Generic
             "-DPRIVATE_LINKLIB_CASE=${case}"
             "-DCMAKE_C_COMPILER=${_clang}"
             "-DCMAKE_AR=${_archiver}"

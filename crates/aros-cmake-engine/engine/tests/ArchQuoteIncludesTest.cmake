@@ -11,6 +11,9 @@ foreach(_case IN ITEMS valid target-first conflict)
     execute_process(COMMAND "${CMAKE_COMMAND}"
         -S "${CMAKE_CURRENT_LIST_DIR}/arch-quote-includes" -B "${_build}"
         -G Ninja "-DQUOTE_TEST_CASE=${_case}"
+        # This fixture compiles freestanding ELF objects, not Darwin binaries.
+        # Do not inject the host's -arch option into the target Clang command.
+        -DCMAKE_SYSTEM_NAME=Generic
         "-DCMAKE_C_COMPILER=${_clang}" "-DCMAKE_ASM_COMPILER=${_clang}"
         RESULT_VARIABLE _result OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr
         TIMEOUT 60)

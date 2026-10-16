@@ -497,7 +497,7 @@ set(_host_tool_contract
     "GB_YACC|/usr/bin/bison"
     "GB_LEX|/usr/bin/flex"
     "GB_MAKEINFO|/opt/homebrew/opt/texinfo/bin/makeinfo"
-    "GB_PYTHON|/opt/homebrew/opt/python@3.14/bin/python3"
+    "GB_PYTHON|/opt/homebrew/opt/python@3.14/bin/python3.14"
     "GB_SED|/opt/homebrew/opt/gnu-sed/bin/gsed"
     "GB_MSGFMT|/opt/homebrew/opt/gettext/bin/msgfmt"
     "GB_MSGMERGE|/opt/homebrew/opt/gettext/bin/msgmerge"

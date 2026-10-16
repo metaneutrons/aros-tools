@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 find_program(_clang NAMES clang REQUIRED)
+# The consumer is a freestanding ELF archive, not a Darwin host binary.
+# Keep host architecture flags out of both positive and refusal configurations.
 
 if(DEFINED ENV{TMPDIR} AND NOT "$ENV{TMPDIR}" STREQUAL "")
     set(_temp_root "$ENV{TMPDIR}")
@@ -14,6 +16,7 @@ set(_source "${CMAKE_CURRENT_LIST_DIR}/deferred-header-partial-tree")
 foreach(_pass RANGE 1 2)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_build}" -G Ninja
+            -DCMAKE_SYSTEM_NAME=Generic
             "-DCMAKE_C_COMPILER=${_clang}"
             "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
             "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
@@ -45,6 +48,7 @@ endif()
 set(_ambiguous_build "${_build}-ambiguous")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_ambiguous_build}" -G Ninja
+        -DCMAKE_SYSTEM_NAME=Generic
         "-DCMAKE_C_COMPILER=${_clang}" "-DAMBIGUOUS_FETCH_OWNER=ON"
         "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"

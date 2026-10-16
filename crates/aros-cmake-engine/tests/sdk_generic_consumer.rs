@@ -2106,7 +2106,6 @@ fn production_arm_toolchain_reuses_matching_environment_float_abi_once() {
         "CMAKE_SIZEOF_VOID_P=4",
         "CMAKE_C_COMPILER_ID=Clang",
         "CMAKE_CXX_COMPILER_ID=Clang",
-        "CMAKE_ASM_COMPILER_ID=Clang",
         "CMAKE_C_COMPILER_TARGET=arm-unknown-aros",
         "CMAKE_CXX_COMPILER_TARGET=arm-unknown-aros",
         "CMAKE_ASM_COMPILER_TARGET=arm-unknown-aros",
@@ -2116,6 +2115,17 @@ fn production_arm_toolchain_reuses_matching_environment_float_abi_once() {
             "missing real compiler detection {detected}:\n{abi}"
         );
     }
+    // CMake recognizes Apple's Clang assembler as AppleClang even when the
+    // same driver's freestanding C/C++ compiler detection reports Clang.
+    // Keep the accepted assembler families closed; target and ABI checks above
+    // still require the actual ARM compiler initialization.
+    let asm_id = abi
+        .lines()
+        .find_map(|line| line.strip_prefix("CMAKE_ASM_COMPILER_ID="));
+    assert!(
+        matches!(asm_id, Some("Clang" | "AppleClang")),
+        "unexpected real assembler compiler detection: {abi}"
+    );
     let flags = String::from_utf8_lossy(outcome.compiler_flags.as_ref().unwrap());
     for (language, unrelated) in [("C", "-O0"), ("CXX", "-O1"), ("ASM", "-O2")] {
         let line = flags
