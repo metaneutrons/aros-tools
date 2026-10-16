@@ -128,6 +128,12 @@ release, has no provenance claim, and never publishes. The complete, offline
 workflow and its prerequisites are documented in the
 [local native-producer guide](https://aros.metaneutrons.cc/aros-tools/workflows/toolchain-producer/).
 
+Before compiler fan-out, `aros toolchain producer host-preflight` can check the
+selected native tools and locked Python imports without compiling or fetching.
+It creates a private Python environment; its observation does not authenticate
+or qualify a compiler or SDK. See the native-producer guide for explicit inputs
+and retained-failure behavior.
+
 A compiler is a host executable; an SDK supplies target headers and libraries
 for a selected ABI. Installing one does not install or select the other. SDK
 products have independent versions: the initial PC x86-64, Raspberry Pi ARM32,
@@ -197,6 +203,13 @@ native hosts. Executable, workflow, contract and unclassified changes use the
 active three-host matrix. macOS Intel is not an `aros-tools` native release
 target. Main release-version merges also run all three hosts before admission;
 ordinary main checkpoints remain Linux-only.
+
+The Darwin/ARM64 GRUB host builder prefers the explicit Homebrew Python 3.14
+interpreter. If it is absent, it checks a closed list of installed `python3`
+paths and warns when selecting a validated Python 3.11+ fallback. An existing
+but unusable candidate fails instead of being skipped. See
+[GRUB host Python selection](docs/grub-host-python.md) for the paths, checks and
+interpreter-identity boundary; this does not change the general Python floor.
 See the [test stages and acceptance policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints)
 for when full Linux and macOS evidence is mandatory.
 
@@ -205,8 +218,13 @@ moving branch. Full integration is explicit:
 
 ```sh
 AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
+AROS_TEST_MESA20_SOURCE_ROOT=/absolute/path/to/AROS-NX-at-cb6974f \
+AROS_TEST_MESA26_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
   scripts/check-workspace.sh all
 ```
+
+Both source checkouts must be clean and exact, with initialized submodules;
+see CONTRIBUTING for their pinned identities and preparation steps.
 
 The architecture gate protects the long-term shape of the workspace: it
 enforces one-way crate dependencies, keeps production modules bounded, requires

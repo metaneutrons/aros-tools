@@ -41,29 +41,28 @@ tag or release. A newer main commit makes the event stale; it cannot authorize
 the older candidate.
 
 Admission also requires an active `refs/tags/v*` ruleset forbidding updates and
-deletions, with no exclusions and an explicitly visible empty bypass list. The
-existing `RELEASE_ADMIN_READ_TOKEN` is used only by this admission job for
-read-only ruleset API requests. The `release` environment must allow protected
-`main` for admission and the `v*` tag pattern for qualification; its secret
-list is unchanged. The token is not part of the Release Please App permissions
-or the writer job. The repository cannot establish the protected environment
-secret's effective API scope from workflow source; admission must fail closed
-if the credential cannot inspect ruleset metadata, including the explicit
-empty bypass list. An omitted bypass list is unknown, not proof that no bypass
-exists. The read-only job exercises that permission on ordinary qualified
-main checkpoints too, before any release merge is needed. The job emits a
-short-lived receipt containing the candidate identity
-and a ruleset policy digest and check time, but no credential.
+deletions, with no exclusions and an explicitly visible empty bypass list.
+Admission uses its repository-scoped job token, not a separate privileged
+governance credential. It joins the exact REST ruleset ID and node identity
+to the GraphQL `RepositoryRuleset` identity and requires a complete empty
+bypass connection: zero actors, no nodes and no next page. Hidden, malformed,
+errored or inconsistent responses fail closed; an omitted REST bypass list
+alone is not proof that no bypass exists. The `release` environment must allow
+protected `main` for admission and the `v*` tag pattern for qualification; its
+secret list is unchanged. The read-only job exercises the governance check on
+ordinary qualified main checkpoints too, before any release merge is needed.
+The job emits a short-lived receipt containing the candidate identity and a
+ruleset policy digest and check time, but no credential.
 
 The separate `release-start` job runs only when admission reports ready. It has
 the narrow Contents, Pull requests, and Actions write permissions, receives no
 repository secret, and checks out protected `main`. Before invoking Release
 Please, it validates the receipt's freshness (at most 15 minutes) and rechecks
-the candidate and visible ruleset policy with its job token. A ruleset mismatch
-or an unverified admission fails closed; missing bypass metadata in the public
-recheck is not independently interpreted as an empty list: the writer relies
-on the fresh receipt for the authenticated bypass check and compares the public
-policy digest. No write request uses the governance credential. Release Please
+the candidate and ruleset policy with its job token. This recheck independently
+repeats the strict REST/GraphQL identity and complete empty-bypass check, then
+compares the fresh receipt's ruleset identity and policy digest. A ruleset
+mismatch, hidden bypass metadata or unverified admission fails closed. No
+separate privileged governance credential is used as a fallback. Release Please
 then creates only the admitted private draft. The
 adapter compares its tag, source SHA, release ID, and version with the saved
 admission, repeats admission after draft creation, verifies that the draft is
@@ -146,7 +145,9 @@ Its private-key action revokes the installation token at job completion; no
 archive signing key or storage credential belongs in this repository.
 
 `RELEASE_ADMIN_READ_TOKEN` remains a repository-only Administration-read
-credential used only in the checkout-free immutable-release preflight.
+credential used by release qualification's tag-governance job and the separate
+checkout-free immutable-release preflight. It is not used by Release Please
+admission/start or passed to build, signing or publication jobs.
 A user-owned repository cannot enable owner-enforced immutable releases, so
 the supported repository `enabled=true` policy is required. PR and ordinary
 qualification jobs receive neither OIDC nor publication permissions.
