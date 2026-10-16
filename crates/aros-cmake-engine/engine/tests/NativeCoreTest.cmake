@@ -36,6 +36,8 @@ function(_native_core_configure name expect_success expected_message)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}"
                 -G "${_generator}"
+                # The synthetic core is ELF even on a Darwin build host.
+                -DCMAKE_SYSTEM_NAME=Generic
                 "-DCMAKE_C_COMPILER=${_native_core_clang}"
                 "-DCMAKE_C_FLAGS=-target x86_64-unknown-linux-gnu -ffreestanding -fno-stack-protector -fno-pic"
                 -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
