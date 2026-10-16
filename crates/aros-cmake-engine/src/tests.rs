@@ -31,6 +31,11 @@ use std::fs;
 use std::process::Command;
 
 #[test]
+fn grub_python_selection_preserves_closed_policy_and_rejects_changed_interpreters() {
+    run_embedded_kobj_contract_test("GrubPythonTest.cmake");
+}
+
+#[test]
 fn literal_objects_bind_independent_source_dependencies_and_incremental_headers() {
     run_embedded_kobj_contract_test("LiteralDependencyBindingsTest.cmake");
 }

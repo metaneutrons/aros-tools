@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 include("${CMAKE_CURRENT_LIST_DIR}/GrubSourceLock.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/GrubPython.cmake")
 
 function(_gb_real_path path output)
     set(_candidate "${path}")
@@ -340,6 +341,7 @@ set(_required GB_MODE GB_VERSION GB_MMAKE_ID GB_SOURCE_ROOT GB_BUILD_ROOT GB_BIN
     GB_ARCHIVE_SHA256 GB_PATCH_SHA256 GB_XZ_PREFIX GB_HOST_PATH GB_HOST_CC
     GB_HOST_CXX GB_PATCH_TOOL GB_MAKE GB_FILE GB_OTOOL GB_INSTALL_TOOL
     GB_MKDIR_TOOL GB_AWK GB_PKG_CONFIG GB_YACC GB_LEX GB_MAKEINFO GB_PYTHON
+    GB_PYTHON_SELECTION GB_PYTHON_VERSION GB_PYTHON_REALPATH GB_PYTHON_SHA256
     GB_SED GB_MSGFMT GB_MSGMERGE GB_XGETTEXT GB_AR GB_RANLIB GB_NM GB_CMP
     GB_GREP GB_TARGET_CLANG GB_TARGET_LD GB_TARGET_OBJCOPY GB_TARGET_RANLIB GB_TARGET_NM
     GB_TARGET_STRIP GB_CONFIGURE_TARGET GB_PLATFORM GB_TARGET_TRIPLE
@@ -472,7 +474,7 @@ if(NOT _xz_prefix STREQUAL _expected_xz_prefix OR
     message(FATAL_ERROR "GRUB2 runner Homebrew xz dependency is incomplete or substituted")
 endif()
 set(_expected_host_path
-    "/opt/homebrew/opt/gettext/bin:/opt/homebrew/opt/texinfo/bin:/opt/homebrew/opt/gawk/bin:/opt/homebrew/opt/pkgconf/bin:/opt/homebrew/opt/python@3.14/bin:/opt/homebrew/opt/gnu-sed/bin:/opt/homebrew/opt/coreutils/bin:/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    "/opt/homebrew/opt/gettext/bin:/opt/homebrew/opt/texinfo/bin:/opt/homebrew/opt/gawk/bin:/opt/homebrew/opt/pkgconf/bin:/opt/homebrew/opt/gnu-sed/bin:/opt/homebrew/opt/coreutils/bin:/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 if(NOT GB_HOST_PATH STREQUAL _expected_host_path)
     message(FATAL_ERROR "GRUB2 runner host PATH contract was substituted")
 endif()
@@ -497,7 +499,6 @@ set(_host_tool_contract
     "GB_YACC|/usr/bin/bison"
     "GB_LEX|/usr/bin/flex"
     "GB_MAKEINFO|/opt/homebrew/opt/texinfo/bin/makeinfo"
-    "GB_PYTHON|/opt/homebrew/opt/python@3.14/bin/python3.14"
     "GB_SED|/opt/homebrew/opt/gnu-sed/bin/gsed"
     "GB_MSGFMT|/opt/homebrew/opt/gettext/bin/msgfmt"
     "GB_MSGMERGE|/opt/homebrew/opt/gettext/bin/msgmerge"
@@ -530,6 +531,12 @@ foreach(_tool_pair IN LISTS _host_tool_contract)
             "GRUB2 runner host tool ${_contract_variable} escaped its audited path")
     endif()
 endforeach()
+
+_aros_grub_python_select(_python_tool _python_selection)
+_aros_grub_python_revalidate("${_python_tool}" "${_python_selection}"
+    "${GB_PYTHON}" "${GB_PYTHON_SELECTION}" "${GB_PYTHON_REALPATH}"
+    "${GB_PYTHON_VERSION}" "${GB_PYTHON_SHA256}")
+_aros_grub_python_notice("${_python_tool}" "${GB_PYTHON_VERSION}" "${_python_selection}")
 
 set(_expected_private_products "")
 foreach(_relative IN LISTS GB_EXPECTED_private_relative)
@@ -632,6 +639,13 @@ set(_build_environment
     "PYTHON=${GB_PYTHON}"
     "PYTHONNOUSERSITE=1"
     "PYTHONHASHSEED=0"
+    "PYTHONPATH="
+    "PYTHONHOME="
+    "PYTHONSTARTUP="
+    "PYTHONINSPECT="
+    "PYTHONUSERBASE="
+    "PYTHONPYCACHEPREFIX="
+    "PYTHONDONTWRITEBYTECODE=1"
     "SED=${GB_SED}"
     "GREP=${GB_GREP}"
     "EGREP=${GB_GREP} -E"

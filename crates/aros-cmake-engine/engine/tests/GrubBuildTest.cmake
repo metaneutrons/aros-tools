@@ -36,7 +36,9 @@ endif()
 function(_grub_configure name expect_success expected_message)
     set(_build "${_root}/${name}")
     set(_selected_engine "${AROS_TEST_ENGINE_DIR}")
-    if(name MATCHES "^engine-(missing|symlink|symlink-parent)-manifest$")
+    if(name STREQUAL "python-fallback")
+        set(_selected_engine "${_fallback_engine}")
+    elseif(name MATCHES "^engine-(missing|symlink|symlink-parent)-manifest$")
         set(_defect "${CMAKE_MATCH_1}")
         set(_selected_engine "${_root}/${name}-engine")
         aros_test_copy_engine_defect("${_selected_engine}"
@@ -66,6 +68,119 @@ function(_grub_configure name expect_success expected_message)
         endif()
     endif()
     set(CONFIGURED_BUILD "${_build}" PARENT_SCOPE)
+    set(CONFIGURE_LOG "${_log}" PARENT_SCOPE)
+endfunction()
+
+function(_grub_contract_value contract variable output)
+    if(NOT EXISTS "${contract}")
+        message(FATAL_ERROR "GRUB2 contract is unavailable: ${contract}")
+    endif()
+    file(STRINGS "${contract}" _matching_lines REGEX "^set\\(${variable} ")
+    list(LENGTH _matching_lines _matching_count)
+    if(NOT _matching_count EQUAL 1)
+        message(FATAL_ERROR "GRUB2 contract has no unique ${variable} value")
+    endif()
+    list(GET _matching_lines 0 _line)
+    set(_prefix "set(${variable} [==[")
+    string(FIND "${_line}" "${_prefix}" _prefix_position)
+    if(NOT _prefix_position EQUAL 0)
+        message(FATAL_ERROR "GRUB2 contract ${variable} value has an unexpected format")
+    endif()
+    string(LENGTH "${_prefix}" _prefix_length)
+    string(SUBSTRING "${_line}" ${_prefix_length} -1 _encoded_value)
+    set(_suffix "]==])")
+    string(LENGTH "${_encoded_value}" _encoded_length)
+    string(LENGTH "${_suffix}" _suffix_length)
+    if(_encoded_length LESS _suffix_length)
+        message(FATAL_ERROR "GRUB2 contract ${variable} value is truncated")
+    endif()
+    math(EXPR _value_length "${_encoded_length} - ${_suffix_length}")
+    string(SUBSTRING "${_encoded_value}" 0 ${_value_length} _value)
+    string(SUBSTRING "${_encoded_value}" ${_value_length} -1 _actual_suffix)
+    if(NOT _actual_suffix STREQUAL _suffix)
+        message(FATAL_ERROR "GRUB2 contract ${variable} value has an unexpected terminator")
+    endif()
+    set(${output} "${_value}" PARENT_SCOPE)
+endfunction()
+
+function(_grub_assert_fallback_warning log context python version)
+    string(REGEX REPLACE "[ \t\r\n]+" " " _normalized_log "${log}")
+    set(_expected_warning
+        "preferred Python 3.14 is not installed; using ${python} (${version})")
+    string(FIND "${_normalized_log}" "${_expected_warning}" _warning_position)
+    if(_warning_position LESS 0)
+        message(FATAL_ERROR
+            "python-fallback ${context} omitted the selected path/version warning: ${_expected_warning}\n${_normalized_log}")
+    endif()
+endfunction()
+
+function(_grub_counterprobe_runner_python build hostile_path)
+    set(_contract "${build}/.aros-grub2-host-grub2-contract.cmake")
+    set(_binary "${build}/gen/configure/arch/all-pc/boot/grub2-host/pc")
+    set(_install "${build}/hosttools/grub2/pc")
+    set(_grub_mkimage "${_install}/grub-mkimage")
+    set(_private_sentinel "${_binary}/runner-python-counterprobe.sentinel")
+    set(_install_sentinel "${_install}/runner-python-counterprobe.sentinel")
+    set(_probe_directory "${_root}/runner-python-counterprobes")
+    if(NOT EXISTS "${_contract}" OR NOT EXISTS "${_grub_mkimage}")
+        message(FATAL_ERROR "GRUB2 runner Python counterprobe inputs are unavailable")
+    endif()
+    file(MAKE_DIRECTORY "${_probe_directory}")
+    file(WRITE "${_private_sentinel}" "private tree sentinel")
+    file(WRITE "${_install_sentinel}" "install tree sentinel")
+    file(SHA256 "${_grub_mkimage}" _grub_mkimage_before)
+    set(_counterprobes
+        "GB_PYTHON|/tmp/aros-grub-counterprobe-python|GRUB2 runner Python selection changed or was substituted"
+        "GB_PYTHON_SELECTION|counterprobe-selection|GRUB2 runner Python selection changed or was substituted"
+        "GB_PYTHON_REALPATH|/tmp/aros-grub-counterprobe-realpath|GRUB2 runner Python selection changed or was substituted"
+        "GB_PYTHON_VERSION|3.0.0|GRUB2 runner Python version changed"
+        "GB_PYTHON_SHA256|ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff|GRUB2 runner Python selection changed or was substituted")
+    foreach(_counterprobe IN LISTS _counterprobes)
+        string(REPLACE "|" ";" _parts "${_counterprobe}")
+        list(GET _parts 0 _variable)
+        list(GET _parts 1 _wrong_value)
+        list(GET _parts 2 _expected_reason)
+        set(_probe_contract "${_probe_directory}/${_variable}.cmake")
+        file(COPY_FILE "${_contract}" "${_probe_contract}")
+        file(APPEND "${_probe_contract}"
+            "set(${_variable} [==[${_wrong_value}]==])\n")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E env "PATH=${hostile_path}"
+                "${CMAKE_COMMAND}" -DGB_ACTION=build
+                "-DCONTRACT=${_probe_contract}"
+                -P "${AROS_TEST_ENGINE_DIR}/RunGrubBuild.cmake"
+            RESULT_VARIABLE _result
+            OUTPUT_VARIABLE _stdout
+            ERROR_VARIABLE _stderr)
+        set(_log "${_stdout}${_stderr}")
+        string(FIND "${_log}" "${_expected_reason}" _reason_position)
+        if(_result EQUAL 0 OR _reason_position LESS 0)
+            message(FATAL_ERROR
+                "GRUB2 runner accepted or misdiagnosed ${_variable} counterprobe (${_result})\n${_log}")
+        endif()
+        foreach(_sentinel_pair IN ITEMS
+                "${_private_sentinel}|private tree sentinel"
+                "${_install_sentinel}|install tree sentinel")
+            string(REPLACE "|" ";" _sentinel_parts "${_sentinel_pair}")
+            list(GET _sentinel_parts 0 _sentinel)
+            list(GET _sentinel_parts 1 _expected_content)
+            if(NOT EXISTS "${_sentinel}")
+                message(FATAL_ERROR
+                    "GRUB2 runner removed a tree sentinel before rejecting ${_variable}")
+            endif()
+            file(READ "${_sentinel}" _actual_content)
+            if(NOT _actual_content STREQUAL _expected_content)
+                message(FATAL_ERROR
+                    "GRUB2 runner changed a tree sentinel before rejecting ${_variable}")
+            endif()
+        endforeach()
+        file(SHA256 "${_grub_mkimage}" _grub_mkimage_after)
+        if(NOT _grub_mkimage_before STREQUAL _grub_mkimage_after)
+            message(FATAL_ERROR
+                "GRUB2 runner changed installed grub-mkimage before rejecting ${_variable}")
+        endif()
+    endforeach()
+    file(REMOVE "${_private_sentinel}" "${_install_sentinel}")
 endfunction()
 
 file(SHA256 "${_repo}/arch/all-pc/boot/grub2-aros/grub-${_grub_version}-aros.diff" _patch_before)
@@ -75,7 +190,7 @@ file(SHA256 "${_repo}/arch/all-pc/boot/grub2-host/mmakefile.src" _host_mmake_bef
 _grub_configure("" TRUE "")
 set(_build "${CONFIGURED_BUILD}")
 set(_closed_host_path
-    "/opt/homebrew/opt/gettext/bin:/opt/homebrew/opt/texinfo/bin:/opt/homebrew/opt/gawk/bin:/opt/homebrew/opt/pkgconf/bin:/opt/homebrew/opt/python@3.14/bin:/opt/homebrew/opt/gnu-sed/bin:/opt/homebrew/opt/coreutils/bin:/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    "/opt/homebrew/opt/gettext/bin:/opt/homebrew/opt/texinfo/bin:/opt/homebrew/opt/gawk/bin:/opt/homebrew/opt/pkgconf/bin:/opt/homebrew/opt/gnu-sed/bin:/opt/homebrew/opt/coreutils/bin:/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 foreach(_contract_spec IN ITEMS
         "grub2-host|${_pc_count}"
         "grub2-efi-host|${_efi64_count}"
@@ -144,6 +259,8 @@ foreach(_lane IN ITEMS pc efi-x86_64 efi-i386)
     endforeach()
 endforeach()
 
+_grub_counterprobe_runner_python("${_build}" "${_hostile_path}")
+
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env "PATH=${_hostile_path}"
         "${CMAKE_COMMAND}" --build "${_build}" --target grub2-host
@@ -187,6 +304,146 @@ if(NOT _patch_before STREQUAL _patch_after OR
    NOT _aros_mmake_before STREQUAL _aros_mmake_after OR
    NOT _host_mmake_before STREQUAL _host_mmake_after)
     message(FATAL_ERROR "GRUB2 runner modified its source tree")
+endif()
+
+set(_fallback_engine "${_root}/python-fallback-engine")
+file(MAKE_DIRECTORY "${_fallback_engine}")
+file(COPY "${AROS_TEST_ENGINE_DIR}/" DESTINATION "${_fallback_engine}")
+set(_fallback_python_helper "${_fallback_engine}/GrubPython.cmake")
+set(_preferred_python "/opt/homebrew/opt/python@3.14/bin/python3.14")
+set(_missing_preferred_python "${_root}/missing-preferred-python3.14")
+if(NOT EXISTS "${_fallback_python_helper}" OR
+   EXISTS "${_missing_preferred_python}" OR IS_SYMLINK "${_missing_preferred_python}")
+    message(FATAL_ERROR "GRUB Python fallback fixture could not prepare its private engine copy")
+endif()
+file(READ "${_fallback_python_helper}" _fallback_policy)
+string(FIND "${_fallback_policy}" "${_preferred_python}" _preferred_position)
+if(_preferred_position LESS 0)
+    message(FATAL_ERROR "GRUB Python preferred-path literal is absent from the copied policy")
+endif()
+string(LENGTH "${_preferred_python}" _preferred_length)
+math(EXPR _after_preferred_position "${_preferred_position} + ${_preferred_length}")
+string(SUBSTRING "${_fallback_policy}" ${_after_preferred_position} -1 _policy_after_preferred)
+string(FIND "${_policy_after_preferred}" "${_preferred_python}" _duplicate_preferred_position)
+if(NOT _duplicate_preferred_position EQUAL -1)
+    message(FATAL_ERROR "GRUB Python preferred-path literal is not unique in the copied policy")
+endif()
+string(REPLACE "${_preferred_python}" "${_missing_preferred_python}"
+    _modified_fallback_policy "${_fallback_policy}")
+string(REPLACE "${_missing_preferred_python}" "${_preferred_python}"
+    _restored_fallback_policy "${_modified_fallback_policy}")
+if(NOT _restored_fallback_policy STREQUAL _fallback_policy)
+    message(FATAL_ERROR "GRUB Python fallback fixture changed more than its preferred-path literal")
+endif()
+file(WRITE "${_fallback_python_helper}" "${_modified_fallback_policy}")
+file(READ "${_fallback_python_helper}" _written_fallback_policy)
+if(NOT _written_fallback_policy STREQUAL _modified_fallback_policy)
+    message(FATAL_ERROR "GRUB Python fallback fixture did not write its private policy copy")
+endif()
+
+_grub_configure("python-fallback" TRUE "")
+set(_fallback_build "${CONFIGURED_BUILD}")
+set(_fallback_configure_log "${CONFIGURE_LOG}")
+set(_fallback_contract "${_fallback_build}/.aros-grub2-host-grub2-contract.cmake")
+_grub_contract_value("${_fallback_contract}" GB_PYTHON _fallback_python)
+_grub_contract_value("${_fallback_contract}" GB_PYTHON_SELECTION _fallback_selection)
+_grub_contract_value("${_fallback_contract}" GB_PYTHON_VERSION _fallback_version)
+if(NOT _fallback_selection STREQUAL "fallback")
+    message(FATAL_ERROR "python-fallback contract did not record a fallback selection")
+endif()
+_grub_assert_fallback_warning(
+    "${_fallback_configure_log}" configure "${_fallback_python}" "${_fallback_version}")
+
+foreach(_target IN ITEMS grub2-host grub2-efi-host grub2-efi32-host)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env "PATH=${_hostile_path}"
+            "${CMAKE_COMMAND}" --build "${_fallback_build}" --target "${_target}"
+        RESULT_VARIABLE _fallback_result
+        OUTPUT_VARIABLE _fallback_stdout
+        ERROR_VARIABLE _fallback_stderr)
+    if(NOT _fallback_result EQUAL 0)
+        message(FATAL_ERROR
+            "python-fallback ${_target} build failed (${_fallback_result})\n${_fallback_stdout}${_fallback_stderr}")
+    endif()
+endforeach()
+
+foreach(_lane IN ITEMS pc efi-x86_64 efi-i386)
+    if(_lane STREQUAL "pc")
+        set(_platform i386-pc)
+        set(_target grub2-host)
+    elseif(_lane STREQUAL "efi-x86_64")
+        set(_platform x86_64-efi)
+        set(_target grub2-efi-host)
+    else()
+        set(_platform i386-efi)
+        set(_target grub2-efi32-host)
+    endif()
+    foreach(_output IN ITEMS
+            "${_fallback_build}/gen/configure/arch/all-pc/boot/grub2-host/${_lane}/build/grub-mkimage"
+            "${_fallback_build}/gen/configure/arch/all-pc/boot/grub2-host/${_lane}/build/grub-core/kernel.img"
+            "${_fallback_build}/hosttools/grub2/${_lane}/grub-mkimage"
+            "${_fallback_build}/hosttools/grub2/${_lane}/lib/grub/${_platform}/normal.mod"
+            "${_fallback_build}/hosttools/grub2/${_lane}/lib/grub/${_platform}/xzio.mod"
+            "${_fallback_build}/hosttools/grub2/${_lane}/lib/grub/${_platform}/moddep.lst")
+        if(NOT EXISTS "${_output}")
+            message(FATAL_ERROR "python-fallback ${_target} omitted ${_output}")
+        endif()
+    endforeach()
+endforeach()
+
+foreach(_target IN ITEMS grub2-host grub2-efi-host grub2-efi32-host)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env "PATH=${_hostile_path}"
+            "${CMAKE_COMMAND}" --build "${_fallback_build}" --target "${_target}"
+        RESULT_VARIABLE _fallback_noop_result
+        OUTPUT_VARIABLE _fallback_noop_stdout
+        ERROR_VARIABLE _fallback_noop_stderr)
+    set(_fallback_noop_log "${_fallback_noop_stdout}${_fallback_noop_stderr}")
+    if(NOT _fallback_noop_result EQUAL 0 OR
+       NOT _fallback_noop_log MATCHES "no work to do")
+        message(FATAL_ERROR
+            "python-fallback ${_target} no-op build failed\n${_fallback_noop_log}")
+    endif()
+endforeach()
+
+_grub_configure("python-fallback" TRUE "")
+if(NOT CONFIGURED_BUILD STREQUAL _fallback_build)
+    message(FATAL_ERROR "python-fallback reconfigure changed its build directory")
+endif()
+set(_fallback_reconfigure_log "${CONFIGURE_LOG}")
+_grub_contract_value("${_fallback_contract}" GB_PYTHON _fallback_reconfigured_python)
+_grub_contract_value("${_fallback_contract}" GB_PYTHON_SELECTION _fallback_reconfigured_selection)
+_grub_contract_value("${_fallback_contract}" GB_PYTHON_VERSION _fallback_reconfigured_version)
+if(NOT _fallback_reconfigured_selection STREQUAL "fallback" OR
+   NOT _fallback_reconfigured_python STREQUAL _fallback_python OR
+   NOT _fallback_reconfigured_version STREQUAL _fallback_version)
+    message(FATAL_ERROR "python-fallback contract metadata changed during no-op reconfigure")
+endif()
+_grub_assert_fallback_warning("${_fallback_reconfigure_log}" reconfigure
+    "${_fallback_reconfigured_python}" "${_fallback_reconfigured_version}")
+foreach(_target IN ITEMS grub2-host grub2-efi-host grub2-efi32-host)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env "PATH=${_hostile_path}"
+            "${CMAKE_COMMAND}" --build "${_fallback_build}" --target "${_target}"
+        RESULT_VARIABLE _fallback_reconfigure_result
+        OUTPUT_VARIABLE _fallback_reconfigure_stdout
+        ERROR_VARIABLE _fallback_reconfigure_stderr)
+    set(_fallback_reconfigure_log
+        "${_fallback_reconfigure_stdout}${_fallback_reconfigure_stderr}")
+    if(NOT _fallback_reconfigure_result EQUAL 0 OR
+       NOT _fallback_reconfigure_log MATCHES "no work to do")
+        message(FATAL_ERROR
+            "python-fallback ${_target} rebuilt after a no-op reconfigure\n${_fallback_reconfigure_log}")
+    endif()
+endforeach()
+
+file(SHA256 "${_repo}/arch/all-pc/boot/grub2-aros/grub-${_grub_version}-aros.diff" _fallback_patch_after)
+file(SHA256 "${_repo}/arch/all-pc/boot/grub2-aros/mmakefile.src" _fallback_aros_mmake_after)
+file(SHA256 "${_repo}/arch/all-pc/boot/grub2-host/mmakefile.src" _fallback_host_mmake_after)
+if(NOT _patch_before STREQUAL _fallback_patch_after OR
+   NOT _aros_mmake_before STREQUAL _fallback_aros_mmake_after OR
+   NOT _host_mmake_before STREQUAL _fallback_host_mmake_after)
+    message(FATAL_ERROR "GRUB2 python-fallback runner modified its source tree")
 endif()
 
 _grub_configure("wrong-identity" FALSE "target identity differs from the audited")
