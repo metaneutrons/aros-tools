@@ -100,6 +100,9 @@ it rather than accepting a green partial stage.
 The real GRUB fixture builds PC, EFI64 and EFI32 host tools **only on
 Darwin/arm64**; Linux explicitly reports that host-qualified omission. A green
 Linux CI run alone is therefore not the complete macOS/GRUB evidence. The
+builder's preferred and controlled fallback Python selection is documented in
+[GRUB host Python selection](docs/grub-host-python.md); a fallback warning is
+not a substitute for real product or release qualification. The
 explicit `test`/`all` gate discovers every root-level self-contained
 `*Test.cmake`. It reports package-qualified fixtures separately; they run only
 through their documented package-specific gate. `clang`, `cmake` and

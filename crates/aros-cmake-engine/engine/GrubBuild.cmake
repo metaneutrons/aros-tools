@@ -2,6 +2,7 @@ include_guard(GLOBAL)
 
 include(CMakeParseArguments)
 include("${CMAKE_CURRENT_LIST_DIR}/GrubSourceLock.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/GrubPython.cmake")
 
 set(_AROS_GRUB_BUILD_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
@@ -434,7 +435,10 @@ function(aros_build_grub2)
     set(_yacc_tool "/usr/bin/bison")
     set(_lex_tool "/usr/bin/flex")
     set(_makeinfo_tool "/opt/homebrew/opt/texinfo/bin/makeinfo")
-    set(_python_tool "/opt/homebrew/opt/python@3.14/bin/python3.14")
+    _aros_grub_python_select(_python_tool _python_selection)
+    _aros_grub_python_probe("${_python_tool}" _python_version _python_real _python_sha256)
+    _aros_grub_python_check_selection_version("${_python_selection}" "${_python_version}")
+    _aros_grub_python_notice("${_python_tool}" "${_python_version}" "${_python_selection}")
     set(_sed_tool "/opt/homebrew/opt/gnu-sed/bin/gsed")
     set(_msgfmt_tool "/opt/homebrew/opt/gettext/bin/msgfmt")
     set(_msgmerge_tool "/opt/homebrew/opt/gettext/bin/msgmerge")
@@ -468,7 +472,6 @@ function(aros_build_grub2)
         "/opt/homebrew/opt/texinfo/bin"
         "/opt/homebrew/opt/gawk/bin"
         "/opt/homebrew/opt/pkgconf/bin"
-        "/opt/homebrew/opt/python@3.14/bin"
         "/opt/homebrew/opt/gnu-sed/bin"
         "/opt/homebrew/opt/coreutils/bin"
         "/opt/homebrew/opt/llvm/bin"
@@ -604,6 +607,10 @@ function(aros_build_grub2)
     _aros_grub_contract_set(GB_LEX "${_lex_tool}")
     _aros_grub_contract_set(GB_MAKEINFO "${_makeinfo_tool}")
     _aros_grub_contract_set(GB_PYTHON "${_python_tool}")
+    _aros_grub_contract_set(GB_PYTHON_SELECTION "${_python_selection}")
+    _aros_grub_contract_set(GB_PYTHON_VERSION "${_python_version}")
+    _aros_grub_contract_set(GB_PYTHON_REALPATH "${_python_real}")
+    _aros_grub_contract_set(GB_PYTHON_SHA256 "${_python_sha256}")
     _aros_grub_contract_set(GB_SED "${_sed_tool}")
     _aros_grub_contract_set(GB_MSGFMT "${_msgfmt_tool}")
     _aros_grub_contract_set(GB_MSGMERGE "${_msgmerge_tool}")
@@ -647,6 +654,7 @@ function(aros_build_grub2)
             -P "${_AROS_GRUB_BUILD_MODULE_DIR}/RunGrubBuild.cmake"
         DEPENDS "${_archive_logical}" "${_patch_logical}"
             "${_install_manifest_logical}" "${_contract_logical}"
+            "${_python_real}" "${_AROS_GRUB_BUILD_MODULE_DIR}/GrubPython.cmake"
             "${_AROS_GRUB_BUILD_MODULE_DIR}/RunGrubBuild.cmake"
         COMMENT "Building audited GRUB2 ${GB_MODE} host lane"
         VERBATIM)
