@@ -1675,10 +1675,13 @@ fn unpack_zip(file: File, name: &str, staging: &Path) -> FetchResult<()> {
         let mut entry = archive
             .by_index(index)
             .map_err(|error| extraction_failure(name, format!("cannot read ZIP entry: {error}")))?;
+        let entry_name = entry.name().map_err(|error| {
+            extraction_failure(name, format!("cannot decode ZIP entry name: {error}"))
+        })?;
         let enclosed = entry.enclosed_name().ok_or_else(|| {
             extraction_failure(
                 name,
-                format!("ZIP entry '{}' escapes the extraction root", entry.name()),
+                format!("ZIP entry '{entry_name}' escapes the extraction root"),
             )
         })?;
         validate_archive_path(&enclosed, name)?;
