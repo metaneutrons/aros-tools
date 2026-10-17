@@ -364,7 +364,7 @@ fn commands_preserve_normal_defaults_target_float_fact_and_ordered_libraries() {
         "-mfloat-abi=softfp",
         "-std=c++17",
         "/source/src/application.cpp",
-        "-Wl,-Map=/proof/relocated-cxx.map,--cref,--trace",
+        "-Wl,-Map=/proof/relocated-cxx.map,--trace",
         "-lfirst",
         "-lsecond+rt",
         "-lthird_2",
@@ -448,7 +448,7 @@ fn c_commands_do_not_infer_float_mode_or_cpp_mode() {
         .any(|argument| argument == "-std=c++17"));
     assert!(command
         .arguments
-        .contains(&"-Wl,-Map=/proof/original-c.map,--cref,--trace".into()));
+        .contains(&"-Wl,-Map=/proof/original-c.map,--trace".into()));
     assert!(command.arguments.contains(&"/proof/original-c.elf".into()));
     assert_eq!(
         command.arguments,
@@ -459,7 +459,7 @@ fn c_commands_do_not_infer_float_mode_or_cpp_mode() {
             "-fno-common",
             "-g0",
             "/source/app.c",
-            "-Wl,-Map=/proof/original-c.map,--cref,--trace",
+            "-Wl,-Map=/proof/original-c.map,--trace",
             "-o",
             "/proof/original-c.elf",
         ]
@@ -531,9 +531,13 @@ fn compiler_cpu_and_fpu_facts_apply_for_generic_targets_and_both_languages() {
                 .unwrap();
             assert!(fpu_index < standard_index);
         }
-        assert!(command.arguments.contains(&format!(
-            "-Wl,-Map=/proof/{label}-{language}.map,--cref,--trace"
-        )));
+        assert!(command
+            .arguments
+            .iter()
+            .all(|argument| !argument.contains("--cref")));
+        assert!(command
+            .arguments
+            .contains(&format!("-Wl,-Map=/proof/{label}-{language}.map,--trace")));
     }
 }
 
@@ -664,9 +668,9 @@ fn compiler_arch_fact_applies_to_c_and_cxx_for_original_and_relocated_sources() 
                 .unwrap();
             assert!(fpu_index < standard_index);
         }
-        assert!(command.arguments.contains(&format!(
-            "-Wl,-Map=/proof/{label}-{language}.map,--cref,--trace"
-        )));
+        assert!(command
+            .arguments
+            .contains(&format!("-Wl,-Map=/proof/{label}-{language}.map,--trace")));
     }
 }
 
@@ -792,9 +796,9 @@ fn compiler_code_model_applies_to_c_and_cxx_for_original_and_relocated_sources()
                 .unwrap();
             assert!(code_model_index < standard_index);
         }
-        assert!(command.arguments.contains(&format!(
-            "-Wl,-Map=/proof/{label}-{language}.map,--cref,--trace"
-        )));
+        assert!(command
+            .arguments
+            .contains(&format!("-Wl,-Map=/proof/{label}-{language}.map,--trace")));
     }
 }
 
