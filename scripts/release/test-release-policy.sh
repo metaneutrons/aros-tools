@@ -79,7 +79,10 @@ for script in release_scripts.glob('*.sh'):
 PY
 
 # The two Linux matrices share one SHA256-pinned Bookworm image matching rust-toolchain.toml.
-python3 - "$root/.github/workflows/release.yml" "$root/rust-toolchain.toml" <<'PY'
+python3 - "$root/.github/workflows/release.yml" "$root/rust-toolchain.toml" \
+    "$root/docs-site/src/content/docs/reference/platform-support.md" \
+    "$root/docs-site/src/content/docs/getting-started/prerequisites.md" \
+    "$root/README.md" <<'PY'
 import pathlib
 import re
 import sys
@@ -177,6 +180,78 @@ expect('container pin omitted', 'container', release[:line_start] + release[line
 for job, (start, end) in sections.items():
     guard_at = release.index(GUARD, start, end)
     expect(f'{job} runtime guard omitted', 'guard', release[:guard_at] + release[guard_at + len(GUARD):], channel)
+
+BASELINE = '15.0'
+EXPORT = f'export MACOSX_DEPLOYMENT_TARGET={BASELINE}'
+ORIGINAL_AUDIT = '''if [[ "$minimum" != 15.0 ]]; then
+                echo "::error::${binary} declares macOS ${minimum:-unknown}; expected 15.0"
+                exit 1
+              fi'''
+DELIVERED_AUDIT = '''if [[ "$minimum" != 15.0 ]]; then
+                echo "::error::delivered $(basename "$binary") declares macOS ${minimum:-unknown}; expected 15.0"
+                exit 1
+              fi'''
+PLATFORM_FLOOR = '| `aarch64-apple-darwin` | Native macOS Apple silicon | macOS 15 or newer |'
+PLATFORM_UNSUPPORTED = 'or macOS below 15.'
+PREREQUISITES_FLOOR = '| macOS Apple silicon | `aarch64-apple-darwin` | macOS 15 |'
+README_FLOOR = 'macOS 15+\n  on Apple silicon'
+documents = [pathlib.Path(path).read_text(encoding='utf-8') for path in sys.argv[3:]]
+
+def macos_failure(workflow, docs):
+    for job, reason in (('native', 'native-export'), ('native-ab', 'ab-export')):
+        start, end = sections[job]
+        if re.findall(r'(?m)^[ \t]*export MACOSX_DEPLOYMENT_TARGET=([^\n]*)$', workflow[start:end]) != [BASELINE]:
+            return reason
+    if len(re.findall(r'(?m)^[ \t]*export MACOSX_DEPLOYMENT_TARGET=', workflow)) != 2:
+        return 'export-layout'
+    native_start, native_end = sections['native']
+    native = workflow[native_start:native_end]
+    if native.count(ORIGINAL_AUDIT) != 1:
+        return 'original-audit'
+    if native.count(DELIVERED_AUDIT) != 1:
+        return 'delivered-audit'
+    if docs[0].count('`aarch64-apple-darwin` | Native macOS Apple silicon |') != 1 or docs[0].count(PLATFORM_FLOOR) != 1:
+        return 'platform-doc'
+    if docs[0].count(PLATFORM_UNSUPPORTED) != 1:
+        return 'platform-unsupported'
+    if docs[1].count('| macOS Apple silicon | `aarch64-apple-darwin` |') != 1 or docs[1].count(PREREQUISITES_FLOOR) != 1:
+        return 'prerequisites-doc'
+    if docs[2].count(README_FLOOR) != 1:
+        return 'readme-prerequisite'
+    return None
+
+failure = macos_failure(release, documents)
+if failure:
+    raise SystemExit(f'macOS policy: {failure}')
+
+def replace_once(text, old, new, label):
+    if text.count(old) != 1:
+        raise SystemExit(f'fixture cannot locate singular {label}')
+    return text.replace(old, new, 1)
+
+def expect_macos(label, reason, workflow=release, docs=documents):
+    actual = macos_failure(workflow, docs)
+    if actual != reason:
+        raise SystemExit(f'{label}: expected {reason} rejection, got {actual or "success"}')
+
+for job, label, reason in (('native', 'native export', 'native-export'), ('native-ab', 'A/B export', 'ab-export')):
+    start, end = sections[job]
+    body = replace_once(release[start:end], EXPORT, 'export MACOSX_DEPLOYMENT_TARGET=13.0', label)
+    expect_macos(f'old {label}', reason, release[:start] + body + release[end:])
+for label, reason, block in (
+    ('original audit', 'original-audit', ORIGINAL_AUDIT),
+    ('delivered audit', 'delivered-audit', DELIVERED_AUDIT),
+):
+    expect_macos(f'old {label}', reason, replace_once(release, block, block.replace('15.0', '13.0'), label))
+for index, label, reason, old, new in (
+    (0, 'platform floor', 'platform-doc', PLATFORM_FLOOR, PLATFORM_FLOOR.replace('15', '13')),
+    (0, 'unsupported platform floor', 'platform-unsupported', PLATFORM_UNSUPPORTED, PLATFORM_UNSUPPORTED.replace('15', '13')),
+    (1, 'prerequisites floor', 'prerequisites-doc', PREREQUISITES_FLOOR, PREREQUISITES_FLOOR.replace('15', '13')),
+    (2, 'README floor', 'readme-prerequisite', README_FLOOR, README_FLOOR.replace('15+', '13+')),
+):
+    changed_docs = documents.copy()
+    changed_docs[index] = replace_once(changed_docs[index], old, new, label)
+    expect_macos(f'old {label}', reason, docs=changed_docs)
 PY
 
 # Cosign delivery can be transiently unavailable, but a retry must never

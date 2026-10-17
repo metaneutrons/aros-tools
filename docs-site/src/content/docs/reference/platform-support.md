@@ -9,11 +9,14 @@ description: Distinguish native host support, implemented target profiles, avail
 | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | Native Linux x86-64 | glibc 2.36 or newer |
 | `aarch64-unknown-linux-gnu` | Native Linux ARM64 | glibc 2.36 or newer |
-| `aarch64-apple-darwin` | Native macOS Apple silicon | macOS 13 or newer |
+| `aarch64-apple-darwin` | Native macOS Apple silicon | macOS 15 or newer |
 
 The current AROS tools release has archives for the three hosts above. macOS Intel is
 not a native archive or package-manager target. See
 [release status](/aros-tools/reference/release-status/) for current versions.
+
+The macOS floor applies to builds from the current source. Previously published
+archives retain their recorded deployment targets; they are not rebuilt in place.
 
 The host mapping is implemented in
 [`host_compiler.rs`](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-cli/src/host_compiler.rs).
@@ -72,7 +75,7 @@ claims to their implementations.
 
 - Windows as a native release host.
 - macOS Intel (`x86_64-apple-darwin`) as a native archive or package-manager host.
-- Published Linux binaries on hosts below glibc 2.36, or macOS below 13.
+- Newly produced Linux binaries on hosts below glibc 2.36, or macOS below 15.
 - A general claim of complete translated products from entirely pristine
   upstream AROS.
 - A blanket boot guarantee for every configured board or named profile.
