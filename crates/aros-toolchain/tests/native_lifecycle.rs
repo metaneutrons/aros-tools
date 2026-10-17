@@ -1580,6 +1580,165 @@ fn native_lifecycle_consumes_a_cold_vendor_generation_offline() {
     assert!(!fixture.root.join("cache/cargo-vendor").exists());
 }
 
+#[test]
+fn native_lifecycle_cargo_commands_ignore_poisoned_ancestor_configuration() {
+    let cargo = which::which("cargo").unwrap();
+    let executable = std::env::current_exe().unwrap();
+    for config_name in ["config.toml", "config"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let cargo_config = root.join(".cargo");
+        let cwd = root.join("nested/cwd");
+        let temporary_directory = root.join("tmp");
+        let control_home = root.join("control/cargo-home");
+        let build_project = root.join("control/build-project");
+        let vendor_project = root.join("control/vendor-project");
+        let poisoned_registry = root.join("control/poisoned-registry");
+        let wrapper = root.join("control/rustc-wrapper");
+        let wrapper_calls = root.join("control/rustc-wrapper.calls");
+        fs::create_dir(&cargo_config).unwrap();
+        fs::set_permissions(&cargo_config, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&temporary_directory).unwrap();
+        fs::create_dir_all(&control_home).unwrap();
+        fs::create_dir_all(&poisoned_registry).unwrap();
+        fs::create_dir_all(build_project.join("src")).unwrap();
+        fs::create_dir_all(vendor_project.join("src")).unwrap();
+        write_executable(
+            &wrapper,
+            &format!(
+                "#!/bin/sh\nset -eu\nprintf 'called\\n' >> {}\ncompiler=\"$1\"\nshift\nexec \"$compiler\" \"$@\"\n",
+                shell_quote(&wrapper_calls)
+            ),
+        );
+        let wrapper_value = serde_json::to_string(&wrapper.display().to_string()).unwrap();
+        let registry_value =
+            serde_json::to_string(&poisoned_registry.display().to_string()).unwrap();
+        fs::write(
+            cargo_config.join(config_name),
+            format!(
+                "[build]\nrustc-wrapper = {wrapper_value}\n\n[source.crates-io]\nreplace-with = \"poisoned\"\n\n[source.poisoned]\ndirectory = {registry_value}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            build_project.join("Cargo.toml"),
+            "[package]\nname = \"cwd-build-control\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(build_project.join("src/lib.rs"), "pub fn control() {}\n").unwrap();
+        fs::write(
+            vendor_project.join("Cargo.toml"),
+            "[package]\nname = \"cwd-vendor-control\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nfixture-dependency = \"1.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(vendor_project.join("src/lib.rs"), "pub fn control() {}\n").unwrap();
+        fs::write(
+            vendor_project.join("Cargo.lock"),
+            format!(
+                "version = 4\n\n[[package]]\nname = \"cwd-vendor-control\"\nversion = \"0.1.0\"\ndependencies = [\"fixture-dependency\"]\n\n[[package]]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{}\"\n",
+                "d".repeat(64)
+            ),
+        )
+        .unwrap();
+
+        // `env_clear` is essential here: an outer RUSTC_WRAPPER value, even
+        // an explicitly empty one, would mask the configuration being tested.
+        let mut build_control = Command::new(&cargo);
+        build_control
+            .current_dir(&cwd)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("CARGO_HOME", &control_home)
+            .env("TMPDIR", &temporary_directory)
+            .arg("build")
+            .arg("--offline")
+            .arg("--manifest-path")
+            .arg(build_project.join("Cargo.toml"))
+            .arg("--target-dir")
+            .arg(root.join("control/build-target"));
+        for variable in ["HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"] {
+            if let Some(value) = std::env::var_os(variable) {
+                build_control.env(variable, value);
+            }
+        }
+        let build_control = build_control.output().unwrap();
+        assert!(
+            build_control.status.success(),
+            "{config_name} wrapper control failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&build_control.stdout),
+            String::from_utf8_lossy(&build_control.stderr),
+        );
+        assert!(
+            wrapper_calls.is_file(),
+            "{config_name} did not activate rustc-wrapper"
+        );
+
+        // Cargo vendor deliberately ignores source replacement unless given
+        // --respect-source-config. Invalid TOML instead proves that vendor
+        // actually discovers this ancestor, without changing production flags.
+        let config_path = cargo_config.join(config_name);
+        let mut poisoned_config = fs::read_to_string(&config_path).unwrap();
+        poisoned_config.push_str("\n[invalid ancestor configuration\n");
+        fs::write(&config_path, poisoned_config).unwrap();
+
+        let mut vendor_control = Command::new(&cargo);
+        vendor_control
+            .current_dir(&cwd)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("CARGO_HOME", &control_home)
+            .env("TMPDIR", &temporary_directory)
+            .args(["vendor", "--locked", "--offline", "--manifest-path"])
+            .arg(vendor_project.join("Cargo.toml"))
+            .arg(root.join("control/vendor-output"));
+        for variable in ["HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"] {
+            if let Some(value) = std::env::var_os(variable) {
+                vendor_control.env(variable, value);
+            }
+        }
+        let vendor_control = vendor_control.output().unwrap();
+        let vendor_diagnostic = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&vendor_control.stdout),
+            String::from_utf8_lossy(&vendor_control.stderr)
+        );
+        assert!(
+            !vendor_control.status.success(),
+            "{config_name} vendor control unexpectedly ignored its ancestor configuration:\n{vendor_diagnostic}"
+        );
+        assert!(
+            vendor_diagnostic.contains(&config_path.display().to_string())
+                && vendor_diagnostic.contains("TOML"),
+            "{config_name} vendor control did not reject the invalid ancestor configuration:\n{vendor_diagnostic}"
+        );
+        fs::remove_file(&wrapper_calls).unwrap();
+
+        for test_name in [
+            "native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain",
+            "explicit_collector_resume_revalidates_predecessors_and_uses_a_fresh_cargo_target",
+            "native_lifecycle_consumes_a_cold_vendor_generation_offline",
+        ] {
+            let output = Command::new(&executable)
+                .current_dir(&cwd)
+                .args(["--exact", test_name, "--nocapture"])
+                .env("TMPDIR", &temporary_directory)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{config_name} ancestor config broke {test_name}:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(
+                !wrapper_calls.exists(),
+                "{config_name} ancestor rustc-wrapper was invoked by {test_name}"
+            );
+        }
+    }
+}
+
 fn cold_vendor_cargo_wrapper(real_cargo: &Path, poison: &Path, trace: &Path) -> String {
     let package_manifest =
         b"[package]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\nedition = \"2021\"\n";
@@ -1595,6 +1754,7 @@ case "$1" in
     exec {real_cargo} "$@"
     ;;
   vendor)
+    test "$(pwd -P)" = /
     test "${{CARGO_HOME:-}}" != {poison}
     printf '%s %s\n' "$1" "$CARGO_HOME" >> {trace}
     vendor=
@@ -1613,6 +1773,7 @@ edition = "2021"
   *)
     for argument in "$@"; do
       if [ "$argument" = build ]; then
+        test "$(pwd -P)" = /
         test "${{CARGO_HOME:-}}" != {poison}
         printf '%s %s\n' build "$CARGO_HOME" >> {trace}
         exec {real_cargo} "$@"

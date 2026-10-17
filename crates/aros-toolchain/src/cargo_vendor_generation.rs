@@ -32,6 +32,7 @@ use crate::cargo_vendor::{
     CARGO_VENDOR_MAX_ENTRIES, CARGO_VENDOR_MAX_TOTAL_BYTES, MAX_TEMPLATE_BYTES, VENDOR_DIRECTORY,
     VENDOR_PLACEHOLDER, VENDOR_TEMPLATE,
 };
+use crate::cargo_working_directory::CargoWorkingDirectory;
 use crate::filesystem::{open_directory, DIRECTORY};
 use crate::ContractError;
 
@@ -484,10 +485,11 @@ pub fn verify_vendor_generation(
 /// Populate one immutable Cargo vendor generation through the selected Cargo
 /// executable, or reuse its fully verified existing instance.
 ///
-/// The Cargo process runs with a fresh private `CARGO_HOME`, `HOME`, temporary
-/// directory and working directory; it cannot consume a user Cargo config or
-/// credentials. Cargo's resolver remains authoritative: this function passes
-/// `--locked` and never edits the selected lockfile.
+/// The Cargo process runs with a fresh private `CARGO_HOME`, `HOME` and
+/// temporary directory, plus a fixed filesystem-root cwd. Root Cargo
+/// configuration is rejected, and no caller/cache ancestor can contribute
+/// Cargo configuration or credentials. Cargo's resolver remains authoritative:
+/// this function passes `--locked` and never edits the selected lockfile.
 ///
 /// When `offline` is set, population is forbidden and this is equivalent to
 /// strict verification of the selected existing generation.
@@ -525,14 +527,17 @@ pub fn fetch_vendor_generation(
     if generation.exists() {
         return verify_vendor_generation_at(&generation, &selection, "cargo.fetch");
     }
+    let cargo_working_directory = CargoWorkingDirectory::prepare()?;
     let staging = create_unique_directory_nofollow(&generation_parent, ".cargo-vendor-stage")
         .map_err(|_| ContractError::state("cannot reserve Cargo vendor staging directory"))?;
-    let result = populate_vendor_generation(&staging, &selection, cancellation);
+    let result =
+        populate_vendor_generation(&staging, &selection, &cargo_working_directory, cancellation);
     match result {
         Ok(_) => {
             lifecycle_lease
                 .revalidate()
                 .map_err(|error| lifecycle_contract_error(&error))?;
+            cargo_working_directory.revalidate()?;
             publish_prepared_tree_noclobber(&staging, &generation).map_err(|_| {
                 ContractError::state("cannot atomically publish verified Cargo vendor generation")
             })?;
@@ -607,6 +612,7 @@ fn acquire_vendor_write_lease(
 fn populate_vendor_generation(
     staging: &Path,
     selection: &CargoVendorSelection,
+    cargo_working_directory: &CargoWorkingDirectory,
     cancellation: &CancellationToken,
 ) -> Result<CargoVendorGeneration, ContractError> {
     let vendor = staging.join(VENDOR_DIRECTORY);
@@ -627,7 +633,7 @@ fn populate_vendor_generation(
     let mut command = Command::new(&selection.cargo_invocation_path);
     command
         .env_clear()
-        .current_dir(staging)
+        .current_dir(cargo_working_directory.path())
         .arg("vendor")
         .arg("--locked")
         .arg("--versioned-dirs")
@@ -641,6 +647,7 @@ fn populate_vendor_generation(
         .env("CARGO_INCREMENTAL", "0")
         .env("RUSTUP_TOOLCHAIN", &selection.rust_channel);
     preserve_rustup_home(&mut command)?;
+    cargo_working_directory.revalidate()?;
     let output = run_output_with_control(
         &mut command,
         CARGO_VENDOR_CAPTURE_LIMIT,
