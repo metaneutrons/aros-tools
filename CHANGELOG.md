@@ -4,6 +4,74 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.4.0](https://github.com/metaneutrons/aros-tools/compare/v0.3.19...v0.4.0) (2026-10-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **release:** Native Apple Silicon aros-tools binaries now require macOS 15 or newer instead of macOS 13. Existing published archives are unchanged.
+
+### Features
+
+* add reviewed portable board registry contracts ([#326](https://github.com/metaneutrons/aros-tools/issues/326)) ([8a58f21](https://github.com/metaneutrons/aros-tools/commit/8a58f2198872a0c00c44d2e306c5607fa07ec83a))
+* **sdk:** add bounded SDK release lock metadata ([#375](https://github.com/metaneutrons/aros-tools/issues/375)) ([677e478](https://github.com/metaneutrons/aros-tools/commit/677e47820be6798e2156e9c29dc9e1985ba716bd))
+* **sdk:** add explicit verified acquisition and managed CLI ([466fb0e](https://github.com/metaneutrons/aros-tools/commit/466fb0e01ab6dfd8c2c868207592af59687f7924))
+* **sdk:** add source-bound local artifact lifecycle ([#374](https://github.com/metaneutrons/aros-tools/issues/374)) ([910b7f4](https://github.com/metaneutrons/aros-tools/commit/910b7f4f6ce7bd899a82ad93467a749af40fb5c6))
+* **sdk:** add verified content-addressed installation and inventory ([#376](https://github.com/metaneutrons/aros-tools/issues/376)) ([6086768](https://github.com/metaneutrons/aros-tools/commit/608676850d22f934b5f7f8636fbabab23153c01d))
+* **sdk:** bind product identities to committed source projections ([#414](https://github.com/metaneutrons/aros-tools/issues/414)) ([8121690](https://github.com/metaneutrons/aros-tools/commit/8121690aadbdabde4fe73023640b2dee87ddec25))
+* **sdk:** execute sealed target-generic consumer graphs ([#417](https://github.com/metaneutrons/aros-tools/issues/417)) ([2324afb](https://github.com/metaneutrons/aros-tools/commit/2324afb9fe64e83f726bba246a44254ffe3289e0))
+* **sdk:** generate native SDKs and stage measured release metadata ([#416](https://github.com/metaneutrons/aros-tools/issues/416)) ([93e9ca0](https://github.com/metaneutrons/aros-tools/commit/93e9ca067acfb766c1633a77b6f88e5edc815cef))
+* **sdk:** integrate qualified compiler and SDK runtime ([#457](https://github.com/metaneutrons/aros-tools/issues/457)) ([992d30f](https://github.com/metaneutrons/aros-tools/commit/992d30f49f97d1c44ed5b948550de3b7478977f7))
+* **sdk:** restore project SDKs from explicit locks ([c5a660b](https://github.com/metaneutrons/aros-tools/commit/c5a660b8972b8a150f3a34e98f1c83d28f705612))
+* **sdk:** select verified SDKs for application projects ([#379](https://github.com/metaneutrons/aros-tools/issues/379)) ([45bf532](https://github.com/metaneutrons/aros-tools/commit/45bf5322c765a0ac36ed6a7dd9cd7ba129ab3df4))
+* source-bound native build and AROS-NX/ESP32-P4 native profile admission ([#344](https://github.com/metaneutrons/aros-tools/issues/344)) ([e472bea](https://github.com/metaneutrons/aros-tools/commit/e472bea0d17ec323d9080062ab1da73c841a7785))
+* **toolchain:** add bounded RISC-V compiler and artifact contracts ([0b70bf8](https://github.com/metaneutrons/aros-tools/commit/0b70bf8c0332b1966d3c4b6e0f42ce8727ba3f16)), closes [#321](https://github.com/metaneutrons/aros-tools/issues/321)
+* **toolchain:** declare native GNU symbol and image utilities ([#331](https://github.com/metaneutrons/aros-tools/issues/331)) ([7387364](https://github.com/metaneutrons/aros-tools/commit/7387364bef28ad4551e823a59b5843c39349dad7))
+* **toolchain:** execute source-bound native GNU candidates ([#338](https://github.com/metaneutrons/aros-tools/issues/338)) ([719beb9](https://github.com/metaneutrons/aros-tools/commit/719beb99f55bf7cec75ce8d67a5f96472e9cd32e))
+* **toolchain:** expose complete compiler-family release evidence ([6846abc](https://github.com/metaneutrons/aros-tools/commit/6846abcee8e0ca17ba08cc67c01c281fb0e52967))
+* **toolchain:** expose native host prerequisite checks ([8fe5dfc](https://github.com/metaneutrons/aros-tools/commit/8fe5dfc9e5689d7165f71c2b55a17abd0e2f04a0))
+* **toolchain:** require ordinary native SDK application evidence ([#365](https://github.com/metaneutrons/aros-tools/issues/365)) ([a0f03aa](https://github.com/metaneutrons/aros-tools/commit/a0f03aa407876a86b15ddefc964357051adbe483))
+* **toolchain:** resolve GNU executable roles from verified payloads ([f47f176](https://github.com/metaneutrons/aros-tools/commit/f47f176475cf78a550f5df7dedb30c185d80e783))
+* **toolchain:** restore compiler-family integration and native SDK boundaries ([#363](https://github.com/metaneutrons/aros-tools/issues/363)) ([985b03c](https://github.com/metaneutrons/aros-tools/commit/985b03c4fa46933800ec4b17fbde56f1d04680c0))
+
+
+### Bug Fixes
+
+* **archives:** bound payload metadata and preserve safe Unicode paths ([#373](https://github.com/metaneutrons/aros-tools/issues/373)) ([19612ec](https://github.com/metaneutrons/aros-tools/commit/19612ec86774d9efce24547871adc62ede364cf7))
+* **ci:** bound docs audit and serialize executable fixtures ([#332](https://github.com/metaneutrons/aros-tools/issues/332)) ([6cf4d58](https://github.com/metaneutrons/aros-tools/commit/6cf4d587d3d9dbe8f40eefa9c9661c49c09d835d))
+* **ci:** qualify GNU compiler fixtures against verified packages ([1e45c84](https://github.com/metaneutrons/aros-tools/commit/1e45c84d41f259d5cf14ace6e2e01b77c6771138))
+* **cmake:** generate SDK comments from source-relative config paths ([42dabc7](https://github.com/metaneutrons/aros-tools/commit/42dabc7b263ae84fb58bf8c96e6d58fb27ea7bf9))
+* **collect:** allow library-free links before SDK installation ([#366](https://github.com/metaneutrons/aros-tools/issues/366)) ([d32821f](https://github.com/metaneutrons/aros-tools/commit/d32821f04739dab1361189a7d78b6fb6cea6e043))
+* **collect:** preserve GNU driver default output semantics ([#334](https://github.com/metaneutrons/aros-tools/issues/334)) ([dbb106b](https://github.com/metaneutrons/aros-tools/commit/dbb106b1f6b701718f8a7cc6ac446354b1c9351a))
+* **deps:** update rustls for current security advisories ([#469](https://github.com/metaneutrons/aros-tools/issues/469)) ([6900cd4](https://github.com/metaneutrons/aros-tools/commit/6900cd4972e011f0fd76af7cdb5d35ac638d4c88))
+* **docs:** override miniflare's sharp with the patched release ([#346](https://github.com/metaneutrons/aros-tools/issues/346)) ([7b2d17b](https://github.com/metaneutrons/aros-tools/commit/7b2d17b8d3c424eccfd3a2aa93d9c9d8249bf232))
+* **docs:** render complete CLI contract tables ([674d293](https://github.com/metaneutrons/aros-tools/commit/674d293119e5f81b5979c90a20eeee755301ba5f))
+* **docs:** update documentation tooling past the high advisories ([#340](https://github.com/metaneutrons/aros-tools/issues/340)) ([84d9e78](https://github.com/metaneutrons/aros-tools/commit/84d9e78a3a786fd22e17bf08dec58885f3195132))
+* **engine:** hash the Mesa 26 GalliumCoreAPI consumer's ABI flags ([#356](https://github.com/metaneutrons/aros-tools/issues/356)) ([d15feec](https://github.com/metaneutrons/aros-tools/commit/d15feecd90a8bb768168f780cf2c0970540e8189))
+* **fetch:** try the next declared source when one serves the wrong bytes ([#357](https://github.com/metaneutrons/aros-tools/issues/357)) ([6633aae](https://github.com/metaneutrons/aros-tools/commit/6633aaef90cf41f44e99e3678286159cee8f254e))
+* **grub:** select a validated installed Python fallback ([7517f90](https://github.com/metaneutrons/aros-tools/commit/7517f907e130215e8e45f193c489f8a2e82b07fe))
+* let pc-x86_64, rpi-aarch64 and arm-raspi configure again after [#344](https://github.com/metaneutrons/aros-tools/issues/344) ([#354](https://github.com/metaneutrons/aros-tools/issues/354)) ([91ac5cb](https://github.com/metaneutrons/aros-tools/commit/91ac5cb4096d658e54b58c98278f11899af00f33))
+* **native:** build the ESP32-P4 profiles with the local compiler ([#351](https://github.com/metaneutrons/aros-tools/issues/351)) ([8ab9c8d](https://github.com/metaneutrons/aros-tools/commit/8ab9c8db04d2115458daf4ccdbe5cadb962f1fab))
+* **process:** observe pipe EOF before the cleanup deadline ([#335](https://github.com/metaneutrons/aros-tools/issues/335)) ([f4800d4](https://github.com/metaneutrons/aros-tools/commit/f4800d40d0736869ee9da2bc466e380908610891))
+* **release:** align native Rust containers with the pinned toolchain ([#476](https://github.com/metaneutrons/aros-tools/issues/476)) ([2fd9fd7](https://github.com/metaneutrons/aros-tools/commit/2fd9fd7898cc1e2a529048482bd576d144efba7b))
+* **release:** authenticate tag governance with the job token ([#466](https://github.com/metaneutrons/aros-tools/issues/466)) ([cdecfbe](https://github.com/metaneutrons/aros-tools/commit/cdecfbef8aae6b1fdf05142e32a1ad0e9f4a6501))
+* **release:** automate qualified promotion and close native SDK build gaps ([#358](https://github.com/metaneutrons/aros-tools/issues/358)) ([5e2d1da](https://github.com/metaneutrons/aros-tools/commit/5e2d1da228e56fd9fe156de5f8b469287fd554ea))
+* **release:** prepare versions from published history ([#464](https://github.com/metaneutrons/aros-tools/issues/464)) ([42a2cea](https://github.com/metaneutrons/aros-tools/commit/42a2cea14d2599be66a53bc446c352e2ff4a5f1e))
+* **release:** preserve the merged PR API contract ([#462](https://github.com/metaneutrons/aros-tools/issues/462)) ([9a3f74e](https://github.com/metaneutrons/aros-tools/commit/9a3f74e4d6d0958ca817c53806e6c5da5de15b7c))
+* **release:** require macOS 15 for native tools ([90d10c4](https://github.com/metaneutrons/aros-tools/commit/90d10c4240070decd3c05be12e60bb5f64c0bdc6))
+* **sdk:** bind native generation to an explicit source epoch ([2eebd15](https://github.com/metaneutrons/aros-tools/commit/2eebd1581312054af23e160d6e386e94210262be))
+* tolerate release PR API head convergence ([#271](https://github.com/metaneutrons/aros-tools/issues/271)) ([8b4a7e1](https://github.com/metaneutrons/aros-tools/commit/8b4a7e1cf4b50148694857517afd2beff4912297))
+* **toolchain:** accept source-supported C++ collector forms ([d22fd0d](https://github.com/metaneutrons/aros-tools/commit/d22fd0d9d13603a3200dd90f4986d9e2e0a8029c))
+* **toolchain:** admit locked YAML for LLVM host builds ([07562db](https://github.com/metaneutrons/aros-tools/commit/07562dbbb59523fccfa61308f0054d0b75cfb074))
+* **toolchain:** close offline compatibility archive validation ([b838866](https://github.com/metaneutrons/aros-tools/commit/b8388668878db17c3c9dc0b22082a56d6a75ed4a))
+* **toolchain:** isolate Cargo and correct SDK input traces ([64f325c](https://github.com/metaneutrons/aros-tools/commit/64f325c117ae5183c0953eb3e3f082bd5405cc11))
+* **toolchain:** reject producer Rust pins below the tools MSRV ([d88d921](https://github.com/metaneutrons/aros-tools/commit/d88d9216b4c5bf3cb95c86d182e3e57654f7b70f))
+* **toolchain:** seal offline MetaMake source consumption ([#336](https://github.com/metaneutrons/aros-tools/issues/336)) ([42596fb](https://github.com/metaneutrons/aros-tools/commit/42596fb9645894aa5bf391bb7fa0bb98419e1bba))
+* **transpiler:** carry the defines of an architecture include declaration to its consumers ([#352](https://github.com/metaneutrons/aros-tools/issues/352)) ([eb76fe6](https://github.com/metaneutrons/aros-tools/commit/eb76fe6929d2f56777d89d057a14966d29b1046e)), closes [#350](https://github.com/metaneutrons/aros-tools/issues/350)
+* **transpiler:** compose source-verified architecture object lanes ([#458](https://github.com/metaneutrons/aros-tools/issues/458)) ([38b2b4c](https://github.com/metaneutrons/aros-tools/commit/38b2b4cb38a0796b907b0f6fb956a35d396329f2))
+* **transpiler:** reduce a module reached only through its headers to a headers-only module ([#349](https://github.com/metaneutrons/aros-tools/issues/349)) ([21fffe9](https://github.com/metaneutrons/aros-tools/commit/21fffe9fd4d972dcd7cc9641ecdaa7c70d57fa77))
+* **transpiler:** resolve $(AROS_TOOLCHAIN) in MetaMake target names ([#355](https://github.com/metaneutrons/aros-tools/issues/355)) ([3362cd7](https://github.com/metaneutrons/aros-tools/commit/3362cd79773f35085cc1c03a6b0339622da0c61a))
+
 ## [0.3.20](https://github.com/metaneutrons/aros-tools/compare/v0.3.19...v0.3.20) (2026-10-13)
 
 
