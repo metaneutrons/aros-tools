@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Plan the bounded host-test matrix from immutable GitHub event inputs.
 
-The planner is deliberately fail-closed.  Only a narrow documentation-only
-allowlist may use the inexpensive Linux lane; an empty, malformed or unfamiliar
-change list cannot authorize a reduced gate. Main pushes that change the
-Release Please version manifest receive all three native hosts before release
+The planner is deliberately fail-closed. Documentation and workflow policy
+may use the inexpensive Linux lane; an empty, malformed or unfamiliar change
+list cannot authorize a reduced gate. Native/shared code and dependency changes
+still require every host. Main pushes that change the Release Please version
+manifest receive all three native hosts before release
 admission; ordinary main checkpoints remain inexpensive. Intel macOS is not an
 active native release target.
 """
@@ -28,6 +29,13 @@ DOCUMENTATION_FILES: Final = {
     "CONTRIBUTING.md",
 }
 DOCUMENTATION_DIRECTORIES: Final = ("docs/", "docs-site/")
+PORTABLE_POLICY_FILES: Final = {
+    "scripts/plan_ci_platform_matrix.py",
+    "scripts/ci_platform_matrix_test.py",
+}
+PORTABLE_POLICY_DIRECTORIES: Final = (
+    ".github/workflows/", "scripts/release/", "scripts/release-please/",
+)
 MAX_CHANGED_PATHS_BYTES: Final = 1024 * 1024
 
 
@@ -44,7 +52,8 @@ def validate_path(value: str) -> str:
     require(value and "\x00" not in value and "\n" not in value and "\r" not in value,
             "changed path is empty or contains a control separator")
     path = PurePosixPath(value)
-    require(not path.is_absolute() and ".." not in path.parts and "." not in path.parts,
+    require(value == path.as_posix() and not path.is_absolute()
+            and ".." not in path.parts and "." not in path.parts,
             f"changed path is not repository-relative: {value!r}")
     require(all(part and not any(character.isspace() and character not in " \t" for character in part)
                 for part in path.parts),
@@ -74,6 +83,15 @@ def is_documentation_only(paths: tuple[str, ...]) -> bool:
     )
 
 
+def is_portable_policy_only(paths: tuple[str, ...]) -> bool:
+    """Policy scripts are exercised by Linux quality, not native binaries."""
+    return bool(paths) and all(
+        is_documentation_only((path,)) or path in PORTABLE_POLICY_FILES
+        or path.startswith(PORTABLE_POLICY_DIRECTORIES)
+        for path in paths
+    )
+
+
 def matrix(scope: str, *, source_qualification: bool) -> dict[str, list[dict[str, object]]]:
     require(scope in {"fast", "full"}, f"unsupported matrix scope: {scope!r}")
     selected = HOSTS[:1] if scope == "fast" else HOSTS
@@ -92,8 +110,12 @@ def plan(*, event: str, changed_paths: tuple[str, ...] | None, dispatch_scope: s
             f"unsupported manual matrix scope: {dispatch_scope!r}")
     if event == "pull_request":
         require(changed_paths is not None, "pull-request planning requires changed paths")
+        for path in changed_paths:
+            validate_path(path)
         if is_documentation_only(changed_paths):
             return "fast", "documentation-only pull request", matrix("fast", source_qualification=False)
+        if is_portable_policy_only(changed_paths):
+            return "fast", "workflow or release policy pull request", matrix("fast", source_qualification=False)
         return "full", "pull request changes executable or unclassified inputs", matrix("full", source_qualification=True)
     if event == "push":
         require(changed_paths is not None, "push planning requires changed paths")

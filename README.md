@@ -198,8 +198,9 @@ explicit `test`/`all` integration checkpoints and the integrated `main` CI lane,
 not every PR iteration. `all` also includes quality and documentation.
 The real GRUB fixture runs only on Darwin/arm64; Linux reports that omission
 rather than claiming full host coverage. PRs always receive the stable Linux
-gate; only a narrow, tested documentation-only path avoids the additional three
-native hosts. Executable, workflow, contract and unclassified changes use the
+gate; a tested documentation/workflow-policy allowlist avoids the additional
+native hosts. Linux still executes all policy regressions and workflow lint.
+Rust, dependency, contract, mixed native and unclassified changes use the
 active three-host matrix. macOS Intel is not an `aros-tools` native release
 target. Main release-version merges also run all three hosts before admission;
 ordinary main checkpoints remain Linux-only.
