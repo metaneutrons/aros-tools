@@ -485,7 +485,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == macOS ]]; then
-            export MACOSX_DEPLOYMENT_TARGET=13.0
+            export MACOSX_DEPLOYMENT_TARGET=15.0
           fi
           cargo build --release --locked --workspace --all-features --target "$TARGET"
       - name: Audit native dynamic linkage
@@ -515,8 +515,8 @@ jobs:
                 mode == "build" && $1 == "minos" { print $2; exit }
                 mode == "legacy" && $1 == "version" { print $2; exit }
               ')
-              if [[ "$minimum" != 13.0 ]]; then
-                echo "::error::${binary} declares macOS ${minimum:-unknown}; expected 13.0"
+              if [[ "$minimum" != 15.0 ]]; then
+                echo "::error::${binary} declares macOS ${minimum:-unknown}; expected 15.0"
                 exit 1
               fi
             done
@@ -611,8 +611,8 @@ jobs:
                 mode == "build" && $1 == "minos" { print $2; exit }
                 mode == "legacy" && $1 == "version" { print $2; exit }
               ')
-              if [[ "$minimum" != 13.0 ]]; then
-                echo "::error::delivered $(basename "$binary") declares macOS ${minimum:-unknown}; expected 13.0"
+              if [[ "$minimum" != 15.0 ]]; then
+                echo "::error::delivered $(basename "$binary") declares macOS ${minimum:-unknown}; expected 15.0"
                 exit 1
               fi
             else
@@ -762,7 +762,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == macOS ]]; then
-            export MACOSX_DEPLOYMENT_TARGET=13.0
+            export MACOSX_DEPLOYMENT_TARGET=15.0
           fi
           cargo build --release --locked --workspace --all-features --target "$TARGET"
           mkdir reproduced

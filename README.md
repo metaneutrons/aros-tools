@@ -57,6 +57,8 @@ experience.
 ### Prerequisites
 
 - Rust 1.99.0 and Cargo (selected by `rust-toolchain.toml`)
+- A supported native host: Linux x86-64 or ARM64 with glibc 2.36+, or macOS 15+
+  on Apple silicon. Intel macOS is not a supported native release host.
 - Git, CMake and Ninja
 - Python 3.11 or newer, curl, a POSIX `patch`, and platform CA certificates used by public
   source-fetch, verification, and build workflows

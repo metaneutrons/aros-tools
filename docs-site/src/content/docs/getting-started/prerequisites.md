@@ -9,7 +9,7 @@ description: Prepare a macOS or Linux host and install only the tools your workf
 | --- | --- | --- |
 | Linux x86-64 | `x86_64-unknown-linux-gnu` | glibc 2.36 |
 | Linux ARM64 | `aarch64-unknown-linux-gnu` | glibc 2.36 |
-| macOS Apple silicon | `aarch64-apple-darwin` | macOS 13 |
+| macOS Apple silicon | `aarch64-apple-darwin` | macOS 15 |
 
 These are the native release targets. Public availability is listed separately
 under [release status](/aros-tools/reference/release-status/).
