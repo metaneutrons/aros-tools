@@ -146,6 +146,11 @@ validated directory placeholder, checks every vendor checksum and publishes
 only a complete generation under `$CACHE/cargo/v1/…`. It never copies a user
 Cargo configuration or credential into the cache.
 
+Cold vendor population and normal or resumed collector Cargo builds also
+exclude caller/work/cache ancestor configuration through the
+[checked filesystem-root working directory](../cache/#cargo-process-configuration-boundary).
+They do not rewrite global Cargo configuration.
+
 The tools workspace's declared minimum Rust version must not exceed the
 producer's pinned channel. An incompatible pin fails with `AX0401` before
 Cargo is invoked or a vendor generation is created, and before the native
