@@ -320,8 +320,8 @@ private work directory.
 aros cache cargo list --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache --format json
 
-# The only population boundary. Cargo runs with a private CARGO_HOME, HOME,
-# temporary directory and working directory.
+# The only population boundary. On a cache miss, Cargo vendor runs with private CARGO_HOME, HOME,
+# temporary directory and checked filesystem-root working directory.
 aros cache cargo fetch --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache
 
@@ -367,6 +367,27 @@ five-minute preview and only removes that generation when its token, retained
 references, object snapshot, and reader/writer lease state still match.
 `cache cargo list` does not hash a vendor tree, but it runs bounded Git and
 `cargo --version` probes before it reads the selected generation receipt.
+
+### Cargo process configuration boundary
+
+Cold vendor population and normal or resumed native collector builds run
+Cargo from `/`, not from the caller, work or cache hierarchy. They retain
+private Cargo home, home and temporary directories. Cold vendor population
+uses its selected manifest and producer Rust pin. Collector builds retain
+their explicit manifest/configuration/target selections and remain
+`--locked --offline`.
+
+These build/vendor commands reject both `/.cargo/config.toml` and the legacy
+`/.cargo/config` without reading their contents. They check filesystem-root
+identity and POSIX permissions; an optional `/.cargo` parent must be a
+real directory owned by the root directory's owner, with no group/other write bits.
+The guard revalidates this state before Cargo execution and successful output
+adoption. It never rewrites global configuration. A rejected root configuration
+requires a host-policy decision, not an automatic deletion or repair.
+
+This is a Cargo configuration-discovery boundary, not an operating-system
+sandbox or ACL inspection. Passive generation verification and the bounded
+version probes do not gain vendor execution or this build/vendor guard.
 
 ## GenMF reference expansions
 

@@ -20,7 +20,7 @@ build is outside the supported distribution contract.
 ## Build and use the tools
 
 Install Rust through your normal Rust toolchain manager. The repository's
-`rust-toolchain.toml` selects Rust 1.98.0 automatically when you run Cargo.
+`rust-toolchain.toml` selects Rust 1.99.0 automatically when you run Cargo.
 You need Git and a working native compiler/linker to build the Rust workspace.
 
 AROS workflows additionally use CMake, Ninja, Python 3.11 or newer, curl,

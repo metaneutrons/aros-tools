@@ -178,8 +178,15 @@ Primary options are `--archive-origins`, `--archive`, `--suffixes`,
 `--offline` and `--force`.
 
 Checksum entries use `filename=sha256:<64-hex-digest>`.
-Strict mode requires complete archive and remote-patch coverage; a mismatch
-always fails. Patch declarations use `name[:subdirectory[:option,...]]`
+Strict mode requires complete archive and remote-patch coverage. During a
+remote download, a declared SHA-256 mismatch rejects that candidate and tries
+the next declared origin. For recognized archive suffixes, mismatching leading
+format bytes are rejected similarly; this is not a complete archive parse at
+origin-selection time. Exhausting the origins fails. This never changes the
+pin or waives verification of existing cache entries. Local patch-input
+verification can fail immediately instead of advancing to another origin.
+Patch declarations use
+`name[:subdirectory[:option,...]]`
 with the supported `-p0` through `-p9`, `-f`, `-N`, and `--forward`
 options. The generated build supplies these values from source recipes.
 
