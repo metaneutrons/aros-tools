@@ -45,9 +45,9 @@ deletions, with no exclusions and an explicitly visible empty bypass list.
 Admission uses its repository-scoped job token, not a separate privileged
 governance credential. It joins the exact REST ruleset ID and node identity
 to the GraphQL `RepositoryRuleset` identity and requires a complete empty
-bypass connection: zero actors, no nodes and no next page. Hidden, malformed,
-errored or inconsistent responses fail closed; an omitted REST bypass list
-alone is not proof that no bypass exists. The `release` environment must allow
+bypass connection: zero actors, no nodes and no next page. A hidden, malformed,
+errored or inconsistent GraphQL bypass response fails closed; an omitted REST
+bypass list alone is not proof that no bypass exists. The `release` environment must allow
 protected `main` for admission and the `v*` tag pattern for qualification; its
 secret list is unchanged. The read-only job exercises the governance check on
 ordinary qualified main checkpoints too, before any release merge is needed.
