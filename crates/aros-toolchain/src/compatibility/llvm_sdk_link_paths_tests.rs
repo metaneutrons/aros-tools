@@ -197,6 +197,21 @@ fn ambiguous_raw_trace_paths_are_rejected() {
 }
 
 #[test]
+fn linker_cross_reference_footer_is_rejected_as_non_trace_output() {
+    let roots = Roots::new();
+    let trace = format!(
+        "{}Cross Reference Table\n\nSymbol                                            File\nClientSymbol                                      {}(objects/client.o)\n",
+        roots.good_trace(),
+        roots.sdk.join("libclient.a").display(),
+    );
+    let error = roots
+        .validate(trace.as_bytes(), MAP, &["client".to_owned()])
+        .expect_err("cross-reference output is not a linker input trace")
+        .to_string();
+    assert!(error.contains("non-absolute or ambiguous input path"));
+}
+
+#[test]
 fn relocated_trace_and_map_must_not_reference_the_original_sdk() {
     let roots = Roots::new();
     let good = roots.good_trace();

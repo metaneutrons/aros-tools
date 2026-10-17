@@ -28,6 +28,7 @@ use crate::cargo_vendor::{
     open_verified_vendor_generation, CargoVendorEnvironment, CargoVendorGeneration,
     CargoVendorGenerationLease, CargoVendorRequest,
 };
+use crate::cargo_working_directory::CargoWorkingDirectory;
 use crate::executor::{BuildRequest, BuildResult, Evidence, Output, ResumePhase, ToolObservation};
 use crate::metamake_fetch::SourceUseLedger;
 use crate::native_compiler_cache::{self, HostCompilerLaunchers};
@@ -57,6 +58,9 @@ pub fn run(
     cancellation: &CancellationToken,
 ) -> Result<BuildResult, ContractError> {
     validate_request(request)?;
+    // Cargo also searches configuration above its private CARGO_HOME. A fixed
+    // root cwd and explicit root-config exclusion keep caller ancestors out.
+    let cargo_working_directory = CargoWorkingDirectory::prepare()?;
     let compiler_cache = aros_cache::resolve_managed_compiler_cache_for_build(
         request.compiler_cache,
         request.compiler_cache_dir.as_deref(),
@@ -114,13 +118,17 @@ pub fn run(
         None => RunDirectories::reserve(&plan_request, &owner, cancellation)?,
         Some(ResumePhase::Compiler) => RunDirectories::resume(&plan_request, &owner, cancellation)?,
     };
+    let execution_environment = NativeExecutionEnvironment {
+        compiler_cache: &compiler_cache,
+        cargo_working_directory: &cargo_working_directory,
+    };
     let result = match request.resume_from {
         None => run_owned(
             request,
             plan,
             &recipe,
             &run_dirs,
-            &compiler_cache,
+            &execution_environment,
             deadline,
             cancellation,
         ),
@@ -129,7 +137,7 @@ pub fn run(
             plan,
             &recipe,
             &run_dirs,
-            &compiler_cache,
+            &execution_environment,
             deadline,
             cancellation,
         ),
@@ -144,15 +152,22 @@ pub fn run(
     }
 }
 
+struct NativeExecutionEnvironment<'a> {
+    compiler_cache: &'a aros_cache::CompilerCacheBuildSelection,
+    cargo_working_directory: &'a CargoWorkingDirectory,
+}
+
 fn run_owned(
     request: &BuildRequest,
     mut plan: plan::Plan,
     recipe: &Recipe,
     run_dirs: &RunDirectories,
-    compiler_cache: &aros_cache::CompilerCacheBuildSelection,
+    execution_environment: &NativeExecutionEnvironment<'_>,
     deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<BuildResult, ContractError> {
+    let compiler_cache = execution_environment.compiler_cache;
+    let cargo_working_directory = execution_environment.cargo_working_directory;
     run_dirs.revalidate(cancellation)?;
     let lifecycle = LifecyclePaths::create(run_dirs)?;
 
@@ -396,6 +411,7 @@ fn run_owned(
     let cargo_program = host_tool(&host, "cargo")?;
     let mut collector = Command::new(cargo_program);
     collector
+        .current_dir(cargo_working_directory.path())
         .arg("--config")
         .arg("net.offline=true")
         .arg("--config")
@@ -430,6 +446,7 @@ fn run_owned(
     if let Some(channel) = selected_rust_channel(producer.root())? {
         collector.env("RUSTUP_TOOLCHAIN", channel);
     }
+    cargo_working_directory.revalidate()?;
     run_phase(
         "collector",
         &mut collector,
@@ -437,6 +454,7 @@ fn run_owned(
         deadline,
         cancellation,
     )?;
+    cargo_working_directory.revalidate()?;
     install_family_collector(&lifecycle.rust_target, &prefix, &bound)?;
     let collector_outputs = measure_collectors(&prefix, bound.selected_profile())?;
     let collector_input = phase_input("collector", &execution_context, Some(&compiler_receipt))?;
@@ -526,10 +544,12 @@ fn resume_after_compiler(
     mut plan: plan::Plan,
     recipe: &Recipe,
     run_dirs: &RunDirectories,
-    compiler_cache: &aros_cache::CompilerCacheBuildSelection,
+    execution_environment: &NativeExecutionEnvironment<'_>,
     deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<BuildResult, ContractError> {
+    let compiler_cache = execution_environment.compiler_cache;
+    let cargo_working_directory = execution_environment.cargo_working_directory;
     run_dirs.revalidate(cancellation)?;
     let lifecycle = LifecyclePaths::open(run_dirs)?;
     let work = run_dirs
@@ -673,6 +693,7 @@ fn resume_after_compiler(
     let rust_target = lifecycle.fresh_resume_rust_target()?;
     let mut collector = Command::new(cargo_program);
     collector
+        .current_dir(cargo_working_directory.path())
         .arg("--config")
         .arg("net.offline=true")
         .arg("--config")
@@ -705,6 +726,7 @@ fn resume_after_compiler(
         collector.env("RUSTUP_TOOLCHAIN", channel);
     }
     let log_name = lifecycle.next_resume_log_name("collector")?;
+    cargo_working_directory.revalidate()?;
     run_phase_with_log(
         "collector",
         &log_name,
@@ -713,6 +735,7 @@ fn resume_after_compiler(
         deadline,
         cancellation,
     )?;
+    cargo_working_directory.revalidate()?;
     install_family_collector(&rust_target, &prefix, &bound)?;
     let collector_outputs = measure_collectors(&prefix, bound.selected_profile())?;
     let collector_input = phase_input("collector", &execution_context, Some(&compiler_receipt))?;

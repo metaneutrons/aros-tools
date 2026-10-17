@@ -99,7 +99,7 @@ pub(super) fn application_command(
     if language == "cxx" {
         arguments.push("-std=c++17".to_owned());
     }
-    arguments.extend([fixture_text, format!("-Wl,-Map={map_text},--cref,--trace")]);
+    arguments.extend([fixture_text, format!("-Wl,-Map={map_text},--trace")]);
     arguments.extend(probe.libraries.iter().map(|library| format!("-l{library}")));
     arguments.extend(["-o".to_owned(), elf_text]);
     if arguments.len() > MAX_APPLICATION_ARGUMENTS {
