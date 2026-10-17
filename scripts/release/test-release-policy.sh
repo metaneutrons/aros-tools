@@ -78,6 +78,107 @@ for script in release_scripts.glob('*.sh'):
             )
 PY
 
+# The two Linux matrices share one SHA256-pinned Bookworm image matching rust-toolchain.toml.
+python3 - "$root/.github/workflows/release.yml" "$root/rust-toolchain.toml" <<'PY'
+import pathlib
+import re
+import sys
+import tomllib
+
+GUARD = 'if [[ "$RUNNER_OS" == Linux && "${RUST_VERSION:-}" != "$toolchain" ]]; then'
+READ_TOOLCHAIN = 'toolchain=$(scripts/release/read-rust-toolchain.sh)'
+LINUX_NAMES = {'linux-x86_64', 'linux-aarch64'}
+
+
+def check(workflow, channel):
+    pins, sections = {}, {}
+
+    def fail(kind, message):
+        return kind, message, pins, sections
+
+    for job in ('native', 'native-ab'):
+        found = list(re.finditer(rf'(?ms)^  {job}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)', workflow))
+        if len(found) != 1:
+            return fail('job', f'release workflow must define job {job} exactly once')
+        section_match = found[0]
+        section = section_match.group('body')
+        sections[job] = (section_match.start('body'), section_match.end('body'))
+        matrix = re.search(r'(?ms)^      matrix:\n        include:\n(?P<body>.*?)(?=^    steps:\n)', section)
+        if matrix is None:
+            return fail('matrix', f'release job {job} has no recognized matrix include')
+        entries = list(re.finditer(r'(?ms)^          - name: (?P<name>[^\n]+)\n'
+                                   r'(?P<body>.*?)(?=^          - name: |\Z)', matrix.group('body')))
+        linux = [entry for entry in entries if entry.group('name').startswith('linux-')]
+        if len(linux) != 2 or {entry.group('name') for entry in linux} != LINUX_NAMES:
+            return fail('matrix', f'release job {job} must have exactly the two named Linux entries')
+        for entry in linux:
+            name = entry.group('name')
+            fields = list(re.finditer(r'(?m)^            container: (?P<value>[^\n]*)$', entry.group('body')))
+            if len(fields) != 1:
+                return fail('container', f'release matrix {job}/{name} must have one container pin')
+            field = fields[0]
+            base = section_match.start('body') + matrix.start('body') + entry.start('body')
+            reference = field.group('value')
+            pins[(job, name)] = (base + field.start('value'), base + field.end('value'), reference)
+        if (section.count(READ_TOOLCHAIN) != 1 or section.count(GUARD) != 1
+                or section.index(GUARD) < section.index(READ_TOOLCHAIN)):
+            return fail('guard', f'release job {job} must retain its runtime RUST_VERSION guard')
+
+    references = []
+    for (job, name), (_, _, reference) in pins.items():
+        match = re.fullmatch(r'rust:(\d+\.\d+\.\d+)-bookworm@sha256:([0-9a-f]{64})', reference)
+        if match is None:
+            return fail('digest', f'release matrix {job}/{name} must use a 64-character SHA256 digest')
+        if match.group(1) != channel:
+            return fail('version', f'release matrix {job}/{name} Rust tag must match channel {channel}')
+        references.append(reference)
+    if len(references) != 4 or len(set(references)) != 1:
+        return fail('mismatch', 'the four Linux matrix entries must use one identical full container reference')
+    return None, None, pins, sections
+
+def expect(label, reason, workflow, channel):
+    actual, detail, _, _ = check(workflow, channel)
+    if actual != reason:
+        raise SystemExit(f'{label}: expected {reason} rejection, got {detail or "success"}')
+
+release_path = pathlib.Path(sys.argv[1])
+toolchain_data = tomllib.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))
+channel = toolchain_data['toolchain']['channel']
+if re.fullmatch(r'\d+\.\d+\.\d+', channel) is None:
+    raise SystemExit('rust-toolchain.toml [toolchain].channel must be X.Y.Z')
+release = release_path.read_text(encoding='utf-8')
+failure, detail, pins, sections = check(release, channel)
+if failure:
+    raise SystemExit(detail)
+major, minor, patch = map(int, channel.split('.'))
+stale = f'{major}.{minor}.{patch - 1}' if patch else f'{major}.{minor - 1}.0' if minor else f'{max(0, major - 1)}.0.0'
+if stale == channel:
+    stale = f'{major}.{minor}.{patch + 1}'
+
+def replace_pin(workflow, pin, value):
+    start, end, _ = pin
+    return workflow[:start] + value + workflow[end:]
+for key, pin in pins.items():
+    reference = pin[2]
+    changed = re.sub(r'^rust:\d+\.\d+\.\d+', f'rust:{stale}', reference)
+    expect(f'stale version in {key}', 'version', replace_pin(release, pin, changed), channel)
+native_pin = pins[('native', 'linux-x86_64')]
+reference = native_pin[2]
+expect('digest removed', 'digest', replace_pin(release, native_pin, reference.split('@', 1)[0]), channel)
+expect('digest algorithm changed', 'digest', replace_pin(release, native_pin, reference.replace('@sha256:', '@sha384:', 1)), channel)
+ab_pin = pins[('native-ab', 'linux-aarch64')]
+prefix, digest = ab_pin[2].rsplit(':', 1)
+different_digest = f'{prefix}:{("1" if digest[0] == "0" else "0")}{digest[1:]}'
+expect('A/B digest differs', 'mismatch', replace_pin(release, ab_pin, different_digest), channel)
+start, end, _ = ab_pin
+line_start = release.rfind('\n', 0, start) + 1
+line_end = release.find('\n', end) + 1
+expect('container pin omitted', 'container', release[:line_start] + release[line_end:], channel)
+for job, (start, end) in sections.items():
+    guard_at = release.index(GUARD, start, end)
+    expect(f'{job} runtime guard omitted', 'guard', release[:guard_at] + release[guard_at + len(GUARD):], channel)
+PY
+
 # Cosign delivery can be transiently unavailable, but a retry must never
 # weaken the pinned installer or let signing continue without a verified client.
 python3 - "$root/.github/actions/install-verified-cosign/action.yml" \
