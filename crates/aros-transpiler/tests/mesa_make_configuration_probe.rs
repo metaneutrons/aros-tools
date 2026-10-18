@@ -31,7 +31,7 @@ const BUILTIN_SELECTORS: [(&str, &str); 11] = [
 // The CPU and eleven selector branches mirror workbench/libs/mesa/mesa.cfg in
 // the AROS-NX source checkout. The base marker and selector values below are
 // deterministic fixture data, not results from configure or a compiler probe.
-const MESA_CONFIGURATION_FIXTURE: &str = r#"
+const MESA_CONFIGURATION_FIXTURE: &str = r"
 MESA_BASEFLAGS := -DMESA_FIXTURE_BASE
 ifneq ($(filter m68k ppc,$(CPU)),)
 MESA_BASEFLAGS += -DUTIL_ARCH_LITTLE_ENDIAN=0 -DUTIL_ARCH_BIG_ENDIAN=1
@@ -74,7 +74,7 @@ endif
 ifneq ($(CFLAGS_NO_BUILTIN_UNREACHABLE),)
 MESA_BASEFLAGS += -DHAVE___BUILTIN_UNREACHABLE
 endif
-"#;
+";
 
 fn configured_context(
     cpu: &str,
@@ -178,12 +178,12 @@ fn configured_arm_and_aarch64_isa_flags_are_frozen_into_ordered_gca_flags() {
     // This test-only assignment mirrors the GCA_ABI_FLAGS declaration form
     // under review. The literal target flags are fixture inputs, not claimed
     // configure/compiler-probe outputs from either architecture.
-    const GCA_ASSIGNMENT_FIXTURE: &str = r#"
+    const GCA_ASSIGNMENT_FIXTURE: &str = r"
 USER_CPPFLAGS := -DORDER=first -DORDER=first -UORDER -fno-strict-aliasing -DORDER=last
 GCA_ABI_FLAGS := $(TARGET_ISA_CFLAGS) $(USER_CPPFLAGS)
 TARGET_ISA_CFLAGS = -march=late-source-value
 USER_CPPFLAGS = -DORDER=late-source-value
-"#;
+";
 
     for (cpu, isa_flags) in [
         ("arm", "-march=armv7-a -mfloat-abi=hard"),
@@ -213,14 +213,14 @@ USER_CPPFLAGS = -DORDER=late-source-value
 #[test]
 fn unknown_branch_and_unsupported_function_reject_the_complete_expression() {
     let context = configured_context("arm", None, None, None);
-    let unknown_branch = r#"
+    let unknown_branch = r"
 FLAGS := -DKNOWN_PREFIX
 ifeq ($(NOT_CONFIGURED_FEATURE),enabled)
 FLAGS += -DUNKNOWN_TRUE_BRANCH
 else
 FLAGS += -DUNKNOWN_FALSE_BRANCH
 endif
-"#;
+";
     let scope = collect_vars_with_context(unknown_branch, &context);
     assert!(scope.raw_at("FLAGS", usize::MAX).is_some());
     assert!(matches!(
@@ -238,4 +238,67 @@ endif
         ),
         Err(MakeExprError::UnsupportedFunction { name }) if name == "shell"
     ));
+}
+
+#[test]
+fn bound_transport_feeds_known_selectors_and_ordered_isa_into_make_evaluation() {
+    use aros_common::{
+        mesa_configuration::{MesaConfigurationIdentity, ValidatedMesaConfiguration},
+        sha256_bytes, ArosCompilerIdentity,
+    };
+
+    // Synthetic identities exercise the transport/evaluator boundary only;
+    // this fixture neither runs configure nor authenticates a compiler probe.
+    let identity = MesaConfigurationIdentity {
+        target_profile: "arm-raspi".into(),
+        target_triple: "arm-unknown-aros".into(),
+        compiler: ArosCompilerIdentity::Llvm {
+            version: "11.0.0".into(),
+        },
+        compiler_tree_sha256: sha256_bytes(b"synthetic compiler tree"),
+        source_inputs_sha256: sha256_bytes(b"synthetic source configuration"),
+        configure_invocation_sha256: sha256_bytes(b"synthetic configure invocation"),
+    };
+    let selectors = BUILTIN_SELECTORS
+        .iter()
+        .map(|(name, _)| ((*name).to_owned(), serde_json::Value::Bool(true)))
+        .collect::<serde_json::Map<_, _>>();
+    let wire = serde_json::json!({
+        "version": 1,
+        "identity": identity,
+        "builtin_selectors": selectors,
+        "target_isa_flags": ["-marm", "-DORDER=1", "-UORDER", "-DORDER=1"],
+    });
+    let bytes = serde_json::to_vec(&wire).unwrap();
+    let configured = ValidatedMesaConfiguration::parse_bound(&bytes, &identity).unwrap();
+    let target = TargetContext {
+        cpu: Some("arm".into()),
+        make_variables: configured.make_variables(),
+        ..TargetContext::default()
+    };
+    let input = format!(
+        "{MESA_CONFIGURATION_FIXTURE}\n\
+         USER_CPPFLAGS := $(MESA_BASEFLAGS)\n\
+         GCA_ABI_FLAGS := $(TARGET_ISA_CFLAGS) $(USER_CPPFLAGS)\n"
+    );
+    let scope = collect_vars_with_context(&input, &target);
+    let mut expected = vec![
+        "-marm".to_owned(),
+        "-DORDER=1".to_owned(),
+        "-UORDER".to_owned(),
+        "-DORDER=1".to_owned(),
+    ];
+    expected.extend(arm_mesa_prefix());
+    expected.extend(BUILTIN_SELECTORS.iter().map(|(_, flag)| (*flag).to_owned()));
+    assert_eq!(
+        evaluate_variable(&scope, "GCA_ABI_FLAGS").unwrap(),
+        expected
+    );
+
+    let mut changed = identity;
+    changed.configure_invocation_sha256 = sha256_bytes(b"different target settings");
+    assert!(ValidatedMesaConfiguration::parse_bound(&bytes, &changed)
+        .unwrap_err()
+        .to_string()
+        .contains("identity does not match"));
 }

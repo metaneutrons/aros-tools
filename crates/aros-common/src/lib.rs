@@ -36,6 +36,7 @@ pub mod media_plan;
 pub mod media_profile;
 pub mod media_receipt;
 pub mod media_tree;
+pub mod mesa_configuration;
 pub mod native_build_contract;
 pub mod native_consumer_contract;
 pub(crate) mod native_consumer_graph;

@@ -72,6 +72,31 @@ or duplicate options, stale snapshots, altered recipes and independent Make/hash
 comparison. Relevant supported native integration follows the completed code;
 do not launch expensive stale-base matrices for partial scaffolding.
 
+### Implemented primitives, not production qualification
+
+`aros-common::mesa_configuration` provides a bounded typed transport with all
+eleven required builtin outcomes and ordered ISA atoms. Parsing compares every
+field against the caller's expected source/configuration/invocation and compiler
+identity, including version and compiler tree. It does not authenticate a
+producer or prove that configure ran. The actual measured producer and runtime
+consumer remain to be implemented; this data format must not become a way to
+assert unmeasured configuration. Other source-evaluated C/CXX feature options
+must also be accounted for before the complete compile contract is switched.
+
+The strict transport/evaluator boundary has focused tests; the previous scalar
+native contract validator is unchanged. Missing, duplicate or extra fields,
+unsafe atoms, stale identities and absent selectors reject rather than default.
+
+An actual CMake/compiler counter-probe demonstrated an additional projection
+hazard: ordinary target options de-duplicate `-DORDER=1 -UORDER -DORDER=1` into
+`-DORDER=1 -UORDER`, changing the compiled program's configuration. The new
+`OrderedCompileContract.cmake` primitive groups one complete argument sequence
+before CMake de-duplication. Its fixture compiles C and C++ sources, inspects the
+actual emitted command sequences, verifies quoting and language isolation, and
+rejects unsafe arguments and overlapping contract calls. The raw negative build
+is isolated to its own target. This helper is not yet called by production Mesa
+and has not replaced its honest own-compiled-flags ABI hash.
+
 No compiler/SDK diagnostic dispatch, publication, scope reduction or issue closure
 is authorized by this plan. Actual implementation and qualification state belongs
 in issue #353.
