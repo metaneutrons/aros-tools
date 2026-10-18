@@ -532,6 +532,169 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertIn("name: qualified-release-staging", ecosystem)
         self.assertIn("needs: recovery", ecosystem)
 
+    def test_channel_guard_admits_only_the_release_and_main_recovery_callers(self):
+        workflow = (ROOT / ".github/workflows/publish-ecosystem.yml").read_text()
+        recovery_step = workflow.split(
+            "      - name: Reconstruct only the exact immutable final release\n", 1
+        )[1].split("      - if:", 1)[0]
+        self.assertIn(
+            "CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}", recovery_step
+        )
+        run_body = recovery_step.split("        run: |\n", 1)[1]
+        guard = textwrap.dedent(run_body.split('          [[ "$TAG" =~', 1)[0])
+        self.assertIn('"$CALLER_WORKFLOW_REF"', guard)
+        repository_guard = '[[ "$GITHUB_REPOSITORY" == metaneutrons/aros-tools ]]'
+        self.assertIn(repository_guard, guard)
+        self.assertLess(run_body.index(repository_guard),
+                        run_body.index('if [[ "$CALLER_WORKFLOW_REF"'))
+        guard_start = run_body.index('if [[ "$CALLER_WORKFLOW_REF"')
+        self.assertLess(guard_start, run_body.index("git fetch"))
+        self.assertLess(guard_start, run_body.index('release=$(gh api'))
+
+        repository = "metaneutrons/aros-tools"
+        tag = "v0.6.0"
+        release_caller = (
+            f"{repository}/.github/workflows/release.yml@refs/tags/{tag}"
+        )
+        recovery_caller = (
+            f"{repository}/.github/workflows/publish-ecosystem.yml@refs/heads/main"
+        )
+        release_context = {
+            "CALLER_WORKFLOW_REF": release_caller,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REF": f"refs/tags/{tag}",
+            "GITHUB_REPOSITORY": repository,
+            "TAG": tag,
+        }
+        cases = (
+            ("tagged release caller", {}, True, None),
+            ("main recovery caller", {
+                "CALLER_WORKFLOW_REF": recovery_caller,
+                "GITHUB_REF": "refs/heads/main",
+            }, True, None),
+            (
+                "wrong workflow",
+                {"CALLER_WORKFLOW_REF":
+                    f"{repository}/.github/workflows/other.yml@refs/tags/{tag}"},
+                False,
+                "channel publication caller is not admitted",
+            ),
+            (
+                "cross-repository caller",
+                {"CALLER_WORKFLOW_REF":
+                    f"attacker/aros-tools/.github/workflows/release.yml@refs/tags/{tag}"},
+                False,
+                "channel publication caller is not admitted",
+            ),
+            (
+                "external repository and matching caller",
+                {
+                    "GITHUB_REPOSITORY": "attacker/aros-tools",
+                    "CALLER_WORKFLOW_REF": (
+                        f"attacker/aros-tools/.github/workflows/release.yml@refs/tags/{tag}"
+                    ),
+                },
+                False,
+                "channel publication repository is not admitted",
+            ),
+            (
+                "release workflow on a branch",
+                {"CALLER_WORKFLOW_REF":
+                    f"{repository}/.github/workflows/release.yml@refs/heads/main",
+                 "GITHUB_REF": "refs/heads/main"},
+                False,
+                "channel publication caller is not admitted",
+            ),
+            (
+                "caller tag differs from input tag",
+                {
+                    "CALLER_WORKFLOW_REF":
+                        f"{repository}/.github/workflows/release.yml@refs/tags/v0.5.0",
+                    "GITHUB_REF": "refs/tags/v0.5.0",
+                },
+                False,
+                "channel publication caller is not admitted",
+            ),
+            (
+                "release ref differs from caller tag",
+                {"GITHUB_REF": "refs/heads/main"},
+                False,
+                "automatic channel publication must match the release tag",
+            ),
+            (
+                "recovery caller with tag ref",
+                {
+                    "CALLER_WORKFLOW_REF": recovery_caller,
+                    "GITHUB_REF": f"refs/tags/{tag}",
+                },
+                False,
+                "manual channel recovery must run from protected main",
+            ),
+            (
+                "recovery caller with wrong event",
+                {
+                    "CALLER_WORKFLOW_REF": recovery_caller,
+                    "GITHUB_REF": "refs/heads/main",
+                    "GITHUB_EVENT_NAME": "push",
+                },
+                False,
+                "manual channel recovery must run from protected main",
+            ),
+            (
+                "wrong event",
+                {"GITHUB_EVENT_NAME": "push"},
+                False,
+                "automatic channel publication must match the release tag",
+            ),
+            (
+                "missing caller ref",
+                {"CALLER_WORKFLOW_REF": ""},
+                False,
+                "channel publication caller is not admitted",
+            ),
+        )
+        followup = self.root / "channel-followup.sh"
+        script = guard + '\n: > "$CHANNEL_GUARD_FOLLOWUP"\n'
+        for name, overrides, admitted, reason in cases:
+            with self.subTest(case=name):
+                followup.unlink(missing_ok=True)
+                result = subprocess.run(
+                    ["bash", "-c", script],
+                    env={**self.env, **release_context, **overrides,
+                         "CHANNEL_GUARD_FOLLOWUP": str(followup)},
+                    capture_output=True, text=True, timeout=30,
+                )
+                if admitted:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertTrue(followup.exists())
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("::error::AP7200", result.stdout + result.stderr)
+                    self.assertIn(reason, result.stdout + result.stderr)
+                    self.assertFalse(followup.exists())
+
+        # The former guard treated every workflow_dispatch tag ref as an
+        # invalid manual recovery. Keep a counterprobe for the real release
+        # caller shape that exposed that regression.
+        old_guard = textwrap.dedent("""\
+            set -euo pipefail
+            if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && \
+                  "$GITHUB_REF" != refs/heads/main ]]; then
+              echo '::error::AP7200 manual channel recovery must run from protected main'
+              exit 1
+            fi
+        """)
+        old_result = subprocess.run(
+            ["bash", "-c", old_guard],
+            env={**self.env, **release_context},
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(old_result.returncode, 0)
+        self.assertIn(
+            "manual channel recovery must run from protected main",
+            old_result.stdout + old_result.stderr,
+        )
+
     def test_public_apt_install_keeps_system_dependencies_without_host_state_mutation(self):
         ecosystem = (ROOT / ".github/workflows/publish-ecosystem.yml").read_text()
         install = ecosystem.split("  apt-install:\n", 1)[1].split("\n  homebrew:\n", 1)[0]

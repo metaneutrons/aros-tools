@@ -78,11 +78,31 @@ jobs:
           VERSION: ${{ inputs.version }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == workflow_dispatch && \
-                "$GITHUB_REF" != refs/heads/main ]]; then
-            echo '::error::AP7200 manual channel recovery must run from protected main'
+          # Reusable workflows retain the caller's event and ref. Both the
+          # tagged release caller and standalone recovery use workflow_dispatch.
+          [[ "$GITHUB_REPOSITORY" == metaneutrons/aros-tools ]] || {
+            echo '::error::AP7200 channel publication repository is not admitted'
+            exit 1
+          }
+          if [[ "$CALLER_WORKFLOW_REF" == \
+                "$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$TAG" ]]; then
+            [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && \
+               "$GITHUB_REF" == "refs/tags/$TAG" ]] || {
+              echo '::error::AP7200 automatic channel publication must match the release tag'
+              exit 1
+            }
+          elif [[ "$CALLER_WORKFLOW_REF" == \
+                  "$GITHUB_REPOSITORY/.github/workflows/publish-ecosystem.yml@refs/heads/main" ]]; then
+            [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && \
+               "$GITHUB_REF" == refs/heads/main ]] || {
+              echo '::error::AP7200 manual channel recovery must run from protected main'
+              exit 1
+            }
+          else
+            echo '::error::AP7200 channel publication caller is not admitted'
             exit 1
           fi
           [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
