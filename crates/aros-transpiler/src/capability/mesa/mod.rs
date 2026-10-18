@@ -16,6 +16,7 @@ use super::manifest_inventory;
 pub mod generators;
 pub mod mesa20;
 pub mod mesa26;
+pub mod ordered_contract;
 pub mod sse41;
 use crate::parser::TargetContext;
 use crate::sources::EvaluatedSources;

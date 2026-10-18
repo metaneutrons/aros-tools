@@ -13,6 +13,30 @@ const MAX_CONFIGURATION_BYTES: usize = 32 * 1024;
 const MAX_TARGET_ISA_FLAGS: usize = 64;
 const MAX_TARGET_ISA_FLAG_BYTES: usize = 256;
 
+/// Compiler feature variables read by the reviewed Mesa compilation recipes.
+///
+/// Every entry is required, even when its measured value is empty. Values are
+/// compiler results, not defaults inferred from the toolchain family.
+pub const MESA_COMPILER_OPTION_VARIABLES: &[&str] = &[
+    "CFLAGS_GNU11",
+    "CXXFLAGS_CXX17",
+    "CXXFLAGS_LIFETIME_DSE1",
+    "CFLAGS_NO_STRICT_ALIASING",
+    "CFLAGS_NO_MATH_ERRNO",
+    "CFLAGS_NO_TRAPPING_MATH",
+    "CFLAGS_VISIBILITY_HIDDEN",
+    "CFLAGS_MERGE_CONSTANTS",
+    "CFLAGS_FUNCTION_SECTIONS",
+    "NOWARN_UNINITIALIZED",
+    "NOWARN_STRICT_ALIASING",
+    "NOWARN_MAYBE_UNINITIALIZED",
+    "NOWARN_MISSING_FIELD_INITIALIZERS",
+    "NOWARN_FORMAT_TRUNCATION",
+    "NOWARN_RETURN_TYPE",
+    "NOWARN_UNUSED_CONST_VARIABLE",
+    "NOWARN_ARRAY_BOUNDS",
+];
+
 /// Caller-measured identity for one configured Mesa target.
 ///
 /// `source_inputs_sha256` identifies the source and configuration closure
@@ -51,6 +75,8 @@ pub struct ValidatedMesaConfiguration {
     identity: MesaConfigurationIdentity,
     target_isa_flags: Vec<String>,
     builtin_selectors: BuiltinSelectors,
+    compiler_options: BTreeMap<String, Vec<String>>,
+    mesa_compile_options: Vec<String>,
 }
 
 impl ValidatedMesaConfiguration {
@@ -65,8 +91,8 @@ impl ValidatedMesaConfiguration {
     ///
     /// # Errors
     /// Rejects oversized or malformed JSON, unsupported versions, invalid
-    /// identities, identity mismatches, unsafe ISA flag atoms, and selector
-    /// values outside the closed schema.
+    /// identities, identity mismatches, unsafe ISA/compiler-option/bundle atoms,
+    /// and selector values outside the closed schema.
     pub fn parse_bound(bytes: &[u8], expected: &MesaConfigurationIdentity) -> Result<Self> {
         if bytes.len() > MAX_CONFIGURATION_BYTES {
             return Err(configuration_error(format!(
@@ -90,11 +116,15 @@ impl ValidatedMesaConfiguration {
             ));
         }
         validate_isa_flags(&wire.target_isa_flags)?;
+        validate_compiler_options(&wire.compiler_options)?;
+        validate_isa_flags(&wire.mesa_compile_options)?;
 
         Ok(Self {
             identity: wire.identity,
             target_isa_flags: wire.target_isa_flags,
             builtin_selectors: wire.builtin_selectors,
+            compiler_options: wire.compiler_options,
+            mesa_compile_options: wire.mesa_compile_options,
         })
     }
 
@@ -118,7 +148,7 @@ impl ValidatedMesaConfiguration {
     #[must_use]
     pub fn make_variables(&self) -> BTreeMap<String, String> {
         let selectors = &self.builtin_selectors;
-        BTreeMap::from([
+        let mut variables = BTreeMap::from([
             (
                 "CFLAGS_NO_BUILTIN_FFS".into(),
                 selector_value(selectors.ffs, "-fno-builtin-ffs"),
@@ -164,7 +194,17 @@ impl ValidatedMesaConfiguration {
                 selector_value(selectors.unreachable, "-fno-builtin-unreachable"),
             ),
             ("TARGET_ISA_CFLAGS".into(), self.target_isa_flags.join(" ")),
-        ])
+        ]);
+        variables.extend(
+            self.compiler_options
+                .iter()
+                .map(|(name, atoms)| (name.clone(), atoms.join(" "))),
+        );
+        variables.insert(
+            "MESA_COMPILEOPTIONS".into(),
+            self.mesa_compile_options.join(" "),
+        );
+        variables
     }
 }
 
@@ -175,6 +215,59 @@ struct MesaConfigurationWire {
     identity: MesaConfigurationIdentity,
     target_isa_flags: Vec<String>,
     builtin_selectors: BuiltinSelectors,
+    #[serde(deserialize_with = "deserialize_compiler_options")]
+    compiler_options: BTreeMap<String, Vec<String>>,
+    mesa_compile_options: Vec<String>,
+}
+
+fn deserialize_compiler_options<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniqueOptions;
+    impl<'de> serde::de::Visitor<'de> for UniqueOptions {
+        type Value = BTreeMap<String, Vec<String>>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a compiler-option object with unique variable names")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> std::result::Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let mut values = BTreeMap::new();
+            while let Some((name, atoms)) = map.next_entry::<String, Vec<String>>()? {
+                if values.insert(name.clone(), atoms).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate compiler-option variable {name}"
+                    )));
+                }
+            }
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_map(UniqueOptions)
+}
+
+fn validate_compiler_options(options: &BTreeMap<String, Vec<String>>) -> Result<()> {
+    if options.len() != MESA_COMPILER_OPTION_VARIABLES.len()
+        || MESA_COMPILER_OPTION_VARIABLES
+            .iter()
+            .any(|name| !options.contains_key(*name))
+    {
+        return Err(configuration_error(
+            "compiler_options must contain every reviewed Mesa compiler variable and no others",
+        ));
+    }
+    for (name, atoms) in options {
+        validate_isa_flags(atoms).map_err(|error| {
+            configuration_error(format!("invalid compiler_options variable {name}: {error}"))
+        })?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -243,7 +243,9 @@ endif
 #[test]
 fn bound_transport_feeds_known_selectors_and_ordered_isa_into_make_evaluation() {
     use aros_common::{
-        mesa_configuration::{MesaConfigurationIdentity, ValidatedMesaConfiguration},
+        mesa_configuration::{
+            MesaConfigurationIdentity, ValidatedMesaConfiguration, MESA_COMPILER_OPTION_VARIABLES,
+        },
         sha256_bytes, ArosCompilerIdentity,
     };
 
@@ -263,11 +265,26 @@ fn bound_transport_feeds_known_selectors_and_ordered_isa_into_make_evaluation() 
         .iter()
         .map(|(name, _)| ((*name).to_owned(), serde_json::Value::Bool(true)))
         .collect::<serde_json::Map<_, _>>();
+    let mut compiler_options = MESA_COMPILER_OPTION_VARIABLES
+        .iter()
+        .map(|name| ((*name).to_owned(), Vec::<String>::new()))
+        .collect::<BTreeMap<_, _>>();
+    compiler_options.insert(
+        "CFLAGS_GNU11".into(),
+        vec![
+            "-std=gnu11".into(),
+            "-DORDER=1".into(),
+            "-UORDER".into(),
+            "-DORDER=1".into(),
+        ],
+    );
     let wire = serde_json::json!({
         "version": 1,
         "identity": identity,
         "builtin_selectors": selectors,
         "target_isa_flags": ["-marm", "-DORDER=1", "-UORDER", "-DORDER=1"],
+        "compiler_options": compiler_options,
+        "mesa_compile_options": ["-DOPTION_BUNDLE=1"],
     });
     let bytes = serde_json::to_vec(&wire).unwrap();
     let configured = ValidatedMesaConfiguration::parse_bound(&bytes, &identity).unwrap();
@@ -279,9 +296,20 @@ fn bound_transport_feeds_known_selectors_and_ordered_isa_into_make_evaluation() 
     let input = format!(
         "{MESA_CONFIGURATION_FIXTURE}\n\
          USER_CPPFLAGS := $(MESA_BASEFLAGS)\n\
+         USER_CFLAGS := $(CFLAGS_GNU11) $(CFLAGS_NO_MATH_ERRNO) $(MESA_COMPILEOPTIONS)\n\
          GCA_ABI_FLAGS := $(TARGET_ISA_CFLAGS) $(USER_CPPFLAGS)\n"
     );
     let scope = collect_vars_with_context(&input, &target);
+    assert_eq!(
+        evaluate_variable(&scope, "USER_CFLAGS").unwrap(),
+        [
+            "-std=gnu11",
+            "-DORDER=1",
+            "-UORDER",
+            "-DORDER=1",
+            "-DOPTION_BUNDLE=1"
+        ]
+    );
     let mut expected = vec![
         "-marm".to_owned(),
         "-DORDER=1".to_owned(),

@@ -1,6 +1,7 @@
 use super::{
     BuiltinSelectors, MesaConfigurationIdentity, MesaConfigurationWire, ValidatedMesaConfiguration,
     CONFIGURATION_FILE, MAX_CONFIGURATION_BYTES, MAX_TARGET_ISA_FLAGS,
+    MESA_COMPILER_OPTION_VARIABLES,
 };
 use crate::{ArosCompilerIdentity, ArosError, Result, Sha256Digest};
 use serde_json::{json, Value};
@@ -49,6 +50,11 @@ fn wire(
         identity: identity.clone(),
         target_isa_flags,
         builtin_selectors,
+        compiler_options: MESA_COMPILER_OPTION_VARIABLES
+            .iter()
+            .map(|name| ((*name).into(), Vec::new()))
+            .collect(),
+        mesa_compile_options: Vec::new(),
     }
 }
 
@@ -118,7 +124,10 @@ fn maps_all_eleven_boolean_selectors_to_fixed_options_or_empty_values() {
         ("CFLAGS_NO_BUILTIN_POPCOUNTLL", "-fno-builtin-popcountll"),
         ("CFLAGS_NO_BUILTIN_UNREACHABLE", "-fno-builtin-unreachable"),
     ];
-    assert_eq!(enabled_variables.len(), 12);
+    assert_eq!(
+        enabled_variables.len(),
+        13 + MESA_COMPILER_OPTION_VARIABLES.len()
+    );
     for (name, option) in pairs {
         assert_eq!(enabled_variables[name], option, "selector {name}");
     }
@@ -129,7 +138,10 @@ fn maps_all_eleven_boolean_selectors_to_fixed_options_or_empty_values() {
     )
     .unwrap();
     let disabled_variables = disabled.make_variables();
-    assert_eq!(disabled_variables.len(), 12);
+    assert_eq!(
+        disabled_variables.len(),
+        13 + MESA_COMPILER_OPTION_VARIABLES.len()
+    );
     for (name, _) in pairs {
         assert_eq!(disabled_variables[name], "", "selector {name}");
     }
@@ -410,4 +422,101 @@ fn rejects_oversized_documents_and_too_many_flag_atoms() {
         message.contains("exceeds its 64-atom limit"),
         "wrong count rejection reason: {message}"
     );
+}
+
+#[test]
+fn compiler_options_preserve_order_and_require_every_known_empty_value() {
+    let expected = identity("arm-raspi", "arm-unknown-aros");
+    let mut configured = wire(&expected, vec![], selectors(false));
+    let mut absent: Value = serde_json::from_slice(&encoded(&configured)).unwrap();
+    absent.as_object_mut().unwrap().remove("compiler_options");
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &serde_json::to_vec(&absent).unwrap(),
+        &expected
+    ))
+    .contains("missing field `compiler_options`"));
+    configured.compiler_options.insert(
+        "CFLAGS_GNU11".into(),
+        vec![
+            "-std=gnu11".into(),
+            "-DORDER=1".into(),
+            "-UORDER".into(),
+            "-DORDER=1".into(),
+        ],
+    );
+    let parsed = ValidatedMesaConfiguration::parse_bound(&encoded(&configured), &expected).unwrap();
+    assert_eq!(
+        parsed.make_variables()["CFLAGS_GNU11"],
+        "-std=gnu11 -DORDER=1 -UORDER -DORDER=1"
+    );
+    assert_eq!(parsed.make_variables()["CXXFLAGS_LIFETIME_DSE1"], "");
+    for name in MESA_COMPILER_OPTION_VARIABLES {
+        let mut missing = configured.clone();
+        missing.compiler_options.remove(*name);
+        assert!(
+            configuration_error(ValidatedMesaConfiguration::parse_bound(
+                &encoded(&missing),
+                &expected
+            ))
+            .contains("every reviewed Mesa compiler variable"),
+            "missing {name}"
+        );
+    }
+    let mut extra = configured.clone();
+    extra.compiler_options.insert("UNREVIEWED".into(), vec![]);
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &encoded(&extra),
+        &expected
+    ))
+    .contains("and no others"));
+    let text = String::from_utf8(encoded(&configured)).unwrap();
+    let duplicate = text.replace(
+        "\"compiler_options\":{",
+        "\"compiler_options\":{\"CFLAGS_GNU11\":[],",
+    );
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        duplicate.as_bytes(),
+        &expected
+    ))
+    .contains("duplicate compiler-option variable CFLAGS_GNU11"));
+    configured
+        .compiler_options
+        .insert("CFLAGS_GNU11".into(), vec!["@untrusted".into()]);
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &encoded(&configured),
+        &expected
+    ))
+    .contains("unsafe syntax"));
+}
+
+#[test]
+fn optional_make_bundle_is_explicitly_measured_not_implicitly_empty() {
+    let expected = identity("arm-raspi", "arm-unknown-aros");
+    let mut configured = wire(&expected, vec![], selectors(false));
+    let empty = ValidatedMesaConfiguration::parse_bound(&encoded(&configured), &expected).unwrap();
+    assert_eq!(empty.make_variables()["MESA_COMPILEOPTIONS"], "");
+    configured.mesa_compile_options =
+        vec!["-DVALUE=1".into(), "-UVALUE".into(), "-DVALUE=1".into()];
+    let nonempty =
+        ValidatedMesaConfiguration::parse_bound(&encoded(&configured), &expected).unwrap();
+    assert_eq!(
+        nonempty.make_variables()["MESA_COMPILEOPTIONS"],
+        "-DVALUE=1 -UVALUE -DVALUE=1"
+    );
+    let mut missing: Value = serde_json::from_slice(&encoded(&configured)).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("mesa_compile_options");
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &serde_json::to_vec(&missing).unwrap(),
+        &expected
+    ))
+    .contains("missing field `mesa_compile_options`"));
+    configured.mesa_compile_options = vec!["@untrusted".into()];
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &encoded(&configured),
+        &expected
+    ))
+    .contains("unsafe syntax"));
 }

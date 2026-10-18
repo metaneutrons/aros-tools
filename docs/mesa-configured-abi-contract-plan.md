@@ -81,7 +81,27 @@ identity, including version and compiler tree. It does not authenticate a
 producer or prove that configure ran. The actual measured producer and runtime
 consumer remain to be implemented; this data format must not become a way to
 assert unmeasured configuration. Other source-evaluated C/CXX feature options
-must also be accounted for before the complete compile contract is switched.
+are now carried through a closed, required set of seventeen configured compiler
+variables. Every variable is required even when empty; missing/extra/duplicate
+keys and unsafe atoms reject. These values still need an actual producer and
+do not include the whole target's configured baseline flags. The complete
+compile contract must not be switched before those remaining inputs are bound.
+`MESA_COMPILEOPTIONS` is also an explicitly required measured bundle, not an
+implicit empty fallback. The actual configured ARM Make oracle found this
+variable undefined/empty, and its command-line counter produced the expected
+changed C/C++ option sequence. The transport retains that distinction between
+a measured empty value and a missing input.
+
+The ordered source evaluator accepts separate declaration and GCA assignment
+contexts. It preserves the four named ISA/CPP/C/C++ component vectors and the
+assignment-time stripped GCA string. It does not equate these components with
+the complete Make compiler command or replace production Mesa behavior yet.
+The opt-in `mesa_configured_source_oracle` test compares these components and
+the GCA assignment against retained GNU Make measurements from the actual
+configured ARM source, with exact source/compiler-configuration hashes. It
+also checks the changed option-bundle counter. This is ARM source-evaluator
+parity for those named values, not an AArch64 result, a complete compiler
+invocation comparison, generated ABI-hash equality or SDK qualification.
 
 The strict transport/evaluator boundary has focused tests; the previous scalar
 native contract validator is unchanged. Missing, duplicate or extra fields,
