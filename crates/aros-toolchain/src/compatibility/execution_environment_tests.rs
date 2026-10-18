@@ -331,7 +331,7 @@ fn rejects_a_host_selector_that_does_not_match_the_measured_roles() {
             "macos-aarch64",
         )
         .unwrap_err(),
-        "native compatibility host-tool closure does not bind the exact measured command set: missing gsed, llvm-arcc, llvm-ranlibcc, xcode-select, xcrun",
+        "native compatibility host-tool closure does not bind the exact measured command set: missing gmake, gsed, llvm-arcc, llvm-ranlibcc, xcode-select, xcrun",
     );
 }
 

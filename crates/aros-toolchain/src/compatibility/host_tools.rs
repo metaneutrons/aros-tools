@@ -26,7 +26,7 @@ use crate::ContractError;
 // guessed ambient-tool allowance. It equals the largest reviewed v1 role set
 // (macOS, including its SDK aliases); enlarging it requires an explicit
 // source-graph review and keeps the bounded invariant auditable.
-const MAX_HOST_TOOLS: usize = 80;
+const MAX_HOST_TOOLS: usize = 81;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -38,8 +38,10 @@ const MAX_HOST_TOOLS: usize = 80;
 /// inherits a directory from the runner's ambient `PATH`.
 ///
 /// `make` deliberately names the role rather than the selected executable, so
-/// macOS may expose Homebrew `gmake` as `make` without changing the child
-/// contract.  Likewise, `cc` remains the source-owned host-compiler spelling
+/// macOS may expose Homebrew `gmake` as `make` for the top-level invocation.
+/// Darwin upstream configure also records literal `gmake` for MetaMake's
+/// recursive commands, so the macOS closure separately measures that role.
+/// Likewise, `cc` remains the source-owned host-compiler spelling
 /// while `as`, `ld`, `ar`, and `ranlib` provide its explicitly measured
 /// binutils dependencies.  The current upstream `configure` also rejects a
 /// closure without `aclocal` and `automake`, even though it merely discovers
@@ -160,6 +162,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
 // would leak their alias names through argv[0] and make them search for their
 // own nonexistent names.
 const MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
+    "gmake",
     "gsed",
     "llvm-arcc",
     "llvm-ranlibcc",
@@ -581,6 +584,9 @@ pub(super) fn valid_tool_name(name: &str) -> bool {
 mod tests {
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt as _};
+    use std::time::Duration;
+
+    use aros_common::process::run_output_with_timeout;
 
     use super::{
         native_compatibility_host_tools, prepare_host_tool_closure, CompatibilityHostTool,
@@ -769,6 +775,96 @@ mod tests {
     }
 
     #[test]
+    fn closure_accepts_the_complete_reviewed_macos_role_set() {
+        let temporary = tempfile::tempdir().unwrap();
+        let program = executable(temporary.path(), "program", b"#!/bin/sh\nexit 0\n");
+        let closure = prepare_host_tool_closure(&HostToolClosureRequest {
+            output_root: temporary.path().join("all-macos-tools"),
+            tools: native_compatibility_host_tools("macos-aarch64")
+                .unwrap()
+                .into_iter()
+                .map(|name| CompatibilityHostTool {
+                    name: name.into(),
+                    program: program.clone(),
+                })
+                .collect(),
+        })
+        .unwrap();
+        assert_eq!(closure.tools.len(), MAX_HOST_TOOLS);
+        closure.revalidate().unwrap();
+    }
+
+    #[test]
+    fn closure_rejects_more_than_the_exact_reviewed_capacity_before_creation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let program = executable(temporary.path(), "program", b"#!/bin/sh\nexit 0\n");
+        let output_root = temporary.path().join("too-many-tools");
+        let request = HostToolClosureRequest {
+            output_root: output_root.clone(),
+            tools: (0..=MAX_HOST_TOOLS)
+                .map(|index| CompatibilityHostTool {
+                    name: format!("tool-{index}"),
+                    program: program.clone(),
+                })
+                .collect(),
+        };
+        assert!(prepare_host_tool_closure(&request).is_err());
+        assert!(!output_root.exists());
+    }
+
+    #[test]
+    fn darwin_recursive_make_requires_its_explicit_measured_gmake_role() {
+        let temporary = tempfile::tempdir().unwrap();
+        let program = executable(
+            temporary.path(),
+            "selected-gnu-make",
+            b"#!/bin/sh\nprintf 'measured GNU make alias\\n'\n",
+        );
+        for include_gmake in [false, true] {
+            let mut tools = vec![CompatibilityHostTool {
+                name: "make".into(),
+                program: program.clone(),
+            }];
+            if include_gmake {
+                tools.push(CompatibilityHostTool {
+                    name: "gmake".into(),
+                    program: program.clone(),
+                });
+            }
+            let closure = prepare_host_tool_closure(&HostToolClosureRequest {
+                output_root: temporary.path().join(if include_gmake {
+                    "with-gmake"
+                } else {
+                    "without-gmake"
+                }),
+                tools,
+            })
+            .unwrap();
+            closure.revalidate().unwrap();
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .args(["-c", "gmake --version"])
+                .env_clear()
+                .env("PATH", &closure.root);
+            let output =
+                run_output_with_timeout(&mut command, 4096, Duration::from_secs(5)).unwrap();
+            assert!(!output.timed_out);
+            assert!(!output.cancelled);
+            if include_gmake {
+                assert!(output.status.success());
+                assert_eq!(
+                    output.stdout.exact_bytes(),
+                    Some(b"measured GNU make alias\n".as_slice())
+                );
+            } else {
+                assert_eq!(output.status.code(), Some(127));
+                assert!(output.stderr.rendered_lossy().contains("gmake"));
+            }
+            closure.revalidate().unwrap();
+        }
+    }
+
+    #[test]
     fn required_roles_include_unconditional_upstream_make_tools() {
         for role in [
             "bash",
@@ -796,6 +892,7 @@ mod tests {
     #[test]
     fn required_roles_include_macos_sdk_tools_required_by_upstream_configure() {
         let macos = native_compatibility_host_tools("macos-aarch64").unwrap();
+        assert!(macos.contains(&"gmake"));
         assert!(macos.contains(&"gsed"));
         assert!(macos.contains(&"llvm-arcc"));
         assert!(macos.contains(&"llvm-ranlibcc"));
@@ -808,6 +905,11 @@ mod tests {
         assert!(!linux.contains(&"llvm-ranlibcc"));
         assert!(!linux.contains(&"xcode-select"));
         assert!(!linux.contains(&"xcrun"));
+        for host in ["linux-x86_64", "linux-aarch64"] {
+            assert!(!native_compatibility_host_tools(host)
+                .unwrap()
+                .contains(&"gmake"));
+        }
     }
 
     #[test]
