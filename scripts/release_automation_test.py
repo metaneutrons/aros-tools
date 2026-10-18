@@ -72,6 +72,8 @@ class GitHub:
         self.calls.append((method, path, payload))
         if method == "PATCH":
             self.release.update(payload)
+            if "tag_name" not in payload:
+                self.release["tag_name"] = "untagged-synthetic"
             if self.bad_normalization:
                 self.release["body"] = "not the canonical notes"
             self.release.update(self.normalization_drift)
@@ -166,6 +168,17 @@ class ReleaseAutomation(unittest.TestCase):
                            "draft": True, "prerelease": False, "immutable": False, "assets": []}
         os.environ.update(RP_CREATED="true", RP_TAG=TAG, RP_SHA=HEAD, RP_ID="123", RP_VERSION="0.3.20")
         return admission
+
+    def assert_normalization_response_drift_rejected(self, field, value):
+        path = self.prepare()
+        self.gh.normalization_drift = {field: value}
+        with self.assertRaisesRegex(SystemExit, "private draft normalization did not preserve identity"):
+            AUTOMATION.start(path)
+        writes = self.mutations()
+        self.assertEqual(len(writes), 1)
+        self.assertTrue(writes[0][1].endswith("/releases/123"))
+        for suffix in ("/git/tags", "/git/refs", "/dispatches"):
+            self.assertFalse(any(endpoint.endswith(suffix) for _, endpoint, _ in writes))
 
     def test_exact_green_merge_is_admitted_without_writes(self):
         self.assertEqual(AUTOMATION.admission()["commit"], HEAD)
@@ -456,6 +469,8 @@ class ReleaseAutomation(unittest.TestCase):
         writes = self.mutations()
         self.assertEqual([p.split(f"repos/{REPO}/")[1] for _, p, _ in writes],
                          ["releases/123", "git/tags", "git/refs", "actions/workflows/release.yml/dispatches"])
+        self.assertEqual({key: writes[0][2][key] for key in ("tag_name", "target_commitish")},
+                         {"tag_name": TAG, "target_commitish": HEAD})
         self.assertEqual(writes[1][2]["object"], HEAD)
         self.assertEqual(writes[1][2]["type"], "commit")
         self.assertEqual(writes[2][2], {"ref": f"refs/tags/{TAG}", "sha": "b" * 40})
@@ -541,8 +556,11 @@ class ReleaseAutomation(unittest.TestCase):
     def test_bad_notes_or_annotation_cannot_create_a_ref(self):
         path = self.prepare()
         self.gh.bad_normalization = True
-        with self.assertRaises(SystemExit):
+        with self.assertRaisesRegex(SystemExit, "private draft normalization did not preserve identity"):
             AUTOMATION.start(path)
+        self.assertEqual([endpoint.split(f"repos/{REPO}/")[1]
+                          for _, endpoint, _ in self.mutations()], ["releases/123"])
+        self.gh.calls.clear()
         self.assertFalse(any(p.endswith("/git/refs") for _, p, _ in self.mutations()))
         self.gh.bad_normalization = False
         self.gh.bad_object = True
@@ -560,11 +578,16 @@ class ReleaseAutomation(unittest.TestCase):
         self.assertEqual(sum(p.endswith("/dispatches") for _, p, _ in self.mutations()), 1)
 
     def test_draft_channel_drift_during_normalization_cannot_create_a_tag(self):
-        path = self.prepare()
-        self.gh.normalization_drift = {"prerelease": True}
-        with self.assertRaises(SystemExit):
-            AUTOMATION.start(path)
-        self.assertFalse(any(p.endswith("/git/tags") for _, p, _ in self.mutations()))
+        self.assert_normalization_response_drift_rejected("prerelease", True)
+
+    def test_tag_identity_drift_during_normalization_cannot_create_a_tag(self):
+        self.assert_normalization_response_drift_rejected("tag_name", "v0.5.1")
+
+    def test_source_identity_drift_during_normalization_cannot_create_a_tag(self):
+        self.assert_normalization_response_drift_rejected("target_commitish", "main")
+
+    def test_assets_drift_during_normalization_cannot_create_a_tag(self):
+        self.assert_normalization_response_drift_rejected("assets", [{"id": 9}])
 
     def test_ref_response_must_remain_annotated_before_dispatch(self):
         path = self.prepare()
