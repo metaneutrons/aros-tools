@@ -4,6 +4,16 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.1](https://github.com/metaneutrons/aros-tools/compare/v0.6.0...v0.6.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **release:** admit tagged callers in channel recovery ([037fa70](https://github.com/metaneutrons/aros-tools/commit/037fa706ac79e17bd0bc022da79086f19de8775e))
+* **release:** wait resiliently for AUR index convergence ([d11f267](https://github.com/metaneutrons/aros-tools/commit/d11f267b70818feab0aa7fbfaafbad0ffea59941))
+* **toolchain:** expose GNU make to Darwin SDK subprocesses ([f701fc0](https://github.com/metaneutrons/aros-tools/commit/f701fc0d428de4752bcca41659f443f6f178639c))
+* **transpiler:** provide LLVM components for ARM targets ([feb0d84](https://github.com/metaneutrons/aros-tools/commit/feb0d84183ed26d7adf5288b2ec571ab15cccd5f))
+
 ## [0.6.0](https://github.com/metaneutrons/aros-tools/compare/v0.3.19...v0.6.0) (2026-10-18)
 
 
