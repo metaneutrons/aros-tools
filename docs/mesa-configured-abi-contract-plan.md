@@ -106,14 +106,21 @@ do not launch expensive stale-base matrices for partial scaffolding.
 eleven required builtin outcomes and ordered ISA atoms. Parsing compares every
 field against the caller's expected source/configuration/invocation and compiler
 identity, including version and compiler tree. It does not authenticate a
-producer or prove that configure ran. The actual measured producer and runtime
-consumer remain to be implemented; this data format must not become a way to
-assert unmeasured configuration. Other source-evaluated C/CXX feature options
+producer or prove that configure ran. The measured producer returns a private
+completed-result type with source/compiler/environment and output revalidation;
+runtime consumers must retain that binding rather than accepting a standalone
+JSON claim. The runtime handoff remains to be implemented. Other source-evaluated C/CXX feature options
 are now carried through a closed, required set of seventeen configured compiler
 variables. Every variable is required even when empty; missing/extra/duplicate
-keys and unsafe atoms reject. These values still need an actual producer and
-do not include the whole target's configured baseline flags. The complete
-compile contract must not be switched before those remaining inputs are bound.
+keys and unsafe atoms reject. Eleven separately required baseline entries carry
+the configured C++ ISA, CONFIG/TARGET C/C++/CPP values, debug/optimization options
+and LLVM diagnostic baseline. They preserve atom order and explicit empties;
+missing, extra or duplicate entries reject. These are configuration-time
+measurements: TARGET_CFLAGS/CXXFLAGS/CPPFLAGS must not replace the source's
+recursive expressions after local USER flags are assigned. The final projection
+must evaluate those expressions at the declaration position, preserving the
+configured baseline and source-local contributions. The complete compile
+contract must not be switched before that projection and its receipt are bound.
 `MESA_COMPILEOPTIONS` is also an explicitly required measured bundle, not an
 implicit empty fallback. The actual configured ARM Make oracle found this
 variable undefined/empty, and its command-line counter produced the expected

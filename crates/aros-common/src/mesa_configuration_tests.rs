@@ -1,6 +1,6 @@
 use super::{
     BuiltinSelectors, MesaConfigurationIdentity, MesaConfigurationWire, ValidatedMesaConfiguration,
-    CONFIGURATION_FILE, MAX_CONFIGURATION_BYTES, MAX_TARGET_ISA_FLAGS,
+    CONFIGURATION_FILE, MAX_CONFIGURATION_BYTES, MAX_TARGET_ISA_FLAGS, MESA_BASELINE_VARIABLES,
     MESA_COMPILER_OPTION_VARIABLES,
 };
 use crate::{ArosCompilerIdentity, ArosError, Result, Sha256Digest};
@@ -48,6 +48,10 @@ fn wire(
     MesaConfigurationWire {
         version: 1,
         identity: identity.clone(),
+        baseline_variables: MESA_BASELINE_VARIABLES
+            .iter()
+            .map(|name| ((*name).into(), Vec::new()))
+            .collect(),
         target_isa_flags,
         builtin_selectors,
         compiler_options: MESA_COMPILER_OPTION_VARIABLES
@@ -126,7 +130,7 @@ fn maps_all_eleven_boolean_selectors_to_fixed_options_or_empty_values() {
     ];
     assert_eq!(
         enabled_variables.len(),
-        13 + MESA_COMPILER_OPTION_VARIABLES.len()
+        13 + MESA_BASELINE_VARIABLES.len() + MESA_COMPILER_OPTION_VARIABLES.len()
     );
     for (name, option) in pairs {
         assert_eq!(enabled_variables[name], option, "selector {name}");
@@ -140,7 +144,7 @@ fn maps_all_eleven_boolean_selectors_to_fixed_options_or_empty_values() {
     let disabled_variables = disabled.make_variables();
     assert_eq!(
         disabled_variables.len(),
-        13 + MESA_COMPILER_OPTION_VARIABLES.len()
+        13 + MESA_BASELINE_VARIABLES.len() + MESA_COMPILER_OPTION_VARIABLES.len()
     );
     for (name, _) in pairs {
         assert_eq!(disabled_variables[name], "", "selector {name}");
@@ -215,6 +219,17 @@ fn rejects_unsupported_version_and_missing_required_fields() {
         &expected,
     ))
     .contains("missing field `target_isa_flags`"));
+
+    let mut missing_baseline: Value = serde_json::from_slice(&encoded(&valid)).unwrap();
+    missing_baseline
+        .as_object_mut()
+        .unwrap()
+        .remove("baseline_variables");
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &serde_json::to_vec(&missing_baseline).unwrap(),
+        &expected,
+    ))
+    .contains("missing field `baseline_variables`"));
 
     let all_selectors = serde_json::to_value(&valid.builtin_selectors).unwrap();
     for name in all_selectors.as_object().unwrap().keys() {
@@ -487,6 +502,77 @@ fn compiler_options_preserve_order_and_require_every_known_empty_value() {
         &expected
     ))
     .contains("unsafe syntax"));
+}
+
+#[test]
+fn baseline_variables_preserve_order_require_every_known_empty_value_and_reject_unsafe_atoms() {
+    let expected = identity("arm-raspi", "arm-unknown-aros");
+    let mut configured = wire(&expected, vec![], selectors(false));
+    configured.baseline_variables.insert(
+        "CONFIG_CFLAGS".into(),
+        vec![
+            "-O2".into(),
+            "-DORDER=1".into(),
+            "-UORDER".into(),
+            "-DORDER=1".into(),
+        ],
+    );
+    let parsed = ValidatedMesaConfiguration::parse_bound(&encoded(&configured), &expected).unwrap();
+    let variables = parsed.make_variables();
+    assert_eq!(
+        variables["CONFIG_CFLAGS"],
+        "-O2 -DORDER=1 -UORDER -DORDER=1"
+    );
+    assert_eq!(variables["TARGET_ISA_CXXFLAGS"], "");
+    for name in MESA_BASELINE_VARIABLES {
+        let atoms = configured.baseline_variables.get(*name).unwrap();
+        if *name != "CONFIG_CFLAGS" {
+            assert!(
+                atoms.is_empty(),
+                "expected an explicit empty value for {name}"
+            );
+            assert_eq!(variables[*name], "");
+        }
+    }
+
+    let mut missing_key = configured.clone();
+    missing_key.baseline_variables.remove("CONFIG_CPPFLAGS");
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &encoded(&missing_key),
+        &expected
+    ))
+    .contains("every required Mesa baseline variable"));
+
+    let mut unknown_key = configured.clone();
+    unknown_key
+        .baseline_variables
+        .insert("UNREVIEWED".into(), vec![]);
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &encoded(&unknown_key),
+        &expected
+    ))
+    .contains("and no others"));
+
+    let text = String::from_utf8(encoded(&configured)).unwrap();
+    let duplicate = text.replace(
+        "\"baseline_variables\":{",
+        "\"baseline_variables\":{\"CONFIG_CFLAGS\":[],",
+    );
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        duplicate.as_bytes(),
+        &expected
+    ))
+    .contains("duplicate baseline variable CONFIG_CFLAGS"));
+
+    let mut unsafe_atom = configured;
+    unsafe_atom
+        .baseline_variables
+        .insert("CONFIG_CFLAGS".into(), vec!["@untrusted".into()]);
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &encoded(&unsafe_atom),
+        &expected
+    ))
+    .contains("CONFIG_CFLAGS atom 0 is empty, too long, or contains unsafe syntax"));
 }
 
 #[test]

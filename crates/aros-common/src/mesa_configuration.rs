@@ -37,6 +37,25 @@ pub const MESA_COMPILER_OPTION_VARIABLES: &[&str] = &[
     "NOWARN_ARRAY_BOUNDS",
 ];
 
+/// Required configure-measured baseline variables transported to Make.
+///
+/// Each value is present even when its measured atom list is empty. This is a
+/// closed transport contract, not a defaulting rule or proof of probe
+/// provenance.
+pub const MESA_BASELINE_VARIABLES: &[&str] = &[
+    "TARGET_ISA_CXXFLAGS",
+    "CONFIG_CFLAGS",
+    "CONFIG_CXXFLAGS",
+    "CONFIG_CPPFLAGS",
+    "TARGET_CFLAGS",
+    "TARGET_CXXFLAGS",
+    "TARGET_CPPFLAGS",
+    "DEBUG_CFLAGS",
+    "DEBUG_CXXFLAGS",
+    "OPTIMIZATION_CFLAGS",
+    "LLVM_NOWARN",
+];
+
 /// Caller-measured identity for one configured Mesa target.
 ///
 /// `source_inputs_sha256` identifies the source and configuration closure
@@ -73,6 +92,7 @@ impl MesaConfigurationIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedMesaConfiguration {
     identity: MesaConfigurationIdentity,
+    baseline_variables: BTreeMap<String, Vec<String>>,
     target_isa_flags: Vec<String>,
     builtin_selectors: BuiltinSelectors,
     compiler_options: BTreeMap<String, Vec<String>>,
@@ -91,8 +111,8 @@ impl ValidatedMesaConfiguration {
     ///
     /// # Errors
     /// Rejects oversized or malformed JSON, unsupported versions, invalid
-    /// identities, identity mismatches, unsafe ISA/compiler-option/bundle atoms,
-    /// and selector values outside the closed schema.
+    /// identities, identity mismatches, unsafe baseline/ISA/compiler-option/
+    /// bundle atoms, and selector values outside the closed schema.
     pub fn parse_bound(bytes: &[u8], expected: &MesaConfigurationIdentity) -> Result<Self> {
         if bytes.len() > MAX_CONFIGURATION_BYTES {
             return Err(configuration_error(format!(
@@ -115,12 +135,14 @@ impl ValidatedMesaConfiguration {
                 "configuration identity does not match the caller-provided expected identity",
             ));
         }
+        validate_baseline_variables(&wire.baseline_variables)?;
         validate_isa_flags(&wire.target_isa_flags)?;
         validate_compiler_options(&wire.compiler_options)?;
         validate_isa_flags(&wire.mesa_compile_options)?;
 
         Ok(Self {
             identity: wire.identity,
+            baseline_variables: wire.baseline_variables,
             target_isa_flags: wire.target_isa_flags,
             builtin_selectors: wire.builtin_selectors,
             compiler_options: wire.compiler_options,
@@ -140,11 +162,12 @@ impl ValidatedMesaConfiguration {
         &self.target_isa_flags
     }
 
-    /// Map every recognized selector to its strict Make value.
+    /// Project the complete validated configuration to strict Make values.
     ///
     /// True selectors produce their fixed `-fno-builtin-*` option; false
-    /// selectors produce the known empty value. `TARGET_ISA_CFLAGS` preserves
-    /// the input atom order and joins atoms with one ASCII space.
+    /// selectors produce the known empty value. Baseline and compiler-option
+    /// atoms preserve their input order and join with one ASCII space;
+    /// `TARGET_ISA_CFLAGS` follows the same rule.
     #[must_use]
     pub fn make_variables(&self) -> BTreeMap<String, String> {
         let selectors = &self.builtin_selectors;
@@ -196,6 +219,11 @@ impl ValidatedMesaConfiguration {
             ("TARGET_ISA_CFLAGS".into(), self.target_isa_flags.join(" ")),
         ]);
         variables.extend(
+            self.baseline_variables
+                .iter()
+                .map(|(name, atoms)| (name.clone(), atoms.join(" "))),
+        );
+        variables.extend(
             self.compiler_options
                 .iter()
                 .map(|(name, atoms)| (name.clone(), atoms.join(" "))),
@@ -213,11 +241,61 @@ impl ValidatedMesaConfiguration {
 struct MesaConfigurationWire {
     version: u32,
     identity: MesaConfigurationIdentity,
+    #[serde(deserialize_with = "deserialize_baseline_variables")]
+    baseline_variables: BTreeMap<String, Vec<String>>,
     target_isa_flags: Vec<String>,
     builtin_selectors: BuiltinSelectors,
     #[serde(deserialize_with = "deserialize_compiler_options")]
     compiler_options: BTreeMap<String, Vec<String>>,
     mesa_compile_options: Vec<String>,
+}
+
+fn deserialize_baseline_variables<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniqueBaselineVariables;
+    impl<'de> serde::de::Visitor<'de> for UniqueBaselineVariables {
+        type Value = BTreeMap<String, Vec<String>>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a baseline-variable object with unique variable names")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> std::result::Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let mut values = BTreeMap::new();
+            while let Some((name, atoms)) = map.next_entry::<String, Vec<String>>()? {
+                if values.insert(name.clone(), atoms).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate baseline variable {name}"
+                    )));
+                }
+            }
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_map(UniqueBaselineVariables)
+}
+
+fn validate_baseline_variables(variables: &BTreeMap<String, Vec<String>>) -> Result<()> {
+    if variables.len() != MESA_BASELINE_VARIABLES.len()
+        || MESA_BASELINE_VARIABLES
+            .iter()
+            .any(|name| !variables.contains_key(*name))
+    {
+        return Err(configuration_error(
+            "baseline_variables must contain every required Mesa baseline variable and no others",
+        ));
+    }
+    for (name, atoms) in variables {
+        validate_flag_atoms(name, atoms)?;
+    }
+    Ok(())
 }
 
 fn deserialize_compiler_options<'de, D>(
@@ -335,9 +413,13 @@ fn validate_identifier(field: &str, value: &str, max_bytes: usize) -> Result<()>
 }
 
 fn validate_isa_flags(flags: &[String]) -> Result<()> {
+    validate_flag_atoms("target_isa_flags", flags)
+}
+
+fn validate_flag_atoms(name: &str, flags: &[String]) -> Result<()> {
     if flags.len() > MAX_TARGET_ISA_FLAGS {
         return Err(configuration_error(format!(
-            "target_isa_flags exceeds its {MAX_TARGET_ISA_FLAGS}-atom limit"
+            "{name} exceeds its {MAX_TARGET_ISA_FLAGS}-atom limit"
         )));
     }
     for (index, flag) in flags.iter().enumerate() {
@@ -348,7 +430,7 @@ fn validate_isa_flags(flags: &[String]) -> Result<()> {
                 .all(|byte| byte.is_ascii_alphanumeric() || b"_.,:/=+-".contains(&byte))
         {
             return Err(configuration_error(format!(
-                "target_isa_flags atom {index} is empty, too long, or contains unsafe syntax"
+                "{name} atom {index} is empty, too long, or contains unsafe syntax"
             )));
         }
     }

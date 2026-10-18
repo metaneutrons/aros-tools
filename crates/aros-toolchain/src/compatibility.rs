@@ -41,6 +41,8 @@ mod llvm_sdk_generated_root;
 mod llvm_sdk_link_paths;
 mod llvm_sdk_links;
 mod llvm_sdk_portable;
+mod mesa_preflight;
+mod mesa_preflight_measurement;
 mod native_sdk_links;
 mod native_sdk_portable;
 mod native_sdk_relocation;
@@ -98,6 +100,7 @@ pub use llvm_sdk_links::{
     execute_llvm_sdk_links, readback_llvm_sdk_links, CompletedLlvmSdkLinks, LlvmSdkLinkRequest,
 };
 pub use llvm_sdk_portable::{LlvmSdkLinkSelection, LlvmSdkPortableProof};
+pub use mesa_preflight::{execute_mesa_preflight, CompletedMesaPreflight, MesaPreflightRequest};
 pub use native_sdk_links::{
     execute_native_sdk_links, readback_native_sdk_links, NativeSdkLinkReport, NativeSdkLinkRequest,
 };

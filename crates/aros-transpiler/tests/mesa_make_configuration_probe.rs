@@ -244,7 +244,8 @@ endif
 fn bound_transport_feeds_known_selectors_and_ordered_isa_into_make_evaluation() {
     use aros_common::{
         mesa_configuration::{
-            MesaConfigurationIdentity, ValidatedMesaConfiguration, MESA_COMPILER_OPTION_VARIABLES,
+            MesaConfigurationIdentity, ValidatedMesaConfiguration, MESA_BASELINE_VARIABLES,
+            MESA_COMPILER_OPTION_VARIABLES,
         },
         sha256_bytes, ArosCompilerIdentity,
     };
@@ -278,12 +279,23 @@ fn bound_transport_feeds_known_selectors_and_ordered_isa_into_make_evaluation() 
             "-DORDER=1".into(),
         ],
     );
+    let mut baseline = MESA_BASELINE_VARIABLES
+        .iter()
+        .map(|name| ((*name).to_owned(), Vec::<String>::new()))
+        .collect::<BTreeMap<_, _>>();
+    baseline.insert(
+        "CONFIG_CFLAGS".into(),
+        vec!["-DBASE=1".into(), "-UBASE".into(), "-DBASE=1".into()],
+    );
+    baseline.insert("TARGET_ISA_CXXFLAGS".into(), vec!["-marm".into()]);
+    baseline.insert("LLVM_NOWARN".into(), vec!["-Wno-implicit-int".into()]);
     let wire = serde_json::json!({
         "version": 1,
         "identity": identity,
         "builtin_selectors": selectors,
         "target_isa_flags": ["-marm", "-DORDER=1", "-UORDER", "-DORDER=1"],
         "compiler_options": compiler_options,
+        "baseline_variables": baseline,
         "mesa_compile_options": ["-DOPTION_BUNDLE=1"],
     });
     let bytes = serde_json::to_vec(&wire).unwrap();
@@ -297,9 +309,20 @@ fn bound_transport_feeds_known_selectors_and_ordered_isa_into_make_evaluation() 
         "{MESA_CONFIGURATION_FIXTURE}\n\
          USER_CPPFLAGS := $(MESA_BASEFLAGS)\n\
          USER_CFLAGS := $(CFLAGS_GNU11) $(CFLAGS_NO_MATH_ERRNO) $(MESA_COMPILEOPTIONS)\n\
+         BASELINE_TEST := $(CONFIG_CFLAGS) $(TARGET_ISA_CXXFLAGS) $(LLVM_NOWARN)\n\
          GCA_ABI_FLAGS := $(TARGET_ISA_CFLAGS) $(USER_CPPFLAGS)\n"
     );
     let scope = collect_vars_with_context(&input, &target);
+    assert_eq!(
+        evaluate_variable(&scope, "BASELINE_TEST").unwrap(),
+        [
+            "-DBASE=1",
+            "-UBASE",
+            "-DBASE=1",
+            "-marm",
+            "-Wno-implicit-int"
+        ]
+    );
     assert_eq!(
         evaluate_variable(&scope, "USER_CFLAGS").unwrap(),
         [
