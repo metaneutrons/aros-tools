@@ -32,6 +32,8 @@ DOCUMENTATION_DIRECTORIES: Final = ("docs/", "docs-site/")
 PORTABLE_POLICY_FILES: Final = {
     "scripts/plan_ci_platform_matrix.py",
     "scripts/ci_platform_matrix_test.py",
+    # Exercises gate routing with inert tools; Linux quality runs this suite.
+    "scripts/workspace_gate_test.py",
 }
 PORTABLE_POLICY_DIRECTORIES: Final = (
     ".github/workflows/", "scripts/release/", "scripts/release-please/",
