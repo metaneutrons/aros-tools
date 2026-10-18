@@ -51,6 +51,7 @@ class PlatformMatrixTests(unittest.TestCase):
             "scripts/release-please/package.json",
             "scripts/plan_ci_platform_matrix.py",
             "scripts/ci_platform_matrix_test.py",
+            "scripts/workspace_gate_test.py",
         )
         for path in paths:
             with self.subTest(path=path):
@@ -74,6 +75,7 @@ class PlatformMatrixTests(unittest.TestCase):
         for paths in (
             ("README.md", ".github/workflows/ci.yml"),
             ("docs/notes.md", "scripts/release/test-release-policy.sh"),
+            (".github/workflows/ci.yml", "scripts/workspace_gate_test.py"),
         ):
             with self.subTest(paths=paths):
                 scope, _, value = planner.plan(
@@ -86,6 +88,8 @@ class PlatformMatrixTests(unittest.TestCase):
         for paths in (
             ("README.md", "crates/aros-verify/src/lib.rs"),
             ("scripts/plan_ci_platform_matrix.py", "crates/aros-romtool/src/main.rs"),
+            ("scripts/workspace_gate_test.py", "crates/aros-toolchain/src/lib.rs"),
+            ("scripts/workspace_gate_test.py", "scripts/check-workspace.sh"),
         ):
             with self.subTest(paths=paths):
                 scope, _, value = planner.plan(
@@ -106,6 +110,8 @@ class PlatformMatrixTests(unittest.TestCase):
             ("Cargo.lock",),
             ("rust-toolchain.toml",),
             ("scripts/check-workspace.sh",),
+            ("scripts/workspace_gate_test_helper.py",),
+            ("scripts/workspace_gate_test.py.bak",),
             (".github/actions/native-build/action.yml",),
             ("contracts/aros-source-v1.toml",),
             ("crates/aros-transpiler/Cargo.toml",),
