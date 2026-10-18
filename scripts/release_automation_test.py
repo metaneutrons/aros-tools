@@ -149,11 +149,19 @@ class ReleaseAutomation(unittest.TestCase):
     def mutations(self):
         return [call for call in self.gh.calls if call[0] != "GET"]
 
+    def set_candidate_labels(self, *labels):
+        label_objects = [{"name": label} for label in labels]
+        self.gh.pull["labels"] = copy.deepcopy(label_objects)
+        self.gh.pending = [[{"number": self.gh.pull["number"],
+                             "merged_at": self.gh.pull["merged_at"],
+                             "labels": copy.deepcopy(label_objects)}]]
+
     def prepare(self):
         candidate = AUTOMATION.admission()
         self.assertIsNotNone(candidate)
         admission = self.root / "admission.json"
         admission.write_text(json.dumps(candidate))
+        self.set_candidate_labels("autorelease: tagged")
         self.gh.release = {"id": 123, "tag_name": TAG, "target_commitish": HEAD,
                            "draft": True, "prerelease": False, "immutable": False, "assets": []}
         os.environ.update(RP_CREATED="true", RP_TAG=TAG, RP_SHA=HEAD, RP_ID="123", RP_VERSION="0.3.20")
@@ -377,10 +385,15 @@ class ReleaseAutomation(unittest.TestCase):
             AUTOMATION.admission()
         self.assertEqual(self.mutations(), [])
 
-    def test_retired_candidate_existing_tag_or_draft_never_restarts(self):
-        self.gh.pull["labels"] = []
+    def test_tagged_candidate_is_not_admitted_before_draft_creation(self):
+        self.set_candidate_labels("autorelease: tagged")
         self.assertIsNone(AUTOMATION.admission())
-        self.gh.pull["labels"] = [{"name": "autorelease: pending"}]
+        self.assertEqual(self.mutations(), [])
+
+    def test_retired_candidate_existing_tag_or_draft_never_restarts(self):
+        self.set_candidate_labels()
+        self.assertIsNone(AUTOMATION.admission())
+        self.set_candidate_labels("autorelease: pending")
         self.gh.ref = {"object": {"type": "tag", "sha": "b" * 40}}
         self.assertIsNone(AUTOMATION.admission())
         self.gh.ref = None
@@ -430,8 +443,12 @@ class ReleaseAutomation(unittest.TestCase):
             AUTOMATION.start(path)
         self.assertEqual(self.mutations(), [])
 
-    def test_exact_candidate_creates_annotated_ref_and_one_tag_dispatch(self):
+    def test_exact_tagged_transition_is_accepted_once(self):
         admission = self.prepare()
+        self.assertEqual(self.gh.pull["labels"], [{"name": "autorelease: tagged"}])
+        self.assertEqual(self.gh.pending[0][0]["labels"], [{"name": "autorelease: tagged"}])
+        self.assertEqual([item["number"] for page in self.gh.pending for item in page
+                          if "autorelease: pending" in {label["name"] for label in item["labels"]}], [])
         self.gh.graphql_calls.clear()
         with patch.dict(os.environ, {"GOVERNANCE_TOKEN": "synthetic-governance-secret"}), \
                 redirect_stdout(io.StringIO()) as output:
@@ -448,6 +465,38 @@ class ReleaseAutomation(unittest.TestCase):
         self.assertNotIn("synthetic-governance-secret", output.getvalue())
         self.assertEqual(self.gh.graphql_calls, [RULESET_NODE_ID])
         self.assertIsNone(AUTOMATION.admission())
+        with self.assertRaisesRegex(SystemExit, "admission changed after draft creation"):
+            AUTOMATION.start(admission)
+        self.assertEqual(self.mutations(), writes)
+
+    def test_postcreation_pending_label_is_rejected_before_writes(self):
+        path = self.prepare()
+        self.set_candidate_labels("autorelease: pending")
+        with self.assertRaisesRegex(SystemExit, "admission changed after draft creation"):
+            AUTOMATION.start(path)
+        self.assertEqual(self.mutations(), [])
+
+    def test_postcreation_missing_label_is_rejected_before_writes(self):
+        path = self.prepare()
+        self.set_candidate_labels()
+        with self.assertRaisesRegex(SystemExit, "admission changed after draft creation"):
+            AUTOMATION.start(path)
+        self.assertEqual(self.mutations(), [])
+
+    def test_postcreation_conflicting_labels_are_rejected_before_writes(self):
+        path = self.prepare()
+        self.set_candidate_labels("autorelease: pending", "autorelease: tagged")
+        with self.assertRaisesRegex(SystemExit, "admission changed after draft creation"):
+            AUTOMATION.start(path)
+        self.assertEqual(self.mutations(), [])
+
+    def test_competing_pending_candidate_blocks_postcreation_transition(self):
+        path = self.prepare()
+        self.gh.pending[0].append({"number": 100, "merged_at": "2026-10-08T10:00:00Z",
+                                  "labels": [{"name": "autorelease: pending"}]})
+        with self.assertRaisesRegex(SystemExit, "other pending candidates; no release transition"):
+            AUTOMATION.start(path)
+        self.assertEqual(self.mutations(), [])
 
     def test_release_please_output_mismatch_never_writes(self):
         path = self.prepare()
