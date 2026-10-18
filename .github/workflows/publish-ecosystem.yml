@@ -776,10 +776,13 @@ jobs:
     name: Verify public AUR package
     needs: aur-publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       VERSION: ${{ inputs.version }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: qualified-release-staging
@@ -816,19 +819,4 @@ jobs:
           cmp "$GITHUB_WORKSPACE/candidate/PKGBUILD" "$published/PKGBUILD"
           cmp "$evidence/PKGBUILD" "$published/PKGBUILD"
           cmp "$evidence/SRCINFO" "$published/.SRCINFO"
-          for attempt in {1..20}; do
-            if curl --fail --silent --show-error --get \
-              --proto '=https' --proto-redir '=https' --tlsv1.2 \
-              --data-urlencode 'v=5' --data-urlencode 'type=info' \
-              --data-urlencode 'arg[]=aros-tools-bin' \
-              https://aur.archlinux.org/rpc | \
-              jq -e --arg version "${VERSION}-1" \
-                '.resultcount == 1 and .results[0].Version == $version' >/dev/null; then
-              exit 0
-            fi
-            if [[ "$attempt" == 20 ]]; then
-              echo "::error::AP7420 AUR metadata did not converge to ${VERSION}-1"
-              exit 1
-            fi
-            sleep 15
-          done
+          python3 scripts/release/wait-aur-index.py "$VERSION"
