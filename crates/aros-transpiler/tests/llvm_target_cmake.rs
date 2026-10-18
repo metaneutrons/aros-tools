@@ -49,6 +49,14 @@ fn target_llvm_has_real_closed_fetch_host_tool_and_component_products() {
     assert!(declaration
         .options
         .contains(&"-DLLVM_ENABLE_RTTI=ON".to_owned()));
+    assert_eq!(
+        &declaration.options[2..5],
+        [
+            "-DLLVM_TARGETS_TO_BUILD=X86",
+            "-DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-aros",
+            "-DLLVM_HOST_TRIPLE=x86_64-unknown-aros",
+        ]
+    );
     let [fetch] = parsed.fetches.as_slice() else {
         panic!("must own only the selected LLVM11 source");
     };
@@ -116,4 +124,133 @@ fn target_llvm_rejects_changed_recipe_instead_of_emitting_empty_meta_success() {
             .contains("unsupported upstream recipe drift"),
         "{error}"
     );
+}
+
+fn raspi_context(cpu: &str, float_abi: &str) -> TargetContext {
+    TargetContext {
+        cpu: Some(cpu.to_owned()),
+        platform: Some("raspi".to_owned()),
+        toolchain: Some("llvm".to_owned()),
+        cpu32: Some(String::new()),
+        use_mmu: Some("1".to_owned()),
+        float_abi: Some(float_abi.to_owned()),
+        target_llvm_ver: Some("11.0.0".to_owned()),
+        ..TargetContext::default()
+    }
+}
+
+#[test]
+fn raspi_target_llvm_owns_architecture_specific_complete_products() {
+    let root = common::source_root();
+    for (cpu, float_abi, backend, triple) in [
+        ("arm", "hard", "ARM", "arm-unknown-aros"),
+        ("aarch64", "", "AArch64", "aarch64-unknown-aros"),
+    ] {
+        let parsed = parse_mmakefile_with_dirs_and_context(
+            &root.join("workbench/libs/llvm/mmakefile.src"),
+            &root,
+            &DirVars::load(&root),
+            &raspi_context(cpu, float_abi),
+        )
+        .unwrap();
+        assert!(
+            parsed.capability_errors.is_empty(),
+            "{:#?}",
+            parsed.capability_errors
+        );
+        let [declaration] = parsed.external_cmake.as_slice() else {
+            panic!("missing {backend} target LLVM provider");
+        };
+        assert_eq!(declaration.build_targets.len(), 45);
+        assert_eq!(declaration.library_products.len(), 45);
+        assert_eq!(declaration.header_products.len(), 8);
+        let manifest = if cpu == "arm" {
+            include_str!("../llvm11-arm-static.components")
+        } else {
+            include_str!("../llvm11-aarch64-static.components")
+        };
+        let expected = manifest
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(declaration.build_targets, expected);
+        assert_eq!(
+            declaration.library_products,
+            expected
+                .iter()
+                .map(|name| {
+                    format!("${{AROS_BUILD_DIR}}/gen/external-install/llvm11/lib/lib{name}.a")
+                })
+                .collect::<Vec<_>>()
+        );
+        for suffix in [
+            "AsmParser",
+            "CodeGen",
+            "Desc",
+            "Disassembler",
+            "Info",
+            "Utils",
+        ] {
+            let library = format!("LLVM{backend}{suffix}");
+            assert!(
+                declaration.build_targets.contains(&library),
+                "missing {library}"
+            );
+            assert!(declaration
+                .library_products
+                .iter()
+                .any(|path| path.ends_with(&format!("/lib{library}.a"))));
+        }
+        assert!(!declaration
+            .build_targets
+            .iter()
+            .any(|name| name.starts_with("LLVMX86")));
+        for option in [
+            format!("-DLLVM_TARGETS_TO_BUILD={backend}"),
+            format!("-DLLVM_DEFAULT_TARGET_TRIPLE={triple}"),
+            format!("-DLLVM_HOST_TRIPLE={triple}"),
+            "-DLLVM_ENABLE_RTTI=ON".to_owned(),
+        ] {
+            assert!(declaration.options.contains(&option), "missing {option}");
+        }
+        for header in ["llvm-c/Core.h", "llvm/Config/llvm-config.h"] {
+            assert!(declaration
+                .header_products
+                .iter()
+                .any(|path| path.ends_with(header)));
+        }
+        assert_eq!(declaration.install_components, ["llvm-headers"]);
+        assert_eq!(declaration.host_tools, ["LLVM_TABLEGEN=llvm-tblgen@11.0.0"]);
+        assert!(declaration.library_group);
+    }
+}
+
+#[test]
+fn raspi_target_llvm_rejects_unqualified_version_and_selector_substitutions() {
+    let root = common::source_root();
+    let recipe = root.join("workbench/libs/llvm/mmakefile.src");
+    for (cpu, float_abi) in [("arm", "hard"), ("aarch64", "")] {
+        let mut target = raspi_context(cpu, float_abi);
+        target.target_llvm_ver = Some("21.1.0".to_owned());
+        let error =
+            parse_mmakefile_with_dirs_and_context(&recipe, &root, &DirVars::load(&root), &target)
+                .unwrap_err();
+        assert!(error.to_string().contains("requires 11.0.0, not 21.1.0"));
+    }
+    for mut target in [
+        raspi_context("arm", "soft"),
+        raspi_context("aarch64", "hard"),
+        raspi_context("riscv", ""),
+    ] {
+        // An unqualified tuple must not inherit either closed provider.
+        target.target_llvm_ver = Some("11.0.0".to_owned());
+        let parsed =
+            parse_mmakefile_with_dirs_and_context(&recipe, &root, &DirVars::load(&root), &target)
+                .unwrap();
+        assert!(!parsed
+            .external_cmake
+            .iter()
+            .any(|item| item.provided_library == "LLVM"));
+    }
 }

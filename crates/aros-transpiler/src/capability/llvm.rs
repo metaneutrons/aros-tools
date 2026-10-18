@@ -23,21 +23,41 @@ pub(crate) fn admit(
     let Some(target) = target else {
         return Ok(None);
     };
-    if target.cpu.as_deref() != Some("x86_64")
-        || target.platform.as_deref() != Some("pc")
-        || target.toolchain.as_deref() != Some("llvm")
-        || target.cpu32.as_deref() != Some("i386")
-        || target.use_mmu.as_deref() != Some("1")
-    {
-        return Ok(None);
-    }
+    let (backend, triple, manifest, component_count) = match (
+        target.cpu.as_deref(),
+        target.platform.as_deref(),
+        target.toolchain.as_deref(),
+        target.cpu32.as_deref(),
+        target.use_mmu.as_deref(),
+        target.float_abi.as_deref(),
+    ) {
+        (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), _) => (
+            "X86",
+            "x86_64-unknown-aros",
+            include_str!("../../llvm11-x86-static.components"),
+            44,
+        ),
+        (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard")) => (
+            "ARM",
+            "arm-unknown-aros",
+            include_str!("../../llvm11-arm-static.components"),
+            45,
+        ),
+        (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => (
+            "AArch64",
+            "aarch64-unknown-aros",
+            include_str!("../../llvm11-aarch64-static.components"),
+            45,
+        ),
+        _ => return Ok(None),
+    };
     if target
         .target_llvm_ver
         .as_deref()
         .is_some_and(|version| !version.is_empty() && version != "11.0.0")
     {
         return Err(format!(
-            "native PC Target-LLVM capability requires 11.0.0, not {}; review the requested source/component contract",
+            "native {backend} Target-LLVM capability requires 11.0.0, not {}; review the requested source/component contract",
             target.target_llvm_ver.as_deref().unwrap_or_default()
         ));
     }
@@ -53,14 +73,14 @@ pub(crate) fn admit(
     if !metadata.file_type().is_file() {
         return Err("LLVM target patch must be a regular source file".to_owned());
     }
-    let components = include_str!("../../llvm11-x86-static.components")
+    let components = manifest
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut unique = std::collections::HashSet::new();
-    if components.len() != 44
+    if components.len() != component_count
         || components.iter().any(|name| {
             !name.starts_with("LLVM")
                 || !name.bytes().all(|byte| byte.is_ascii_alphanumeric())
@@ -79,12 +99,9 @@ pub(crate) fn admit(
         base: String::new(), patch_origins: "${AROS_SOURCE_DIR}/tools/crosstools/llvm".to_owned(),
         patches: "llvm-11.0.0.src-aros.diff:llvm-11.0.0.src:-p1".to_owned(), dir: DIRECTORY.to_owned(),
     };
-    let options = [
+    let mut options = [
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
         "-DCMAKE_BUILD_TYPE=Release",
-        "-DLLVM_TARGETS_TO_BUILD=X86",
-        "-DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-aros",
-        "-DLLVM_HOST_TRIPLE=x86_64-unknown-aros",
         "-DLLVM_ENABLE_PROJECTS=",
         "-DLLVM_ENABLE_RUNTIMES=",
         "-DLLVM_ENABLE_ASSERTIONS=OFF",
@@ -116,6 +133,16 @@ pub(crate) fn admit(
     ]
     .map(str::to_owned)
     .to_vec();
+    // LLVM_HOST_TRIPLE names where these libraries run, not the build machine.
+    // LLVM 11 uses it to select the native MCJIT initialization entry points.
+    options.splice(
+        2..2,
+        [
+            format!("-DLLVM_TARGETS_TO_BUILD={backend}"),
+            format!("-DLLVM_DEFAULT_TARGET_TRIPLE={triple}"),
+            format!("-DLLVM_HOST_TRIPLE={triple}"),
+        ],
+    );
     let declaration = ExternalCMakeDecl {
         mmake_name: "workbench-libs-llvm".to_owned(),
         source_dir: "${AROS_PORTS_DIR}/llvm/llvm-11.0.0.src".to_owned(),
