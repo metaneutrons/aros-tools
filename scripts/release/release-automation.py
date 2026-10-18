@@ -366,6 +366,7 @@ def start(path: Path) -> None:
     # Only the just-created empty private draft is normalized. The producer
     # later compares this body byte-for-byte with its signed release notes.
     normalized = api(f"repos/{repo}/releases/{release_id}", method="PATCH", payload={
+        "tag_name": tag, "target_commitish": head,
         "name": f"aros-tools {tag}", "body": body, "draft": True, "prerelease": False})
     if (normalized.get("id") != release_id or normalized.get("body") != body
             or normalized.get("name") != f"aros-tools {tag}" or normalized.get("draft") is not True
