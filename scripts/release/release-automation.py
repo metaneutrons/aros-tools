@@ -276,13 +276,20 @@ def admission(*, expected_draft: int | None = None, governance_receipt: dict | N
     ):
         fail("release PR is not the exact four-file version/changelog change")
     labels = {label.get("name") for label in pull.get("labels", [])}
-    if "autorelease: pending" not in labels:
+    # Release Please consumes its pending label when it creates the draft.
+    # Only this invocation's exact returned draft may cross that one-way phase;
+    # fresh admission still rejects already tagged or retired candidates.
+    release_labels = {label for label in labels if isinstance(label, str)
+                      and label.startswith("autorelease: ")}
+    expected_label = "autorelease: pending" if expected_draft is None else "autorelease: tagged"
+    if release_labels != {expected_label}:
         return None  # Explicitly retired or already completed; never revive it.
     pending = api(f"repos/{repo}/pulls?state=closed&base=main&per_page=100", pages=True)
     pending_prs = [item["number"] for page in pending for item in page if item.get("merged_at")
                    and "autorelease: pending" in {label.get("name") for label in item.get("labels", [])}]
-    if pending_prs != [number]:
-        fail("Release Please has other pending candidates; no draft may be created")
+    expected_pending = [number] if expected_draft is None else []
+    if pending_prs != expected_pending:
+        fail("Release Please has other pending candidates; no release transition is permitted")
     runs = {}
     for workflow, required in REQUIRED_JOBS.items():
         pages = api(f"repos/{repo}/actions/workflows/{workflow}/runs?event=push&branch=main&head_sha={head}&per_page=100",
