@@ -11,8 +11,8 @@ use std::{collections::BTreeMap, fs, path::PathBuf};
 const VC4: &str = "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium";
 
 #[test]
-#[ignore = "requires explicit source and retained configured ARM GNU Make oracle"]
-fn actual_arm_configured_source_components_equal_gnu_make() {
+#[ignore = "requires explicit source and retained configured ARM/AArch64 GNU Make oracle"]
+fn actual_configured_source_components_equal_gnu_make() {
     let source = required_directory("AROS_TEST_MESA_SOURCE_ROOT");
     let evidence = required_directory("AROS_TEST_MESA_ORACLE_ROOT");
     let oracle: serde_json::Value = serde_json::from_slice(
@@ -20,6 +20,17 @@ fn actual_arm_configured_source_components_equal_gnu_make() {
     )
     .unwrap();
     assert_eq!(oracle["exit_code"], 0);
+    let selected: serde_json::Value =
+        serde_json::from_slice(&fs::read(evidence.join("configured-context/result.json")).unwrap())
+            .unwrap();
+    assert_eq!(selected["exit_code"], 0);
+    let cpu = selected["values"]["AROS_TARGET_CPU"].as_str().unwrap();
+    let platform = selected["values"]["AROS_TARGET_ARCH"].as_str().unwrap();
+    assert!(matches!(cpu, "arm" | "aarch64"));
+    assert_eq!(platform, "raspi");
+    let manifest =
+        aros_common::ArosToolchainManifest::load(&evidence.join("native/toolchain")).unwrap();
+    assert_eq!(manifest.target_triple.split_once('-').unwrap().0, cpu);
     let mesa = fs::read_to_string(source.join("workbench/libs/mesa/mesa.cfg")).unwrap();
     let vc4 = fs::read_to_string(source.join(VC4).join("mmakefile.src")).unwrap();
     assert_eq!(
@@ -30,7 +41,9 @@ fn actual_arm_configured_source_components_equal_gnu_make() {
         aros_common::sha256_bytes(vc4.as_bytes()).as_str(),
         oracle["source_mmake_sha256"].as_str().unwrap()
     );
-    let compiler_path = evidence.join("configure-oracle/bin/raspi-arm/gen/config/compiler.cfg");
+    let generated = PathBuf::from(selected["values"]["GENDIR"].as_str().unwrap());
+    assert!(generated.is_absolute() && generated.starts_with(evidence.join("configure-oracle")));
+    let compiler_path = generated.join("config/compiler.cfg");
     let compiler = fs::read_to_string(compiler_path).unwrap();
     assert_eq!(
         aros_common::sha256_bytes(compiler.as_bytes()).as_str(),
@@ -53,7 +66,18 @@ fn actual_arm_configured_source_components_equal_gnu_make() {
     .unwrap();
     assert_eq!(optional["original"]["exit_code"], 0);
     assert_eq!(optional["counter"]["exit_code"], 0);
+    for name in ["MESA_COMPILEOPTIONS", "USER_CFLAGS", "USER_CXXFLAGS"] {
+        assert_ne!(
+            optional["original"]["values"][name].as_str().unwrap(),
+            optional["counter"]["values"][name].as_str().unwrap(),
+            "counter measurement did not change {name}"
+        );
+    }
     for (name, value) in values {
+        assert_eq!(
+            &selected["values"][name], value,
+            "selected paths belong to a different configured context"
+        );
         assert_eq!(
             &optional["original"]["values"][name], value,
             "additional measurement selected a different configured context"
@@ -72,15 +96,11 @@ fn actual_arm_configured_source_components_equal_gnu_make() {
     );
     configured.insert(
         "PORTSDIR".into(),
-        evidence
-            .join("configure-oracle/Ports")
-            .to_str()
-            .unwrap()
-            .into(),
+        selected["values"]["PORTSDIR"].as_str().unwrap().into(),
     );
     let context = TargetContext {
-        cpu: Some("arm".into()),
-        platform: Some("raspi".into()),
+        cpu: Some(cpu.into()),
+        platform: Some(platform.into()),
         toolchain: Some("llvm".into()),
         mesa_version: Some("26.0.0".into()),
         make_variables: configured,

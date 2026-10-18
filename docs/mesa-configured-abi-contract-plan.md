@@ -60,6 +60,34 @@ handoff either.
 
 ## Development and acceptance evidence
 
+### Runtime preflight insertion
+
+The existing native compatibility `UpstreamConfigure` phase occurs after
+`CmakeConsumer`; its outputs therefore cannot supply pre-transpilation facts.
+The measured Mesa configuration must come from a separate bounded preflight
+before the first engine configure, in both CLI and native compatibility paths.
+The fixed six-phase compatibility proof remains required and in its original
+order; a preflight is neither an SDK owner nor a substitute for any phase.
+
+The implementation must reuse the validated source/compiler selections and
+closed host environment, run with compiler construction disabled, and bind the
+concrete configure target/options, source closure, compiler bytes, environment
+and generated configuration to its result. A board name is not a configure
+target, and a previously failed SDK execution is not a reusable producer.
+Frontend configuration needs an explicit source-owned configure selection where
+no validated producer profile already supplies one. The same validated result
+must reach every transpiler pass. A data file and a caller-supplied matching
+digest alone are not evidence that this preflight ran.
+
+Capture the configured global C/C++ baseline as well as the named USER and ISA
+components before switching compilation. The actual AArch64 source oracle
+selects `--target=aarch64-unknown-aros -fno-pic -fno-pie -mcmodel=large`, not a
+guessed architecture flag bundle. Read configured paths/selectors from the
+same Make context, and bind optional configuration files or their measured
+absence. Never invoke the ordinary Makefile or depend on a dry-run to prevent
+recursive builds. The preflight receipt must be included in execution/readback
+identity before claiming SDK qualification. Production wiring is still open.
+
 The prerequisite test `mesa_make_configuration_probe` has three passing tests:
 all eleven known-empty/nonempty/missing selectors; immediate-assignment freezing
 with ordered duplicate `-D`/`-U` inputs; and rejection of unknown conditions and
