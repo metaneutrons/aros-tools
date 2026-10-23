@@ -15,13 +15,13 @@
   },
   "dependencies": {
     "@astrojs/starlight": "0.42.6",
-    "astro": "7.3.8",
+    "astro": "7.4.0",
     "sharp": "0.35.5"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.10",
     "typescript": "6.0.3",
-    "wrangler": "4.149.0"
+    "wrangler": "4.151.0"
   },
   "overrides": {
     "postcss-selector-parser": "7.1.6",
