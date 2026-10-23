@@ -46,6 +46,43 @@ fn scan(root: &Path, context: &TargetContext, text: &str) -> crate::LocalMakeInc
 }
 
 #[test]
+fn legacy_fragment_decoding_preserves_original_byte_seals_and_syntax_guards() {
+    let (tree, mut context) = fixture();
+    let original = b"# Copyright \xa9\nUSER_CPPFLAGS := -DFIRST -UFIRST -DFIRST\n";
+    fs::write(tree.path().join(OPTIONS), original).unwrap();
+    context.native_configuration_inputs.insert(
+        OPTIONS.into(),
+        aros_common::sha256_bytes(original).to_string(),
+    );
+    let input = format!("include $(SRCDIR)/{OPTIONS}\n");
+    let accepted = scan(tree.path(), &context, &input);
+    assert!(accepted.issues.is_empty(), "{:?}", accepted.issues);
+    assert!(accepted.expanded.contains("# Copyright ©"));
+    assert!(accepted.expanded.contains("-DFIRST -UFIRST -DFIRST"));
+
+    // The equivalent displayed UTF-8 text has different original bytes and
+    // cannot satisfy the retained Latin-1 source seal.
+    fs::write(
+        tree.path().join(OPTIONS),
+        aros_common::decode_source_bytes(original.to_vec()),
+    )
+    .unwrap();
+    assert!(!scan(tree.path(), &context, &input).issues.is_empty());
+
+    let unsafe_bytes = b"# Copyright \xa9\nUSER_CPPFLAGS := $(shell touch sentinel)\n";
+    fs::write(tree.path().join(OPTIONS), unsafe_bytes).unwrap();
+    context.native_configuration_inputs.insert(
+        OPTIONS.into(),
+        aros_common::sha256_bytes(unsafe_bytes).to_string(),
+    );
+    let refused = scan(tree.path(), &context, &input);
+    assert!(!refused.issues.is_empty());
+    assert_eq!(refused.expanded, input);
+    assert!(refused.fragments.is_empty());
+    assert!(!tree.path().join("sentinel").exists());
+}
+
+#[test]
 fn exact_optional_absence_and_sealed_assignment_select_sources_in_order() {
     let (tree, context) = fixture();
     let text = concat!(

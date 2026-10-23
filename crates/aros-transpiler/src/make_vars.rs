@@ -59,6 +59,7 @@ fn initial_make_configuration(
 /// gdbstop, two targets claimed the output SYS/C/.../gdbstop, and Ninja refused
 /// to generate the build at all. 16 declarations across 9 mmakefiles read a
 /// variable that is reassigned later in the same file.
+#[derive(Clone)]
 pub struct VarScope {
     /// Literal source configuration loaded before this file, not command-line
     /// overrides. Local assignment history shadows these defaults.
@@ -108,6 +109,18 @@ pub struct VarScope {
     /// because they may come from an included configuration fragment.
     local_names: HashSet<String>,
 }
+
+mod program;
+pub use program::{
+    validate_captured_source_commands, CapturedShellSearch, MakeFileEvent, MakeFileEventKind,
+    MakeFileProgram, MakeIncludeResolver, MakeInitialFlavor, MakeInitialValue, MakeProgramPaths,
+    MakeRecipePrefixes, MakeRecipeProjection, MakeRecipeShellProjection,
+    MakeResolvedIncludeResolver, MakeResolvedInput, MakeTargetRecipeRequest, MakeVariableEvent,
+    MakeVariableProgram,
+};
+
+#[cfg(test)]
+mod program_tests;
 
 impl VarScope {
     fn has_opaque_assignment_before(&self, name: &str, line: usize) -> bool {
@@ -223,6 +236,10 @@ impl VarScope {
     /// The right-hand side of `name` as written, as of `line`.
     #[must_use]
     pub fn raw_at(&self, name: &str, line: usize) -> Option<String> {
+        self.raw_at_ref(name, line).map(str::to_owned)
+    }
+
+    fn raw_at_ref(&self, name: &str, line: usize) -> Option<&str> {
         if self.has_opaque_assignment_before(name, line)
             || self.has_uncertain_path_value_before(name, line)
         {
@@ -231,8 +248,8 @@ impl VarScope {
         self.raw
             .get(name)
             .and_then(|history| history.iter().rev().find(|(at, _)| *at < line))
-            .map(|(_, v)| v.clone())
-            .or_else(|| self.configuration.get(name).cloned())
+            .map(|(_, value)| value.as_str())
+            .or_else(|| self.configuration.get(name).map(String::as_str))
     }
 
     /// A simple (`:=`) assignment that froze a reference to a variable which
@@ -312,7 +329,17 @@ impl VarScope {
     /// not GNU Make's recursive/simple flavor, so a source `+=` with references
     /// cannot safely choose one expansion time.
     pub(crate) fn flavor_uncertainty_reason_at(&self, name: &str, line: usize) -> Option<String> {
-        self.flavor_uncertainty_reason_inner(name, line, 16, &mut HashSet::new())
+        self.flavor_uncertainty_reason_with(name, line, &|_| None)
+    }
+
+    /// Check uncertainty through exact raw overrides without copying history.
+    pub(crate) fn flavor_uncertainty_reason_with(
+        &self,
+        name: &str,
+        line: usize,
+        raw_override: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<String> {
+        self.flavor_uncertainty_reason_inner(name, line, 16, &mut HashSet::new(), raw_override)
     }
 
     fn flavor_uncertainty_reason_inner(
@@ -321,30 +348,44 @@ impl VarScope {
         line: usize,
         depth: usize,
         visiting: &mut HashSet<String>,
+        raw_override: &dyn Fn(&str) -> Option<String>,
     ) -> Option<String> {
-        if let Some(reason) = self
-            .flavor_uncertainties
-            .get(name)
-            .and_then(|history| history.iter().rev().find(|(at, _)| *at < line))
-            .and_then(|(_, reason)| reason.as_ref())
+        let overridden = raw_override(name);
+        if let Some(reason) = overridden
+            .is_none()
+            .then(|| {
+                self.flavor_uncertainties
+                    .get(name)
+                    .and_then(|history| history.iter().rev().find(|(at, _)| *at < line))
+                    .and_then(|(_, reason)| reason.as_ref())
+            })
+            .flatten()
         {
             return Some(reason.clone());
         }
         if depth == 0 || !visiting.insert(name.to_owned()) {
             return None;
         }
-        let reason = self.raw_at(name, line).and_then(|value| {
-            scoped_variable_references(&value)
-                .into_iter()
-                .find_map(|dependency| {
-                    self.flavor_uncertainty_reason_inner(&dependency, line, depth - 1, visiting)
+        let reason = overridden
+            .or_else(|| self.raw_at(name, line))
+            .and_then(|value| {
+                scoped_variable_references(&value)
+                    .into_iter()
+                    .find_map(|dependency| {
+                        self.flavor_uncertainty_reason_inner(
+                            &dependency,
+                            line,
+                            depth - 1,
+                            visiting,
+                            raw_override,
+                        )
                         .map(|reason| {
                             format!(
                                 "{name} depends on {dependency}, whose value is uncertain: {reason}"
                             )
                         })
-                })
-        });
+                    })
+            });
         visiting.remove(name);
         reason
     }
@@ -408,7 +449,18 @@ enum VariableFlavor {
 /// two icon lists are built incrementally, and treating their `+=` lines as
 /// either invalid or ordinary assignments silently drops 118 generated files.
 pub(crate) fn variable_assignment(line: &str) -> Option<(&str, &str, AssignmentKind)> {
-    let trimmed = line.trim();
+    variable_assignment_impl(line, false)
+}
+
+fn variable_assignment_impl(
+    line: &str,
+    preserve_whitespace: bool,
+) -> Option<(&str, &str, AssignmentKind)> {
+    let trimmed = if preserve_whitespace {
+        line.trim_start()
+    } else {
+        line.trim()
+    };
     let (at, width, kind) = [
         ("::=", AssignmentKind::SimpleSet),
         (":=", AssignmentKind::SimpleSet),
@@ -421,14 +473,31 @@ pub(crate) fn variable_assignment(line: &str) -> Option<(&str, &str, AssignmentK
     .min_by_key(|(at, _, _)| *at)?;
 
     let name = trimmed[..at].trim();
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
+    if !literal_variable_name(name) {
         return None;
     }
-    Some((name, trimmed[at + width..].trim(), kind))
+    let rhs = &trimmed[at + width..];
+    Some((
+        name,
+        if preserve_whitespace {
+            rhs.trim_start()
+        } else {
+            rhs.trim()
+        },
+        kind,
+    ))
+}
+
+/// Shared admitted literal-name grammar for assignment/undefine/define readers.
+pub(crate) fn literal_variable_name(name: &str) -> bool {
+    // This GNU Make variable selects shell controls; an assignment is not a
+    // dot/uppercase special-target rule. Other control-target policies remain
+    // separately refused by the file/rule readers.
+    name == ".SHELLFLAGS"
+        || !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
 }
 
 /// Parses the literal undefine NAME form supported by source-scoped Make
@@ -443,39 +512,56 @@ pub(crate) fn undefine_directive(line: &str) -> Result<Option<&str>, ()> {
         return Ok(None);
     };
     let name = tail.trim();
-    if !name.is_empty()
-        && name.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '_' || character == '-'
-        })
-    {
+    if literal_variable_name(name) {
         Ok(Some(name))
     } else {
         Err(())
     }
 }
 
-/// Removes an unescaped GNU Make comment from one logical line.
+/// Find the first Make comment byte in a logical line.
 ///
-/// A `#` starts a comment even when it is attached to the preceding word.
-/// Keeping it in an assignment made `FILES := a b #disabled` compile a bogus
-/// source named `#disabled`. An odd run of backslashes escapes the marker.
-pub(crate) fn strip_make_comment(line: &str) -> &str {
-    for (at, character) in line.char_indices() {
-        if character != '#' {
-            continue;
-        }
-        let escaped = line[..at]
-            .bytes()
-            .rev()
-            .take_while(|byte| *byte == b'\\')
-            .count()
-            % 2
-            == 1;
-        if !escaped {
-            return &line[..at];
+/// Hashes inside balanced Make references and one-character references are
+/// data, as are hashes escaped by an odd backslash run. `None` also means the
+/// line has an unbalanced or over-deep reference, so callers must preserve it
+/// rather than discard any suffix based on an uncertain boundary.
+pub(crate) fn make_comment_start(bytes: &[u8]) -> Option<usize> {
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => {
+                let start = cursor;
+                while cursor < bytes.len() && bytes[cursor] == b'\\' {
+                    cursor += 1;
+                }
+                if bytes.get(cursor) == Some(&b'#') {
+                    if (cursor - start).is_multiple_of(2) {
+                        return Some(cursor);
+                    }
+                    cursor += 1;
+                }
+            }
+            b'$' => match bytes.get(cursor + 1) {
+                Some(b'(' | b'{') => {
+                    cursor = crate::make_expr::reference_end_bytes(bytes, cursor)? + 1;
+                }
+                Some(_) => cursor += 2,
+                None => cursor += 1,
+            },
+            b'#' => return Some(cursor),
+            _ => cursor += 1,
         }
     }
-    line
+    None
+}
+
+/// Removes a Make comment from one continuation-joined logical line.
+///
+/// A `#` starts a comment even when attached to the preceding word, except
+/// inside balanced variable/function references or a one-character reference.
+/// An odd run of backslashes escapes the marker.
+pub(crate) fn strip_make_comment(line: &str) -> &str {
+    make_comment_start(line.as_bytes()).map_or(line, |at| &line[..at])
 }
 
 /// Freezes local variable references in a simply-expanded (`:=`) assignment.
@@ -750,27 +836,81 @@ fn condition_pattern_matches(pattern: &str, word: &str) -> bool {
     word.len() >= prefix.len() + suffix.len() && word.starts_with(prefix) && word.ends_with(suffix)
 }
 
+const MAX_CONDITION_VALUE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CONDITION_WORK_BYTES: usize = 16 * 1024 * 1024;
+
+fn condition_append(output: &mut String, value: &str, budget: &mut usize) -> Option<()> {
+    if output.len().checked_add(value.len())? > MAX_CONDITION_VALUE_BYTES {
+        return None;
+    }
+    *budget = budget.checked_sub(value.len().checked_add(1)?)?;
+    output.push_str(value);
+    Some(())
+}
+
 fn expand_condition_function(
     body: &str,
     scope: &VarScope,
     context: &TargetContext,
     depth: usize,
     line: usize,
+    budget: &mut usize,
 ) -> Option<String> {
     let split = body.find(char::is_whitespace)?;
     let name = body[..split].trim();
-    let args = body[split..].trim();
+    let args = body[split..].trim_start();
     match name {
+        "word" => {
+            let (index, words) = split_top_level_comma(args)?;
+            let index = expand_condition_operand(index, scope, context, depth - 1, line, budget)?;
+            if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let index = index.parse::<usize>().ok()?.checked_sub(1)?;
+            let words = expand_condition_text(words, scope, context, depth - 1, line, budget)?;
+            Some(
+                words
+                    .split_whitespace()
+                    .nth(index)
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        }
+        "subst" => {
+            let (from, remaining) = split_top_level_comma(args)?;
+            let (to, text) = split_top_level_comma(remaining)?;
+            let from = expand_condition_text(from, scope, context, depth - 1, line, budget)?;
+            let to = expand_condition_text(to, scope, context, depth - 1, line, budget)?;
+            let text = expand_condition_text(text, scope, context, depth - 1, line, budget)?;
+            let replacements = if from.is_empty() {
+                1
+            } else {
+                text.matches(&from).count()
+            };
+            let bytes = text
+                .len()
+                .checked_sub(replacements.checked_mul(from.len())?)?
+                .checked_add(replacements.checked_mul(to.len())?)?;
+            if bytes > MAX_CONDITION_VALUE_BYTES {
+                return None;
+            }
+            Some(if from.is_empty() {
+                text + &to
+            } else {
+                text.replace(&from, &to)
+            })
+        }
         "strip" => Some(
-            expand_condition_operand(args, scope, context, depth - 1, line)?
+            expand_condition_operand(args, scope, context, depth - 1, line, budget)?
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" "),
         ),
         "findstring" => {
             let (needle, haystack) = split_top_level_comma(args)?;
-            let needle = expand_condition_operand(needle, scope, context, depth - 1, line)?;
-            let haystack = expand_condition_operand(haystack, scope, context, depth - 1, line)?;
+            let needle = expand_condition_operand(needle, scope, context, depth - 1, line, budget)?;
+            let haystack =
+                expand_condition_operand(haystack, scope, context, depth - 1, line, budget)?;
             Some(if haystack.contains(&needle) {
                 needle
             } else {
@@ -779,8 +919,14 @@ fn expand_condition_function(
         }
         "filter" | "filter-out" => {
             let (patterns, words) = split_top_level_comma(args)?;
-            let patterns = expand_condition_operand(patterns, scope, context, depth - 1, line)?;
-            let words = expand_condition_operand(words, scope, context, depth - 1, line)?;
+            let patterns =
+                expand_condition_operand(patterns, scope, context, depth - 1, line, budget)?;
+            let words = expand_condition_operand(words, scope, context, depth - 1, line, budget)?;
+            *budget = budget.checked_sub(
+                patterns
+                    .len()
+                    .checked_mul(words.split_whitespace().count())?,
+            )?;
             let keep_matches = name == "filter";
             Some(
                 words
@@ -805,25 +951,29 @@ fn expand_condition_reference(
     context: &TargetContext,
     depth: usize,
     line: usize,
+    budget: &mut usize,
 ) -> Option<String> {
-    let body = body.trim();
-    if !body.is_empty()
-        && body.chars().all(|character| {
+    let reference = body.trim();
+    if !reference.is_empty()
+        && reference.chars().all(|character| {
             character.is_ascii_alphanumeric() || character == '_' || character == '-'
         })
     {
-        if scope.path_is_conditional_at(body, line) {
+        if scope.path_is_conditional_at(reference, line) {
             return None;
         }
-        if let Some(value) = scope.raw_at(body, line) {
-            return expand_condition_operand(&value, scope, context, depth - 1, line);
+        if let Some(value) = scope.raw_at_ref(reference, line) {
+            return expand_condition_text(value, scope, context, depth - 1, line, budget);
         }
-        if let Some(value) = context.value(body) {
-            return Some(value);
+        if let Some(value) = context
+            .value_bounded(reference, MAX_CONDITION_VALUE_BYTES.min(*budget))
+            .ok()?
+        {
+            return expand_condition_text(&value, scope, context, depth - 1, line, budget);
         }
-        return scope.local_names.contains(body).then(String::new);
+        return scope.local_names.contains(reference).then(String::new);
     }
-    expand_condition_function(body, scope, context, depth, line)
+    expand_condition_function(body.trim_start(), scope, context, depth, line, budget)
 }
 
 fn expand_condition_operand(
@@ -832,22 +982,36 @@ fn expand_condition_operand(
     context: &TargetContext,
     depth: usize,
     line: usize,
+    budget: &mut usize,
 ) -> Option<String> {
-    if depth == 0 {
+    expand_condition_text(raw, scope, context, depth, line, budget)
+        .map(|value| value.trim().to_owned())
+}
+
+fn expand_condition_text(
+    raw: &str,
+    scope: &VarScope,
+    context: &TargetContext,
+    depth: usize,
+    line: usize,
+    budget: &mut usize,
+) -> Option<String> {
+    if depth == 0 || raw.len() > MAX_CONDITION_VALUE_BYTES {
         return None;
     }
+    *budget = budget.checked_sub(raw.len().checked_add(1)?)?;
     let mut output = String::with_capacity(raw.len());
     let mut cursor = 0usize;
     while cursor < raw.len() {
         let Some(relative) = raw[cursor..].find('$') else {
-            output.push_str(&raw[cursor..]);
+            condition_append(&mut output, &raw[cursor..], budget)?;
             break;
         };
         let dollar = cursor + relative;
-        output.push_str(&raw[cursor..dollar]);
+        condition_append(&mut output, &raw[cursor..dollar], budget)?;
         let next = *raw.as_bytes().get(dollar + 1)?;
         if next == b'$' {
-            output.push('$');
+            condition_append(&mut output, "$", budget)?;
             cursor = dollar + 2;
             continue;
         }
@@ -876,16 +1040,18 @@ fn expand_condition_operand(
         if end == raw.len() {
             return None;
         }
-        output.push_str(&expand_condition_reference(
+        let expanded = expand_condition_reference(
             &raw[dollar + 2..end],
             scope,
             context,
             depth - 1,
             line,
-        )?);
+            budget,
+        )?;
+        condition_append(&mut output, &expanded, budget)?;
         cursor = end + 1;
     }
-    Some(output.trim().to_owned())
+    Some(output)
 }
 
 pub(crate) fn evaluate_conditional(
@@ -895,6 +1061,7 @@ pub(crate) fn evaluate_conditional(
     context: &TargetContext,
     line: usize,
 ) -> ConditionalTruth {
+    let mut budget = MAX_CONDITION_WORK_BYTES;
     let value = match directive {
         "ifeq" | "ifneq" => equality_operands(args).and_then(|(left, right)| {
             Some(
@@ -904,12 +1071,14 @@ pub(crate) fn evaluate_conditional(
                     context,
                     MAX_DEPTH_FOR_IMMEDIATE_EXPANSION,
                     line,
+                    &mut budget,
                 )? == expand_condition_operand(
                     right,
                     scope,
                     context,
                     MAX_DEPTH_FOR_IMMEDIATE_EXPANSION,
                     line,
+                    &mut budget,
                 )?,
             )
         }),
@@ -920,8 +1089,10 @@ pub(crate) fn evaluate_conditional(
             if scope.path_is_conditional_at(name, line) {
                 return ConditionalTruth::Unknown;
             }
-            let value = scope.raw_at(name, line).or_else(|| context.value(name));
-            value.map(|value| !value.is_empty())
+            scope
+                .raw_at_ref(name, line)
+                .map(|value| !value.is_empty())
+                .or_else(|| context.value_nonempty(name))
         }
         _ => None,
     };
@@ -976,7 +1147,7 @@ struct DefineScan {
     headers: Vec<Option<DefineBinding>>,
 }
 
-fn make_define_directive(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn make_define_directive(line: &str) -> Option<(&str, &str)> {
     let line = strip_make_comment(line.trim_start()).trim_start();
     let mut words = line.splitn(2, char::is_whitespace);
     let mut word = words.next().unwrap_or_default();
@@ -1048,6 +1219,12 @@ fn scan_define_bodies(lines: &[&str]) -> DefineScan {
     }
 }
 
+/// Reuse the ordinary Make scanner's inert define-body boundary in consumers
+/// which project original expanded target-specific assignments.
+pub(crate) fn make_define_suppression(joined: &str) -> Vec<bool> {
+    scan_define_bodies(&joined.lines().collect::<Vec<_>>()).suppressed
+}
+
 /// A top-level `$(error ...)` call: GNU Make stops reading the makefile when
 /// it expands one.
 pub(crate) fn is_make_error_directive(line: &str) -> bool {
@@ -1060,6 +1237,83 @@ pub(crate) fn collect_vars_impl_with_forward_locals(
     joined: &str,
     context: Option<&TargetContext>,
     forward_locals: bool,
+) -> (VarScope, Vec<ConditionalTruth>) {
+    collect_vars_impl_projected(joined, context, forward_locals, None)
+}
+
+/// Opt-in exact expansion of active simply-expanded assignments.
+///
+/// The supplied evaluator sees the partial scope at the original source position, with no
+/// future assignments. Returned strings are literal values, not Make syntax.
+/// Existing collectors retain their original behavior through the default path.
+///
+/// # Errors
+/// Returns the evaluator's first error without exposing the partial scope.
+pub fn collect_vars_with_immediate_evaluator(
+    joined: &str,
+    context: &TargetContext,
+    evaluate: &impl Fn(&str, &VarScope, usize) -> Result<String, String>,
+) -> Result<(VarScope, Vec<Option<bool>>), String> {
+    let failure = std::cell::RefCell::new(None);
+    let project = |raw: &str, scope: &VarScope, line: usize| {
+        if failure.borrow().is_some() {
+            return String::new();
+        }
+        match evaluate(raw, scope, line) {
+            Ok(value) => value.replace('$', "$$"),
+            Err(error) => {
+                *failure.borrow_mut() = Some(error);
+                String::new()
+            }
+        }
+    };
+    let result = collect_vars_impl_projected(joined, Some(context), false, Some(&project));
+    match failure.into_inner() {
+        Some(error) => Err(error),
+        None => Ok((
+            result.0,
+            result
+                .1
+                .into_iter()
+                .map(|state| match state {
+                    ConditionalTruth::True => Some(true),
+                    ConditionalTruth::False => Some(false),
+                    ConditionalTruth::Unknown => None,
+                })
+                .collect(),
+        )),
+    }
+}
+
+type ImmediateProjection<'a> = dyn Fn(&str, &VarScope, usize) -> String + 'a;
+
+#[derive(Clone, Copy)]
+struct AssignmentInput<'a> {
+    /// The transactional driver can prove a skipped default assignment even
+    /// in an unknown branch. Legacy collection retains its conservative guard.
+    prove_default_noop: bool,
+    line: &'a str,
+    line_no: usize,
+    branch_state: ConditionalTruth,
+    selected: bool,
+    path_names: &'a HashSet<String>,
+    preserve_whitespace: bool,
+    flavor: Option<VariableFlavor>,
+    append_base: Option<&'a str>,
+    /// A streaming define body is already delimited and must retain leading
+    /// whitespace/newlines rather than being reparsed as assignment syntax.
+    raw_value: Option<&'a str>,
+}
+
+#[cfg(test)]
+#[path = "make_immediate_evaluator_tests.rs"]
+mod immediate_evaluator_tests;
+
+fn collect_vars_impl_projected(
+    joined: &str,
+    context: Option<&TargetContext>,
+    forward_locals: bool,
+    project: Option<&ImmediateProjection<'_>>,
 ) -> (VarScope, Vec<ConditionalTruth>) {
     let mut scope = VarScope {
         configuration: initial_make_configuration(context),
@@ -1223,195 +1477,264 @@ pub(crate) fn collect_vars_impl_with_forward_locals(
             continue;
         }
 
-        // Make has five assignment spellings here and the tree uses them.
-        // Reading only `:=` lost every list written with `=` or `?=`:
-        // rom/hidds/pci/pcitool declares `FILES = main pciids support locale`
-        // that way, while the icon sets append to two lists with `+=`.
-        let assignment = variable_assignment(line);
-        let undefine = undefine_directive(line).ok().flatten();
-        let (var_name, value, kind) = if let Some((name, value, kind)) = assignment {
-            (name, value, kind)
-        } else if let Some(name) = undefine {
-            (name, "", AssignmentKind::Undefine)
-        } else {
-            continue;
-        };
-        scope.local_names.insert(var_name.to_owned());
+        apply_assignment(
+            &mut scope,
+            &mut flavors,
+            AssignmentInput {
+                prove_default_noop: false,
+                line,
+                line_no,
+                branch_state,
+                selected: context.is_none() || branch_state == ConditionalTruth::True,
+                path_names: &path_names,
+                preserve_whitespace: false,
+                flavor: None,
+                append_base: None,
+                raw_value: None,
+            },
+            project,
+        );
+    }
 
-        if branch_state == ConditionalTruth::Unknown {
+    (scope, line_states)
+}
+
+fn apply_assignment(
+    scope: &mut VarScope,
+    flavors: &mut HashMap<String, VariableFlavor>,
+    input: AssignmentInput<'_>,
+    project: Option<&ImmediateProjection<'_>>,
+) {
+    // Make has five assignment spellings here and the tree uses them.
+    // Reading only `:=` lost every list written with `=` or `?=`:
+    // rom/hidds/pci/pcitool declares `FILES = main pciids support locale`
+    // that way, while the icon sets append to two lists with `+=`.
+    let assignment = variable_assignment_impl(input.line, input.preserve_whitespace);
+    let undefine = undefine_directive(input.line).ok().flatten();
+    let (var_name, value, kind) = if let Some((name, value, kind)) = assignment {
+        (name, value, kind)
+    } else if let Some(name) = undefine {
+        (name, "", AssignmentKind::Undefine)
+    } else {
+        return;
+    };
+    let value = input.raw_value.unwrap_or(value);
+    scope.local_names.insert(var_name.to_owned());
+
+    // A default assignment cannot alter an already proved definition, even
+    // when its surrounding branch is unknown. Do not invent uncertainty for
+    // that no-op. Earlier unresolved writes still require the normal guard.
+    if input.prove_default_noop
+        && kind == AssignmentKind::SetIfUnset
+        && scope.is_defined_before(var_name, input.line_no)
+        && !scope.conditionally_assigned_before(var_name, input.line_no)
+    {
+        return;
+    }
+
+    if input.branch_state == ConditionalTruth::Unknown {
+        scope
+            .conditional_assignments
+            .entry(var_name.to_owned())
+            .or_default()
+            .push((input.line_no, kind));
+    }
+    if !input.selected {
+        return;
+    }
+
+    if kind == AssignmentKind::SetIfUnset && scope.is_defined_before(var_name, input.line_no) {
+        return;
+    }
+
+    if kind == AssignmentKind::Undefine {
+        scope
+            .undefinitions
+            .entry(var_name.to_owned())
+            .or_default()
+            .push(input.line_no);
+    }
+
+    if input.branch_state == ConditionalTruth::True
+        && matches!(
+            kind,
+            AssignmentKind::SimpleSet | AssignmentKind::RecursiveSet | AssignmentKind::Undefine
+        )
+    {
+        scope
+            .path_replacements
+            .entry(var_name.to_owned())
+            .or_default()
+            .push(input.line_no);
+    }
+
+    let flavor = input.flavor.unwrap_or_else(|| match kind {
+        AssignmentKind::SimpleSet => VariableFlavor::Simple,
+        AssignmentKind::RecursiveSet | AssignmentKind::SetIfUnset | AssignmentKind::Undefine => {
+            VariableFlavor::Recursive
+        }
+        AssignmentKind::Append => flavors.get(var_name).copied().unwrap_or_else(|| {
+            if scope.configuration.contains_key(var_name) {
+                VariableFlavor::Unknown
+            } else {
+                VariableFlavor::Recursive
+            }
+        }),
+    });
+    let flavor_uncertainty = if kind == AssignmentKind::Append
+        && flavor == VariableFlavor::Unknown
+        && value.contains('$')
+    {
+        Some(format!(
+            "{var_name} appends Make references to a configuration value whose recursive/simple flavor is unknown"
+        ))
+    } else if matches!(kind, AssignmentKind::SimpleSet | AssignmentKind::Append)
+        && flavor == VariableFlavor::Simple
+    {
+        scoped_variable_references(value)
+            .into_iter()
+            .find_map(|dependency| {
+                scope
+                    .flavor_uncertainty_reason_at(&dependency, input.line_no)
+                    .map(|reason| {
+                        format!(
+                            "{var_name} freezes a value from {dependency} with uncertain Make flavor: {reason}"
+                        )
+                    })
+            })
+    } else {
+        None
+    };
+    match kind {
+        AssignmentKind::SimpleSet
+        | AssignmentKind::RecursiveSet
+        | AssignmentKind::Undefine
+        | AssignmentKind::SetIfUnset => {
             scope
-                .conditional_assignments
+                .flavor_uncertainties
                 .entry(var_name.to_owned())
                 .or_default()
-                .push((line_no, kind));
+                .push((input.line_no, flavor_uncertainty));
         }
-        if context.is_some() && branch_state != ConditionalTruth::True {
-            continue;
-        }
-
-        if kind == AssignmentKind::SetIfUnset && scope.is_defined_before(var_name, line_no) {
-            continue;
-        }
-
-        if kind == AssignmentKind::Undefine {
-            scope
-                .undefinitions
-                .entry(var_name.to_owned())
-                .or_default()
-                .push(line_no);
-        }
-
-        if branch_state == ConditionalTruth::True
-            && matches!(
-                kind,
-                AssignmentKind::SimpleSet | AssignmentKind::RecursiveSet | AssignmentKind::Undefine
-            )
-        {
-            scope
-                .path_replacements
-                .entry(var_name.to_owned())
-                .or_default()
-                .push(line_no);
-        }
-
-        let flavor = match kind {
-            AssignmentKind::SimpleSet => VariableFlavor::Simple,
-            AssignmentKind::RecursiveSet
-            | AssignmentKind::SetIfUnset
-            | AssignmentKind::Undefine => VariableFlavor::Recursive,
-            AssignmentKind::Append => flavors.get(var_name).copied().unwrap_or_else(|| {
-                if scope.configuration.contains_key(var_name) {
-                    VariableFlavor::Unknown
-                } else {
-                    VariableFlavor::Recursive
-                }
-            }),
-        };
-        let flavor_uncertainty = if kind == AssignmentKind::Append
-            && flavor == VariableFlavor::Unknown
-            && value.contains('$')
-        {
-            Some(format!(
-                "{var_name} appends Make references to a configuration value whose recursive/simple flavor is unknown"
-            ))
-        } else if matches!(kind, AssignmentKind::SimpleSet | AssignmentKind::Append)
-            && flavor == VariableFlavor::Simple
-        {
-            scoped_variable_references(value)
-                .into_iter()
-                .find_map(|dependency| {
-                    scope
-                        .flavor_uncertainty_reason_at(&dependency, line_no)
-                        .map(|reason| {
-                            format!(
-                                "{var_name} freezes a value from {dependency} with uncertain Make flavor: {reason}"
-                            )
-                        })
-                })
-        } else {
-            None
-        };
-        match kind {
-            AssignmentKind::SimpleSet
-            | AssignmentKind::RecursiveSet
-            | AssignmentKind::Undefine
-            | AssignmentKind::SetIfUnset => {
+        AssignmentKind::Append => {
+            if let Some(reason) = flavor_uncertainty {
                 scope
                     .flavor_uncertainties
                     .entry(var_name.to_owned())
                     .or_default()
-                    .push((line_no, flavor_uncertainty));
-            }
-            AssignmentKind::Append => {
-                if let Some(reason) = flavor_uncertainty {
-                    scope
-                        .flavor_uncertainties
-                        .entry(var_name.to_owned())
-                        .or_default()
-                        .push((line_no, Some(reason)));
-                }
+                    .push((input.line_no, Some(reason)));
             }
         }
-        if flavor == VariableFlavor::Simple
-            && scalar_references(value).any(|name| {
-                scope.path_depends_on_conditional_at(
-                    name,
-                    line_no,
-                    MAX_DEPTH_FOR_IMMEDIATE_EXPANSION,
-                    &mut Vec::new(),
-                )
-            })
-        {
-            scope
-                .uncertain_path_values
-                .entry(var_name.to_owned())
-                .or_default()
-                .push(line_no);
-        }
-        let path_rhs = if flavor == VariableFlavor::Simple {
-            expand_immediate_locals_impl(
-                value,
-                &scope,
-                MAX_DEPTH_FOR_IMMEDIATE_EXPANSION,
-                Some(&path_names),
-            )
-        } else {
-            value.to_owned()
-        };
-        let path_value = if kind == AssignmentKind::Append {
-            let previous = scope
-                .path_raw
-                .get(var_name)
-                .and_then(|history| history.last())
-                .map(|(_, value)| value.as_str())
-                .or_else(|| scope.configuration.get(var_name).map(String::as_str))
-                .unwrap_or("");
-            format!("{previous} {path_rhs}").trim().to_owned()
-        } else {
-            path_rhs
-        };
-        scope
-            .path_raw
-            .entry(var_name.to_owned())
-            .or_default()
-            .push((line_no, path_value));
-        let expanded_rhs = if flavor == VariableFlavor::Simple {
-            expand_immediate_locals(value, &scope, MAX_DEPTH_FOR_IMMEDIATE_EXPANSION)
-        } else {
-            value.to_owned()
-        };
-        let expanded = if kind == AssignmentKind::Append {
-            match scope.latest_raw(var_name) {
-                Some(old) if !old.is_empty() && !expanded_rhs.is_empty() => {
-                    format!("{old} {expanded_rhs}")
-                }
-                Some(old) if !old.is_empty() => old.to_owned(),
-                _ => expanded_rhs,
-            }
-        } else {
-            expanded_rhs
-        };
-
-        let values: Vec<String> = expanded
-            .split_whitespace()
-            .filter(|s| *s != "\\")
-            .map(|s| s.replace(['"', '\\'], "").trim().to_owned())
-            .filter(|s| keep_list_item(s))
-            .collect();
-        scope
-            .raw
-            .entry(var_name.to_owned())
-            .or_default()
-            .push((line_no, expanded.trim().to_owned()));
-        scope
-            .assignments
-            .entry(var_name.to_owned())
-            .or_default()
-            .push((line_no, values));
-        flavors.insert(var_name.to_owned(), flavor);
     }
+    if flavor == VariableFlavor::Simple
+        && scalar_references(value).any(|name| {
+            scope.path_depends_on_conditional_at(
+                name,
+                input.line_no,
+                MAX_DEPTH_FOR_IMMEDIATE_EXPANSION,
+                &mut Vec::new(),
+            )
+        })
+    {
+        scope
+            .uncertain_path_values
+            .entry(var_name.to_owned())
+            .or_default()
+            .push(input.line_no);
+    }
+    let projected =
+        if flavor == VariableFlavor::Simple && input.branch_state == ConditionalTruth::True {
+            project.map(|project| project(value, scope, input.line_no))
+        } else {
+            None
+        };
+    let path_rhs = projected.as_ref().map_or_else(
+        || {
+            if flavor == VariableFlavor::Simple {
+                expand_immediate_locals_impl(
+                    value,
+                    scope,
+                    MAX_DEPTH_FOR_IMMEDIATE_EXPANSION,
+                    Some(input.path_names),
+                )
+            } else {
+                value.to_owned()
+            }
+        },
+        Clone::clone,
+    );
+    let path_value = if kind == AssignmentKind::Append {
+        let previous = input
+            .append_base
+            .or_else(|| {
+                scope
+                    .path_raw
+                    .get(var_name)
+                    .and_then(|history| history.last())
+                    .map(|(_, value)| value.as_str())
+                    .or_else(|| scope.configuration.get(var_name).map(String::as_str))
+            })
+            .unwrap_or("");
+        if input.preserve_whitespace {
+            append_words_value(previous, &path_rhs)
+        } else {
+            format!("{previous} {path_rhs}").trim().to_owned()
+        }
+    } else {
+        path_rhs
+    };
+    scope
+        .path_raw
+        .entry(var_name.to_owned())
+        .or_default()
+        .push((input.line_no, path_value));
+    let expanded_rhs = projected.unwrap_or_else(|| {
+        if flavor == VariableFlavor::Simple {
+            expand_immediate_locals(value, scope, MAX_DEPTH_FOR_IMMEDIATE_EXPANSION)
+        } else {
+            value.to_owned()
+        }
+    });
+    let expanded = if kind == AssignmentKind::Append {
+        match input.append_base.or_else(|| scope.latest_raw(var_name)) {
+            Some(old) if !old.is_empty() && !expanded_rhs.is_empty() => {
+                format!("{old} {expanded_rhs}")
+            }
+            Some(old) if !old.is_empty() => old.to_owned(),
+            _ => expanded_rhs,
+        }
+    } else {
+        expanded_rhs
+    };
 
-    (scope, line_states)
+    let values: Vec<String> = expanded
+        .split_whitespace()
+        .filter(|s| *s != "\\")
+        .map(|s| s.replace(['"', '\\'], "").trim().to_owned())
+        .filter(|s| keep_list_item(s))
+        .collect();
+    scope.raw.entry(var_name.to_owned()).or_default().push((
+        input.line_no,
+        if input.preserve_whitespace {
+            expanded
+        } else {
+            expanded.trim().to_owned()
+        },
+    ));
+    scope
+        .assignments
+        .entry(var_name.to_owned())
+        .or_default()
+        .push((input.line_no, values));
+    flavors.insert(var_name.to_owned(), flavor);
+}
+
+fn append_words_value(previous: &str, rhs: &str) -> String {
+    match (previous.is_empty(), rhs.is_empty()) {
+        (false, false) => format!("{previous} {rhs}"),
+        (false, true) => previous.to_owned(),
+        _ => rhs.to_owned(),
+    }
 }
 
 /// Returns the bounded variable names nested in Make references. Function and
@@ -1541,3 +1864,53 @@ pub(crate) fn keep_list_item(s: &str) -> bool {
 
 #[cfg(test)]
 mod configuration_tests;
+
+#[cfg(test)]
+mod make_comment_tests {
+    use super::strip_make_comment;
+
+    #[test]
+    fn comments_respect_nested_references_one_character_refs_and_dollars() {
+        assert_eq!(
+            strip_make_comment("VALUE := $(subst #,X,a#b) # trailing"),
+            "VALUE := $(subst #,X,a#b) "
+        );
+        assert_eq!(
+            strip_make_comment("$(info RESULT=$(subst #,X,a#b)) # trailing"),
+            "$(info RESULT=$(subst #,X,a#b)) "
+        );
+        assert_eq!(
+            strip_make_comment("VALUE := $#tail # trailing"),
+            "VALUE := $#tail "
+        );
+        assert_eq!(strip_make_comment("VALUE := $$# trailing"), "VALUE := $$");
+        assert_eq!(
+            strip_make_comment("VALUE := escaped\\#data # trailing"),
+            "VALUE := escaped\\#data "
+        );
+    }
+
+    #[test]
+    fn ambiguous_unbalanced_or_overdeep_references_do_not_strip_suffixes() {
+        assert_eq!(
+            strip_make_comment("VALUE := $(open # retained"),
+            "VALUE := $(open # retained"
+        );
+        let nested = format!("$({}# retained{})", "$((".repeat(32), ")".repeat(32));
+        // The helper is conservative when nesting exceeds the evaluator bound.
+        assert_eq!(strip_make_comment(&nested), nested);
+    }
+
+    #[test]
+    fn delimiter_walk_keeps_gnu_closing_rules_after_single_dollar() {
+        // Fixed GNU probes reject both forms as a one-argument `subst`.
+        // A one-character `$)`/`$}` does not hide a closing delimiter while
+        // GNU is locating the end of the surrounding function's arguments.
+        for input in [
+            b"$(subst $),X,aa)".as_slice(),
+            b"${subst $},X,aa}".as_slice(),
+        ] {
+            assert_eq!(crate::make_expr::reference_end_bytes(input, 0), Some(9));
+        }
+    }
+}

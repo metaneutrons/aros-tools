@@ -61,6 +61,47 @@ fn evaluate_without_filesystem(src: &str, expression: &str) -> Result<String, Ma
 }
 
 #[test]
+fn literal_dollar_paths_survive_shell_globs_and_projected_abspath() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = root.join("source$literal");
+    let build = root.join("build$literal");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&build).unwrap();
+    fs::write(source.join("$name.c"), "fixture\n").unwrap();
+    let scope = collect_vars("");
+    let dirs = DirVars::default();
+    let context = MakeExprContext::new(&scope, &dirs, 0, &source, Path::new(""))
+        .with_working_directory(&source)
+        .with_build_directory(&build);
+    assert_eq!(
+        evaluate_make_expr("$(abspath ${AROS_SOURCE_DIR}/leaf)", &context).unwrap(),
+        format!("{}/leaf", source.display())
+    );
+    assert_eq!(
+        evaluate_make_expr("$(abspath ${AROS_BUILD_DIR}/leaf)", &context).unwrap(),
+        format!("{}/leaf", build.display())
+    );
+    assert_eq!(
+        evaluate_make_expr("$(wildcard ${AROS_SOURCE_DIR}/*.c)", &context).unwrap(),
+        "${AROS_SOURCE_DIR}/$name.c"
+    );
+    let shell = |_command: &str| Ok("$name.c".to_owned());
+    let native = context
+        .without_source_projection()
+        .with_pure_text_pipeline()
+        .with_captured_shell(&shell);
+    assert_eq!(
+        evaluate_make_expr("$(wildcard $(shell selected))", &native).unwrap(),
+        "$name.c"
+    );
+    assert_eq!(
+        evaluate_make_expr("$(abspath $(shell selected))", &native).unwrap(),
+        format!("{}/$name.c", source.display())
+    );
+}
+
+#[test]
 fn filesystem_disabled_context_evaluates_nested_pure_functions() {
     assert_eq!(
         evaluate_without_filesystem(
@@ -144,6 +185,146 @@ fn subst_handles_archive_version_spellings() {
         ),
         Ok("2143 2_14_3".to_owned())
     );
+}
+
+#[test]
+fn fixed_arity_functions_preserve_excess_commas_in_the_final_argument() {
+    assert_eq!(
+        evaluate("", "$(strip -Wl,-Map -Xlinker)"),
+        Ok("-Wl,-Map -Xlinker".to_owned())
+    );
+    assert_eq!(
+        evaluate("", "$(subst a,x,cat,dog)"),
+        Ok("cxt,dog".to_owned())
+    );
+    assert_eq!(evaluate("", "$(findstring b,a,b,c)"), Ok("b".to_owned()));
+    assert_eq!(
+        evaluate("", "$(if ,left,right,tail)"),
+        Ok("right,tail".to_owned())
+    );
+    assert_eq!(
+        evaluate("", "$(if ,left,right,tail,extra)"),
+        Ok("right,tail,extra".to_owned())
+    );
+}
+
+#[test]
+fn final_argument_commas_and_nested_expansion_commas_are_partitioned_once() {
+    assert_eq!(
+        evaluate("", "$(subst a,$(if yes,x,y),z,a)"),
+        Ok("z,x".to_owned())
+    );
+    assert_eq!(
+        evaluate("", "$(if ,yes,$(subst a,x,a,b),tail)"),
+        Ok("x,b,tail".to_owned())
+    );
+}
+
+#[test]
+fn variadic_make_functions_remain_unbounded() {
+    assert_eq!(evaluate("", "$(or ,,third,fourth)"), Ok("third".to_owned()));
+    assert_eq!(
+        evaluate("", "$(and yes,yes,third,fourth)"),
+        Ok("fourth".to_owned())
+    );
+    assert_eq!(
+        evaluate(
+            "mapper = $(1)|$(2)|$(3)|$(4)\n",
+            "$(call mapper,one,two,three,four)",
+        ),
+        Ok("one|two|three|four".to_owned())
+    );
+}
+
+#[test]
+fn fixed_arity_refusals_happen_before_expanding_and_keep_minimum_counts() {
+    for expression in [
+        "$(subst $(MISSING),replacement)",
+        "$(findstring needle)",
+        "$(if condition)",
+        "$(foreach item,list)",
+        "$(addprefix prefix)",
+    ] {
+        let error = evaluate("", expression).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                MakeExprError::InvalidSyntax { detail, .. } if detail.contains("expects")
+            ),
+            "{expression}: {error}"
+        );
+    }
+}
+
+#[test]
+fn fixed_arity_commas_match_controlled_native_gnu_make() {
+    let executable = if cfg!(target_os = "macos") {
+        "gmake"
+    } else {
+        "make"
+    };
+    let tree = TempTree::new();
+    let expressions = [
+        "$(strip -Wl,-Map -Xlinker)",
+        "$(strip foo(bar,baz))",
+        "$(subst (a,b),X,(a,b))",
+        "$(addprefix pre,a,b)",
+        "$(subst a,x,cat,dog)",
+        "$(findstring b,a,b,c)",
+        "$(if ,left,right,tail)",
+        "$(if ,yes,$(subst a,x,a,b),tail)",
+        "$(or ,,third,fourth)",
+        "$(and yes,yes,third,fourth)",
+    ];
+    let mut source = String::new();
+    let mut expected = Vec::new();
+    for (index, expression) in expressions.iter().enumerate() {
+        writeln!(source, "$(info RESULT_{index}={expression})").unwrap();
+        expected.push(format!(
+            "RESULT_{index}={}",
+            evaluate("", expression).unwrap()
+        ));
+    }
+    source.push_str(".PHONY: probe\nprobe:\n");
+    let selected = tree.0.join("commas.mk");
+    fs::write(&selected, source).unwrap();
+    let query = |file: &Path| {
+        Command::new(executable)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap())
+            .env("LC_ALL", "C")
+            .current_dir(&tree.0)
+            .args(["-r", "-n", "-s", "--no-print-directory", "-f"])
+            .arg(file)
+            .arg("-o")
+            .arg(file)
+            .arg("probe")
+            .output()
+            .unwrap()
+    };
+    let output = query(&selected);
+    assert!(
+        output.status.success(),
+        "fixed synthetic GNU function query failed"
+    );
+    assert_eq!(
+        std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let counter = tree.0.join("too-few.mk");
+    fs::write(
+        &counter,
+        "VALUE := $(subst needle,replacement)\n.PHONY: probe\nprobe:\n",
+    )
+    .unwrap();
+    let refusal = query(&counter);
+    assert!(!refusal.status.success());
+    assert!(std::str::from_utf8(&refusal.stderr)
+        .unwrap()
+        .contains("insufficient number of arguments"));
 }
 
 #[test]
@@ -613,6 +794,9 @@ fn pure_function_corpus_is_differentially_checked_against_gnu_make() {
 
     let source = "LIST := gamma alpha beta alpha\n\
                   OTHER := 1 2\n\
+                  1 := globalone\n\
+                  2 := globaltwo\n\
+                  nested = $(call mapper,inner)\n\
                   mapper = $(addsuffix -$(1),$(2))\n";
     let expressions = [
         "$(sort $(LIST))",
@@ -625,6 +809,12 @@ fn pure_function_corpus_is_differentially_checked_against_gnu_make() {
         "$(or ,,$(firstword $(LIST)))",
         "$(and one,two,$(lastword $(LIST)))",
         "$(call mapper,tag,a b)",
+        "$(call mapper ignored,tag,a b)",
+        "$(call $(strip mapper ignored),tag,a b)",
+        "$(call mapper\tignored,tag,a b)",
+        "$(call mapper ignored)",
+        "$(call )",
+        "$(call nested,left,a b)",
         "$(foreach item,a b,prefix-$(item))",
         "<$(foreach i,a b,left  right)>",
         "<$(foreach i,a b,  x )>",

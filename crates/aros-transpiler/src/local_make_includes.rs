@@ -101,7 +101,7 @@ pub enum LocalMakeIncludeIssueKind {
     Missing,
     /// The resolved path leaves the source tree, including through a symlink.
     OutsideSourceTree,
-    /// The fragment could not be read as UTF-8 text.
+    /// The fragment could not be read.
     Read,
     /// The include graph contains a recursion cycle.
     Cycle,
@@ -800,15 +800,10 @@ fn expand_one_fragment(
         )]);
     }
     state.bytes_read = total_bytes;
-    let Ok(body) = String::from_utf8(bytes) else {
-        return Err(vec![issue(
-            included_from,
-            include_line,
-            LocalMakeIncludeIssueKind::Read,
-            include.path,
-            "the local fragment is not valid UTF-8 text",
-        )]);
-    };
+    // Use the same exact legacy decoding as the declaring Source reader.
+    // Seals and resource limits above are checked against original bytes,
+    // not a decoded/re-encoded surrogate. Syntax/path guards below still apply.
+    let body = aros_common::decode_source_bytes(bytes);
     let relative = path
         .strip_prefix(&state.root)
         .unwrap_or(&path)

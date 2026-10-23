@@ -6,6 +6,139 @@ use crate::make_expr::{evaluate_make_expr, MakeExprContext};
 use std::path::Path;
 
 #[test]
+fn conditional_expansion_has_shared_work_and_intermediate_size_limits() {
+    let context = TargetContext::default();
+    let scope = collect_vars_with_context("A :=\n", &context);
+    let repeated = "$(A)".repeat(64);
+    let mut enough = 4096;
+    assert_eq!(
+        expand_condition_text(&repeated, &scope, &context, 16, usize::MAX, &mut enough),
+        Some(String::new())
+    );
+    let mut constrained = 400;
+    assert!(expand_condition_text(
+        &repeated,
+        &scope,
+        &context,
+        16,
+        usize::MAX,
+        &mut constrained
+    )
+    .is_none());
+    assert!(
+        constrained < 20,
+        "must consume the shared budget, not reject by depth"
+    );
+    let fallback = TargetContext {
+        cpu: Some("arm".into()),
+        platform: Some("raspi".into()),
+        variant: Some(String::new()),
+        make_variables: [("BIG".into(), "x".repeat(1024))].into(),
+        ..TargetContext::default()
+    };
+    assert_eq!(
+        fallback.value_bounded("CPU", 3).unwrap().as_deref(),
+        Some("arm")
+    );
+    assert!(fallback.value_bounded("CPU", 2).is_err());
+    assert_eq!(
+        fallback
+            .value_bounded("AROS_TARGET_PLATFORM", 9)
+            .unwrap()
+            .as_deref(),
+        Some("raspi-arm")
+    );
+    assert!(fallback.value_bounded("AROS_TARGET_PLATFORM", 8).is_err());
+    let empty_scope = collect_vars_with_context("# BIG := unavailable\n", &context);
+    let mut budget = 64;
+    assert!(expand_condition_text(
+        "$(BIG)",
+        &empty_scope,
+        &fallback,
+        16,
+        usize::MAX,
+        &mut budget
+    )
+    .is_none());
+    let borrowed_scope =
+        collect_vars_with_context(&format!("BIG := {}\n", "x".repeat(1024)), &context);
+    let mut budget = 64;
+    assert!(expand_condition_text(
+        "$(BIG)",
+        &borrowed_scope,
+        &context,
+        16,
+        usize::MAX,
+        &mut budget
+    )
+    .is_none());
+    let input = "a".repeat(20_000);
+    let excessive = format!("subst a,{},{}", "X".repeat(256), input);
+    let mut budget = MAX_CONDITION_WORK_BYTES;
+    assert!(
+        expand_condition_function(&excessive, &scope, &context, 16, usize::MAX, &mut budget)
+            .is_none()
+    );
+    let mut budget = MAX_CONDITION_WORK_BYTES;
+    assert_eq!(
+        expand_condition_function(
+            &format!("subst a,X,{input}"),
+            &scope,
+            &context,
+            16,
+            usize::MAX,
+            &mut budget
+        ),
+        Some("X".repeat(20_000))
+    );
+}
+
+#[test]
+fn pure_version_word_and_substitution_conditions_preserve_make_semantics() {
+    let context = TargetContext::default();
+    let scope = collect_vars_with_context("", &context);
+    for (expression, expected) in [
+        ("$(word 2,$(subst ., ,26.1.0))", "1"),
+        ("$(word 4,a b)", ""),
+        ("$(subst ,X,abc)", "abcX"),
+        ("$(subst ., ,a.b)", "a b"),
+    ] {
+        assert_eq!(
+            evaluate_conditional(
+                "ifeq",
+                &format!("({expression},{expected})"),
+                &scope,
+                &context,
+                0
+            ),
+            ConditionalTruth::True,
+            "{expression}"
+        );
+    }
+    for expression in [
+        "$(word 0,a)",
+        "$(word nope,a)",
+        "$(word 999999999999999999999999,a)",
+        "$(word 1)",
+        "$(subst a,b)",
+        "$(word 1,$(shell echo forbidden))",
+    ] {
+        assert_eq!(
+            evaluate_conditional("ifeq", &format!("({expression},)"), &scope, &context, 0),
+            ConditionalTruth::Unknown,
+            "{expression}"
+        );
+    }
+    let text = "OPT_MESAGL := 26.0.0\nDOTS := $(subst ., ,$(OPT_MESAGL))\nMAJOR = $(word 1,$(DOTS))\nMINOR = $(word 2,$(DOTS))\nBUILD = mesa$(MAJOR)-$(MINOR)\nifeq ($(BUILD),)\n$(error empty module name)\nendif\nOBJDIR := selected\n";
+    assert_eq!(
+        collect_vars_with_context(text, &context)
+            .raw_at("OBJDIR", usize::MAX)
+            .as_deref(),
+        Some("selected")
+    );
+}
+
+#[test]
 fn closed_target_selectors_seed_internal_make_configuration() {
     let context = TargetContext {
         make_variables: [("CONFIG_ONLY".into(), "config-value".into())].into(),
