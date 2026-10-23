@@ -112,6 +112,9 @@ pub(super) struct LlvmSdkPortableExpectations<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlvmSdkPortableProof {
     identity: SdkIdentity,
+    compiler_root: PathBuf,
+    compiler_tree_sha256: Sha256Digest,
+    compiler_inventory_sha256: Sha256Digest,
     binding_sha256: Sha256Digest,
     receipt_sha256: Sha256Digest,
     inventory_sha256: Sha256Digest,
@@ -119,6 +122,23 @@ pub struct LlvmSdkPortableProof {
 }
 
 impl LlvmSdkPortableProof {
+    /// Independently selected compiler root retained by this checked proof.
+    #[must_use]
+    pub fn compiler_root(&self) -> &Path {
+        &self.compiler_root
+    }
+
+    /// Content-CAS digest bound to the independently selected compiler inputs.
+    #[must_use]
+    pub const fn compiler_tree_sha256(&self) -> &Sha256Digest {
+        &self.compiler_tree_sha256
+    }
+
+    /// Package inventory digest (distinct from the content-CAS digest).
+    #[must_use]
+    pub const fn compiler_inventory_sha256(&self) -> &Sha256Digest {
+        &self.compiler_inventory_sha256
+    }
     #[must_use]
     pub const fn identity(&self) -> &SdkIdentity {
         &self.identity
@@ -146,6 +166,18 @@ impl LlvmSdkPortableProof {
 }
 
 impl LlvmSdkLinkSelection {
+    /// Original selected compiler root; no pathname-layout inference.
+    #[must_use]
+    pub fn compiler_root(&self) -> &Path {
+        Path::new(&self.compiler_root)
+    }
+
+    /// Compiler content-CAS identity measured before execution.
+    #[must_use]
+    pub const fn compiler_tree_sha256(&self) -> &Sha256Digest {
+        &self.compiler_tree_sha256
+    }
+
     /// Exact source profile selected before generation, not the compiler profile.
     #[must_use]
     pub fn source_profile(&self) -> &str {
@@ -836,6 +868,19 @@ pub(super) fn readback<B: AsRef<[u8]>>(
     }
     Ok(LlvmSdkPortableProof {
         identity: selected.identity.clone(),
+        compiler_root: PathBuf::from(&selected.compiler_root),
+        compiler_tree_sha256: selected.compiler_tree_sha256.clone(),
+        compiler_inventory_sha256: Sha256Digest::parse(
+            &toolchain_inventory_sha256(
+                &compiler_inventory
+                    .iter()
+                    .filter(|entry| entry.path != aros_common::AROS_TOOLCHAIN_MANIFEST_FILE)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|_| error("cannot hash package payload compiler inventory"))?,
+        )
+        .map_err(|_| error("invalid package payload compiler inventory digest"))?,
         binding_sha256,
         receipt_sha256,
         inventory_sha256,

@@ -109,6 +109,7 @@ pub(super) struct ExpectedRetainedEvidence {
     cmake_build_required: bool,
     native_sdk: Option<crate::compatibility::NativeSdkLinkSelection>,
     llvm_sdk: Option<crate::compatibility::LlvmSdkLinkSelection>,
+    mesa_preflight: Option<super::mesa_selection::MesaPreflightSelection>,
 }
 
 impl ExpectedRetainedEvidence {
@@ -136,6 +137,7 @@ impl ExpectedRetainedEvidence {
             cmake_build_required: self.cmake_build_required,
             native_sdk: self.native_sdk.as_ref(),
             llvm_sdk: self.llvm_sdk.as_ref(),
+            mesa_preflight: self.mesa_preflight.as_ref(),
             sdk_consumer_source_tree_sha256: &request.preparation.source_tree_sha256,
             engine_api_version: request.preparation.engine_api_version,
             engine_sha256: &request.preparation.engine_sha256,
@@ -191,13 +193,18 @@ impl ExpectedRetainedEvidence {
             .as_ref()
             .map(crate::compatibility::native_sdk_portable::select)
             .transpose()?;
+        let llvm_drivers =
+            super::llvm_sdk::drivers(request, &inputs.compiler, &CancellationToken::default())?;
+        let mesa_preflight = llvm_drivers
+            .as_ref()
+            .map(|drivers| super::mesa_selection::select(request, drivers))
+            .transpose()?
+            .flatten();
         let llvm_sdk = if let Some(source) = &request.llvm_sdk_source {
             super::llvm_sdk::select(request, &inputs.compiler)?;
-            let drivers =
-                super::llvm_sdk::drivers(request, &inputs.compiler, &CancellationToken::default())?
-                    .ok_or_else(|| {
-                        ContractError::compatibility("LLVM SDK retained selection lost its drivers")
-                    })?;
+            let drivers = llvm_drivers.as_ref().ok_or_else(|| {
+                ContractError::compatibility("LLVM SDK retained selection lost its drivers")
+            })?;
             Some(crate::compatibility::llvm_sdk_portable::select(
                 &crate::compatibility::LlvmSdkGeneratedRootRequest {
                     source: source.clone(),
@@ -205,7 +212,7 @@ impl ExpectedRetainedEvidence {
                     cmake_build_root: request.cmake_build_root.clone(),
                     timeout: request.timeout,
                 },
-                &drivers,
+                drivers,
                 &request.reports_root.join("llvm-sdk-links"),
                 &CancellationToken::default(),
             )?)
@@ -226,6 +233,7 @@ impl ExpectedRetainedEvidence {
             cmake_build_required: inputs.native_consumer_contract.is_some() || llvm_sdk.is_some(),
             native_sdk,
             llvm_sdk,
+            mesa_preflight,
         })
     }
 
@@ -255,6 +263,19 @@ impl ExpectedRetainedEvidence {
         if upstream_tree != self.upstream_tree || environments != self.environments {
             return Err(ContractError::compatibility(
                 "native compatibility source or environment changed before retained read-back",
+            ));
+        }
+        let inputs = validate_inputs(request)?;
+        let llvm_drivers =
+            super::llvm_sdk::drivers(request, &inputs.compiler, &CancellationToken::default())?;
+        let mesa_preflight = llvm_drivers
+            .as_ref()
+            .map(|drivers| super::mesa_selection::select(request, drivers))
+            .transpose()?
+            .flatten();
+        if mesa_preflight != self.mesa_preflight {
+            return Err(ContractError::compatibility(
+                "retained Mesa preflight selection changed before read-back",
             ));
         }
         let standalone_request = standalone_output_request(request)?;
@@ -311,7 +332,12 @@ impl ExpectedRetainedEvidence {
         } else {
             None
         };
-        verify_report_inventory(&reports_root, &paths, sdk_namespace)?;
+        verify_report_inventory(
+            &reports_root,
+            &paths,
+            sdk_namespace,
+            self.mesa_preflight.as_ref(),
+        )?;
         let native_sdk = if let Some(selection) = &self.native_sdk {
             let inputs = validate_inputs(request)?;
             let sdk_request = super::native_sdk_request(request, &inputs)?.ok_or_else(|| {
@@ -359,11 +385,9 @@ impl ExpectedRetainedEvidence {
                 ContractError::compatibility("retained LLVM SDK lost its verified source selection")
             })?;
             super::llvm_sdk::select(request, &self.compiler)?;
-            let drivers =
-                super::llvm_sdk::drivers(request, &self.compiler, &CancellationToken::default())?
-                    .ok_or_else(|| {
-                    ContractError::compatibility("retained LLVM SDK lost its measured drivers")
-                })?;
+            let drivers = llvm_drivers.as_ref().ok_or_else(|| {
+                ContractError::compatibility("retained LLVM SDK lost its measured drivers")
+            })?;
             let generated_request = crate::compatibility::LlvmSdkGeneratedRootRequest {
                 source: source.clone(),
                 preparation: request.preparation.clone(),
@@ -372,7 +396,7 @@ impl ExpectedRetainedEvidence {
             };
             let current = crate::compatibility::llvm_sdk_portable::select(
                 &generated_request,
-                &drivers,
+                drivers,
                 &request.reports_root.join("llvm-sdk-links"),
                 &CancellationToken::default(),
             )?;
@@ -393,13 +417,54 @@ impl ExpectedRetainedEvidence {
             )?;
             crate::compatibility::readback_llvm_sdk_build_links(
                 &generated_request,
-                &drivers,
+                drivers,
                 &request.reports_root.join("llvm-sdk-links"),
                 proof.binding_sha256(),
                 proof.receipt_sha256(),
                 &CancellationToken::default(),
             )?;
             Some(proof)
+        } else {
+            None
+        };
+        let mesa_preflight_proof = if let Some(selection) = &self.mesa_preflight {
+            let source = request.llvm_sdk_source.as_ref().ok_or_else(|| {
+                ContractError::compatibility("retained Mesa preflight lost its selected SDK source")
+            })?;
+            let drivers = llvm_drivers.as_ref().ok_or_else(|| {
+                ContractError::compatibility(
+                    "retained Mesa preflight lost its measured LLVM drivers",
+                )
+            })?;
+            selection.validate_binding(
+                &request.profile,
+                &inputs.compiler,
+                drivers.compiler_tree_sha256(),
+                drivers.compiler_root(),
+                &request.preparation.source_tree_sha256,
+                source.identity(),
+            )?;
+            let receipt = super::super::read_regular_bounded(
+                &selection.output_root().join("receipt.json"),
+                "retained Mesa preflight receipt",
+                1024 * 1024,
+            )?;
+            let members = super::super::mesa_preflight_evidence::expected_members(
+                selection.output_root(),
+                &receipt,
+            )?;
+            let files = members
+                .into_iter()
+                .map(|(name, (path, limit))| {
+                    let bytes = super::super::read_regular_bounded(
+                        &path,
+                        "retained Mesa preflight member",
+                        limit,
+                    )?;
+                    Ok((name, bytes))
+                })
+                .collect::<Result<BTreeMap<_, _>, ContractError>>()?;
+            Some(selection.readback(&files)?)
         } else {
             None
         };
@@ -414,8 +479,11 @@ impl ExpectedRetainedEvidence {
                 &phase_reports,
                 &logs,
                 &standalone,
-                native_sdk.as_ref(),
-                llvm_sdk.as_ref(),
+                super::portable::SdkReadbackProofs {
+                    native: native_sdk.as_ref(),
+                    llvm: llvm_sdk.as_ref(),
+                    mesa: mesa_preflight_proof.as_ref(),
+                },
             )
     }
 }
@@ -483,6 +551,7 @@ fn verify_report_inventory(
     root: &Path,
     expected: &BTreeSet<PathBuf>,
     sdk_namespace: Option<&str>,
+    mesa_preflight: Option<&super::mesa_selection::MesaPreflightSelection>,
 ) -> Result<(), ContractError> {
     // The common durable publisher intentionally retains a persistent empty
     // advisory lock for each published file. Admit only names derived from
@@ -501,6 +570,16 @@ fn verify_report_inventory(
     if let Some(namespace) = sdk_namespace {
         expected_with_locks.insert(PathBuf::from(namespace));
         super::checked_directory(&root.join(namespace), "retained SDK proof")?;
+    }
+    if let Some(selection) = mesa_preflight {
+        let namespace = PathBuf::from("mesa-preflight");
+        if selection.output_root() != root.join(&namespace) {
+            return Err(ContractError::compatibility(
+                "retained Mesa preflight root differs from its independently selected namespace",
+            ));
+        }
+        expected_with_locks.insert(namespace.clone());
+        super::checked_directory(&root.join(namespace), "retained Mesa preflight evidence")?;
     }
     verify_directory_inventory(root, &expected_with_locks)
 }

@@ -18,7 +18,7 @@ use flate2::read::GzDecoder;
 use serde::Serialize;
 use tar::{Archive, EntryType};
 
-use crate::source_lock::{HostPythonPackage, SourceLock};
+use crate::source_lock::{HostPythonLock, HostPythonPackage, SourceLock};
 use crate::ContractError;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -98,7 +98,58 @@ impl PythonEnvironment {
         destination: &Path,
         interpreter: &PythonInterpreter,
     ) -> Result<Self, ContractError> {
-        verify_selected_package_contract(lock)?;
+        Self::prepare_packages(
+            lock.host_python_packages(),
+            cache_root,
+            destination,
+            interpreter,
+        )
+    }
+
+    /// Prepare a fresh private module root from a standalone host-Python lock.
+    ///
+    /// The required AROS packages are checked before the destination is
+    /// created. Only packages declared by the lock are extracted and probed.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0401 under the same conditions as [`Self::prepare`].
+    pub fn prepare_from_host_lock(
+        lock: &HostPythonLock,
+        cache_root: &Path,
+        destination: &Path,
+    ) -> Result<Self, ContractError> {
+        let interpreter = find_interpreter()?;
+        Self::prepare_from_host_lock_with_interpreter(lock, cache_root, destination, &interpreter)
+    }
+
+    /// Prepare the private runtime from a standalone host-Python lock with one
+    /// already observed host interpreter.
+    ///
+    /// Native lifecycle code uses this form so the interpreter that imports
+    /// lock-owned modules is identical to the interpreter recorded in host
+    /// preflight. The path is still canonicalized and version-probed here.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0401 under the same conditions as
+    /// [`Self::prepare_with_interpreter`].
+    pub fn prepare_from_host_lock_with_interpreter(
+        lock: &HostPythonLock,
+        cache_root: &Path,
+        destination: &Path,
+        interpreter: &PythonInterpreter,
+    ) -> Result<Self, ContractError> {
+        Self::prepare_packages(lock.packages(), cache_root, destination, interpreter)
+    }
+
+    fn prepare_packages(
+        packages: &[HostPythonPackage],
+        cache_root: &Path,
+        destination: &Path,
+        interpreter: &PythonInterpreter,
+    ) -> Result<Self, ContractError> {
+        verify_selected_package_contract(packages)?;
         if !cache_root.is_absolute() {
             return Err(ContractError::environment(
                 "verified host Python source cache must be absolute",
@@ -119,9 +170,9 @@ impl PythonEnvironment {
         })?;
         ensure_private_directory(destination)?;
         let interpreter = revalidate_interpreter(interpreter)?;
-        let mut import_roots = Vec::with_capacity(lock.host_python_packages().len());
-        let mut packages = Vec::with_capacity(lock.host_python_packages().len());
-        for package in lock.host_python_packages() {
+        let mut import_roots = Vec::with_capacity(packages.len());
+        let mut observations = Vec::with_capacity(packages.len());
+        for package in packages {
             if !package.payload().filename().ends_with(".tar.gz") {
                 return Err(ContractError::environment(
                     "selected host Python package archive is not a supported .tar.gz payload",
@@ -148,7 +199,7 @@ impl PythonEnvironment {
             })?;
             let import_root = package_import_root(&root, package)?;
             import_roots.push(import_root);
-            packages.push(PythonPackageObservation {
+            observations.push(PythonPackageObservation {
                 name: package.name().to_owned(),
                 version: package.version().to_owned(),
                 filename: payload.filename().to_owned(),
@@ -159,9 +210,9 @@ impl PythonEnvironment {
         let environment = Self {
             interpreter,
             import_roots,
-            packages,
+            packages: observations,
         };
-        environment.verify_runtime(lock)?;
+        environment.verify_runtime(packages)?;
         Ok(environment)
     }
 
@@ -245,9 +296,8 @@ impl PythonEnvironment {
         ]))
     }
 
-    fn verify_runtime(&self, lock: &SourceLock) -> Result<(), ContractError> {
-        let expected = lock
-            .host_python_packages()
+    fn verify_runtime(&self, packages: &[HostPythonPackage]) -> Result<(), ContractError> {
+        let expected = packages
             .iter()
             .zip(&self.import_roots)
             .map(|(package, root)| RuntimePackage {
@@ -260,7 +310,7 @@ impl PythonEnvironment {
             .map_err(|_| ContractError::environment("cannot encode Python runtime probe"))?;
         let mut command = Command::new(&self.interpreter.path);
         self.apply_to(&mut command);
-        command.args(["-s", "-B", "-c", RUNTIME_PROBE, &expected]);
+        command.args(["-S", "-s", "-B", "-c", RUNTIME_PROBE, &expected]);
         let output =
             run_output_with_timeout(&mut command, CAPTURE_LIMIT, PROBE_TIMEOUT).map_err(|_| {
                 ContractError::environment("cannot start the selected host Python interpreter")
@@ -274,22 +324,20 @@ impl PythonEnvironment {
     }
 }
 
-fn verify_selected_package_contract(lock: &SourceLock) -> Result<(), ContractError> {
-    let packages = lock
-        .host_python_packages()
+fn verify_selected_package_contract(packages: &[HostPythonPackage]) -> Result<(), ContractError> {
+    let names = packages
         .iter()
         .map(HostPythonPackage::name)
         .collect::<BTreeSet<_>>();
     let required = BTreeSet::from(["mako", "markupsafe"]);
     let mut allowed = required.clone();
     allowed.insert("yaml");
-    if !required.is_subset(&packages) || !packages.is_subset(&allowed) {
+    if !required.is_subset(&names) || !names.is_subset(&allowed) {
         return Err(ContractError::environment(
             "selected AROS source contract requires mako and markupsafe; only yaml is optional",
         ));
     }
-    if !lock
-        .host_python_packages()
+    if !packages
         .iter()
         .all(|package| python_module_name(package.name()))
     {
@@ -601,6 +649,10 @@ from pathlib import Path
 import sys
 
 expected = json.loads(sys.argv[1])
+private_roots = [str(Path(item["root"])) for item in expected]
+sys.path[:] = private_roots + [
+    entry for entry in sys.path if entry and entry not in private_roots
+]
 module_names = {item["name"] for item in expected}
 required_modules = {"mako", "markupsafe"}
 allowed_modules = required_modules | {"yaml"}
@@ -625,3 +677,43 @@ from mako.template import Template
 if Template("locked runtime").render() != "locked runtime":
     raise SystemExit("Mako template validation failed")
 "#;
+
+#[cfg(test)]
+mod host_lock_tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::{PythonEnvironment, PythonInterpreter};
+    use crate::source_lock::HostPythonLock;
+
+    #[test]
+    fn standalone_lock_checks_required_packages_before_creating_environment() {
+        let lock = json!({
+            "schema": "aros-host-python-lock-v1",
+            "packages": [{
+                "name": "mako", "version": "1.3.10", "filename": "mako.tar.gz",
+                "url": "https://example.invalid/mako.tar.gz", "sha256": "a".repeat(64),
+                "size": 1, "source_root": "mako-1.3.10", "python_path": "."
+            }]
+        });
+        let lock = HostPythonLock::parse(&serde_json::to_vec(&lock).unwrap()).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let destination = temporary.path().join("python-environment");
+        let interpreter = PythonInterpreter {
+            path: PathBuf::from("/unavailable/python3"),
+            version: "Python 3.0.0".into(),
+        };
+
+        assert!(PythonEnvironment::prepare_from_host_lock_with_interpreter(
+            &lock,
+            &cache,
+            &destination,
+            &interpreter,
+        )
+        .is_err());
+        assert!(!destination.exists());
+    }
+}

@@ -1018,7 +1018,9 @@ fn validates_compiler_cpu_and_fpu_fact_types_bounds_and_portable_tokens() {
             target.abi.insert(name.into(), SdkAbiValue::Text(value));
             assert_rejection(
                 validate_target(&target),
-                &format!("SDK target {name} must be 1..=64 ASCII characters, start with a letter or digit, and contain only letters, digits, _, ., + or -"),
+                &format!(
+                    "SDK target {name} must be 1..=64 ASCII characters, start with a letter or digit, and contain only letters, digits, _, ., + or -"
+                ),
             );
         }
     }

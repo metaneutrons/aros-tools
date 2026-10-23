@@ -324,6 +324,7 @@ impl Fixture {
             native_sdk: None,
             llvm_sdk_identity: None,
             llvm_sdk: None,
+            mesa_preflight: None,
             sdk_consumer_source_tree_sha256: &self.sdk_source_tree,
             engine_api_version: 3,
             engine_sha256: &self.engine_sha256,
@@ -399,6 +400,7 @@ impl Fixture {
             package: Some(package),
             native_sdk: None,
             llvm_sdk: None,
+            mesa_preflight_receipt_sha256: None,
         };
         document.validate().unwrap();
         self.receipt = crate::canonical::bytes(&serde_json::to_value(&document).unwrap()).unwrap();
@@ -417,6 +419,20 @@ fn reads_back_gnu_rv32_v3_receipt_and_exact_logs() {
             .collect()
     );
     assert_eq!(fixture.profile.name(), "rv32-compat");
+}
+
+#[test]
+fn historical_llvm_receipts_cannot_adopt_a_mesa_preflight_claim() {
+    let mut fixture = Fixture::new(false);
+    readback_native_compatibility_receipt(&fixture.request()).unwrap();
+    let mut document: serde_json::Value = serde_json::from_slice(&fixture.receipt).unwrap();
+    document["mesa_preflight_receipt_sha256"] = serde_json::json!("a".repeat(64));
+    fixture.receipt = crate::canonical::bytes(&document).unwrap();
+    assert!(readback_native_compatibility_receipt(&fixture.request()).is_err());
+    // A new schema cannot upgrade an independently non-Mesa/non-SDK lane.
+    document["schema"] = serde_json::json!(super::MESA_LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA);
+    fixture.receipt = crate::canonical::bytes(&document).unwrap();
+    assert!(readback_native_compatibility_receipt(&fixture.request()).is_err());
 }
 
 #[test]

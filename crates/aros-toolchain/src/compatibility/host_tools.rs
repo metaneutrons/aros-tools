@@ -24,9 +24,10 @@ use crate::ContractError;
 
 // This is a hard resource bound for an owned, revalidated closure, not a
 // guessed ambient-tool allowance. It equals the largest reviewed v1 role set
-// (macOS, including its SDK aliases); enlarging it requires an explicit
-// source-graph review and keeps the bounded invariant auditable.
-const MAX_HOST_TOOLS: usize = 80;
+// (macOS, including its SDK aliases), plus the ordinary CLI's explicit Git
+// role for revalidating LocalSourceIdentity in transpiler children. Native
+// qualification still requires its unchanged exact v1 role set.
+const MAX_HOST_TOOLS: usize = 82;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -38,8 +39,10 @@ const MAX_HOST_TOOLS: usize = 80;
 /// inherits a directory from the runner's ambient `PATH`.
 ///
 /// `make` deliberately names the role rather than the selected executable, so
-/// macOS may expose Homebrew `gmake` as `make` without changing the child
-/// contract.  Likewise, `cc` remains the source-owned host-compiler spelling
+/// macOS may expose Homebrew `gmake` as `make` for the top-level invocation.
+/// Darwin upstream configure also records literal `gmake` for MetaMake's
+/// recursive commands, so the macOS closure separately measures that role.
+/// Likewise, `cc` remains the source-owned host-compiler spelling
 /// while `as`, `ld`, `ar`, and `ranlib` provide its explicitly measured
 /// binutils dependencies.  The current upstream `configure` also rejects a
 /// closure without `aclocal` and `automake`, even though it merely discovers
@@ -160,6 +163,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
 // would leak their alias names through argv[0] and make them search for their
 // own nonexistent names.
 const MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
+    "gmake",
     "gsed",
     "llvm-arcc",
     "llvm-ranlibcc",
@@ -239,6 +243,24 @@ pub struct HostToolClosure {
     /// closure directory. The descriptor is CLOEXEC and never reaches a child.
     root_handle: Arc<File>,
     directory_identity: DirectoryIdentity,
+}
+
+impl aros_transpiler::make_vars::CapturedShellSearch for HostToolClosure {
+    fn path(&self) -> &Path {
+        &self.root
+    }
+
+    fn revalidate(&self) -> Result<(), String> {
+        Self::revalidate(self)
+            .map_err(|_| "captured shell inherited host-tool closure changed".into())
+    }
+
+    fn validate_command(&self, command: &str) -> Result<(), String> {
+        if !self.tools.contains_key(command) {
+            return Err("captured shell external command lacks a selected host role".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -759,13 +781,105 @@ mod tests {
     }
 
     #[test]
-    fn closure_capacity_tracks_the_largest_reviewed_v1_role_set() {
+    fn closure_capacity_tracks_native_roles_plus_one_local_git_role() {
+        assert!(!native_compatibility_host_tools("macos-aarch64")
+            .unwrap()
+            .contains(&"git"));
         assert_eq!(
             native_compatibility_host_tools("macos-aarch64")
                 .unwrap()
-                .len(),
+                .len()
+                + 1,
             MAX_HOST_TOOLS
         );
+    }
+
+    #[test]
+    fn explicit_capacity_accepts_the_local_role_and_rejects_one_more() {
+        let temporary = tempfile::tempdir().unwrap();
+        let program = executable(temporary.path(), "selected-tool", b"#!/bin/sh\nexit 0\n");
+        let tools: Vec<_> = (0..=MAX_HOST_TOOLS)
+            .map(|index| CompatibilityHostTool {
+                name: format!("role-{index}"),
+                program: program.clone(),
+            })
+            .collect();
+        let output_root = temporary.path().join("closure");
+        assert!(prepare_host_tool_closure(&HostToolClosureRequest {
+            output_root: output_root.clone(),
+            tools: tools.clone()
+        })
+        .is_err());
+        assert!(!output_root.exists());
+        let closure = prepare_host_tool_closure(&HostToolClosureRequest {
+            output_root,
+            tools: tools.into_iter().take(MAX_HOST_TOOLS).collect(),
+        })
+        .unwrap();
+        closure.revalidate().unwrap();
+    }
+
+    #[test]
+    fn darwin_recursive_make_requires_its_explicit_measured_gmake_role() {
+        let temporary = tempfile::tempdir().unwrap();
+        let program = executable(
+            temporary.path(),
+            "selected-gnu-make",
+            b"#!/bin/sh\nprintf 'measured GNU make alias\\n'\n",
+        );
+        for include_gmake in [false, true] {
+            let mut tools = vec![CompatibilityHostTool {
+                name: "make".into(),
+                program: program.clone(),
+            }];
+            if include_gmake {
+                tools.push(CompatibilityHostTool {
+                    name: "gmake".into(),
+                    program: program.clone(),
+                });
+            }
+            let closure = prepare_host_tool_closure(&HostToolClosureRequest {
+                output_root: temporary.path().join(if include_gmake {
+                    "with-gmake"
+                } else {
+                    "without-gmake"
+                }),
+                tools,
+            })
+            .unwrap();
+            closure.revalidate().unwrap();
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .args(["-c", "gmake --version"])
+                .env_clear()
+                .env("PATH", &closure.root);
+            let output = aros_common::run_output_with_timeout(
+                &mut command,
+                4096,
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap();
+            assert!(!output.timed_out && !output.cancelled);
+            if include_gmake {
+                assert!(output.status.success());
+                assert_eq!(
+                    output.stdout.exact_bytes(),
+                    Some(b"measured GNU make alias\n".as_slice())
+                );
+            } else {
+                assert_eq!(output.status.code(), Some(127));
+                assert!(output.stderr.rendered_lossy().contains("gmake"));
+            }
+            closure.revalidate().unwrap();
+        }
+        assert!(native_compatibility_host_tools("macos-aarch64")
+            .unwrap()
+            .contains(&"gmake"));
+        for host in ["linux-x86_64", "linux-aarch64"] {
+            assert!(!native_compatibility_host_tools(host)
+                .unwrap()
+                .contains(&"gmake"));
+        }
     }
 
     #[test]

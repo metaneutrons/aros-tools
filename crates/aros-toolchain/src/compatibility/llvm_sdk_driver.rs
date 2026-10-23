@@ -168,6 +168,46 @@ pub struct LlvmSdkDriverBinding {
 }
 
 impl LlvmSdkDriverBinding {
+    /// Canonical root selected and measured by the original driver inspection.
+    /// This is not inferred from either driver's pathname. Revalidate the
+    /// binding before using this retained identity in a later owning stage.
+    #[must_use]
+    pub fn compiler_root(&self) -> &Path {
+        &self.compiler_root
+    }
+
+    /// Transport the measured tree and both exact driver invocation spellings.
+    ///
+    /// Role labels are caller selections, not executable-name inference.
+    /// This contains no query execution or package-authentication authority;
+    /// the owner must revalidate this binding and the consumer captures the
+    /// actual selected trees before binding Source command words.
+    #[must_use]
+    pub fn program_selection(
+        &self,
+        c_role: &str,
+        cxx_role: &str,
+    ) -> aros_common::captured_programs::ProgramSetSelection {
+        use aros_common::captured_programs::{
+            ProgramRootSelection, ProgramSelection, ProgramSetSelection,
+        };
+        ProgramSetSelection {
+            roots: vec![ProgramRootSelection {
+                root: self.compiler_root.clone(),
+                content_sha256: self.compiler_tree_sha256.clone(),
+            }],
+            programs: [(c_role, &self.clang), (cxx_role, &self.clangxx)]
+                .into_iter()
+                .map(|(role, identity)| ProgramSelection {
+                    role: role.to_owned(),
+                    root_index: 0,
+                    invocation_path: identity.invocation_path.clone(),
+                    executable_sha256: identity.file_sha256.clone(),
+                })
+                .collect(),
+        }
+    }
+
     /// Original `bin/clang` invocation path, not a symlink-resolved target.
     #[must_use]
     pub fn clang_path(&self) -> &Path {

@@ -107,6 +107,12 @@ pub struct NativeCompatibilityReceiptReadbackRequest<'a> {
     pub llvm_sdk_identity: Option<&'a aros_common::sdk_manifest::SdkIdentity>,
     /// Rootless four-link evidence independently checked against that selection.
     pub llvm_sdk: Option<&'a crate::compatibility::LlvmSdkPortableProof>,
+    /// Independently selected Mesa policy and opaque consistency-only byte proof.
+    /// Presence must be selected before execution, never inferred from a receipt.
+    pub mesa_preflight: Option<(
+        &'a super::MesaPreflightSelection,
+        &'a crate::compatibility::MesaPreflightDataProof,
+    )>,
     /// Measured content-only CAS of the engine-free SDK consumer source tree.
     pub sdk_consumer_source_tree_sha256: &'a Sha256Digest,
     /// Embedded tools-owned CMake engine API version expected by every phase.
@@ -190,6 +196,9 @@ pub fn readback_native_compatibility_receipt(
             super::GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA
         }
         ArosCompilerIdentity::Gnu { .. } => super::GNU_COMPATIBILITY_RECEIPT_SCHEMA,
+        ArosCompilerIdentity::Llvm { .. } if request.mesa_preflight.is_some() => {
+            super::MESA_LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+        }
         ArosCompilerIdentity::Llvm { .. } if request.llvm_sdk_identity.is_some() => {
             super::LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
         }
@@ -201,6 +210,15 @@ pub fn readback_native_compatibility_receipt(
         ));
     }
     validate_receipt_package(&document, request)?;
+    if document.mesa_preflight_receipt_sha256.as_ref()
+        != request
+            .mesa_preflight
+            .map(|(_, proof)| proof.receipt_sha256())
+    {
+        return Err(readback_error(
+            "Mesa aggregate claim differs from its independently required byte proof",
+        ));
+    }
     validate_receipt_upstream(&document, request)?;
     validate_receipt_ports(&document, request.ports_sources)?;
     validate_receipt_standalone(&document, request)?;
@@ -322,6 +340,32 @@ fn validate_expectations(
         }
     } else if request.llvm_sdk.is_some() {
         return Err(readback_error("LLVM SDK proof has no independent identity"));
+    }
+    if let Some((selection, proof)) = request.mesa_preflight {
+        let identity = request.llvm_sdk_identity.ok_or_else(|| {
+            readback_error("Mesa preflight requires an independent LLVM SDK identity")
+        })?;
+        let llvm = request.llvm_sdk.ok_or_else(|| {
+            readback_error("Mesa preflight requires the complete LLVM SDK byte proof")
+        })?;
+        if llvm.compiler_inventory_sha256().as_str() != manifest.tree_sha256 {
+            return Err(readback_error(
+                "Mesa compiler inventory differs from its package",
+            ));
+        }
+        selection.validate_binding(
+            request.profile,
+            request.package.compiler,
+            llvm.compiler_tree_sha256(),
+            llvm.compiler_root(),
+            request.sdk_consumer_source_tree_sha256,
+            identity,
+        )?;
+        if !proof.matches_expectations(&selection.expectations())? {
+            return Err(readback_error(
+                "Mesa byte proof was checked for another selection",
+            ));
+        }
     }
     if request.native_sdk_required
         && (!request.cmake_build_required

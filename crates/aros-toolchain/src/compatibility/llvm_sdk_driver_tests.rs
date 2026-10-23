@@ -152,6 +152,30 @@ fn measures_both_historical_driver_roles_for_source_defined_target_triples() {
         assert_eq!(binding.target().target_triple, triple);
         assert_eq!(binding.clang_path(), fixture.root.join("bin/clang"));
         assert_eq!(binding.clangxx_path(), fixture.root.join("bin/clang++"));
+        assert_eq!(binding.compiler_root(), fixture.root);
+        let selected = binding.program_selection("source-c", "source-cxx");
+        selected.validate().unwrap();
+        assert_eq!(selected.roots[0].root, fixture.root);
+        assert_eq!(
+            selected.roots[0].content_sha256,
+            *binding.compiler_tree_sha256()
+        );
+        let captured = aros_common::captured_programs::CapturedProgramSet::capture(
+            &selected.roots,
+            &selected.programs,
+        )
+        .unwrap();
+        let c = captured.identity_for_role("source-c").unwrap();
+        let cxx = captured.identity_for_role("source-cxx").unwrap();
+        assert_eq!(c.invocation_path(), binding.clang_path());
+        assert_eq!(cxx.invocation_path(), binding.clangxx_path());
+        assert_eq!(c.resolved_path(), cxx.resolved_path());
+        assert_ne!(c.invocation_path(), cxx.invocation_path());
+        assert_eq!(
+            c.executable_sha256(),
+            binding.clang_identity().file_sha256()
+        );
+        binding.revalidate(&CancellationToken::default()).unwrap();
         assert_eq!(
             binding.clangxx_identity().invocation_path(),
             fixture.root.join("bin/clang++")

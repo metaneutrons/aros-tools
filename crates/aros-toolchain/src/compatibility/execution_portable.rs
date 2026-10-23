@@ -30,6 +30,7 @@ pub const PORTABLE_NATIVE_COMPATIBILITY_MANIFEST: &str = "compatibility-measurem
 const SCHEMA: &str = "aros-toolchain-compatibility-measurement-v2";
 const SDK_SCHEMA: &str = "aros-toolchain-compatibility-measurement-v3";
 const LLVM_SDK_SCHEMA: &str = "aros-toolchain-compatibility-measurement-v4";
+const MESA_SCHEMA: &str = "aros-toolchain-compatibility-measurement-v5";
 const MAX_ELF_BYTES: usize = super::super::standalone::MAX_STANDALONE_ARTIFACT_BYTES as usize;
 
 /// Independently retained expectations for one compatibility lane.
@@ -56,6 +57,9 @@ pub struct NativeCompatibilityReceiptExpectations<'a> {
     /// Generic LLVM SDK source/driver/path selection made before execution.
     /// It must never be copied from an aggregate receipt being audited.
     pub llvm_sdk: Option<&'a crate::compatibility::LlvmSdkLinkSelection>,
+    /// Independently selected Mesa 26 preflight inputs. This binds consistency
+    /// evidence, but does not prove that the preflight process ran.
+    pub mesa_preflight: Option<&'a super::mesa_selection::MesaPreflightSelection>,
     /// Independently measured engine-free SDK consumer source tree.
     pub sdk_consumer_source_tree_sha256: &'a Sha256Digest,
     /// Selected tools engine API version.
@@ -78,6 +82,13 @@ pub struct NativeCompatibilityReceiptExpectations<'a> {
     pub ports_sources: &'a [NativeCompatibilityExpectedPortSource],
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct SdkReadbackProofs<'a> {
+    pub(super) native: Option<&'a crate::compatibility::NativeSdkPortableProof>,
+    pub(super) llvm: Option<&'a crate::compatibility::LlvmSdkPortableProof>,
+    pub(super) mesa: Option<&'a crate::compatibility::MesaPreflightDataProof>,
+}
+
 impl NativeCompatibilityReceiptExpectations<'_> {
     pub(super) fn readback_documents(
         &self,
@@ -85,9 +96,17 @@ impl NativeCompatibilityReceiptExpectations<'_> {
         reports: &BTreeMap<CompatibilityPhase, Vec<u8>>,
         logs: &BTreeMap<CompatibilityPhase, Vec<NativeCompatibilityCommandLogs>>,
         standalone: &StandaloneOutputReport,
-        native_sdk: Option<&crate::compatibility::NativeSdkPortableProof>,
-        llvm_sdk: Option<&crate::compatibility::LlvmSdkPortableProof>,
+        proofs: SdkReadbackProofs<'_>,
     ) -> Result<NativeCompatibilityReceiptReadback, ContractError> {
+        let mesa_preflight = match (self.mesa_preflight, proofs.mesa) {
+            (Some(selection), Some(proof)) => Some((selection, proof)),
+            (None, None) => None,
+            _ => {
+                return Err(error(
+                    "Mesa preflight selection and byte proof must be present together",
+                ));
+            }
+        };
         readback_native_compatibility_receipt(&NativeCompatibilityReceiptReadbackRequest {
             receipt_bytes: receipt,
             phase_report_bytes: reports,
@@ -98,11 +117,12 @@ impl NativeCompatibilityReceiptExpectations<'_> {
             gnu_source_preset: self.gnu_source_preset,
             cmake_build_required: self.cmake_build_required,
             native_sdk_required: self.native_sdk.is_some(),
-            native_sdk,
+            native_sdk: proofs.native,
             llvm_sdk_identity: self
                 .llvm_sdk
                 .map(crate::compatibility::LlvmSdkLinkSelection::identity),
-            llvm_sdk,
+            llvm_sdk: proofs.llvm,
+            mesa_preflight,
             sdk_consumer_source_tree_sha256: self.sdk_consumer_source_tree_sha256,
             engine_api_version: self.engine_api_version,
             engine_sha256: self.engine_sha256,
@@ -268,6 +288,7 @@ pub(super) fn export_with_expectations(
     verify_snapshot_elf_identities(&files, &shape, &standalone)?;
     let native_sdk = readback_sdk_snapshot(&files, &expected)?;
     let llvm_sdk = readback_llvm_sdk_snapshot(&files, &expected)?;
+    let mesa_preflight = readback_mesa_snapshot(&files, &expected)?;
     let joined = readback_snapshot(
         &files,
         &shape,
@@ -275,6 +296,7 @@ pub(super) fn export_with_expectations(
         &standalone,
         native_sdk.as_ref(),
         llvm_sdk.as_ref(),
+        mesa_preflight.as_ref(),
     )?;
     if local != joined || prepared.readback(request, profiles)? != joined {
         return Err(error(
@@ -370,6 +392,7 @@ pub fn readback_portable_native_compatibility(
     verify_snapshot_elf_identities(&files, &shape, &standalone)?;
     let native_sdk = readback_sdk_snapshot(&files, &request.expected)?;
     let llvm_sdk = readback_llvm_sdk_snapshot(&files, &request.expected)?;
+    let mesa_preflight = readback_mesa_snapshot(&files, &request.expected)?;
     let joined = readback_snapshot(
         &files,
         &shape,
@@ -377,6 +400,7 @@ pub fn readback_portable_native_compatibility(
         &standalone,
         native_sdk.as_ref(),
         llvm_sdk.as_ref(),
+        mesa_preflight.as_ref(),
     )?;
     validate_root(&request.directory)?;
     require_inventory(&request.directory, &expected_inventory)?;
@@ -422,6 +446,7 @@ impl Shape {
         outputs: &Path,
         expected: &NativeCompatibilityReceiptExpectations<'_>,
     ) -> Result<Self, ContractError> {
+        validate_mesa_selection_binding(expected)?;
         let targets: BTreeMap<_, _> = standalone_triples(expected.profile)?
             .into_iter()
             .map(|triple| {
@@ -523,6 +548,37 @@ impl Shape {
                 }
             }
         }
+        if let Some(selection) = expected.mesa_preflight {
+            let receipt_path = if reports == outputs {
+                reports.join("mesa-preflight-receipt.json")
+            } else {
+                selection.output_root().join("receipt.json")
+            };
+            let mut aliases = BTreeSet::new();
+            let receipt = read_member(&receipt_path, 1024 * 1024, &mut aliases)?;
+            let mesa_members = crate::compatibility::mesa_preflight_evidence::expected_members(
+                selection.output_root(),
+                &receipt,
+            )?;
+            if mesa_members
+                .keys()
+                .any(|name| !name.starts_with("mesa-preflight-"))
+            {
+                return Err(error(
+                    "Mesa preflight selection contains an invalid member name",
+                ));
+            }
+            for (name, (original_path, limit)) in mesa_members {
+                let path = if reports == outputs {
+                    reports.join(&name)
+                } else {
+                    original_path
+                };
+                if shape.members.insert(name, (path, limit)).is_some() {
+                    return Err(error("Mesa preflight and compatibility filenames collide"));
+                }
+            }
+        }
         Ok(shape)
     }
 
@@ -601,6 +657,7 @@ fn readback_snapshot(
     standalone: &StandaloneOutputReport,
     native_sdk: Option<&crate::compatibility::NativeSdkPortableProof>,
     llvm_sdk: Option<&crate::compatibility::LlvmSdkPortableProof>,
+    mesa_preflight: Option<&crate::compatibility::MesaPreflightDataProof>,
 ) -> Result<NativeCompatibilityReceiptReadback, ContractError> {
     let mut reports = BTreeMap::new();
     let mut logs = BTreeMap::new();
@@ -627,19 +684,68 @@ fn readback_snapshot(
         &reports,
         &logs,
         standalone,
-        native_sdk,
-        llvm_sdk,
+        SdkReadbackProofs {
+            native: native_sdk,
+            llvm: llvm_sdk,
+            mesa: mesa_preflight,
+        },
     )
 }
 
 const fn measurement_schema(expected: &NativeCompatibilityReceiptExpectations<'_>) -> &'static str {
-    if expected.llvm_sdk.is_some() {
+    if expected.mesa_preflight.is_some() {
+        MESA_SCHEMA
+    } else if expected.llvm_sdk.is_some() {
         LLVM_SDK_SCHEMA
     } else if expected.native_sdk.is_some() {
         SDK_SCHEMA
     } else {
         SCHEMA
     }
+}
+
+fn readback_mesa_snapshot(
+    files: &BTreeMap<String, Vec<u8>>,
+    expected: &NativeCompatibilityReceiptExpectations<'_>,
+) -> Result<Option<crate::compatibility::MesaPreflightDataProof>, ContractError> {
+    let Some(selection) = expected.mesa_preflight else {
+        return Ok(None);
+    };
+    let mesa_files = files
+        .iter()
+        .filter(|(name, _)| name.starts_with("mesa-preflight-"))
+        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .collect::<BTreeMap<_, _>>();
+    // The closed receipt schema derives the bounded exact member inventory.
+    // The reader rejects missing/extra members and binds every selected owner;
+    // a legacy constant cannot represent collection evidence.
+    selection.readback(&mesa_files).map(Some)
+}
+
+fn validate_mesa_selection_binding(
+    expected: &NativeCompatibilityReceiptExpectations<'_>,
+) -> Result<(), ContractError> {
+    let Some(selection) = expected.mesa_preflight else {
+        return Ok(());
+    };
+    let llvm = expected.llvm_sdk.ok_or_else(|| {
+        error("Mesa preflight selection requires an independent LLVM SDK selection")
+    })?;
+    selection.validate_helper(
+        &expected
+            .helpers
+            .get("aros-transpiler")
+            .ok_or_else(|| error("Mesa preflight selection lost its measured helper"))?
+            .sha256,
+    )?;
+    selection.validate_binding(
+        expected.profile,
+        expected.package.compiler,
+        llvm.compiler_tree_sha256(),
+        llvm.compiler_root(),
+        expected.sdk_consumer_source_tree_sha256,
+        llvm.identity(),
+    )
 }
 
 fn readback_llvm_sdk_snapshot(

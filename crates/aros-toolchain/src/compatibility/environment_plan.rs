@@ -208,13 +208,19 @@ fn validate_host_environment(
         .copied()
         .collect::<Vec<_>>();
     if python != host_python.program || !missing_roles.is_empty() || !unexpected_roles.is_empty() {
-        return Err(ContractError::compatibility(
-            format!(
-                "native compatibility host-tool closure does not bind the exact measured command set{}{}",
-                if missing_roles.is_empty() { String::new() } else { format!(": missing {}", missing_roles.join(", ")) },
-                if unexpected_roles.is_empty() { String::new() } else { format!("; unexpected {}", unexpected_roles.join(", ")) },
-            ),
-        ));
+        return Err(ContractError::compatibility(format!(
+            "native compatibility host-tool closure does not bind the exact measured command set{}{}",
+            if missing_roles.is_empty() {
+                String::new()
+            } else {
+                format!(": missing {}", missing_roles.join(", "))
+            },
+            if unexpected_roles.is_empty() {
+                String::new()
+            } else {
+                format!("; unexpected {}", unexpected_roles.join(", "))
+            },
+        )));
     }
     Ok(())
 }

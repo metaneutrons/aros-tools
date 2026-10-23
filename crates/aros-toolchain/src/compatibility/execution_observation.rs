@@ -24,6 +24,7 @@ use crate::ContractError;
 const SCHEMA: &str = "aros-toolchain-compatibility-inputs-v1";
 const SDK_SCHEMA: &str = "aros-toolchain-compatibility-inputs-v2";
 const LLVM_SDK_SCHEMA: &str = "aros-toolchain-compatibility-inputs-v3";
+const MESA_LLVM_SDK_SCHEMA: &str = "aros-toolchain-compatibility-inputs-v4";
 const MAX_STANDALONE_FIXTURE_BYTES: u64 = 1024 * 1024;
 
 /// Bounded content identity only; this makes no claim about a fixture path or
@@ -60,6 +61,8 @@ struct InputDocument {
     native_sdk: Option<crate::compatibility::NativeSdkLinkSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     llvm_sdk: Option<crate::compatibility::LlvmSdkLinkSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mesa_preflight: Option<super::MesaPreflightSelection>,
     sdk_source_tree_sha256: Sha256Digest,
     engine_api_version: u32,
     engine_sha256: Sha256Digest,
@@ -109,9 +112,12 @@ impl NativeCompatibilityInputClaims {
             .map_err(|_| error("compatibility input observation is not closed JSON"))?;
         if (document.schema != SCHEMA
             && document.schema != SDK_SCHEMA
-            && document.schema != LLVM_SDK_SCHEMA)
+            && document.schema != LLVM_SDK_SCHEMA
+            && document.schema != MESA_LLVM_SDK_SCHEMA)
             || (document.schema == SDK_SCHEMA) != document.native_sdk.is_some()
-            || (document.schema == LLVM_SDK_SCHEMA) != document.llvm_sdk.is_some()
+            || (document.schema == LLVM_SDK_SCHEMA || document.schema == MESA_LLVM_SDK_SCHEMA)
+                != document.llvm_sdk.is_some()
+            || (document.schema == MESA_LLVM_SDK_SCHEMA) != document.mesa_preflight.is_some()
         {
             return Err(error(
                 "compatibility input observation has an unsupported schema",
@@ -130,6 +136,27 @@ impl NativeCompatibilityInputClaims {
             {
                 return Err(error(
                     "LLVM SDK input observation differs from its source/compiler build selection",
+                ));
+            }
+        }
+        if let Some(selection) = &document.mesa_preflight {
+            selection.validate()?;
+            if !document.cmake_build_required
+                || document.native_sdk.is_some()
+                || document.source_preset.is_some()
+                || !matches!(document.compiler, ArosCompilerIdentity::Llvm { .. })
+                || document
+                    .llvm_sdk
+                    .as_ref()
+                    .is_none_or(|llvm_sdk| selection.identity() != llvm_sdk.identity())
+                || selection.compiler() != &document.compiler
+                || selection.profile_name() != document.target_profile
+                || selection.target_triple() != document.target_triple
+                || selection.profile_document_sha256() != &document.profiles_sha256
+                || selection.source_tree_sha256() != &document.sdk_source_tree_sha256
+            {
+                return Err(error(
+                    "Mesa preflight input observation differs from its source/compiler/profile/SDK selection",
                 ));
             }
         }
@@ -182,8 +209,8 @@ impl NativeCompatibilityInputClaims {
     /// selected profiles. Other measured identities remain unauthenticated
     /// claims until the owning-job/runtime/source evidence has been verified.
     /// Never select this document or its raw digest from a receipt's own fields.
-    /// `native_sdk_required` must be selected from the independently qualified
-    /// source contract, never inferred from this input document's SDK marker.
+    /// `native_sdk_required` must be selected from the independently verified
+    /// source/runtime policy, never inferred from this input document's marker.
     ///
     /// # Errors
     /// Returns AX0703 for package/compiler/source/host/profile substitutions.
@@ -194,11 +221,20 @@ impl NativeCompatibilityInputClaims {
         profile: &'a Profile,
         native_sdk_required: bool,
     ) -> Result<NativeCompatibilityReceiptExpectations<'a>, ContractError> {
-        self.selected_expectations(package, profiles, profile, native_sdk_required, None)
+        self.selected_expectations(
+            package,
+            profiles,
+            profile,
+            native_sdk_required,
+            None,
+            (false, None),
+        )
     }
 
     /// Rebind generic LLVM SDK inputs to a separately selected complete SDK
-    /// identity. Neither parsed input claims nor hashes authenticate a CI job.
+    /// identity under the historical no-Mesa policy. This entry point rejects
+    /// configured-Mesa input markers; neither parsed input claims nor hashes
+    /// authenticate a CI job.
     ///
     /// # Errors
     /// Rejects a different SDK product/source/ABI or compiler/profile selection.
@@ -209,7 +245,59 @@ impl NativeCompatibilityInputClaims {
         profile: &'a Profile,
         identity: &aros_common::sdk_manifest::SdkIdentity,
     ) -> Result<NativeCompatibilityReceiptExpectations<'a>, ContractError> {
-        self.selected_expectations(package, profiles, profile, false, Some(identity))
+        self.expectations_with_llvm_sdk_policy(package, profiles, profile, identity, false)
+    }
+
+    /// Rebind LLVM SDK inputs to separately selected product/source identity
+    /// and configured-Mesa policy. The policy must come from verified source
+    /// and runtime evidence, never from this document's own marker.
+    ///
+    /// # Errors
+    /// Rejects a different SDK product/source/compiler/profile selection or a
+    /// Mesa marker whose presence differs from independently selected policy.
+    pub fn expectations_with_llvm_sdk_policy<'a>(
+        &'a self,
+        package: NativeCompatibilityExpectedPackage<'a>,
+        profiles: &'a Profiles,
+        profile: &'a Profile,
+        identity: &aros_common::sdk_manifest::SdkIdentity,
+        mesa_required: bool,
+    ) -> Result<NativeCompatibilityReceiptExpectations<'a>, ContractError> {
+        self.selected_expectations(
+            package,
+            profiles,
+            profile,
+            false,
+            Some(identity),
+            (mesa_required, None),
+        )
+    }
+
+    /// Rebind collection evidence to an independently selected Source contract
+    /// and measured inventory helper. Neither value may be adopted from this
+    /// input document or the produced Mesa receipt.
+    ///
+    /// # Errors
+    /// Rejects changed Source scope, contract, helper or LLVM SDK identities.
+    pub fn expectations_with_llvm_sdk_mesa_selection<'a>(
+        &'a self,
+        package: NativeCompatibilityExpectedPackage<'a>,
+        profiles: &'a Profiles,
+        profile: &'a Profile,
+        identity: &aros_common::sdk_manifest::SdkIdentity,
+        genmodule: (
+            &aros_common::mesa_genmodule_inventory::MesaGenmoduleSelectionBinding,
+            &Sha256Digest,
+        ),
+    ) -> Result<NativeCompatibilityReceiptExpectations<'a>, ContractError> {
+        self.selected_expectations(
+            package,
+            profiles,
+            profile,
+            false,
+            Some(identity),
+            (true, Some(genmodule)),
+        )
     }
 
     fn selected_expectations<'a>(
@@ -219,7 +307,15 @@ impl NativeCompatibilityInputClaims {
         profile: &'a Profile,
         native_sdk_required: bool,
         llvm_sdk_identity: Option<&aros_common::sdk_manifest::SdkIdentity>,
+        mesa_policy: (
+            bool,
+            Option<(
+                &aros_common::mesa_genmodule_inventory::MesaGenmoduleSelectionBinding,
+                &Sha256Digest,
+            )>,
+        ),
     ) -> Result<NativeCompatibilityReceiptExpectations<'a>, ContractError> {
+        let (mesa_preflight_required, genmodule) = mesa_policy;
         let doc = &self.document;
         if doc.native_sdk.is_some() != native_sdk_required {
             return Err(error(
@@ -236,6 +332,11 @@ impl NativeCompatibilityInputClaims {
                 "LLVM SDK requirement differs from independent product/source policy",
             ));
         }
+        if doc.mesa_preflight.is_some() != mesa_preflight_required {
+            return Err(error(
+                "configured Mesa requirement differs from independent source/runtime policy",
+            ));
+        }
         let selected = profiles.select(profile.name())?;
         if doc
             .llvm_sdk
@@ -245,6 +346,32 @@ impl NativeCompatibilityInputClaims {
             return Err(error(
                 "LLVM SDK source profile differs from the independent compiler profile",
             ));
+        }
+        if let Some(selection) = &doc.mesa_preflight {
+            selection.validate_genmodule_binding(genmodule)?;
+            let identity = llvm_sdk_identity.ok_or_else(|| {
+                error("configured Mesa selection requires an independently selected LLVM SDK")
+            })?;
+            let llvm = doc
+                .llvm_sdk
+                .as_ref()
+                .ok_or_else(|| error("Mesa observation requires an independent LLVM selection"))?;
+            selection.validate_binding(
+                profile,
+                package.compiler,
+                llvm.compiler_tree_sha256(),
+                llvm.compiler_root(),
+                &doc.sdk_source_tree_sha256,
+                identity,
+            )?;
+            selection.validate_helper(
+                &doc.helpers
+                    .get("aros-transpiler")
+                    .ok_or_else(|| error("Mesa collection input lost its measured helper"))?
+                    .sha256,
+            )?;
+        } else if genmodule.is_some() {
+            return Err(error("independently selected Mesa collection is absent"));
         }
         let manifest = crate::canonical::bytes(
             &serde_json::to_value(package.manifest)
@@ -274,6 +401,7 @@ impl NativeCompatibilityInputClaims {
             cmake_build_required: doc.cmake_build_required,
             native_sdk: doc.native_sdk.as_ref(),
             llvm_sdk: doc.llvm_sdk.as_ref(),
+            mesa_preflight: doc.mesa_preflight.as_ref(),
             sdk_consumer_source_tree_sha256: &doc.sdk_source_tree_sha256,
             engine_api_version: doc.engine_api_version,
             engine_sha256: &doc.engine_sha256,
@@ -296,7 +424,9 @@ impl NativeCompatibilityInputClaims {
                 .map_err(|_| error("cannot encode observed compatibility package manifest"))?,
         )?;
         let document = InputDocument {
-            schema: if expected.llvm_sdk.is_some() {
+            schema: if expected.mesa_preflight.is_some() {
+                MESA_LLVM_SDK_SCHEMA
+            } else if expected.llvm_sdk.is_some() {
                 LLVM_SDK_SCHEMA
             } else if expected.native_sdk.is_some() {
                 SDK_SCHEMA
@@ -317,6 +447,7 @@ impl NativeCompatibilityInputClaims {
             cmake_build_required: expected.cmake_build_required,
             native_sdk: expected.native_sdk.cloned(),
             llvm_sdk: expected.llvm_sdk.cloned(),
+            mesa_preflight: expected.mesa_preflight.cloned(),
             sdk_source_tree_sha256: expected.sdk_consumer_source_tree_sha256.clone(),
             engine_api_version: expected.engine_api_version,
             engine_sha256: expected.engine_sha256.clone(),

@@ -21,6 +21,10 @@ const MAX_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct SourceLock(Record, Sha256Digest);
 
+/// One semantically valid standalone host-Python package lock.
+#[derive(Debug, Clone)]
+pub struct HostPythonLock(HostPythonLockRecord, Sha256Digest);
+
 /// A declared archive whose exact bytes must be present in a verified cache.
 #[derive(Debug, Clone, Copy)]
 pub struct Payload<'a> {
@@ -141,6 +145,45 @@ impl HostPythonPackage {
     }
 }
 
+impl HostPythonLock {
+    /// Parse a standalone, closed host-Python package lock without accessing
+    /// the network or filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0101 for an unsupported schema or invalid package metadata.
+    pub fn parse(input: &[u8]) -> Result<Self, ContractError> {
+        if input.len() > crate::canonical::MAX_DOCUMENT_BYTES {
+            return Err(ContractError::invalid("host Python lock exceeds 1 MiB"));
+        }
+        let record: HostPythonLockRecord = serde_json::from_slice(input).map_err(|_| {
+            ContractError::invalid("invalid or unsupported closed host Python lock document")
+        })?;
+        debug_assert_eq!(record.schema, HostPythonLockSchema::V1);
+        if record.packages.is_empty() || record.packages.len() > MAX_PAYLOADS {
+            return Err(ContractError::invalid(
+                "host Python lock must declare 1..1024 packages",
+            ));
+        }
+        let mut filenames = BTreeSet::new();
+        let mut total = 0;
+        validate_host_python_packages(&record.packages, &mut filenames, &mut total, false)?;
+        Ok(Self(record, sha256_bytes(input)))
+    }
+
+    /// Packages in source-owned declaration order.
+    #[must_use]
+    pub fn packages(&self) -> &[HostPythonPackage] {
+        &self.0.packages
+    }
+
+    /// Digest of the exact parsed document bytes, not a reserialization.
+    #[must_use]
+    pub const fn sha256(&self) -> &Sha256Digest {
+        &self.1
+    }
+}
+
 impl SourceLock {
     /// Parse and close a supported source-lock schema without accessing the
     /// network or the filesystem.
@@ -258,6 +301,19 @@ struct Record {
     version: String,
     sources: Vec<Source>,
     host_python_packages: Vec<HostPythonPackage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostPythonLockRecord {
+    schema: HostPythonLockSchema,
+    packages: Vec<HostPythonPackage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+enum HostPythonLockSchema {
+    #[serde(rename = "aros-host-python-lock-v1")]
+    V1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -386,7 +442,7 @@ fn validate(record: &Record) -> Result<(), ContractError> {
             || !https_url(&source.url)
             || source.size == 0
             || !components.insert((&source.component, &source.version))
-            || !filenames.insert(&source.filename)
+            || !filenames.insert(source.filename.clone())
         {
             return Err(ContractError::invalid(
                 "source lock contains duplicate or invalid source declarations",
@@ -429,9 +485,24 @@ fn validate(record: &Record) -> Result<(), ContractError> {
     if record.schema == Schema::V3 && record.family == CompilerFamily::Gnu {
         validate_gnu_components(record)?;
     }
+    validate_host_python_packages(
+        &record.host_python_packages,
+        &mut filenames,
+        &mut total,
+        true,
+    )?;
+    Ok(())
+}
+
+fn validate_host_python_packages(
+    packages: &[HostPythonPackage],
+    filenames: &mut BTreeSet<String>,
+    total: &mut u64,
+    source_lock: bool,
+) -> Result<(), ContractError> {
     let mut names = BTreeSet::new();
     let mut roots = BTreeSet::new();
-    for package in &record.host_python_packages {
+    for package in packages {
         if !token(&package.name)
             || !token(&package.version)
             || !portable_filename(&package.filename)
@@ -439,22 +510,33 @@ fn validate(record: &Record) -> Result<(), ContractError> {
             || package.size == 0
             || !single_segment(&package.source_root)
             || !safe_python_path(&package.python_path)
-            || !names.insert(&package.name)
-            || !roots.insert(&package.source_root)
-            || !filenames.insert(&package.filename)
+            || !names.insert(package.name.as_str())
+            || !roots.insert(package.source_root.as_str())
+            || !filenames.insert(package.filename.clone())
         {
-            return Err(ContractError::invalid(
-                "source lock contains duplicate or invalid host Python package declarations",
-            ));
+            let message = if source_lock {
+                "source lock contains duplicate or invalid host Python package declarations"
+            } else {
+                "host Python lock contains duplicate or invalid package declarations"
+            };
+            return Err(ContractError::invalid(message));
         }
-        total = total.checked_add(package.size).ok_or_else(|| {
-            ContractError::invalid("source-lock payload sizes overflow the supported limit")
+        *total = total.checked_add(package.size).ok_or_else(|| {
+            let message = if source_lock {
+                "source-lock payload sizes overflow the supported limit"
+            } else {
+                "host Python payload sizes overflow the supported limit"
+            };
+            ContractError::invalid(message)
         })?;
     }
-    if total > MAX_TOTAL_BYTES {
-        return Err(ContractError::invalid(
-            "source-lock payload closure exceeds the 8 GiB safety limit",
-        ));
+    if *total > MAX_TOTAL_BYTES {
+        let message = if source_lock {
+            "source-lock payload closure exceeds the 8 GiB safety limit"
+        } else {
+            "host Python payload closure exceeds the 8 GiB safety limit"
+        };
+        return Err(ContractError::invalid(message));
     }
     Ok(())
 }
@@ -552,4 +634,141 @@ fn safe_python_path(value: &str) -> bool {
             && value
                 .split('/')
                 .all(|part| token(part) && part != "." && part != ".."))
+}
+
+#[cfg(test)]
+mod host_python_lock_tests {
+    use aros_common::sha256_bytes;
+    use serde_json::{json, Value};
+
+    use super::HostPythonLock;
+
+    fn lock() -> Value {
+        json!({
+            "schema": "aros-host-python-lock-v1",
+            "packages": [
+                {
+                    "name": "mako", "version": "1.3.10", "filename": "mako-1.3.10.tar.gz",
+                    "url": "https://example.invalid/mako.tar.gz", "sha256": "a".repeat(64),
+                    "size": 7, "source_root": "mako-1.3.10", "python_path": "."
+                },
+                {
+                    "name": "markupsafe", "version": "3.0.2", "filename": "markupsafe-3.0.2.tar.gz",
+                    "url": "https://example.invalid/markupsafe.tar.gz", "sha256": "b".repeat(64),
+                    "size": 8, "source_root": "markupsafe-3.0.2", "python_path": "src"
+                }
+            ]
+        })
+    }
+
+    fn bytes(document: &Value) -> Vec<u8> {
+        serde_json::to_vec(document).unwrap()
+    }
+
+    #[test]
+    fn parses_closed_standalone_lock_and_hashes_exact_bytes() {
+        let mut input = bytes(&lock());
+        input.push(b' ');
+        let parsed = HostPythonLock::parse(&input).unwrap();
+
+        assert_eq!(parsed.sha256(), &sha256_bytes(&input));
+        assert_eq!(parsed.packages().len(), 2);
+        assert_eq!(parsed.packages()[0].name(), "mako");
+        assert_eq!(parsed.packages()[1].source_root(), "markupsafe-3.0.2");
+        assert_eq!(parsed.packages()[1].python_path(), "src");
+    }
+
+    #[test]
+    fn rejects_unknown_schema_fields_and_oversized_documents() {
+        let mut unknown_schema = lock();
+        unknown_schema["schema"] = json!("aros-host-python-lock-v2");
+        assert!(HostPythonLock::parse(&bytes(&unknown_schema)).is_err());
+
+        let mut unknown_field = lock();
+        unknown_field["extra"] = json!(true);
+        assert!(HostPythonLock::parse(&bytes(&unknown_field)).is_err());
+
+        let mut unknown_package_field = lock();
+        unknown_package_field["packages"][0]["extra"] = json!(true);
+        assert!(HostPythonLock::parse(&bytes(&unknown_package_field)).is_err());
+
+        assert!(
+            HostPythonLock::parse(&vec![b' '; crate::canonical::MAX_DOCUMENT_BYTES + 1]).is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_package_identities_and_unsafe_paths() {
+        let mut duplicate_name = lock();
+        duplicate_name["packages"][1]["name"] = json!("mako");
+        assert!(HostPythonLock::parse(&bytes(&duplicate_name)).is_err());
+
+        let mut duplicate_root = lock();
+        duplicate_root["packages"][1]["source_root"] = json!("mako-1.3.10");
+        assert!(HostPythonLock::parse(&bytes(&duplicate_root)).is_err());
+
+        let mut duplicate_filename = lock();
+        duplicate_filename["packages"][1]["filename"] = json!("mako-1.3.10.tar.gz");
+        assert!(HostPythonLock::parse(&bytes(&duplicate_filename)).is_err());
+
+        for path in ["../outside", "/absolute", "safe/../../outside"] {
+            let mut unsafe_root = lock();
+            unsafe_root["packages"][0]["source_root"] = json!(path);
+            assert!(HostPythonLock::parse(&bytes(&unsafe_root)).is_err());
+
+            let mut unsafe_python_path = lock();
+            unsafe_python_path["packages"][0]["python_path"] = json!(path);
+            assert!(HostPythonLock::parse(&bytes(&unsafe_python_path)).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_package_payload_metadata_and_total_size() {
+        let mut invalid = lock();
+        invalid["packages"][0]["version"] = json!(" ");
+        assert!(HostPythonLock::parse(&bytes(&invalid)).is_err());
+
+        let mut invalid = lock();
+        invalid["packages"][0]["url"] = json!("http://example.invalid/mako.tar.gz");
+        assert!(HostPythonLock::parse(&bytes(&invalid)).is_err());
+
+        let mut invalid = lock();
+        invalid["packages"][0]["size"] = json!(0);
+        assert!(HostPythonLock::parse(&bytes(&invalid)).is_err());
+
+        let mut invalid = lock();
+        invalid["packages"][0]["sha256"] = json!("A".repeat(64));
+        assert!(HostPythonLock::parse(&bytes(&invalid)).is_err());
+
+        let mut over_limit = lock();
+        over_limit["packages"][0]["size"] = json!(8_u64 * 1024 * 1024 * 1024);
+        over_limit["packages"][1]["size"] = json!(1);
+        assert!(HostPythonLock::parse(&bytes(&over_limit)).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_and_overpopulated_package_lists() {
+        let mut empty = lock();
+        empty["packages"] = json!([]);
+        assert!(HostPythonLock::parse(&bytes(&empty)).is_err());
+
+        let mut too_many = lock();
+        let mut packages = Vec::new();
+        for index in 0..=1024 {
+            let mut package = too_many["packages"][0].clone();
+            package["name"] = json!(format!("package{index}"));
+            package["filename"] = json!(format!("package{index}.tar.gz"));
+            package["source_root"] = json!(format!("package{index}"));
+            packages.push(package);
+        }
+        too_many["packages"] = json!(packages);
+        assert!(HostPythonLock::parse(&bytes(&too_many)).is_err());
+    }
+
+    #[test]
+    fn rejects_non_object_package_records() {
+        let mut non_object_package: Value = lock();
+        non_object_package["packages"][0] = json!("mako");
+        assert!(HostPythonLock::parse(&bytes(&non_object_package)).is_err());
+    }
 }

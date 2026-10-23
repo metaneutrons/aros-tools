@@ -39,6 +39,7 @@ struct OwnedExpectations {
     cmake_build_required: bool,
     native_sdk: Option<crate::compatibility::NativeSdkLinkSelection>,
     llvm_sdk: Option<crate::compatibility::LlvmSdkLinkSelection>,
+    mesa_preflight: Option<crate::compatibility::MesaPreflightSelection>,
     sdk_consumer_source_tree_sha256: Sha256Digest,
     engine_api_version: u32,
     engine_sha256: Sha256Digest,
@@ -66,6 +67,7 @@ impl OwnedExpectations {
             cmake_build_required: value.cmake_build_required,
             native_sdk: value.native_sdk.cloned(),
             llvm_sdk: value.llvm_sdk.cloned(),
+            mesa_preflight: value.mesa_preflight.cloned(),
             sdk_consumer_source_tree_sha256: value.sdk_consumer_source_tree_sha256.clone(),
             engine_api_version: value.engine_api_version,
             engine_sha256: value.engine_sha256.clone(),
@@ -95,6 +97,7 @@ impl OwnedExpectations {
             cmake_build_required: self.cmake_build_required,
             native_sdk: self.native_sdk.as_ref(),
             llvm_sdk: self.llvm_sdk.as_ref(),
+            mesa_preflight: self.mesa_preflight.as_ref(),
             sdk_consumer_source_tree_sha256: &self.sdk_consumer_source_tree_sha256,
             engine_api_version: self.engine_api_version,
             engine_sha256: &self.engine_sha256,
@@ -345,8 +348,71 @@ fn reseal_member(directory: &Path, name: &str, bytes: &[u8], selected_digest: &m
 }
 
 #[test]
+fn mesa_v7_roundtrips_without_original_roots_and_rejects_resealed_stage_corruption() {
+    let original = tempfile::tempdir().unwrap();
+    let fixture = super::llvm_sdk_tests::configured_mesa_fixture(original.path(), false, false);
+    let exported = make_exported_fixture(&original, &fixture.request, &fixture.profiles);
+    drop(fixture);
+    drop(original);
+    assert!(!exported.original_root.exists());
+    let request = request_for(
+        &exported.directory,
+        exported.manifest_sha256.clone(),
+        &exported.expected,
+    );
+    let result = readback_portable_native_compatibility(&request).unwrap();
+    assert_eq!(result.receipt().receipt_sha256, exported.receipt_sha256);
+    assert_eq!(
+        manifest_value(&exported.directory)["schema"],
+        "aros-toolchain-compatibility-measurement-v5"
+    );
+    assert_rejected_without_mutation(
+        &exported,
+        "downgraded aggregate",
+        "schema does not match",
+        |directory, _, digest| {
+            let mut receipt: Value = serde_json::from_slice(
+                &fs::read(directory.join("native-compatibility.receipt.json")).unwrap(),
+            )
+            .unwrap();
+            receipt["schema"] = json!("aros-toolchain-native-compatibility-receipt-v6");
+            receipt
+                .as_object_mut()
+                .unwrap()
+                .remove("mesa_preflight_receipt_sha256");
+            reseal_member(
+                directory,
+                "native-compatibility.receipt.json",
+                &crate::canonical::bytes(&receipt).unwrap(),
+                digest,
+            );
+        },
+    );
+    assert_rejected_without_mutation(
+        &exported,
+        "downgraded measurement",
+        "manifest differs from its canonical closed inventory",
+        |directory, _, digest| {
+            let mut manifest = manifest_value(directory);
+            manifest["schema"] = json!("aros-toolchain-compatibility-measurement-v4");
+            rewrite_manifest(directory, &manifest, digest);
+        },
+    );
+    let mut selected_digest = exported.manifest_sha256.clone();
+    reseal_member(
+        &exported.directory,
+        "mesa-preflight-features.stdout",
+        b"changed",
+        &mut selected_digest,
+    );
+    let corrupt = request_for(&exported.directory, selected_digest, &exported.expected);
+    let error = readback_portable_native_compatibility(&corrupt).unwrap_err();
+    assert_ax0703(&error, "stage logs differ");
+}
+
+#[test]
 fn portable_export_roundtrips_rootless_gnu_and_llvm_elf_inventories() {
-    let fixtures = [
+    let fixtures = vec![
         make_gnu_export(32),
         make_gnu_export(64),
         make_gnu_consumer_build_export(),
@@ -372,9 +438,11 @@ fn portable_export_roundtrips_rootless_gnu_and_llvm_elf_inventories() {
             .files
             .keys()
             .any(|name| name.ends_with(".stderr.log")));
-        assert!(fixture.files.keys().any(|name| Path::new(name)
-            .extension()
-            .is_some_and(|extension| extension == "o")));
+        assert!(fixture.files.keys().any(|name| {
+            Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension == "o")
+        }));
         if fixture.expected.cmake_build_required {
             assert!(fixture.files.contains_key("cmake-consumer.1.stdout.log"));
             assert!(fixture.files.contains_key("cmake-consumer.2.stdout.log"));
@@ -641,7 +709,9 @@ fn rejects_independent_package_profile_engine_source_environment_and_ports_chang
         fixture,
         "wrong independent SDK source tree",
         "native compatibility receipt package, profile, preset, or SDK source binding differs from expected inputs",
-        |_, expected, _| expected.sdk_consumer_source_tree_sha256 = sha256_bytes(b"other SDK source"),
+        |_, expected, _| {
+            expected.sdk_consumer_source_tree_sha256 = sha256_bytes(b"other SDK source");
+        },
     );
     assert_rejected_without_mutation(
         fixture,
@@ -661,7 +731,10 @@ fn rejects_independent_package_profile_engine_source_environment_and_ports_chang
         fixture,
         "wrong host-tool identity",
         "native compatibility SDK phase host-tool or environment identity differs from independent expectation",
-        |_, expected, _| expected.host_tools.values_mut().next().unwrap().sha256 = sha256_bytes(b"other host tool"),
+        |_, expected, _| {
+            expected.host_tools.values_mut().next().unwrap().sha256 =
+                sha256_bytes(b"other host tool");
+        },
     );
     assert_rejected_without_mutation(
         fixture,

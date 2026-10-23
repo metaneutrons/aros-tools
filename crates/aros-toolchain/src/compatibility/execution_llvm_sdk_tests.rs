@@ -6,12 +6,23 @@
 
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use aros_common::mesa_configuration::{MESA_BASELINE_VARIABLES, MESA_COMPILER_OPTION_VARIABLES};
+use aros_common::mesa_configuration_input::{
+    MESA_GENMODULE_BASE_CONFIG, MESA_GENMODULE_OVERRIDE_CONFIG,
+};
+use aros_common::mesa_genmodule_inventory::{
+    MesaGenmoduleInventory, MesaGenmoduleInventoryRecord, MesaGenmoduleInventoryScope,
+    MesaGenmoduleSelectionBinding, MesaGenmoduleSelectionDocument, MESA_GENMODULE_INVENTORY_SCHEMA,
+    MESA_GENMODULE_SELECTION_SCHEMA,
+};
+use aros_common::mesa_genmodule_make::MESA_GENMODULE_MAKE_SUFFIXES;
 use aros_common::sdk_manifest::{SdkIdentity, SdkSourceIdentity, SdkTarget};
 use aros_common::{
     sha256_bytes, toolchain_tree_inventory, ArosCompilerIdentity, ArosToolchainManifest,
@@ -41,6 +52,11 @@ const PROFILE_NAME: &str = "pc-x86_64";
 const SDK_RELATIVE_ROOT: &str = "products/ci-selected-sdk-layout";
 const SDK_INCLUDE_RELATIVE: &str = "products/ci-selected-sdk-layout/include";
 const SOURCE_EPOCH: u64 = 946_684_800;
+const HISTORICAL_V6_MESA_VERSION: &str = "20.0.0";
+const CONFIGURED_MESA_VERSION: &str = "26.0.0";
+
+#[path = "execution_mesa_tests.rs"]
+mod mesa_tests;
 
 #[derive(Clone, Copy)]
 pub(super) enum BindingMode {
@@ -54,6 +70,21 @@ pub(super) struct Fixture {
     pub(super) profiles: Profiles,
     pub(super) cmake_log: PathBuf,
     pub(super) binding_path: PathBuf,
+}
+
+#[derive(Clone, Copy)]
+struct MesaFixtureOptions<'a> {
+    version: &'a str,
+    include_configure: bool,
+    mutate_preflight_receipt: Option<&'a Path>,
+    mutate_inventory_helper: bool,
+}
+
+#[derive(Clone, Copy)]
+struct MesaSourceOptions<'a> {
+    version: &'a str,
+    include_configure: bool,
+    clang_path: &'a Path,
 }
 
 #[test]
@@ -173,8 +204,18 @@ fn llvm_sdk_binding_exactly_checks_source_declared_companion_roles() {
 
     let role_source_root = root.join("companion-role-fixture");
     fs::create_dir(&role_source_root).unwrap();
-    let (source_root, materialized_source_root, identity, _) =
-        generic_source(&role_source_root, "x86_64", 62, PROFILE_NAME, true);
+    let (source_root, materialized_source_root, identity, _) = generic_source(
+        &role_source_root,
+        "x86_64",
+        62,
+        PROFILE_NAME,
+        true,
+        MesaSourceOptions {
+            version: HISTORICAL_V6_MESA_VERSION,
+            include_configure: false,
+            clang_path: &fixture.request.relocation.first.root.join("bin/clang"),
+        },
+    );
     let source = verify_sdk_source(&SdkSourceVerificationRequest {
         source_root,
         materialized_source_root,
@@ -434,6 +475,70 @@ fn fixture_for_host_with_toolchain_profile(
     toolchain_profile: &str,
     host: &'static str,
 ) -> Fixture {
+    fixture_for_host_with_mesa_options(
+        root,
+        binding_mode,
+        arch,
+        machine,
+        toolchain_profile,
+        host,
+        MesaFixtureOptions {
+            version: HISTORICAL_V6_MESA_VERSION,
+            include_configure: false,
+            mutate_preflight_receipt: None,
+            mutate_inventory_helper: false,
+        },
+    )
+}
+
+pub(super) fn configured_mesa_fixture(
+    root: &Path,
+    missing_configure: bool,
+    mutate_preflight_receipt: bool,
+) -> Fixture {
+    let mutation_path = root.join("reports/mesa-preflight/receipt.json");
+    fixture_for_host_with_mesa_options(
+        root,
+        BindingMode::Valid,
+        "x86_64",
+        62,
+        PROFILE_NAME,
+        "linux-x86_64",
+        MesaFixtureOptions {
+            version: CONFIGURED_MESA_VERSION,
+            include_configure: !missing_configure,
+            mutate_preflight_receipt: mutate_preflight_receipt.then_some(mutation_path.as_path()),
+            mutate_inventory_helper: false,
+        },
+    )
+}
+
+pub(super) fn configured_mesa_fixture_mutating_inventory_helper(root: &Path) -> Fixture {
+    fixture_for_host_with_mesa_options(
+        root,
+        BindingMode::Valid,
+        "x86_64",
+        62,
+        PROFILE_NAME,
+        "linux-x86_64",
+        MesaFixtureOptions {
+            version: CONFIGURED_MESA_VERSION,
+            include_configure: true,
+            mutate_preflight_receipt: None,
+            mutate_inventory_helper: true,
+        },
+    )
+}
+
+fn fixture_for_host_with_mesa_options(
+    root: &Path,
+    binding_mode: BindingMode,
+    arch: &str,
+    machine: u16,
+    toolchain_profile: &str,
+    host: &'static str,
+    mesa_options: MesaFixtureOptions<'_>,
+) -> Fixture {
     let mut llvm = super::llvm_v2_tests::llvm_v2_fixture(root);
     llvm.request.host = host.to_owned();
     let host_roles = native_compatibility_host_tools(host).unwrap();
@@ -457,8 +562,29 @@ fn fixture_for_host_with_toolchain_profile(
     let compiler_root = root;
     install_link_capable_drivers(&mut llvm.request, compiler_root);
 
-    let (source_root, materialized_source_root, identity, response_path) =
-        generic_source(root, arch, machine, toolchain_profile, false);
+    let clang_path = llvm
+        .request
+        .relocation
+        .first
+        .root
+        .canonicalize()
+        .unwrap()
+        .join("bin/clang");
+    let (source_root, materialized_source_root, identity, response_path) = generic_source(
+        root,
+        arch,
+        machine,
+        toolchain_profile,
+        false,
+        MesaSourceOptions {
+            version: mesa_options.version,
+            include_configure: mesa_options.include_configure,
+            clang_path: &clang_path,
+        },
+    );
+    if mesa_options.version == CONFIGURED_MESA_VERSION {
+        install_mesa_preflight_host_tools(&mut llvm.request, root);
+    }
     let helper_path = llvm.request.preparation.helpers["aros-transpiler"]
         .path
         .clone();
@@ -467,11 +593,19 @@ fn fixture_for_host_with_toolchain_profile(
     // The real source validator emits sorted JSON with one final LF; CMake
     // retains those exact bytes. Keep the mock on that same boundary.
     fs::write(&response_path, crate::canonical::bytes(&response).unwrap()).unwrap();
+    let inventory_path = root.join("mesa-genmodule-selection.json");
+    if mesa_options.version == CONFIGURED_MESA_VERSION {
+        fs::write(&inventory_path, configured_mesa_inventory(&identity)).unwrap();
+    }
     write_executable(
         &helper_path,
-        format!(
-            "#!/bin/sh\nset -eu\n[ \"$PATH\" = /nonexistent ]\n[ -z \"${{HOME+x}}\" ]\n[ \"$1\" = --validate-native-consumer-only ]\n/bin/cat {}\n",
-            shell_quote(&response_path.to_string_lossy())
+        mesa_transpiler_helper(
+            &response_path,
+            &inventory_path,
+            &materialized_source_root,
+            &identity,
+            mesa_options.version == CONFIGURED_MESA_VERSION,
+            &llvm.request.host_tools.root,
         )
         .as_bytes(),
     );
@@ -518,6 +652,10 @@ fn fixture_for_host_with_toolchain_profile(
         &sdk_root,
         &selected_response,
         binding_mode,
+        mesa_options.mutate_preflight_receipt,
+        mesa_options
+            .mutate_inventory_helper
+            .then_some(helper_path.as_path()),
     );
     write_executable(&llvm.request.cmake_program, cmake_script.as_bytes());
     llvm.request.llvm_sdk_source = Some(verified_source);
@@ -545,9 +683,17 @@ pub(super) fn bind_fixture_to_shared_source(fixture: &mut Fixture, source: &Veri
         .clone();
     write_executable(
         &helper_path,
-        format!(
-            "#!/bin/sh\nset -eu\n[ \"$PATH\" = /nonexistent ]\n[ -z \"${{HOME+x}}\" ]\n[ \"$1\" = --validate-native-consumer-only ]\n/bin/cat {}\n",
-            shell_quote(&response_path.to_string_lossy())
+        mesa_transpiler_helper(
+            &response_path,
+            &fixture
+                .cmake_log
+                .parent()
+                .unwrap()
+                .join("mesa-genmodule-selection.json"),
+            source.materialized_source_root(),
+            source.identity(),
+            false,
+            &fixture.request.host_tools.root,
         )
         .as_bytes(),
     );
@@ -564,6 +710,7 @@ fn generic_source(
     machine: u16,
     toolchain_profile: &str,
     with_companion_role: bool,
+    mesa_options: MesaSourceOptions<'_>,
 ) -> (PathBuf, PathBuf, SdkIdentity, PathBuf) {
     let source_root = root.join("generic-sdk-source");
     fs::create_dir(&source_root).unwrap();
@@ -573,7 +720,8 @@ fn generic_source(
     let target_triple = format!("{source_cpu}-unknown-aros");
     let cpu32 = if with_companion_role { "i386" } else { "" };
     let profile = format!(
-        "[[targets]]\nname='{PROFILE_NAME}'\ntoolchain_profile='{toolchain_profile}'\narch='{arch}'\nplatform='pc'\nbsp='generic'\nsdk_consumer_contract='consumer.json'\n[targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='llvm'\ncpu32='{cpu32}'\nuse_mmu=true\nmesa_version='26.0.0'\n[targets.bootstrap_abi]\nflavour='native'\nplatform_smp=true\n"
+        "[[targets]]\nname='{PROFILE_NAME}'\ntoolchain_profile='{toolchain_profile}'\narch='{arch}'\nplatform='pc'\nbsp='generic'\nsdk_consumer_contract='consumer.json'\n[targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='llvm'\ncpu32='{cpu32}'\nuse_mmu=true\nmesa_version='{mesa_version}'\n[targets.bootstrap_abi]\nflavour='native'\nplatform_smp=true\n",
+        mesa_version = mesa_options.version,
     );
     let abi = json!({
         "source_cpu": source_cpu,
@@ -603,13 +751,42 @@ fn generic_source(
     )
     .unwrap();
 
-    let input_paths = [
+    // Historical v6 compatibility coverage deliberately declares Mesa 20 and
+    // has no configure/features inputs. Configured Mesa 26 fixtures add both
+    // source files before sealing the consumer input list or committing.
+    if mesa_options.version == CONFIGURED_MESA_VERSION {
+        if mesa_options.include_configure {
+            write_executable(
+                &source_root.join("configure"),
+                mesa_configure_script(mesa_options.clang_path).as_bytes(),
+            );
+        }
+        write_executable(
+            &source_root.join("config/features"),
+            mesa_features_script(arch, mesa_options.clang_path).as_bytes(),
+        );
+        write_source_genmodule_fixture(&source_root);
+    }
+
+    let mut input_paths = vec![
         "aros-targets.toml",
         "policy.json",
         "probe.c",
         "probe.cpp",
         "config/make.cfg.in",
     ];
+    if mesa_options.version == CONFIGURED_MESA_VERSION {
+        if mesa_options.include_configure {
+            input_paths.push("configure");
+        }
+        input_paths.push("config/features");
+        input_paths.extend([
+            "tools/genmodule/Makefile",
+            "tools/genmodule/Makefile.deps",
+            aros_common::mesa_configuration_input::MESA_GENMODULE_BASE_CONFIG,
+            aros_common::mesa_configuration_input::MESA_GENMODULE_OVERRIDE_CONFIG,
+        ]);
+    }
     let inputs = input_paths
         .iter()
         .map(|path| {
@@ -636,6 +813,9 @@ fn generic_source(
             "cxx": {"source": "probe.cpp", "libraries": ["fixture"]},
         },
     });
+    if mesa_options.version == CONFIGURED_MESA_VERSION {
+        contract["mesa_configure_target"] = json!(toolchain_profile);
+    }
     if with_companion_role {
         contract["companion_roles"] = json!([i386_companion_role()]);
     }
@@ -731,6 +911,8 @@ fn cmake_mock_script(
     sdk_root: &Path,
     response_path: &Path,
     binding_mode: BindingMode,
+    mutate_preflight_receipt: Option<&Path>,
+    mutate_inventory_helper: Option<&Path>,
 ) -> String {
     let configure_binding = if matches!(binding_mode, BindingMode::Missing) {
         String::new()
@@ -741,10 +923,22 @@ fn cmake_mock_script(
             shell_quote(&binding_path.to_string_lossy())
         )
     };
+    let mutation = mutate_preflight_receipt.map_or_else(String::new, |path| {
+        format!(
+            "printf '%s' 'synthetic preflight receipt mutation' >> {}\n",
+            shell_quote(&path.to_string_lossy())
+        )
+    });
+    let helper_mutation = mutate_inventory_helper.map_or_else(String::new, |path| {
+        format!(
+            "printf '%s' 'synthetic inventory helper mutation' >> {}\n",
+            shell_quote(&path.to_string_lossy())
+        )
+    });
     // The measured host-command closure in this fixture uses exit-0 sentinels
     // for unrelated utilities. Use the real filesystem utility for SDK dirs.
     format!(
-        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> {log}\nif [ \"$1\" = -S ]; then\n  printf '%s\\n' configure >> {log}\n  build=\n  while [ \"$#\" -gt 0 ]; do\n    if [ \"$1\" = -B ]; then shift; build=$1; fi\n    shift\n  done\n  mkdir -p {sdk_include} {sdk_lib}\n  printf '%s\\n' '/* synthetic public SDK header */' > {sdk_header}\n  printf '%s\\n' 'synthetic SDK archive' > {sdk_archive}\n  {configure_binding}else\n  printf '%s\\n' build >> {log}\n  [ \"$1\" = --build ]\n  case \" $* \" in *' --target includes linklibs '*) ;; *) exit 41 ;; esac\nfi\n",
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> {log}\nif [ \"$1\" = -S ]; then\n  printf '%s\\n' configure >> {log}\n  build=\n  while [ \"$#\" -gt 0 ]; do\n    if [ \"$1\" = -B ]; then shift; build=$1; fi\n    shift\n  done\n  mkdir -p {sdk_include} {sdk_lib}\n  printf '%s\\n' '/* synthetic public SDK header */' > {sdk_header}\n  printf '%s\\n' 'synthetic SDK archive' > {sdk_archive}\n  {configure_binding}{mutation}{helper_mutation}else\n  printf '%s\\n' build >> {log}\n  [ \"$1\" = --build ]\n  case \" $* \" in *' --target includes linklibs '*) ;; *) exit 41 ;; esac\nfi\n",
         log = shell_quote(&log.to_string_lossy()),
         sdk_include = shell_quote(&sdk_root.join("include").to_string_lossy()),
         sdk_lib = shell_quote(&sdk_root.join("lib").to_string_lossy()),
@@ -752,6 +946,309 @@ fn cmake_mock_script(
         sdk_archive = shell_quote(&sdk_root.join("lib/libfixture.a").to_string_lossy()),
     )
     .replace("mkdir -p", "/bin/mkdir -p")
+}
+
+fn install_mesa_preflight_host_tools(request: &mut NativeCompatibilityRequest, root: &Path) {
+    let fake_make = request.host_tools.tools["make"].program.clone();
+    let gnu_make = gnu_make();
+    let dispatch = root.join("mesa-preflight-make-dispatch");
+    write_executable(
+        &dispatch,
+        format!(
+            "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = --silent ] && [ \"${{2-}}\" = --no-builtin-rules ]; then\n  exec {} \"$@\"\nfi\nif [ \"${{1-}}\" = --no-builtin-rules ]; then\n  exec {} \"$@\"\nfi\nexec {} \"$@\"\n",
+            shell_quote(&gnu_make.to_string_lossy()),
+            shell_quote(&gnu_make.to_string_lossy()),
+            shell_quote(&fake_make.to_string_lossy()),
+        )
+        .as_bytes(),
+    );
+
+    let tools = request
+        .host_tools
+        .tools
+        .iter()
+        .map(|(name, identity)| CompatibilityHostTool {
+            name: name.clone(),
+            program: match name.as_str() {
+                "bash" => host_program("bash"),
+                "make" => dispatch.clone(),
+                "mkdir" => host_program("mkdir"),
+                _ => identity.program.clone(),
+            },
+        })
+        .collect();
+    request.host_tools = prepare_host_tool_closure(&HostToolClosureRequest {
+        output_root: root.join("mesa-preflight-host-tools"),
+        tools,
+    })
+    .unwrap();
+}
+
+fn configured_mesa_inventory(identity: &SdkIdentity) -> Vec<u8> {
+    let binding = MesaGenmoduleSelectionBinding {
+        profile: PROFILE_NAME.into(),
+        kind: "sdk-consumer".into(),
+        scope: MesaGenmoduleInventoryScope::ContractRoots,
+        contract_sha256: identity.source.contract_sha256.clone(),
+    };
+    let records = ["mesa3dgl-owner-a", "mesa3dgl-owner-b"]
+        .into_iter()
+        .map(|owner| MesaGenmoduleInventoryRecord {
+            owner: owner.into(),
+            declaration_directory: "workbench/libs/mesa".into(),
+            module: "mesa3dgl26-0".into(),
+            module_type: "library".into(),
+            base_configuration: MESA_GENMODULE_BASE_CONFIG.into(),
+            override_configuration: Some(MESA_GENMODULE_OVERRIDE_CONFIG.into()),
+            consumer_path: format!("runtime/{owner}"),
+            components: Vec::new(),
+        })
+        .collect();
+    let document = MesaGenmoduleSelectionDocument {
+        schema: MESA_GENMODULE_SELECTION_SCHEMA.into(),
+        selection: binding,
+        inventory: MesaGenmoduleInventory {
+            schema: MESA_GENMODULE_INVENTORY_SCHEMA.into(),
+            records,
+        },
+    };
+    crate::canonical::bytes(&serde_json::to_value(document).unwrap()).unwrap()
+}
+
+fn mesa_transpiler_helper(
+    response_path: &Path,
+    inventory_path: &Path,
+    materialized_source_root: &Path,
+    identity: &SdkIdentity,
+    allow_inventory: bool,
+    inventory_host_tools: &Path,
+) -> String {
+    let mut script = format!(
+        "#!/bin/sh\nset -eu\n[ -z \"${{HOME+x}}\" ]\nif [ \"${{1-}}\" = --validate-native-consumer-only ]; then\n  [ \"$PATH\" = /nonexistent ]\n  /bin/cat {}\n  exit\nfi\n[ \"$PATH\" = {} ] || exit 50\n",
+        shell_quote(&response_path.to_string_lossy()),
+        shell_quote(&inventory_host_tools.to_string_lossy()),
+    );
+    if allow_inventory {
+        let binding = identity.source.contract_sha256.to_string();
+        let source = shell_quote(&materialized_source_root.to_string_lossy());
+        let inventory = shell_quote(&inventory_path.to_string_lossy());
+        write!(script,
+            "[ \"${{1-}}\" = --mesa-genmodule-inventory-only ] || exit 51\nshift\n[ \"${{1-}}\" = --native-consumer-profile ] || exit 52\nshift\n[ \"${{1-}}\" = {PROFILE_NAME} ] || exit 53\nshift\n[ \"${{1-}}\" = --native-consumer-contract-sha256 ] || exit 54\nshift\n[ \"${{1-}}\" = {binding} ] || exit 55\nshift\noutput=\nports=\nwhile [ \"$#\" -gt 0 ]; do\n  option=$1\n  shift\n  [ \"$#\" -gt 0 ] || exit 56\n  value=$1\n  shift\n  case \"$option\" in\n    --source-dir) [ \"$value\" = {source} ] || exit 57 ;;\n    --output) output=$value ;;\n    --ports-dir) ports=$value ;;\n    --cpu) [ \"$value\" = x86_64 ] || exit 58 ;;\n    --platform) [ \"$value\" = pc ] || exit 59 ;;\n    --family|--variant|--cpu32|--float-abi) [ -z \"$value\" ] || exit 60 ;;\n    --toolchain) [ \"$value\" = llvm ] || exit 61 ;;\n    --use-mmu) [ \"$value\" = 1 ] || exit 62 ;;\n    --mesa-version) [ \"$value\" = {CONFIGURED_MESA_VERSION} ] || exit 63 ;;\n    *) exit 64 ;;\n  esac\ndone\n[ -n \"$output\" ] && [ -n \"$ports\" ] || exit 65\n/bin/cat {inventory} > \"$output\"\nexit\n"
+        ).unwrap();
+    }
+    script
+}
+
+fn write_source_genmodule_fixture(source: &Path) {
+    let directory = source.join("tools/genmodule");
+    fs::create_dir_all(&directory).unwrap();
+    for (relative, bytes) in [
+        (
+            MESA_GENMODULE_BASE_CONFIG,
+            "fixture genmodule base configuration\n",
+        ),
+        (
+            MESA_GENMODULE_OVERRIDE_CONFIG,
+            "fixture genmodule Mesa override\n",
+        ),
+    ] {
+        let path = source.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    let generated_lines = MESA_GENMODULE_MAKE_SUFFIXES
+        .iter()
+        .map(|suffix| shell_quote(&format!("mesa3dgl26-0_{suffix} += ")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        "#!/bin/sh\nset -eu\nout=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -d ]; then shift; out=$1; fi\n  shift\ndone\n[ -n \"$out\" ] || exit 42\nprintf '%s\\n' {generated_lines} > \"$out/Makefile.mesa3dgl26-0library\"\n"
+    );
+    let quoted_lines = script
+        .lines()
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('$', "$$");
+    fs::write(
+        directory.join("Makefile"),
+        format!(
+            ".PHONY: all\nall: $(GENMODULE)\n$(GENMODULE):\n\t@printf '%s\\n' {quoted_lines} > \"$@\"\n\t@/bin/chmod 755 \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(directory.join("Makefile.deps"), "# fixture inventory\n").unwrap();
+}
+
+fn mesa_configure_script(clang_path: &Path) -> String {
+    let compiler_root = clang_path.parent().and_then(Path::parent).unwrap();
+    let clangxx_path = clang_path.with_file_name("clang++");
+    let mut script = format!(
+        "#!/bin/bash\nset -eu\n\
+         [ \"$#\" -eq 7 ] || exit 90\n\
+         [ \"$1\" = --target=pc-x86_64 ] || exit 91\n\
+         [ \"$2\" = --with-toolchain=llvm ] || exit 92\n\
+         [ \"$3\" = --with-llvm-version={LLVM_VERSION} ] || exit 93\n\
+         [ \"$4\" = --with-aros-toolchain=yes ] || exit 94\n\
+         [ \"$5\" = --disable-crosstools ] || exit 95\n\
+         [ \"$6\" = {} ] || exit 96\n\
+         [ \"$7\" = --with-mesagl={CONFIGURED_MESA_VERSION} ] || exit 97\n\
+         mkdir -p config gen/config\n",
+        shell_quote(&format!(
+            "--with-aros-toolchain-install={}",
+            compiler_root.display()
+        )),
+    );
+    script.push_str(
+        "source_root=\"${0%/*}\"\n\
+         printf 'default: all\\nTOP := %s\\nSRCDIR := %s\\ninclude $(TOP)/config/make.cfg\\nall:\\n\\t@: > poison-target-ran\\n' \"$PWD\" \"$source_root\" > Makefile\n",
+    );
+
+    let clang = clang_path.to_string_lossy();
+    let clangxx = clangxx_path.to_string_lossy();
+    for line in [
+        "AROS_TARGET_CPU := x86_64".to_owned(),
+        "AROS_TARGET_ARCH := pc".to_owned(),
+        format!("TARGET_CC := {clang}"),
+        "TARGET_SYSROOT :=".into(),
+        "TARGET_CFLAGS := -target-c".into(),
+        "DEBUG_CFLAGS := -g".into(),
+        "OPTIMIZATION_CFLAGS := -O2".into(),
+        format!("TARGET_CPP := {clang} -E"),
+        format!("TARGET_CXX := {clangxx}"),
+        format!("AROS_CXX := {clangxx}"),
+        "TARGET_LTO := no".into(),
+        "LTO_CFLAGS :=".into(),
+        "CFLAGS_IQUOTE := -iquote".into(),
+        "CFLAGS_IQUOTE_END :=".into(),
+        "TARGET_CXXFLAGS := -target-cxx".into(),
+        "AROS_BUILD_HOST := x86_64-unknown-linux-gnu".into(),
+        "TARGET_ISA_CFLAGS := -march=x86-64".into(),
+        "TARGET_ISA_CXXFLAGS := -march=x86-64".into(),
+        "CONFIG_CFLAGS := -Dconfig-c".into(),
+        "CONFIG_CXXFLAGS := -Dconfig-cxx".into(),
+        "CONFIG_CPPFLAGS := -Dconfig-cpp".into(),
+        "TARGET_CPPFLAGS := -target-cpp".into(),
+        "DEBUG_CXXFLAGS := -g".into(),
+        "LLVM_NOWARN = $(NOWARN_IMPLICIT_INT)".into(),
+        "MESA_COMPILEOPTIONS := -Dmesa-feature".into(),
+    ] {
+        writeln!(
+            script,
+            "printf '%s\\n' {} >> config/make.cfg",
+            shell_quote(&line)
+        )
+        .unwrap();
+    }
+    script.push_str(
+        "printf '%s\\n' \"AROS_DEVELOPER := $PWD/AROS/Developer\" >> config/make.cfg\n\
+         printf '%s\\n' \"GENDIR := $PWD/gen\" >> config/make.cfg\n\
+         printf '%s\\n' \"PORTSDIR := $PWD/Ports\" >> config/make.cfg\n",
+    );
+    script
+}
+
+fn mesa_features_script(cpu: &str, clang_path: &Path) -> String {
+    let clang = clang_path.to_string_lossy();
+    let clangxx_path = clang_path.with_file_name("clang++");
+    let clangxx = clangxx_path.to_string_lossy();
+    let mut script = format!(
+        "#!/bin/bash\nset -eu\n\
+         [ \"$1\" = --host=x86_64-unknown-linux-gnu ] || exit 30\n\
+         [ \"$AROS_TARGET_CPU\" = {cpu} ] || exit 31\n\
+         [ \"$CC\" = {} ] || exit 32\n\
+         [ \"$CONFIG_STATUS\" = features.status ] || exit 33\n\
+         [ \"$CPP\" = {} ] || exit 35\n\
+         [ \"$CXX\" = {} ] || exit 36\n\
+         [ \"$CFLAGS\" = \"-target-c -g -O2\" ] || exit 37\n\
+         config_root=\"${{PWD%/config}}\"\n\
+         [ \"$PWD\" = \"$config_root/config\" ] || exit 39\n\
+         [ \"$AROS_DEVELOPER\" = \"$config_root/AROS/Developer\" ] || exit 38\n\
+         [ \"$2\" = \"--with-config-dir=$config_root/gen/config\" ] || exit 34\n\
+         config_dir=\"$config_root/gen/config\"\n\
+         mkdir -p \"$config_dir\"\n\
+         : > \"$config_dir/compiler.cfg\"\n",
+        shell_quote(&format!("{clang} ")),
+        shell_quote(&format!("{clang} -E ")),
+        shell_quote(&format!("{clangxx} ")),
+    );
+    for name in MESA_COMPILER_OPTION_VARIABLES {
+        let value = match *name {
+            "CFLAGS_GNU11" => "-std=gnu11",
+            "CXXFLAGS_CXX17" => "-std=c++17",
+            _ => "",
+        };
+        script.push_str(&mesa_assignment_command(name, value));
+    }
+    for (index, (name, value)) in [
+        ("CFLAGS_NO_BUILTIN_FFS", "-fno-builtin-ffs"),
+        ("CFLAGS_NO_BUILTIN_FFSLL", "-fno-builtin-ffsll"),
+        ("CFLAGS_NO_BUILTIN_BSWAP32", "-fno-builtin-bswap32"),
+        ("CFLAGS_NO_BUILTIN_BSWAP64", "-fno-builtin-bswap64"),
+        ("CFLAGS_NO_BUILTIN_CLZ", "-fno-builtin-clz"),
+        ("CFLAGS_NO_BUILTIN_CLZLL", "-fno-builtin-clzll"),
+        ("CFLAGS_NO_BUILTIN_CTZ", "-fno-builtin-ctz"),
+        ("CFLAGS_NO_BUILTIN_EXPECT", "-fno-builtin-expect"),
+        ("CFLAGS_NO_BUILTIN_POPCOUNT", "-fno-builtin-popcount"),
+        ("CFLAGS_NO_BUILTIN_POPCOUNTLL", "-fno-builtin-popcountll"),
+        ("CFLAGS_NO_BUILTIN_UNREACHABLE", "-fno-builtin-unreachable"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        script.push_str(&mesa_assignment_command(
+            name,
+            if index % 2 == 0 { value } else { "" },
+        ));
+    }
+    script.push_str(&mesa_assignment_command(
+        "NOWARN_IMPLICIT_INT",
+        "-Wno-implicit-int",
+    ));
+    script
+}
+
+fn mesa_assignment_command(name: &str, value: &str) -> String {
+    format!(
+        "printf '%s\\n' {} >> \"$config_dir/compiler.cfg\"\n",
+        shell_quote(&format!("{name} := {value}"))
+    )
+}
+
+fn host_program(name: &str) -> PathBuf {
+    let output = Command::new("which")
+        .arg(name)
+        .output()
+        .unwrap_or_else(|error| panic!("cannot locate host {name}: {error}"));
+    assert!(
+        output.status.success(),
+        "the synthetic Mesa execution regression requires host {name}"
+    );
+    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+        .canonicalize()
+        .unwrap()
+}
+
+fn gnu_make() -> PathBuf {
+    for name in ["gmake", "make"] {
+        let output = Command::new("which").arg(name).output().unwrap();
+        if !output.status.success() {
+            continue;
+        }
+        let path = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+            .canonicalize()
+            .unwrap();
+        let version = Command::new(&path).arg("--version").output().unwrap();
+        if version.status.success()
+            && String::from_utf8_lossy(&version.stdout)
+                .lines()
+                .next()
+                .is_some_and(|line| line.starts_with("GNU Make "))
+        {
+            return path;
+        }
+    }
+    panic!("the synthetic Mesa execution regression requires GNU Make")
 }
 
 fn install_link_capable_drivers(request: &mut NativeCompatibilityRequest, root: &Path) {

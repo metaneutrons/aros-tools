@@ -370,6 +370,7 @@ fn expected(fixture: &ReceiptFixture) -> NativeCompatibilityReceiptExpectations<
         cmake_build_required: request.cmake_build_required,
         native_sdk: None,
         llvm_sdk: None,
+        mesa_preflight: None,
         sdk_consumer_source_tree_sha256: request.sdk_consumer_source_tree_sha256,
         engine_api_version: request.engine_api_version,
         engine_sha256: request.engine_sha256,

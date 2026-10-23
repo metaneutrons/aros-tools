@@ -52,6 +52,7 @@ fn receipt_accepts_safe_nested_upstream_fetch_markers() {
         package: None,
         native_sdk: None,
         llvm_sdk: None,
+        mesa_preflight_receipt_sha256: None,
     };
 
     let error = document.validate().unwrap_err();

@@ -17,11 +17,10 @@ use aros_common::{sha256_bytes, ArosCompilerIdentity, CancellationToken, Sha256D
 use serde::{Deserialize, Serialize};
 
 use super::{
-    checked_executable, run_probe_set, verify_standalone_outputs,
-    verify_standalone_outputs_with_compilers, CompatibilityCommand, CompatibilityPhase,
-    CompatibilityPreparation, CompatibilityProbeRequest, CompatibilityProbeSet,
-    CompatibilityProbeSetRequest, HostToolClosure, StandaloneOutputReport, StandaloneOutputRequest,
-    StandaloneTargetArtifacts, TwoRootRelocation,
+    checked_executable, verify_standalone_outputs, verify_standalone_outputs_with_compilers,
+    CompatibilityCommand, CompatibilityPhase, CompatibilityPreparation, CompatibilityProbeRequest,
+    CompatibilityProbeSet, CompatibilityProbeSetRequest, HostToolClosure, StandaloneOutputReport,
+    StandaloneOutputRequest, StandaloneTargetArtifacts, TwoRootRelocation,
 };
 use crate::compatibility_ports::{
     safe_fetch_marker_path, safe_relative_path, CompatibilityPortsPayload,
@@ -41,11 +40,20 @@ const GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compat
 const LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v4";
 const LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA: &str =
     "aros-toolchain-native-compatibility-receipt-v6";
+const MESA_LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA: &str =
+    "aros-toolchain-native-compatibility-receipt-v7";
 const COMPATIBILITY_RECEIPT_FILE: &str = "native-compatibility.receipt.json";
 
 #[path = "execution_llvm_sdk.rs"]
 mod llvm_sdk;
 pub use llvm_sdk::LlvmSdkCompatibilityReport;
+
+#[path = "execution_mesa.rs"]
+mod mesa;
+
+#[path = "execution_mesa_selection.rs"]
+mod mesa_selection;
+pub use mesa_selection::MesaPreflightSelection;
 
 #[path = "execution_receipt_readback.rs"]
 mod receipt_readback;
@@ -168,6 +176,9 @@ pub struct NativeCompatibilityReport {
     /// Complete local LLVM SDK build/link digests, separate from GNU evidence.
     /// Portable owning-job export and release admission remain separate gates.
     pub llvm_sdk: Option<LlvmSdkCompatibilityReport>,
+    /// Actual owner-retained Mesa preflight receipt, not a standalone JSON claim.
+    /// Portable qualification requires the separately versioned evidence join.
+    pub mesa_preflight_receipt_sha256: Option<Sha256Digest>,
     /// Durable aggregate receipt binding every phase report and standalone
     /// collector result without workstation-local paths.
     pub receipt: CompatibilityReceipt,
@@ -198,6 +209,8 @@ struct CompatibilityReceiptDocument {
     native_sdk: Option<CompatibilityReceiptSdk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     llvm_sdk: Option<LlvmSdkCompatibilityReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mesa_preflight_receipt_sha256: Option<Sha256Digest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,8 +291,11 @@ struct CompatibilityReceiptArtifact {
 /// lock against concurrent writers. GNU receipts use v3 (v5 with SDK links)
 /// and LLVM family-v2 receipts use v4 to bind the canonical manifest identity.
 /// Explicit generic LLVM SDK selection uses v6 and binds the source-derived
-/// CMake SDK inventory and four original/relocated application links. Local
-/// execution does not grant portable owning-job evidence, signature
+/// CMake SDK inventory and four original/relocated application links.
+/// Mesa 26 execution additionally retains a real preflight across CMake and
+/// emits v7. Retained/portable readback requires the independently selected
+/// Mesa policy and its complete bounded byte proof, not just a receipt marker.
+/// Local execution does not grant portable owning-job evidence, signature
 /// authentication or release admission. Legacy LLVM v1 remains v2.
 ///
 /// # Errors
@@ -324,8 +340,26 @@ pub fn execute_native_compatibility(
         .materialize_cmake_cache(&outputs.cmake_build)?;
     let sealed_environment = environments.sdk;
     let poisoned_environment = environments.standalone;
+    let mesa = mesa::begin(
+        request,
+        &outputs.reports,
+        llvm_drivers.as_ref(),
+        &sealed_environment,
+        cancellation,
+    )?;
     let helpers_root = helpers_root(&request.preparation)?;
     let mut cmake_commands = vec![cmake_command(request, &inputs, &outputs, &helpers_root)?];
+    if let Some(owner) = &mesa {
+        let drivers = llvm_drivers.as_ref().ok_or_else(|| {
+            ContractError::compatibility("Mesa preflight lost its selected LLVM drivers")
+        })?;
+        cmake_commands[0].arguments.extend(owner.arguments(
+            request,
+            drivers,
+            &sealed_environment,
+            cancellation,
+        )?);
+    }
     if let Some(roots) = inputs
         .sdk_consumer_contract
         .as_ref()
@@ -388,7 +422,7 @@ pub fn execute_native_compatibility(
             CompatibilityProbeRequest {
                 phase: CompatibilityPhase::UpstreamLinklibs,
                 commands: vec![upstream_commands.linklibs],
-                environment: sealed_environment,
+                environment: sealed_environment.clone(),
                 current_dir: outputs.upstream_build.clone(),
                 reports_root: outputs.reports.clone(),
                 timeout: request.timeout,
@@ -414,7 +448,21 @@ pub fn execute_native_compatibility(
             },
         ],
     };
-    let probes = run_probe_set(&probes, cancellation)?;
+    let revalidate_mesa = || {
+        if let Some(owner) = &mesa {
+            let drivers = llvm_drivers.as_ref().ok_or_else(|| {
+                ContractError::compatibility("Mesa preflight lost its selected LLVM drivers")
+            })?;
+            owner.revalidate(request, drivers, &sealed_environment, cancellation)?;
+        }
+        Ok(())
+    };
+    let probes = super::run_probe_set_with_boundary(&probes, cancellation, |phase| {
+        if phase == CompatibilityPhase::CmakeConsumer {
+            revalidate_mesa()?;
+        }
+        Ok(())
+    })?;
     if let Some(host_inputs) = &inputs.host_generator_cache {
         host_inputs.revalidate()?;
     }
@@ -463,10 +511,17 @@ pub fn execute_native_compatibility(
         revalidate_bound_roots(request)?;
         super::validate_preparation(&request.preparation)?;
     }
+    revalidate_mesa()?;
+    let mesa_preflight_receipt_sha256 = mesa.as_ref().map(|owner| owner.receipt_sha256().clone());
     let receipt = write_compatibility_receipt(
         &outputs.reports,
         &probes,
-        (&standalone, native_sdk.as_ref(), llvm_sdk.as_ref()),
+        (
+            &standalone,
+            native_sdk.as_ref(),
+            llvm_sdk.as_ref(),
+            mesa_preflight_receipt_sha256.as_ref(),
+        ),
         &inputs.upstream_source_commit,
         &inputs.upstream_source_tree,
         &inputs.ports_sources,
@@ -475,11 +530,13 @@ pub fn execute_native_compatibility(
     if let Some(completed) = &completed_llvm_sdk {
         completed.revalidate(cancellation)?;
     }
+    revalidate_mesa()?;
     Ok(NativeCompatibilityReport {
         probes,
         standalone,
         native_sdk,
         llvm_sdk,
+        mesa_preflight_receipt_sha256,
         receipt,
     })
 }
@@ -593,13 +650,14 @@ fn write_compatibility_receipt(
         &StandaloneOutputReport,
         Option<&super::NativeSdkLinkReport>,
         Option<&LlvmSdkCompatibilityReport>,
+        Option<&Sha256Digest>,
     ),
     upstream_source_commit: &GitObjectId,
     upstream_source_tree: &GitObjectId,
     ports_sources: &CompatibilityPortsSources,
     request: &NativeCompatibilityRequest,
 ) -> Result<CompatibilityReceipt, ContractError> {
-    let (standalone, native_sdk, llvm_sdk) = verified_outputs;
+    let (standalone, native_sdk, llvm_sdk, mesa_preflight_receipt_sha256) = verified_outputs;
     let mut persisted_reports = BTreeMap::new();
     let mut phase_reports = Vec::with_capacity(super::REQUIRED_PROBE_PHASES.len());
     for phase in super::REQUIRED_PROBE_PHASES {
@@ -677,7 +735,9 @@ fn write_compatibility_receipt(
         None
     };
     let document = CompatibilityReceiptDocument {
-        schema: if llvm_sdk.is_some() {
+        schema: if mesa_preflight_receipt_sha256.is_some() {
+            MESA_LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+        } else if llvm_sdk.is_some() {
             LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
         } else if native_sdk.is_some() {
             GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA
@@ -702,6 +762,7 @@ fn write_compatibility_receipt(
             entries: proof.sdk_entries,
         }),
         llvm_sdk: llvm_sdk.cloned(),
+        mesa_preflight_receipt_sha256: mesa_preflight_receipt_sha256.cloned(),
     };
     document.validate()?;
     let encoded = canonical::bytes(
@@ -756,7 +817,8 @@ impl CompatibilityReceiptDocument {
                 GNU_COMPATIBILITY_RECEIPT_SCHEMA
                 | GNU_SDK_COMPATIBILITY_RECEIPT_SCHEMA
                 | LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA
-                | LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA => self.package.is_none(),
+                | LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+                | MESA_LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA => self.package.is_none(),
                 _ => true,
             }
         {
@@ -770,9 +832,21 @@ impl CompatibilityReceiptDocument {
                 .as_ref()
                 .is_some_and(|sdk| sdk.entries == 0 || sdk.entries > 100_000)
         {
-            return Err(ContractError::compatibility("native compatibility receipt lacks its mandatory ordinary SDK proof or mixes legacy schemas"));
+            return Err(ContractError::compatibility(
+                "native compatibility receipt lacks its mandatory ordinary SDK proof or mixes legacy schemas",
+            ));
         }
-        if (self.schema == LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA) != self.llvm_sdk.is_some()
+        if (self.schema == MESA_LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA)
+            != self.mesa_preflight_receipt_sha256.is_some()
+        {
+            return Err(ContractError::compatibility(
+                "configured Mesa receipt lacks its owner-retained preflight or mixes historical schemas",
+            ));
+        }
+        if matches!(
+            self.schema.as_str(),
+            LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA | MESA_LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+        ) != self.llvm_sdk.is_some()
             || self.llvm_sdk.as_ref().is_some_and(|sdk| {
                 self.native_sdk.is_some()
                     || !(1..=100_000).contains(&sdk.sdk_entries)
@@ -798,14 +872,18 @@ impl CompatibilityReceiptDocument {
                     .is_some_and(crate::profiles::identifier),
                 (
                     ArosCompilerIdentity::Llvm { .. },
-                    LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA | LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA,
+                    LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA
+                    | LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+                    | MESA_LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA,
                 ) => package.source_preset.is_none(),
                 _ => false,
             };
             let mut expected_targets = BTreeSet::from([package.target_triple.as_str()]);
             if matches!(
                 self.schema.as_str(),
-                LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA | LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+                LLVM_V2_COMPATIBILITY_RECEIPT_SCHEMA
+                    | LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
+                    | MESA_LLVM_SDK_COMPATIBILITY_RECEIPT_SCHEMA
             ) && package.target_profile == "pc-x86_64"
             {
                 expected_targets.insert("i386-unknown-aros");
@@ -1541,7 +1619,7 @@ fn cmake_command(
                 _ => {
                     return Err(ContractError::compatibility(
                         "LLVM SDK source lost its ABI platform SMP fact",
-                    ))
+                    ));
                 }
             };
             command.arguments.extend([

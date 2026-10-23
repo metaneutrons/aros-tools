@@ -32,6 +32,7 @@ mod deadline_tests;
 mod environment;
 mod environment_plan;
 mod execution;
+pub mod gnu_shell_query;
 mod host_generator_inputs;
 mod host_tools;
 mod llvm_sdk_application;
@@ -42,10 +43,15 @@ mod llvm_sdk_link_paths;
 mod llvm_sdk_links;
 mod llvm_sdk_portable;
 mod mesa_preflight;
+mod mesa_preflight_evidence;
+mod mesa_preflight_llvm;
 mod mesa_preflight_measurement;
+mod mesa_preflight_profile;
+mod mesa_preflight_recipe;
 mod native_sdk_links;
 mod native_sdk_portable;
 mod native_sdk_relocation;
+mod recipe_shell;
 mod relocation;
 #[cfg(all(test, unix))]
 mod sdk_generation_matrix_cli_tests;
@@ -69,7 +75,7 @@ pub use execution::{
     execute_native_compatibility, execute_native_compatibility_with_export,
     execute_native_compatibility_with_readback, export_retained_native_compatibility,
     readback_native_compatibility_receipt, readback_portable_native_compatibility,
-    readback_retained_native_compatibility, LlvmSdkCompatibilityReport,
+    readback_retained_native_compatibility, LlvmSdkCompatibilityReport, MesaPreflightSelection,
     NativeCompatibilityCommandLogs, NativeCompatibilityExecutionExport,
     NativeCompatibilityExpectedPackage, NativeCompatibilityExpectedPortSource,
     NativeCompatibilityInputClaims, NativeCompatibilityReceiptExpectations,
@@ -100,7 +106,23 @@ pub use llvm_sdk_links::{
     execute_llvm_sdk_links, readback_llvm_sdk_links, CompletedLlvmSdkLinks, LlvmSdkLinkRequest,
 };
 pub use llvm_sdk_portable::{LlvmSdkLinkSelection, LlvmSdkPortableProof};
-pub use mesa_preflight::{execute_mesa_preflight, CompletedMesaPreflight, MesaPreflightRequest};
+pub use mesa_preflight::{
+    GeneratedNativeMakeInclude, NativeMakeIncludeExecution,
+    build_mesa_native_host, collect_mesa_native_root, execute_mesa_preflight,
+    join_mesa_native_source, observe_mesa_native_dispatch, observe_mesa_native_launch_inputs,
+    observe_mesa_native_root, prepare_mesa_native_direct_collection, BuiltMesaNativeHost,
+    CollectedMesaNativeDirect, CollectedMesaNativeRoot, CompletedMesaPreflight,
+    ExecutedMesa26OriginalRecipe, Mesa26GeneratedPathListSelection, Mesa26OriginalRecipeExecution,
+    MesaGenmodulePreflightSelection, MesaNativeCollectionSelection, MesaNativeDirectOrigin,
+    MesaNativeDispatchSelection, MesaNativeHostBuildSelection, MesaNativeRootQuerySelection,
+    MesaNativeSourceSelection, MesaPreflightRequest, NativeGenmoduleInventorySelection,
+    NativeGenmoduleMakeData, NativeGenmoduleMakeSelection, ObservedFencedMesaNativeDispatch,
+    ObservedMesaNativeDispatch, ObservedMesaNativeLaunchInputs, ObservedMesaNativeRoot,
+    PreparedMesaNativeDirectCollection, RecordedMesaNativeDispatch,
+    SelectedNativeGenmoduleInventory, SourceJoinedMesaNativeRoot,
+};
+pub use mesa_preflight_evidence::MesaPreflightDataProof;
+pub use mesa_preflight_profile::{MesaPreflightProfile, SourceMesaPreflightProfile};
 pub use native_sdk_links::{
     execute_native_sdk_links, readback_native_sdk_links, NativeSdkLinkReport, NativeSdkLinkRequest,
 };
@@ -617,6 +639,14 @@ pub fn run_probe_set(
     request: &CompatibilityProbeSetRequest,
     cancellation: &CancellationToken,
 ) -> Result<CompatibilityProbeSet, ContractError> {
+    run_probe_set_with_boundary(request, cancellation, |_| Ok(()))
+}
+
+fn run_probe_set_with_boundary(
+    request: &CompatibilityProbeSetRequest,
+    cancellation: &CancellationToken,
+    mut after_phase: impl FnMut(CompatibilityPhase) -> Result<(), ContractError>,
+) -> Result<CompatibilityProbeSet, ContractError> {
     let mut probes = BTreeMap::new();
     for probe in &request.probes {
         if probes.insert(probe.phase, probe).is_some() {
@@ -652,6 +682,7 @@ pub fn run_probe_set(
             ContractError::compatibility("compatibility probe set lost a required phase")
         })?;
         reports.insert(phase, run_probe(probe, cancellation)?);
+        after_phase(phase)?;
     }
     Ok(CompatibilityProbeSet { reports })
 }
@@ -935,12 +966,12 @@ impl ProbeReportPaths {
                 Ok(_) => {
                     return Err(ContractError::compatibility(
                         "compatibility report output already exists and cannot be adopted",
-                    ))
+                    ));
                 }
                 Err(_) => {
                     return Err(ContractError::compatibility(
                         "cannot safely inspect a compatibility report output path",
-                    ))
+                    ));
                 }
             }
         }

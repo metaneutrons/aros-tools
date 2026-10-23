@@ -37,6 +37,20 @@ pub enum CompatibilityEnvironment {
     },
 }
 
+impl CompatibilityEnvironment {
+    /// Apply this exact revalidated policy to a child process, removing ambient
+    /// environment entries rather than appending the measured search path.
+    ///
+    /// # Errors
+    /// Rejects invalid variables or changed host closure entries before changing
+    /// the command. This transports policy; it does not authenticate execution.
+    pub fn apply_to(&self, command: &mut std::process::Command) -> Result<(), ContractError> {
+        let resolved = resolve(self)?;
+        command.env_clear().envs(resolved.variables);
+        Ok(())
+    }
+}
+
 /// Measured host tool identity written into a report without local paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,7 +136,9 @@ pub(super) fn identity(
     Ok(sha256_bytes(&encoded))
 }
 
-fn validate_variables(environment: &BTreeMap<String, String>) -> Result<(), ContractError> {
+pub(super) fn validate_variables(
+    environment: &BTreeMap<String, String>,
+) -> Result<(), ContractError> {
     if environment.len() > MAX_PROBE_ENVIRONMENT_ENTRIES {
         return Err(ContractError::compatibility(
             "compatibility process has more environment entries than the configured limit",
@@ -163,4 +179,82 @@ fn valid_name(name: &str) -> bool {
     let mut characters = name.bytes();
     matches!(characters.next(), Some(b'A'..=b'Z' | b'_'))
         && characters.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn policy_handoff_clears_ambient_and_explicit_command_environment() {
+        let mut command = Command::new("/bin/sh");
+        command.env("INJECTED", "ambient").args([
+            "-c",
+            "test -z \"${HOME+x}\" && test -z \"${INJECTED+x}\" && printf '%s' \"$PATH\"",
+        ]);
+        CompatibilityEnvironment::Poisoned {
+            variables: BTreeMap::from([("PATH".into(), "/nonexistent".into())]),
+        }
+        .apply_to(&mut command)
+        .unwrap();
+        let output =
+            aros_common::run_output_with_timeout(&mut command, 4096, Duration::from_secs(5))
+                .unwrap();
+        assert!(output.status.success() && !output.timed_out);
+        assert_eq!(output.stdout.exact_bytes().unwrap(), b"/nonexistent");
+    }
+
+    #[test]
+    fn invalid_policy_does_not_partially_modify_the_command() {
+        let mut command = Command::new("/bin/sh");
+        command.env("UNCHANGED", "yes");
+        let original: Vec<_> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(std::ffi::OsStr::to_owned)))
+            .collect();
+        assert!(CompatibilityEnvironment::Poisoned {
+            variables: BTreeMap::from([("PATH".into(), "/ambient".into())])
+        }
+        .apply_to(&mut command)
+        .is_err());
+        let current: Vec<_> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(std::ffi::OsStr::to_owned)))
+            .collect();
+        assert_eq!(current, original);
+    }
+
+    #[test]
+    fn sealed_handoff_uses_only_the_revalidated_closure_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let closure = crate::compatibility::prepare_host_tool_closure(
+            &crate::compatibility::HostToolClosureRequest {
+                output_root: temporary.path().join("closure"),
+                tools: vec![crate::compatibility::CompatibilityHostTool {
+                    name: "sh".into(),
+                    program: std::path::Path::new("/bin/sh").canonicalize().unwrap(),
+                }],
+            },
+        )
+        .unwrap();
+        let expected = closure.root.to_string_lossy().into_owned();
+        let policy = CompatibilityEnvironment::SealedHostTools {
+            variables: BTreeMap::from([("PATH".into(), "/nonexistent".into())]),
+            host_tools: closure,
+        };
+        let mut command = Command::new("/bin/sh");
+        command
+            .env("PATH", "/ambient")
+            .args(["-c", "printf '%s' \"$PATH\""]);
+        policy.apply_to(&mut command).unwrap();
+        let output =
+            aros_common::run_output_with_timeout(&mut command, 4096, Duration::from_secs(5))
+                .unwrap();
+        assert!(output.status.success() && !output.timed_out);
+        assert_eq!(output.stdout.exact_bytes().unwrap(), expected.as_bytes());
+        std::fs::remove_file(temporary.path().join("closure/sh")).unwrap();
+        assert!(policy.apply_to(&mut command).is_err());
+    }
 }

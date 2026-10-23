@@ -113,8 +113,18 @@ fn guarded_package_from_fixture_with_release(
 
     let local = fixture.readback().unwrap();
     let package_root = tempfile::tempdir().unwrap();
-    let selected_package =
+    let mut selected_package =
         package_request_for_release(&fixture, package_root.path().join("package"), release_id);
+    // Standalone SDK readback selects this document independently. Construct
+    // its required identity before packaging so every digest binds the same
+    // synthetic environment, rather than patching claims after packaging.
+    selected_package.build_environment.insert(
+        "schema".into(),
+        json!("aros-toolchain-build-environment-v1"),
+    );
+    selected_package
+        .build_environment
+        .insert("host".into(), json!(fixture.identity.host));
     let result_root = tempfile::tempdir().unwrap();
     let result_path = result_root.path().join(BUILD_RESULT_FILE);
     let result_bytes = synthetic_build_result(&local, &fixture.identity);

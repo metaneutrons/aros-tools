@@ -68,6 +68,7 @@ pub(super) fn probe_if_configured(
         request.generations.len(),
         "CLI should report the exact complete fixture matrix count"
     );
+    probe_source_policy_selection(&binary, request, generation_inputs, &metadata_root);
 
     super::sdk_qualification_cli_tests::probe(
         &binary,
@@ -144,6 +145,226 @@ pub(super) fn probe_if_configured(
         &wrong_policy_result,
         "SDK generation native policy differs from its independently selected compiler family",
         "SDK family policy cannot be substituted through selection metadata",
+    );
+}
+
+/// Synthetic independent policy declarations exercise collector byte joins.
+/// This does not claim inspection of a real source or authenticate its origin.
+fn probe_source_policy_selection(
+    binary: &Path,
+    request: &SdkGenerationMatrixReadbackRequest<'_, '_>,
+    generation_inputs: &BTreeMap<ExpectedSdkGenerationLane, GenerationCompatibilityInput<'_>>,
+    metadata_root: &Path,
+) {
+    let inputs = &request.complete.builds.packages.inputs;
+    let mut selection = selection_document(request, generation_inputs, metadata_root);
+    selection["schema"] = json!("aros-toolchain-release-evidence-selection-v3");
+    let mut llvm_row = None;
+    for (index, row) in selection["sdk_generations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        let group = inputs
+            .groups()
+            .iter()
+            .find(|group| group.id() == row["group_id"].as_str().unwrap())
+            .unwrap();
+        if group.source_lock().family() != crate::source_lock::CompilerFamily::Llvm {
+            continue;
+        }
+        let sdk = inputs
+            .sdks()
+            .iter()
+            .find(|sdk| sdk.id() == row["sdk_id"].as_str().unwrap())
+            .unwrap();
+        // Existing matrix fixtures explicitly select historical Mesa20, not
+        // configured Mesa26. This constant is fixture policy, not a marker read.
+        let policy = json!({
+            "source_commit":sdk.identity().source.commit,
+            "source_tree":sdk.identity().source.git_tree,
+            "source_preset":sdk.source_preset(),
+            "compiler_profile":row["target_profile"],
+            "profiles_sha256":sha256_bytes(b"synthetic independently selected source profiles"),
+            "native_consumer":{"file":"synthetic-sdk-consumer.json","sha256":sdk.identity().source.contract_sha256,"schema":"aros-sdk-consumer-contract-v1"},
+            "native_sdk_required":true,"mesa_preflight_required":false
+        });
+        let bytes = crate::canonical::bytes(&policy).unwrap();
+        let path = write_bytes(
+            metadata_root,
+            &format!("source-policy-{index}.json"),
+            &bytes,
+        );
+        row["compatibility"]["source_policy"] = json!({"path":path,"sha256":sha256_bytes(&bytes)});
+        llvm_row = Some(index);
+    }
+    let Some(row_index) = llvm_row else {
+        return;
+    };
+    let (path, digest) = write_selection(metadata_root, "selection-source-policy.json", &selection);
+    assert_success(
+        &invoke_cli(binary, &cli_arguments(request, &path, &digest)),
+        "v3 LLVM SDK policy selection should verify",
+    );
+    probe_generation_policy_cli(
+        binary,
+        request,
+        &selection["sdk_generations"][row_index],
+        metadata_root,
+    );
+    let mut missing = selection.clone();
+    missing["sdk_generations"][row_index]["compatibility"]
+        .as_object_mut()
+        .unwrap()
+        .remove("source_policy");
+    let (path, digest) = write_selection(
+        metadata_root,
+        "selection-missing-source-policy.json",
+        &missing,
+    );
+    assert_failure_contains(
+        &invoke_cli(binary, &cli_arguments(request, &path, &digest)),
+        "requires a separately selected source policy",
+        "v3 cannot infer absent source policy from input markers",
+    );
+    let selected_policy =
+        &mut selection["sdk_generations"][row_index]["compatibility"]["source_policy"];
+    let policy_path = PathBuf::from(selected_policy["path"].as_str().unwrap());
+    let mut policy: Value = serde_json::from_slice(&fs::read(&policy_path).unwrap()).unwrap();
+    policy["mesa_preflight_required"] = json!(true);
+    let bytes = crate::canonical::bytes(&policy).unwrap();
+    fs::write(&policy_path, &bytes).unwrap();
+    selected_policy["sha256"] = json!(sha256_bytes(&bytes));
+    let (path, digest) = write_selection(metadata_root, "selection-required-mesa.json", &selection);
+    assert_failure_contains(
+        &invoke_cli(binary, &cli_arguments(request, &path, &digest)),
+        "configured Mesa requirement differs",
+        "independent Mesa policy must reject historical input observations",
+    );
+}
+
+fn probe_generation_policy_cli(
+    binary: &Path,
+    request: &SdkGenerationMatrixReadbackRequest<'_, '_>,
+    row: &Value,
+    root: &Path,
+) {
+    let packages = &request.complete.builds.packages;
+    let (lane, generation) = request
+        .generations
+        .iter()
+        .find(|(lane, _)| {
+            lane.sdk_id() == row["sdk_id"].as_str().unwrap()
+                && lane.group_id() == row["group_id"].as_str().unwrap()
+                && lane.profile() == row["target_profile"].as_str().unwrap()
+                && lane.host() == row["host"].as_str().unwrap()
+        })
+        .unwrap();
+    let expected_lane = (lane.group_id(), lane.profile(), lane.host());
+    let artifact = packages
+        .index
+        .artifacts()
+        .iter()
+        .find(|artifact| {
+            (
+                artifact.group_id(),
+                artifact.target_profile(),
+                artifact.host(),
+            ) == expected_lane
+        })
+        .unwrap();
+    let compiler = &generation.compatibility.expected.package;
+    let environment = crate::canonical::bytes(&Value::Object(
+        packages.build_environments[artifact.asset()].clone(),
+    ))
+    .unwrap();
+    let environment_path =
+        write_bytes(root, "standalone-generation-environment.json", &environment);
+    let mut compatibility = row["compatibility"].clone();
+    compatibility
+        .as_object_mut()
+        .unwrap()
+        .remove("native_sdk_required");
+    let mut selected = json!({
+        "schema":"aros-sdk-generation-readback-selection-v2",
+        "compiler":{
+            "directory":request.complete.builds.lanes[artifact.asset()].builds[0].package_dir,
+            "archive_sha256":compiler.archive_sha256,"archive_size":compiler.archive_size,
+            "environment":{"path":environment_path,"sha256":sha256_bytes(&environment)}
+        },
+        "sdk":{
+            "directory":generation.package.package_dir,
+            "tree_sha256":generation.package.expected_tree_sha256,
+            "archive_sha256":generation.package.expected_archive_sha256,
+            "archive_size":generation.package.expected_archive_size
+        },
+        "generation":row["record"],"compatibility":compatibility
+    });
+    let mut arguments = vec![
+        "sdk".into(),
+        "verify-generation".into(),
+        "--inputs-dir".into(),
+        packages.directory.to_string_lossy().into_owned(),
+        "--inputs-sha256".into(),
+        packages.inputs.collection_sha256().to_string(),
+        "--sdk-id".into(),
+        lane.sdk_id().to_owned(),
+        "--compiler-group".into(),
+        lane.group_id().to_owned(),
+        "--compiler-profile".into(),
+        lane.profile().to_owned(),
+        "--host".into(),
+        lane.host().to_owned(),
+        "--release-id".into(),
+        packages.index.release_id().to_owned(),
+    ];
+    for prefix in &packages.forbidden_prefixes {
+        arguments.extend([
+            "--forbidden-prefix".into(),
+            prefix.to_string_lossy().into_owned(),
+        ]);
+    }
+    if packages.forbidden_prefixes.is_empty() {
+        // The standalone command requires an explicit forbidden root. Use the
+        // actual compiler extraction in this synthetic fixture, not a dummy
+        // path or a relaxation of its production argument contract.
+        arguments.extend([
+            "--forbidden-prefix".into(),
+            request.complete.builds.lanes[artifact.asset()].builds[0]
+                .package_dir
+                .to_string_lossy()
+                .into_owned(),
+        ]);
+    }
+    let (path, digest) = write_selection(root, "standalone-generation-policy.json", &selected);
+    let mut valid = arguments.clone();
+    valid.extend([
+        "--selection".into(),
+        path.to_string_lossy().into_owned(),
+        "--selection-sha256".into(),
+        digest.to_string(),
+    ]);
+    assert_success(
+        &invoke_cli(binary, &valid),
+        "standalone v2 generation must read the independent source policy",
+    );
+    selected["compatibility"]
+        .as_object_mut()
+        .unwrap()
+        .remove("source_policy");
+    let (path, digest) =
+        write_selection(root, "standalone-generation-missing-policy.json", &selected);
+    arguments.extend([
+        "--selection".into(),
+        path.to_string_lossy().into_owned(),
+        "--selection-sha256".into(),
+        digest.to_string(),
+    ]);
+    assert_failure_contains(
+        &invoke_cli(binary, &arguments),
+        "requires a separately selected source policy",
+        "standalone v2 must not infer missing policy from results",
     );
 }
 
@@ -318,7 +539,9 @@ fn synthetic_input_document(expected: &NativeCompatibilityReceiptExpectations<'_
     let c_fixture = b"synthetic compiler-lane C fixture";
     let cxx_fixture = b"synthetic compiler-lane C++ fixture";
     let mut document = json!({
-        "schema": if expected.llvm_sdk.is_some() {
+        "schema": if expected.mesa_preflight.is_some() {
+            "aros-toolchain-compatibility-inputs-v4"
+        } else if expected.llvm_sdk.is_some() {
             "aros-toolchain-compatibility-inputs-v3"
         } else if expected.native_sdk.is_some() {
             "aros-toolchain-compatibility-inputs-v2"
@@ -366,6 +589,12 @@ fn synthetic_input_document(expected: &NativeCompatibilityReceiptExpectations<'_
     }
     if let Some(selection) = expected.llvm_sdk {
         object.insert("llvm_sdk".into(), serde_json::to_value(selection).unwrap());
+    }
+    if let Some(selection) = expected.mesa_preflight {
+        object.insert(
+            "mesa_preflight".into(),
+            serde_json::to_value(selection).unwrap(),
+        );
     }
     crate::canonical::bytes(&document).unwrap()
 }

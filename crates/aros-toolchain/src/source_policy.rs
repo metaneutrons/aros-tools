@@ -13,7 +13,7 @@ use aros_common::{
     sdk_consumer_contract::load_bound_sdk_consumer_contract, sha256_bytes, CancellationToken,
     Sha256Digest, TargetProfile,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::compatibility_source::CommittedSourceIdentity;
 use crate::inspection::{self, Checkout};
@@ -22,6 +22,10 @@ use crate::ContractError;
 
 const SOURCE_POLICY_TIMEOUT: Duration = Duration::from_mins(5);
 const SOURCE_PROFILE_FILE: &str = "aros-targets.toml";
+
+#[cfg(test)]
+#[path = "source_policy_mesa_tests.rs"]
+mod mesa_tests;
 
 /// Inputs for one policy selection from an exact source commit and tree.
 #[derive(Debug, Clone)]
@@ -37,7 +41,8 @@ pub struct SourcePolicyRequest {
 }
 
 /// Contract selection, if the chosen source profile declares one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeConsumerPolicy {
     /// Source-relative consumer-contract path.
     pub file: String,
@@ -48,7 +53,8 @@ pub struct NativeConsumerPolicy {
 }
 
 /// Source-derived policy for one selected compiler profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeSourcePolicy {
     /// Exact selected source commit object ID.
     pub source_commit: String,
@@ -64,6 +70,55 @@ pub struct NativeSourcePolicy {
     pub native_consumer: Option<NativeConsumerPolicy>,
     /// True when the bound consumer contract requires ordinary SDK links.
     pub native_sdk_required: bool,
+    /// True only for the source-selected LLVM Mesa 26 configured-input path.
+    pub mesa_preflight_required: bool,
+}
+
+/// Bind independently selected source-policy bytes to one LLVM SDK lane.
+///
+/// The caller must independently select the raw digest and authenticate policy
+/// origin. Parsing does not prove that source inspection executed. Never obtain
+/// this policy from compatibility reports or their input-observation markers.
+///
+/// # Errors
+/// Rejects malformed/ambiguous policy metadata, another source/preset/compiler
+/// or consumer contract, and policies without ordinary generic SDK links.
+pub fn readback_sdk_mesa_policy(
+    bytes: &[u8],
+    identity: &aros_common::sdk_manifest::SdkIdentity,
+    source_preset: &str,
+    compiler_profile: &str,
+) -> Result<bool, ContractError> {
+    identity.validate().map_err(ContractError::identity)?;
+    if bytes.is_empty() || bytes.len() > crate::canonical::MAX_DOCUMENT_BYTES {
+        return Err(ContractError::identity(
+            "source policy exceeds its metadata bound",
+        ));
+    }
+    let policy: NativeSourcePolicy = serde_json::from_slice(bytes)
+        .map_err(|_| ContractError::identity("source policy is not closed unambiguous metadata"))?;
+    let consumer = policy.native_consumer.as_ref().ok_or_else(|| {
+        ContractError::identity("LLVM source policy lacks its generic SDK contract")
+    })?;
+    if policy.source_commit != identity.source.commit
+        || policy.source_tree != identity.source.git_tree
+        || policy.source_preset != source_preset
+        || policy.compiler_profile != compiler_profile
+        || consumer.sha256 != identity.source.contract_sha256
+        || consumer.schema != "aros-sdk-consumer-contract-v1"
+        || !crate::compatibility_ports::safe_relative_path(&consumer.file)
+        || !policy.native_sdk_required
+        || policy
+            .profiles_sha256
+            .as_str()
+            .bytes()
+            .all(|byte| byte == b'0')
+    {
+        return Err(ContractError::identity(
+            "source policy differs from the independent SDK source, preset, compiler or contract",
+        ));
+    }
+    Ok(policy.mesa_preflight_required)
 }
 
 /// Derive source-owned SDK policy from a pinned and recursively clean checkout.
@@ -194,6 +249,9 @@ pub fn inspect_native_source_policy(
         profiles_sha256: sha256_bytes(&profile_bytes),
         native_consumer,
         native_sdk_required,
+        mesa_preflight_required: profile.transpiler.as_ref().is_some_and(|context| {
+            context.toolchain == "llvm" && context.mesa_version.as_deref() == Some("26.0.0")
+        }),
     })
 }
 
@@ -515,7 +573,8 @@ mod tests {
                 "compiler_profile":COMPILER_PROFILE,
                 "profiles_sha256":sha256_bytes(&fs::read(fixture.root.join(SOURCE_PROFILE_FILE)).unwrap()),
                 "native_consumer":consumer,
-                "native_sdk_required":required
+                "native_sdk_required":required,
+                "mesa_preflight_required":false
             })
         );
     }

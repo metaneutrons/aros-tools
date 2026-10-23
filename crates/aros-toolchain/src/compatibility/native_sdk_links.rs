@@ -638,7 +638,9 @@ fn readback_native_sdk_links_bytes(
                 || report.commands[index].command_sha256
                     != super::command_identity(&command.program, &command.arguments)?
             {
-                return Err(error("native SDK phase command differs from ordinary source-declared driver invocation"));
+                return Err(error(
+                    "native SDK phase command differs from ordinary source-declared driver invocation",
+                ));
             }
             let name = format!("{label}-{language}");
             let elf_bytes = read_regular_bounded(
@@ -1084,7 +1086,9 @@ fn validate_link_paths(
             && !resolved.starts_with(compiler)
             && !resolved.starts_with(temporary)
         {
-            return Err(error("native SDK linker trace selected an input outside the SDK, compiler or private temporary root"));
+            return Err(error(
+                "native SDK linker trace selected an input outside the SDK, compiler or private temporary root",
+            ));
         }
         sdk_archive |= resolved.starts_with(sdk)
             && resolved

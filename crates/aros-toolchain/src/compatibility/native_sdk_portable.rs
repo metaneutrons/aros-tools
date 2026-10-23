@@ -1137,7 +1137,7 @@ pub(super) fn validate_inventory_with_limit(
             _ => {
                 return Err(error(
                     "portable SDK inventory contains an unknown entry type",
-                ))
+                ));
             }
         }
     }

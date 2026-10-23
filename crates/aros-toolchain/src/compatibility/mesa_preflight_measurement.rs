@@ -22,13 +22,7 @@ const PREFLIGHT_TARGET_DECLARATION: &str =
 /// rejected. The included config is retained because it supplies the values
 /// being measured; no ordinary Makefile target is copied after it.
 pub(super) fn wrapper(makefile: &str, keys: &[&str]) -> Result<String, ContractError> {
-    if makefile.len() > MAX_GENERATED_MAKEFILE_BYTES {
-        return Err(error("generated Mesa Makefile exceeds its byte bound"));
-    }
-
-    let prefix_end = unique_include_boundary(makefile)?;
-    let prefix = &makefile[..prefix_end];
-    validate_prefix(&prefix[..prefix.len() - CONFIG_INCLUDE_LINE.len()])?;
+    let prefix = configuration_prefix(makefile)?;
 
     let mut output_size = prefix.len();
     if output_size > MAX_WRAPPER_BYTES {
@@ -71,12 +65,36 @@ pub(super) fn wrapper(makefile: &str, keys: &[&str]) -> Result<String, ContractE
     Ok(wrapper)
 }
 
+/// Validate and borrow the generated configuration prefix without a query target.
+pub(super) fn configuration_prefix(makefile: &str) -> Result<&str, ContractError> {
+    if makefile.len() > MAX_GENERATED_MAKEFILE_BYTES {
+        return Err(error("generated Mesa Makefile exceeds its byte bound"));
+    }
+
+    let prefix_end = unique_include_boundary(makefile)?;
+    let prefix = &makefile[..prefix_end];
+    validate_prefix(&prefix[..prefix.len() - CONFIG_INCLUDE_LINE.len()])?;
+
+    if prefix.len() > MAX_WRAPPER_BYTES {
+        return Err(error("Mesa preflight wrapper exceeds its byte bound"));
+    }
+    Ok(prefix)
+}
+
 /// Parse exactly one `KEY=value` record for each requested key.
 pub(super) fn parse_values(
     bytes: &[u8],
     keys: &[&str],
 ) -> Result<BTreeMap<String, String>, ContractError> {
-    if bytes.len() > MAX_WRAPPER_BYTES {
+    let output_limit =
+        if keys.contains(&aros_common::make_initial_values::MAKE_INITIAL_VALUES_METADATA_KEY) {
+            // The separately bounded namespace (64 KiB) and raw-value packet
+            // (128 KiB) join ordinary measurements. Legacy probes retain 64 KiB.
+            256 * 1024
+        } else {
+            MAX_WRAPPER_BYTES
+        };
+    if bytes.len() > output_limit {
         return Err(error("Mesa preflight output exceeds its byte bound"));
     }
     validate_keys_unique(keys)?;
@@ -298,7 +316,7 @@ fn has_forbidden_make_function(line: &str) -> bool {
     false
 }
 
-fn validate_keys_unique(keys: &[&str]) -> Result<(), ContractError> {
+pub(super) fn validate_keys_unique(keys: &[&str]) -> Result<(), ContractError> {
     if keys.is_empty() {
         return Err(error("Mesa preflight key set is empty"));
     }

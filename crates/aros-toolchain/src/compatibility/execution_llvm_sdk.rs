@@ -50,7 +50,9 @@ pub(super) fn select(
         || request.consumer_source_date_epoch != Some(source.identity().source_date_epoch)
         || source.consumer_contract_schema() != SDK_CONSUMER_CONTRACT_SCHEMA
     {
-        return Err(error("LLVM SDK execution requires a family-v2 LLVM package, explicit epoch and verified generic source selection"));
+        return Err(error(
+            "LLVM SDK execution requires a family-v2 LLVM package, explicit epoch and verified generic source selection",
+        ));
     }
     source.revalidate()?;
     let identity = source.identity();
