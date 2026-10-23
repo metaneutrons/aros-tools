@@ -13,11 +13,35 @@
 
 use super::manifest_inventory;
 
+pub mod configured_driver;
+mod configured_generators;
+pub mod configured_genmodule;
+pub mod configured_genmodule_full;
+pub mod configured_graph;
+pub mod configured_inventory;
+mod configured_llvm;
+// Unwired development adapters are not production APIs. Preserve their
+// regression probes until an owning graph transaction integrates them.
+#[cfg(test)]
+mod configured_make_program;
+#[cfg(test)]
+pub(crate) mod configured_native_source;
+
+mod configured_scope;
+pub mod configured_source_context;
+mod configured_target_options;
 pub mod generators;
 pub mod mesa20;
 pub mod mesa26;
 pub mod ordered_contract;
 pub mod sse41;
+#[cfg(test)]
+#[path = "configured_target_capture_actual_tests.rs"]
+mod target_capture_actual_tests;
+
+#[cfg(test)]
+#[path = "configured_cxx_eval_actual_tests.rs"]
+mod cxx_eval_actual_tests;
 use crate::parser::TargetContext;
 use crate::sources::EvaluatedSources;
 use std::collections::HashSet;

@@ -1,11 +1,17 @@
 //! Opt-in comparison against retained configured-source GNU Make measurements.
 //! This evaluates source flag components, not a full SDK or compiler invocation.
 
+#[path = "support/mesa_configured_components.rs"]
+mod mesa_configured_components;
+
 use aros_transpiler::{
-    capability::mesa::ordered_contract::evaluate_ordered_mesa_contract, dirs::DirVars,
-    make_expr::MakeExprContext, make_vars::collect_vars_with_context, parser::join_continuations,
+    dirs::DirVars,
+    make_expr::{evaluate_make_expr, evaluate_make_list, MakeExprContext, MakeExprError},
+    make_vars::collect_vars_with_context,
+    parser::join_continuations,
     TargetContext,
 };
+use mesa_configured_components::evaluate_ordered_mesa_contract;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 const VC4: &str = "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium";

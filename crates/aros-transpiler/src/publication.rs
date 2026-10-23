@@ -45,6 +45,7 @@ pub struct Publication {
 
 impl Publication {
     /// Create one generation whose graph file is installed after every sidecar.
+    #[must_use]
     pub fn for_output(commit_marker: impl Into<PathBuf>) -> Self {
         Self {
             commit_marker: commit_marker.into(),
@@ -52,6 +53,21 @@ impl Publication {
             notices: Vec::new(),
             coverage: Vec::new(),
         }
+    }
+
+    /// Exact persistent control file retained by this output's publisher.
+    ///
+    /// This derives a name only. It does not acquire a lock, authorize deletion,
+    /// or establish the type, contents or ownership of an existing file.
+    ///
+    /// # Errors
+    /// Refuses an output outside the portable publication naming contract.
+    pub fn persistent_lock_path(&self) -> io::Result<PathBuf> {
+        aros_common::publication_journal_lock_path(&self.journal_path()?)
+    }
+
+    fn journal_path(&self) -> io::Result<PathBuf> {
+        publication_journal_path(&self.commit_marker, "transpiler")
     }
 
     pub fn present(&mut self, destination: PathBuf, content: impl Into<Vec<u8>>) {
@@ -91,6 +107,9 @@ impl Publication {
         });
     }
 
+    /// Render the deterministic coverage declaration for this generation.
+    /// # Errors
+    /// Returns an error when the coverage document cannot be serialized.
     pub fn coverage_json(&mut self) -> serde_json::Result<String> {
         self.coverage
             .sort_by(|left, right| left.code.cmp(&right.code));
@@ -104,6 +123,9 @@ impl Publication {
         })
     }
 
+    /// Commit the complete artifact set while retaining its persistent lock.
+    /// # Errors
+    /// Refuses invalid destinations/coverage or a failed durable transaction.
     pub fn publish(self) -> io::Result<()> {
         let notices = self.notices.clone();
         self.publish_impl(|| {})?;
@@ -116,8 +138,8 @@ impl Publication {
     fn publish_impl(self, after_lock: impl FnOnce()) -> io::Result<()> {
         validate_coverage(&self.coverage)?;
         validate_unique_destinations(&self.artifacts)?;
+        let journal = self.journal_path()?;
         let (artifacts, marker) = split_commit_marker(self.artifacts, &self.commit_marker)?;
-        let journal = publication_journal_path(&self.commit_marker, "transpiler")?;
         let mut transaction = DurableFileSet::new(journal)?;
         after_lock();
 

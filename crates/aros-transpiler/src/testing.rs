@@ -86,6 +86,20 @@ pub fn mesa20_root() -> PathBuf {
         .expect("AROS_TEST_MESA20_SOURCE_ROOT must resolve to a directory")
 }
 
+/// Explicit current Mesa 26 fixture, separate from generic historical counts.
+///
+/// # Panics
+/// Panics if neither explicit fixture nor its generic fallback resolves.
+#[must_use]
+pub fn mesa26_root() -> PathBuf {
+    let configured = std::env::var_os("AROS_TEST_MESA26_SOURCE_ROOT")
+        .or_else(|| std::env::var_os("AROS_TEST_SOURCE_ROOT"))
+        .expect("AROS_TEST_MESA26_SOURCE_ROOT must name the Mesa 26 checkout");
+    PathBuf::from(configured)
+        .canonicalize()
+        .expect("AROS_TEST_MESA26_SOURCE_ROOT must resolve to a directory")
+}
+
 /// A concrete target profile, the way CMake derives one for a preset.
 #[must_use]
 pub fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {

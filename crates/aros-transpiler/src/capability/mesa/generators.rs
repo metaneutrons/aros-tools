@@ -538,16 +538,17 @@ pub(crate) fn parse_mesautil(
 #[cfg(test)]
 mod tests {
     use super::{parse_glapi, parse_mesautil};
+    use crate::dirs::DirVars;
     use crate::parser::TargetContext;
     use crate::parser::{
         collect_mmakefile_fetches_with_context, parse_mmakefile_with_dirs_and_context_and_fetches,
     };
-    use crate::testing::{dirs, root, target_context};
+    use crate::testing::{mesa26_root, target_context};
     use std::path::Path;
 
     #[test]
     fn glapi_python_capability_rejects_current_source_fetch_and_profile_drift() {
-        let root = root();
+        let root = mesa26_root();
         let relative_dir = Path::new("workbench/libs/mesa/libglapi");
         let mut profile = target_context("x86_64", "pc", "");
         profile.mesa_version = Some("26.0.0".to_owned());
@@ -560,7 +561,7 @@ mod tests {
         let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
             &root.join(relative_dir).join("mmakefile.src"),
             &root,
-            &dirs(),
+            &DirVars::load(&root),
             &profile,
             &central_fetches,
         )
@@ -611,7 +612,7 @@ mod tests {
 
     #[test]
     fn mesautil_python_capability_rejects_current_source_fetch_and_profile_drift() {
-        let root = root();
+        let root = mesa26_root();
         let relative_dir = Path::new("workbench/libs/mesa/libmesautil");
         let mut profile = target_context("x86_64", "pc", "");
         profile.mesa_version = Some("26.0.0".to_owned());
@@ -632,7 +633,7 @@ mod tests {
         let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
             &root.join(relative_dir).join("mmakefile.src"),
             &root,
-            &dirs(),
+            &DirVars::load(&root),
             &profile,
             &central_fetches,
         )

@@ -4,18 +4,45 @@ use crate::graph::{supports_genmodule_client_archives, DependencyGraph};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+#[path = "configured_mesa.rs"]
+mod configured_mesa;
+
 /// Emits the concrete module targets.
 pub(super) fn emit_concrete_targets(
     out: &mut String,
     graph: &DependencyGraph,
     kickstart_members: &BTreeMap<String, Vec<String>>,
 ) {
+    if let Some(error) = configured_mesa::configured_mesa_metadata_error(graph) {
+        writeln!(
+            out,
+            "message(FATAL_ERROR {})",
+            configured_mesa::cmake_bracket_argument(&error)
+        )
+        .unwrap();
+        return;
+    }
+
     // 1. Concrete Module Targets. HashMap iteration is deliberately avoided:
     // reproducible generated CMake is required for meaningful comparisons,
     // and declaration order can decide which producer claims an output first.
     let mut concrete_targets: Vec<_> = graph.targets.values().collect();
     concrete_targets.sort_by(|a, b| a.mmake_name.cmp(&b.mmake_name));
+    let mut configured_target_declarations = String::new();
     for target in concrete_targets {
+        let configured_selection = graph.configured_mesa.as_ref().and_then(|configured| {
+            configured
+                .targets
+                .get(&target.mmake_name)
+                .map(|entry| (configured, entry))
+        });
+        let configured_contract = configured_selection.map(|(_, entry)| &entry.options);
+        let configured = configured_contract.is_some();
+        let out = if configured {
+            &mut configured_target_declarations
+        } else {
+            &mut *out
+        };
         let macro_name = match target.module_type {
             ModuleType::Library => "aros_add_library",
             ModuleType::Abi => "aros_add_module_abi",
@@ -78,6 +105,9 @@ pub(super) fn emit_concrete_targets(
             }
             writeln!(out, ")\n").unwrap();
             continue;
+        }
+        if configured {
+            configured_mesa::emit_configured_mesa_target_snapshot(out);
         }
         writeln!(out, "{macro_name}(").unwrap();
         writeln!(out, "    TARGET {}", target.target_name).unwrap();
@@ -241,7 +271,7 @@ pub(super) fn emit_concrete_targets(
             writeln!(out, "    USELIBS {}", target.use_libs.join(" ")).unwrap();
         }
 
-        if !target.include_dirs.is_empty() {
+        if !configured && !target.include_dirs.is_empty() {
             let quoted: Vec<String> = target.include_dirs.iter().map(|d| cmake_arg(d)).collect();
             writeln!(out, "    INCLUDES {}", quoted.join(" ")).unwrap();
         }
@@ -260,11 +290,11 @@ pub(super) fn emit_concrete_targets(
 
         // Preprocessor state the sources depend on, from USER_CPPFLAGS /
         // USER_CFLAGS. Quoted so a value containing a CMake variable survives.
-        if !target.defines.is_empty() {
+        if !configured && !target.defines.is_empty() {
             let quoted: Vec<String> = target.defines.iter().map(|d| cmake_arg(d)).collect();
             writeln!(out, "    DEFINES {}", quoted.join(" ")).unwrap();
         }
-        if !target.undefines.is_empty() {
+        if !configured && !target.undefines.is_empty() {
             let quoted: Vec<String> = target.undefines.iter().map(|d| cmake_arg(d)).collect();
             writeln!(out, "    UNDEFINES {}", quoted.join(" ")).unwrap();
         }
@@ -283,7 +313,7 @@ pub(super) fn emit_concrete_targets(
 
         // Architecture-conditional flags from a make.opts, same "<tag>|<value>"
         // shape as ARCH_INCLUDES.
-        if !target.arch_defines.is_empty() {
+        if !configured && !target.arch_defines.is_empty() {
             let pairs: Vec<String> = target
                 .arch_defines
                 .iter()
@@ -291,7 +321,7 @@ pub(super) fn emit_concrete_targets(
                 .collect();
             writeln!(out, "    ARCH_DEFINES {}", pairs.join(" ")).unwrap();
         }
-        if !target.arch_compile_options.is_empty() {
+        if !configured && !target.arch_compile_options.is_empty() {
             let pairs: Vec<String> = target
                 .arch_compile_options
                 .iter()
@@ -300,7 +330,7 @@ pub(super) fn emit_concrete_targets(
             writeln!(out, "    ARCH_COMPILE_OPTIONS {}", pairs.join(" ")).unwrap();
         }
 
-        if !target.compile_options.is_empty() {
+        if !configured && !target.compile_options.is_empty() {
             let quoted: Vec<String> = target
                 .compile_options
                 .iter()
@@ -341,6 +371,22 @@ pub(super) fn emit_concrete_targets(
         }
 
         writeln!(out, ")").unwrap();
+        if let Some((configured, entry)) = configured_selection {
+            configured_mesa::emit_configured_mesa_compile_contract(
+                out,
+                target,
+                &entry.options,
+                (
+                    &entry.source_context,
+                    &configured.driver.recipe.make_coordinates,
+                ),
+                &graph
+                    .python_outputs
+                    .iter()
+                    .filter(|producer| producer.consumers.contains(&target.mmake_name))
+                    .collect::<Vec<_>>(),
+            );
+        }
         for product in graph
             .sdk_program_outputs
             .iter()
@@ -397,7 +443,24 @@ pub(super) fn emit_concrete_targets(
         }
         writeln!(out).unwrap();
     }
+
+    if !configured_target_declarations.is_empty() {
+        let configured = graph
+            .configured_mesa
+            .as_ref()
+            .expect("configured declarations have a selected payload");
+        configured_mesa::emit_configured_mesa_subdirectory(
+            out,
+            &configured_target_declarations,
+            configured.targets.contains_key("linklibs-gallium_vc4"),
+            &configured.driver,
+        );
+    }
 }
+
+#[cfg(test)]
+#[path = "targets_tests.rs"]
+mod tests;
 
 /// Emits bindings that need the concrete targets to exist.
 pub(super) fn emit_post_target_bindings(out: &mut String, graph: &DependencyGraph) {
@@ -409,10 +472,14 @@ pub(super) fn emit_post_target_bindings(out: &mut String, graph: &DependencyGrap
         .targets
         .get("linklibs-gallium_vc4")
         .is_some_and(|target| {
-            target
-                .defines
-                .iter()
-                .any(|value| value == "AROS_MESA_MAJOR=26")
+            !graph
+                .configured_mesa
+                .as_ref()
+                .is_some_and(|configured| configured.targets.contains_key("linklibs-gallium_vc4"))
+                && target
+                    .defines
+                    .iter()
+                    .any(|value| value == "AROS_MESA_MAJOR=26")
         })
     {
         writeln!(out, "aros_build_mesa26_gallium_core_api()\n").unwrap();

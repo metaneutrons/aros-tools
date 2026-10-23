@@ -156,7 +156,7 @@ const SEEDS: &[(&str, &str)] = &[
 ];
 
 /// Directory variables resolved to CMake expressions.
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 pub struct DirVars {
     /// Explicit SDK companion roles from the independently validated source contract.
     sdk_companion_roles: Vec<aros_common::SdkCompanionRole>,

@@ -955,6 +955,175 @@ impl DependencyGraph {
         }
         Ok(())
     }
+
+    /// Retain pending declaration identities needed for a source-bound
+    /// genmodule inventory, while leaving them outside the compilable target
+    /// graph. The ordinary native selection pass remains authoritative for
+    /// concrete targets; this only carries the metadata that pass cannot see
+    /// because the declaration's source inventory is pending.
+    ///
+    /// # Errors
+    /// Rejects unresolved selected client endpoints and any error reported by
+    /// ordinary native-selection retention.
+    pub fn retain_native_genmodule_inventory(
+        &mut self,
+        selected: &BTreeSet<String>,
+        context: &TargetContext,
+    ) -> Result<()> {
+        let is_selected =
+            |name: &str| endpoint(name, context).is_ok_and(|name| selected.contains(&name));
+
+        // Capture architecture ownership before ordinary retention prunes its
+        // declarations. These are the same selected effects used by the
+        // concrete-target path below.
+        let architecture_owners: BTreeSet<_> = self
+            .arch_endpoint_effects
+            .iter()
+            .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
+            .filter_map(|effect| {
+                match &effect.data {
+                    crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects {
+                        mainmmake,
+                        ..
+                    }
+                    | crate::arch_endpoint_effects::ArchEndpointEffectData::ArchClientLinklibSources {
+                        mainmmake,
+                        ..
+                    } => Some(mainmmake.clone()),
+                    _ => None,
+                }
+            })
+            .collect();
+        let architecture_runtime_owners: BTreeSet<_> = self
+            .arch_endpoint_effects
+            .iter()
+            .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
+            .filter_map(|effect| match &effect.data {
+                crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects {
+                    mainmmake,
+                    ..
+                } => Some(mainmmake.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let pending_identities = self.inventory_targets.clone();
+        let mut pending_runtime = BTreeSet::new();
+        let mut pending_clients = BTreeSet::new();
+        for identity in &pending_identities {
+            let has_runtime = !matches!(
+                identity.module_type,
+                ModuleType::Abi
+                    | ModuleType::ModuleHeaders
+                    | ModuleType::LinkLib
+                    | ModuleType::Package
+                    | ModuleType::Custom
+            );
+            if has_runtime
+                && (is_selected(&identity.mmake_name)
+                    || is_selected(&format!("{}-kobj", identity.mmake_name))
+                    || is_selected(&format!("{}-kobj-quick", identity.mmake_name))
+                    || architecture_runtime_owners.contains(&identity.mmake_name))
+            {
+                pending_runtime.insert(identity.mmake_name.clone());
+            }
+
+            for suffix in ["-linklib", "-linklib-rel"] {
+                let raw = format!("{}{suffix}", identity.mmake_name);
+                if selected.contains(&endpoint(&raw, context)?) {
+                    pending_clients.insert(raw);
+                }
+            }
+        }
+
+        // A source-owned architecture client endpoint names a source lane,
+        // not the archive target. Reproduce the regular path's exact metadata
+        // pairing for pending declarations, without fabricating source lists.
+        for effect in self
+            .arch_endpoint_effects
+            .iter()
+            .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
+        {
+            let crate::arch_endpoint_effects::ArchEndpointEffectData::ArchClientLinklibSources {
+                mainmmake,
+                tag,
+                linklib_sources,
+                directory,
+                compiler,
+                ..
+            } = &effect.data
+            else {
+                continue;
+            };
+            if compiler != "target" {
+                continue;
+            }
+            let Some(identity) = pending_identities
+                .iter()
+                .find(|identity| identity.mmake_name == *mainmmake)
+            else {
+                continue;
+            };
+            if !supports_genmodule_client_archives(&identity.module_type) {
+                continue;
+            }
+            let Some(linklibs) = identity
+                .genmodule_linklibs
+                .as_ref()
+                .filter(|linklibs| linklibs.enabled)
+            else {
+                continue;
+            };
+            let source_pair = self.arch_sources.get(mainmmake).is_some_and(|sources| {
+                sources.iter().any(|source| {
+                    &source.tag == tag
+                        && &source.dir == directory
+                        && &source.linklib_files == linklib_sources
+                        && !source.files.is_empty()
+                })
+            });
+            if !source_pair {
+                continue;
+            }
+            pending_clients.insert(format!("{mainmmake}-linklib"));
+            if linklibs.has_relative {
+                pending_clients.insert(format!("{mainmmake}-linklib-rel"));
+            }
+        }
+
+        let needed_identities: BTreeSet<_> = pending_identities
+            .iter()
+            .filter(|identity| {
+                let name = identity.mmake_name.as_str();
+                is_selected(name)
+                    || architecture_owners.contains(name)
+                    || [
+                        "-linklib",
+                        "-linklib-rel",
+                        "-includes",
+                        "-fd",
+                        "-kobj",
+                        "-kobj-quick",
+                    ]
+                    .iter()
+                    .any(|suffix| is_selected(&format!("{name}{suffix}")))
+            })
+            .map(|identity| identity.mmake_name.clone())
+            .collect();
+
+        self.retain_native_selection(selected, context)?;
+        self.inventory_targets
+            .retain(|identity| needed_identities.contains(&identity.mmake_name));
+        self.native_selected_runtime_modules
+            .as_mut()
+            .ok_or_else(|| failure("native selection did not retain runtime module state"))?
+            .extend(pending_runtime);
+        self.native_selected_client_archives
+            .as_mut()
+            .ok_or_else(|| failure("native selection did not retain client archive state"))?
+            .extend(pending_clients);
+        Ok(())
+    }
 }
 
 /// Reduce a declaration to the headers-only form the engine already knows

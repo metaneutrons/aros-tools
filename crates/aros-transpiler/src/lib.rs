@@ -37,10 +37,26 @@ mod literal_header_copies;
 mod literal_icon_condition;
 pub mod literal_objects;
 pub mod local_make_includes;
+pub mod make_definitions;
 pub mod make_deps;
 pub mod make_expr;
+pub mod make_interpreted_rules;
 pub mod make_opts;
+pub mod make_rule_events;
+pub mod make_rule_graph;
+pub mod make_rule_header;
+pub mod publication;
+// The standalone line reader is retained as an independent test oracle.
+// Productive Source reads use MakeFileProgram's interpreted event stream.
+#[cfg(test)]
+mod make_rule_program;
+pub mod make_shell_data;
+pub mod make_shell_effects;
+pub(crate) mod make_source_origins;
+pub mod make_target_capture;
+pub mod make_text_pipeline;
 pub mod make_vars;
+pub mod make_vpath;
 pub mod metamake_owner_graph;
 pub mod metamake_project;
 pub mod module_paths;
@@ -49,6 +65,7 @@ pub mod native_owner_projection;
 pub mod native_parser_origins;
 pub mod packages;
 pub mod parser;
+pub mod root_dispatch_capture;
 pub mod script_output_aggregates;
 pub mod sdk_asset_rules;
 pub mod sdk_file_copies;

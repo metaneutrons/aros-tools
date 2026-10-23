@@ -306,6 +306,13 @@ pub struct InventoryTargetIdentity {
     pub module_macro: Option<ModuleMacroForm>,
     pub target_dir: Option<String>,
     pub linklib_name: Option<String>,
+    /// Source-relative genmodule base configuration, retained even when the
+    /// declaration's fetched source list is still pending.
+    #[serde(default)]
+    pub config_file: Option<String>,
+    /// Source-relative genmodule override, retained with a pending identity.
+    #[serde(default)]
+    pub config_override_file: Option<String>,
     pub genmodule_linklibs: Option<GenmoduleLinklibs>,
     pub config_relative_libraries: Vec<String>,
     pub canonical_linklib_output: bool,
@@ -334,6 +341,8 @@ impl From<&TargetDefinition> for InventoryTargetIdentity {
             module_macro: target.module_macro,
             target_dir: target.target_dir.clone(),
             linklib_name: target.linklib_name.clone(),
+            config_file: target.config_file.clone(),
+            config_override_file: target.config_override_file.clone(),
             genmodule_linklibs: target.genmodule_linklibs.clone(),
             config_relative_libraries: target.config_relative_libraries.clone(),
             canonical_linklib_output: target.canonical_linklib_output,

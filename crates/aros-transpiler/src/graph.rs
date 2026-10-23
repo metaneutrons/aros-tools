@@ -68,6 +68,10 @@ pub struct ResolvedScriptOutput {
 /// Dependency Graph for parallel target building and cycle detection.
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
+    /// One complete configured compilation selection. Coordinates belong to
+    /// its driver; each target owns its options and source context together.
+    /// None preserves the historical path. This is data, not execution proof.
+    pub configured_mesa: Option<crate::capability::mesa::configured_graph::ConfiguredMesaGraph>,
     pub assembly_headers: Vec<crate::assembly_headers::AssemblyHeaderDecl>,
     pub arch_endpoint_effects: Vec<crate::arch_endpoint_effects::ArchEndpointEffect>,
     /// Selected client archive endpoints in their source declaration spelling,
@@ -549,3 +553,7 @@ pub use audit::NativeGraphAudit;
 #[cfg(test)]
 #[path = "graph_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "pending_genmodule_selection_tests.rs"]
+mod pending_genmodule_selection_tests;

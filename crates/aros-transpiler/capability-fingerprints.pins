@@ -26,9 +26,11 @@ mesautil-generator-capability = 9ff6ca66c503c1671c6bbd2a2d0b8a9a449a3368a8fcbed2
 
 # Mesa 26 glapi is a separate two-stage generated archive. The full source
 # recipe is pinned because the cold-tree evaluator cannot import mesa.cfg.
-mesa26-glapi-recipe = cbedcf70cfb2a3c5df6f638791e8e90a5a616ebfcf6fe1345c94449951357a26 # gitleaks:allow -- public SHA-256 of the audited source recipe, not a credential
+mesa26-glapi-recipe = 0edf3bae7ee629f4721f5bf92ce18431e4a01d98192681184dc2faaf0bf358f6 # gitleaks:allow -- public SHA-256 of the audited source recipe, not a credential
 mesa26-egl-recipe = 7f2e4c2241f305bca95ad0080736c61a06f63c295a2d0fa9ec7f5c2c272a20a4 # gitleaks:allow -- public SHA-256 of the audited Mesa 26 EGL recipe
-mesa26-config = a93996e9e9bd71fe54d7be9edca1e06de06d04edd15b50570888d5c95bb9ea80
+# Reviewed deterministic compile policy: removes stale unversioned entrypoint
+# imports/conditions, retaining clean-build flags without section-GC linking.
+mesa26-config = 5965a0c6f4122095c8bb80b1013e64cbc8c76ca53f56fba60fa210a58169290d
 
 # Remaining Mesa generator lanes. Each recipe fingerprint is paired with the
 # versioned inventory from which its hard-coded generator output closure was
@@ -45,15 +47,15 @@ mesa20-v3d-recipe = 471bb1ad3fa9020f23015bed29634d2812527cb8b415e4c9771202627bc9
 
 # Mesa 26.0.0 archive recipes and explicit source inventories. The capability
 # expands these exact inputs into target source lists and generated products.
-mesa26-compiler-recipe = 4a2e0ce91877996fa764a977e908d932a88017a9e79b1794426a2c667213a68c
+mesa26-compiler-recipe = 4693979e21de08df9dfda9052a024db48901553bb223cc8d1c881dbbd66db4e8
 mesa26-compiler-manifest = f5452181979700a6bfa941f0a7cc3fae6e9b420f93c013bb5967e21a5bed2fa6
-mesa26-core-recipe = cb9a53da44e93cd58bda21783d55fcea4adedef262c3fdda983ec1c9a68b984e
+mesa26-core-recipe = db1ae3bace3e63138291e2ddf9d5994daae72e6608e6ca34656a0c3121c5dfbd
 mesa26-core-manifest = 0fe9d122a56ed4f98e85edcecb3d5f36bc94510e40e82683ad3f7687495864f5
 mesa26-galliumaux-recipe = 291b33bdbd5b4db1cbccd2a933bfdd6a0795066dc33b99d2e8e3ba0432f062de
 # Keeps galliumdrawllvm out of mesa3dgl-linklibs; sources and libraries are unchanged.
 mesa26-galliumaux-recipe-llvmpipe-only = cf353c235442d3056339f43317009c036aca00849e2a671c8cd32e100b9c0784
 mesa26-galliumaux-manifest = b24fcbebbbb2b1c32eb505e5d42b91d9e15470b04b5f57af4ac3238c3a0f180d
-mesa26-util-recipe = e8ce470d8eb25536171d69d988c6cc3f13a378a652a648a22ff33de0d483cabe
+mesa26-util-recipe = 52c27aaf7849ce1ba1de8d0526761b7345aca928257716da3ac8b2f9f127ebd6
 mesa26-util-manifest = e31d9aa580180ebac45f41a4364b60dce03595b35a457ae517affc78c0ae7471
 mesa26-v3d-recipe = 1d4ee5e8fc4a17d67c0652a932bed4e0c1913c6044fdc4bf981533db0dab744b
 # Upstream 13484a98 adds v3d_dt to the HIDD; the Mesa archive remains unchanged.

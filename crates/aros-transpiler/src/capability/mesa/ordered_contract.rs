@@ -1,76 +1,127 @@
 //! Ordered source evaluation for the reviewed Mesa VC4 compile/ABI inputs.
 //!
 //! The source's `config/make.tmpl` compile rules pass `CFLAGS` before
-//! `CPPFLAGS`. `config/make.cfg.in` builds `CFLAGS` from
-//! `TARGET_ISA_CFLAGS`, then `TARGET_CFLAGS` (which includes `USER_CFLAGS`);
-//! it builds `CPPFLAGS` from `USER_INCLUDES`, configured preprocessor flags,
-//! then `USER_CPPFLAGS`. C++ has a separate ISA variable. This evaluator
-//! deliberately exposes only the four named values below. It does not claim
-//! they are a complete compiler invocation: optimization, configured
-//! diagnostics, `USER_INCLUDES`, and other configured flags remain outside
-//! this boundary. The caller keeps the named vectors distinct until it has a
-//! separately reviewed projection.
+//! `CPPFLAGS`. `config/target.cfg.in` recursively builds `TARGET_CFLAGS` and
+//! `TARGET_CXXFLAGS` from optimization, configuration, and source-local user
+//! flags; `TARGET_CPPFLAGS` combines user includes, configured preprocessor
+//! flags, and source-local `USER_CPPFLAGS`. `config/make.cfg.in` adds the
+//! separate C or C++ ISA flags and appends `LLVM_NOWARN` to CFLAGS only. The
+//! compiler-options evaluator below projects reviewed recursive Make
+//! definitions into C, C++, and VC4 bridge word sequences. These are
+//! option-sequence projections, not complete
+//! compiler invocations: driver, sysroot, generated include, and other
+//! invocation inputs remain outside this boundary. Callers must provide the
+//! reviewed source definitions for recursive `TARGET_*`, `CFLAGS`, `CXXFLAGS`,
+//! and `CPPFLAGS`; configured global frozen `TARGET_*FLAGS` values must not
+//! replace those expressions after local `USER_*` assignments.
 //!
 //! The GCA string follows the source's immediate assignment
 //! `GCA_ABI_FLAGS := $(TARGET_ISA_CFLAGS) $(USER_CPPFLAGS)` and its later
-//! `$(strip $(GCA_ABI_FLAGS))` use. Its context must point at that assignment,
+//! `$(strip $(GCA_ABI_FLAGS))` use. Its context must point immediately after that assignment,
 //! so subsequent local assignments do not alter the frozen value.
 
 use crate::make_expr::{evaluate_make_expr, evaluate_make_list, MakeExprContext, MakeExprError};
+use serde::{Deserialize, Serialize};
 
-/// The selected source flag components plus the value frozen for GCA.
+/// Source-ordered option projections for Mesa C, C++, and the VC4 GCA bridge.
 ///
-/// Each vector contains GNU Make words in source order, with duplicates kept.
-/// `gca_abi_flags` is the exact whitespace-normalized string produced by the
-/// reviewed GCA immediate assignment at `gca_assignment_context`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OrderedMesaContract {
-    /// Configured target ISA words, before any compilation projection.
-    pub target_isa_cflags: Vec<String>,
-    /// Source preprocessor words in declaration-time order.
-    pub user_cppflags: Vec<String>,
-    /// Source C option words in declaration-time order.
-    pub user_cflags: Vec<String>,
-    /// Source C++ option words in declaration-time order.
-    pub user_cxxflags: Vec<String>,
-    /// Whitespace-normalized ABI input at the immediate assignment position.
+/// The vectors preserve GNU Make word order and duplicates. They are not full
+/// compiler invocations and must not be treated as a driver, sysroot, or
+/// generated-include contract. `gca_abi_flags` is evaluated independently at
+/// the source's immediate GCA assignment, so later local changes do not alter
+/// the frozen ABI input.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderedMesaCompilerOptions {
+    /// `$(CFLAGS) $(CPPFLAGS)` at the declaration position.
+    pub c: Vec<String>,
+    /// `$(CXXFLAGS) $(CPPFLAGS)` at the declaration position.
+    pub cxx: Vec<String>,
+    /// `$(CFLAGS) $(USER_CFLAGS) $(CPPFLAGS) $(USER_CPPFLAGS) $(USER_INCLUDES)`
+    /// at the declaration position, retained as the separate VC4 bridge view.
+    pub vc4_bridge: Vec<String>,
+    /// Whitespace-normalized value of the immediate GCA assignment expression.
     pub gca_abi_flags: String,
 }
 
-/// Evaluate Mesa's named source flag values at their respective Make positions.
+/// Evaluate Mesa's reviewed C/C++ option projections and the frozen GCA value.
 ///
-/// `declaration_context` is the caller's declaration position for the four
-/// components. `gca_assignment_context` is the VC4 mmakefile position where
-/// `GCA_ABI_FLAGS` is immediately assigned. Missing configured variables,
-/// unresolved conditionals, and unsupported expressions remain errors from the
-/// strict Make evaluator; an absent value is never treated as known-empty.
+/// `declaration_context` must point at the relevant source declaration, with
+/// the recursive Make formulas for `CFLAGS`, `CXXFLAGS`, and `CPPFLAGS` in its
+/// scope. `gca_assignment_context` must point immediately after
+/// the selected source's immediate `GCA_ABI_FLAGS` assignment. The projections use
+/// expressions `$(CFLAGS) $(CPPFLAGS)`, `$(CXXFLAGS) $(CPPFLAGS)`, and
+/// `$(CFLAGS) $(USER_CFLAGS) $(CPPFLAGS) $(USER_CPPFLAGS) $(USER_INCLUDES)`.
+/// The GCA value reads the source-frozen variable, never a reconstructed RHS.
+///
+/// This reports option words only; it does not claim to capture driver,
+/// sysroot, generated include, or every compiler invocation input.
 ///
 /// # Errors
 /// Rejects unresolved variables, ambiguous values and unsupported expressions.
-/// The caller must independently verify the reviewed recipe and both positions.
-pub fn evaluate_ordered_mesa_contract(
+pub fn evaluate_ordered_mesa_compiler_options(
     declaration_context: &MakeExprContext<'_>,
     gca_assignment_context: &MakeExprContext<'_>,
-) -> Result<OrderedMesaContract, MakeExprError> {
-    let target_isa_cflags = evaluate_make_list("$(TARGET_ISA_CFLAGS)", declaration_context)?;
-    let user_cppflags = evaluate_make_list("$(USER_CPPFLAGS)", declaration_context)?;
-    let user_cflags = evaluate_make_list("$(USER_CFLAGS)", declaration_context)?;
-    let user_cxxflags = evaluate_make_list("$(USER_CXXFLAGS)", declaration_context)?;
+) -> Result<OrderedMesaCompilerOptions, MakeExprError> {
+    evaluate_ordered_mesa_options(
+        declaration_context,
+        Some(gca_assignment_context),
+        "$(CFLAGS) $(CPPFLAGS)",
+        "$(CXXFLAGS) $(CPPFLAGS)",
+    )
+}
 
-    // Keep this expression aligned with the source's immediate := assignment;
-    // evaluating at the caller's declaration site would miss Make's freeze.
-    let gca_abi_flags = evaluate_make_expr(
-        "$(strip $(TARGET_ISA_CFLAGS) $(USER_CPPFLAGS))",
-        gca_assignment_context,
+// Only the owning recipe projection may omit an unselected GCA assignment.
+// Public compile/ABI projection always requires an explicit source context.
+fn evaluate_ordered_mesa_options(
+    declaration_context: &MakeExprContext<'_>,
+    gca_assignment_context: Option<&MakeExprContext<'_>>,
+    c_expression: &str,
+    cxx_expression: &str,
+) -> Result<OrderedMesaCompilerOptions, MakeExprError> {
+    let c = evaluate_make_list(c_expression, declaration_context)?;
+    let cxx = evaluate_make_list(cxx_expression, declaration_context)?;
+    let vc4_bridge = evaluate_make_list(
+        "$(CFLAGS) $(USER_CFLAGS) $(CPPFLAGS) $(USER_CPPFLAGS) $(USER_INCLUDES)",
+        declaration_context,
     )?;
+    let gca_abi_flags = gca_assignment_context
+        .map(|context| evaluate_make_expr("$(strip $(GCA_ABI_FLAGS))", context))
+        .transpose()?
+        .unwrap_or_default();
 
-    Ok(OrderedMesaContract {
-        target_isa_cflags,
-        user_cppflags,
-        user_cflags,
-        user_cxxflags,
+    Ok(OrderedMesaCompilerOptions {
+        c,
+        cxx,
+        vc4_bridge,
         gca_abi_flags,
     })
+}
+
+/// Add the measured default target-recipe LTO/safety lane in source order.
+/// The handwritten bridge is a separate recipe and keeps its own expression.
+/// Driver, sysroot, quote roots and source-name mapping still require their
+/// structural handoff; this is not a complete compiler-command claim.
+pub(super) fn evaluate_ordered_mesa_recipe_options(
+    declaration: &MakeExprContext<'_>,
+    gca: Option<&MakeExprContext<'_>>,
+) -> Result<OrderedMesaCompilerOptions, MakeExprError> {
+    let lto = evaluate_make_expr("$(TARGET_LTO)", declaration)?;
+    let prefix = match lto.as_str() {
+        "yes" => "$(LTO_CFLAGS) ",
+        "no" => "",
+        _ => {
+            return Err(MakeExprError::InvalidSyntax {
+                expression: "$(TARGET_LTO)".into(),
+                detail: "unsupported configured LTO selection".into(),
+            })
+        }
+    };
+    evaluate_ordered_mesa_options(
+        declaration,
+        gca,
+        &format!("{prefix}$(CFLAGS) $(SAFETY_CFLAGS) $(CPPFLAGS)"),
+        &format!("{prefix}$(CXXFLAGS) $(SAFETY_CFLAGS) $(CPPFLAGS)"),
+    )
 }
 
 #[cfg(test)]

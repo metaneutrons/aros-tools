@@ -1,5 +1,6 @@
 use super::{archive_sources, compile_contract, glapi_sources, GLAPI_DIR, GLAPI_MMAKE};
 use crate::parser::TargetContext;
+use crate::testing::mesa26_root as mesa26_source_root;
 use std::fs;
 use std::path::Path;
 
@@ -61,13 +62,6 @@ fn runtime_identity_rejects_changed_source_module_names() {
         .unwrap_err()
         .contains("unexpected Mesa 26 runtime modname"));
     }
-}
-
-fn mesa26_source_root() -> std::path::PathBuf {
-    let configured = std::env::var_os("AROS_TEST_MESA26_SOURCE_ROOT")
-        .or_else(|| std::env::var_os("AROS_TEST_SOURCE_ROOT"))
-        .expect("AROS_TEST_MESA26_SOURCE_ROOT must name the Mesa 26 checkout");
-    std::path::PathBuf::from(configured)
 }
 
 fn opensbi_riscv64_mesa26_profile() -> TargetContext {

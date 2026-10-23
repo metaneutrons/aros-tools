@@ -296,6 +296,23 @@ fn bound_transport_feeds_known_selectors_and_ordered_isa_into_make_evaluation() 
         "target_isa_flags": ["-marm", "-DORDER=1", "-UORDER", "-DORDER=1"],
         "compiler_options": compiler_options,
         "baseline_variables": baseline,
+        "undefined_variables": ["CUR_MESADIR"],
+            "recipe_configuration": {
+                "make_coordinates": {
+                    "source_root": "/source",
+                    "build_root": "/make-build",
+                    "ports_root": "/make-build/Ports",
+                    "generated_root": "/make-build/gen",
+                },
+                "safety_cflags": {"state":"defined","value":[]}, "target_lto":"no",
+                "lto_cflags":[], "cflags_iquote":["-iquote"], "cflags_iquote_end":[],
+                "target_cc":"/compiler/bin/clang", "target_cxx":"/compiler/bin/clang++",
+                "target_sysroot":[]
+            },
+            "llvm_configuration": {
+            "opt_llvm": { "state": "undefined" },
+            "target_llvm_ver": { "state": "defined", "value": "11.0.0" },
+        },
         "mesa_compile_options": ["-DOPTION_BUNDLE=1"],
     });
     let bytes = serde_json::to_vec(&wire).unwrap();

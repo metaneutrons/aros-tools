@@ -22,9 +22,11 @@ use walkdir::WalkDir;
 mod cli_args;
 mod consumer_validation;
 mod error_mapping;
+mod mesa_configuration_input;
+mod native_capture_entry;
 mod native_selection;
 mod observability;
-mod publication;
+use aros_transpiler::publication;
 mod reports;
 mod source_discovery;
 
@@ -40,6 +42,9 @@ use reports::{render_source_inventory_manifest, resolved_publication_path, write
 
 fn main() -> ExitCode {
     let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(status) = native_capture_entry::try_capture(&arguments) {
+        return status;
+    }
     let requested_format =
         requested_diagnostic_format(&arguments, "AROS_TRANSPILER_DIAGNOSTIC_FORMAT");
     let matches = match Args::command().try_get_matches_from(arguments) {
@@ -252,8 +257,17 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         target_rust: args.target_rust.clone(),
         target_rust_ver: args.target_rust_ver.clone(),
     });
-    let native_contract =
+    let selected_contract =
         load_native_selection(args, target.as_ref()).map_err(native_selection_input_error)?;
+    // Full-target inventory binds source configuration without importing SDK
+    // root selection or native-only parsing context into the ordinary graph.
+    let (native_contract, full_inventory_contract) =
+        if args.mesa_genmodule_full_inventory_profile.is_some() {
+            (None, selected_contract)
+        } else {
+            (selected_contract, None)
+        };
+    let mut mesa_input = mesa_configuration_input::load(args)?;
     if let (Some(contract), Some(target)) = (&native_contract, &mut target) {
         dirs.bind_native_target_tool_roles();
         if let native_selection::LoadedNativeSelection::SdkConsumer(loaded) = contract {
@@ -312,40 +326,61 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     } else {
         std::collections::BTreeSet::new()
     };
-    let mut files: Vec<PathBuf> = Vec::new();
-    for entry in WalkDir::new(&args.source_dir)
-        .into_iter()
-        .filter_entry(|entry| {
-            !entry.file_type().is_dir()
-                || entry.depth() == 0
-                || !(entry.file_name().to_str().is_some_and(|name| {
-                    skip_dirs.contains(&name) || source_ignoredirs.contains(name)
-                }) || entry
-                    .path()
-                    .strip_prefix(&args.source_dir)
-                    .is_ok_and(|relative| {
-                        excluded_build_paths
-                            .iter()
-                            .any(|excluded| relative.starts_with(excluded))
-                    }))
-        })
+    let mut files: Vec<PathBuf> = if native_contract
+        .as_ref()
+        .is_some_and(|native| native.invocation().metamake_projection.is_some())
     {
-        let entry = entry.map_err(|error| {
-            diagnostics_error(vec![Diagnostic::error(
-                DiagnosticCode::SourceWalk,
-                DiagnosticStage::SourceWalk,
-                format!("cannot walk MetaMake source tree: {error}"),
-            )
-            .with_location(SourceLocation::new("."))])
-        })?;
-        // Both template inputs and direct fragments belong to MetaMake.
-        if matches!(
-            entry.file_name().to_str(),
-            Some("mmakefile.src" | "mmakefile")
-        ) {
-            files.push(entry.into_path());
+        aros_transpiler::native_owner_projection::discover_meta_inputs(
+            &args.source_dir,
+            &source_ignoredirs,
+            &excluded_build_paths,
+        )
+        .map_err(|message| {
+            native_selection_input_error(ArosError::Configuration {
+                file: "native MetaMake discovery".into(),
+                message,
+            })
+        })?
+        .into_keys()
+        .map(|relative| args.source_dir.join(relative))
+        .collect()
+    } else {
+        let mut files = Vec::new();
+        for entry in WalkDir::new(&args.source_dir)
+            .into_iter()
+            .filter_entry(|entry| {
+                !entry.file_type().is_dir()
+                    || entry.depth() == 0
+                    || !(entry.file_name().to_str().is_some_and(|name| {
+                        skip_dirs.contains(&name) || source_ignoredirs.contains(name)
+                    }) || entry
+                        .path()
+                        .strip_prefix(&args.source_dir)
+                        .is_ok_and(|relative| {
+                            excluded_build_paths
+                                .iter()
+                                .any(|excluded| relative.starts_with(excluded))
+                        }))
+            })
+        {
+            let entry = entry.map_err(|error| {
+                diagnostics_error(vec![Diagnostic::error(
+                    DiagnosticCode::SourceWalk,
+                    DiagnosticStage::SourceWalk,
+                    format!("cannot walk MetaMake source tree: {error}"),
+                )
+                .with_location(SourceLocation::new("."))])
+            })?;
+            // Both template inputs and direct fragments belong to MetaMake.
+            if matches!(
+                entry.file_name().to_str(),
+                Some("mmakefile.src" | "mmakefile")
+            ) {
+                files.push(entry.into_path());
+            }
         }
-    }
+        files
+    };
     files.sort();
     let native_owner_projection = native_contract
         .as_ref()
@@ -356,6 +391,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                     profile: contract.invocation().profile,
                     projection: contract.invocation().metamake_projection,
                     inputs: contract.invocation().inputs,
+                    optional_meta_dependencies: contract.invocation().optional_meta_dependencies,
                 },
                 &files,
                 aros_common::target::native_host_key().unwrap_or(""),
@@ -462,6 +498,18 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         .collect();
 
     pb.finish_with_message("Parsing complete");
+
+    // Parsing keeps logical include coordinates. Before accepting its results,
+    // recheck both original bytes and alias referents, not content hashes alone.
+    // As with discovery, callers must keep the Source tree stable during reads.
+    if let Some(projection) = &native_owner_projection {
+        projection.verify(&args.source_dir).map_err(|message| {
+            native_selection_input_error(ArosError::Configuration {
+                file: "native MetaMake inputs after parsing".into(),
+                message,
+            })
+        })?;
+    }
 
     let mut parse_errors = Vec::new();
     let mut parsed_files = Vec::new();
@@ -607,7 +655,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                         .to_string_lossy()
                         .into_owned();
                     if projection
-                        .snapshots
+                        .snapshots()
                         .get(&relative)
                         .is_none_or(|digest| parsed.source_sha256.as_ref() != Some(digest))
                     {
@@ -847,7 +895,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         partial_source_lists.extend(parsed.partial_source_lists);
         source_inventory_patterns.extend(parsed.source_inventory_patterns);
         source_inventory_needs.extend(parsed.source_inventory_needs);
-        if args.source_inventory_only {
+        if args.source_inventory_only || args.mesa_genmodule_inventory_only {
             graph
                 .inventory_targets
                 .extend(parsed.source_inventory_targets);
@@ -876,7 +924,10 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         return Err(diagnostics_error(capability_errors));
     }
 
-    if !args.source_inventory_only && native_contract.is_none() {
+    if !args.source_inventory_only
+        && !args.mesa_genmodule_inventory_only
+        && native_contract.is_none()
+    {
         if let Err(errors) = graph.validate_python_output_consumers() {
             let diagnostics = errors
                 .into_iter()
@@ -897,6 +948,13 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         source_inventory_patterns.dedup();
         let unresolved_inventory =
             graph.resolve_source_inventory_fetches(&source_inventory_patterns);
+        if full_inventory_contract.is_some() && !unresolved_inventory.is_empty() {
+            return Err(diagnostics_error(unresolved_inventory.iter().map(|pattern|
+                Diagnostic::error(DiagnosticCode::GraphValidation,
+                    DiagnosticStage::GraphValidation,
+                    format!("fetched-tree source wildcard has no owning %fetch declaration: `{pattern}`"))
+            ).collect()));
+        }
         partial_source_lists.extend(unresolved_inventory.into_iter().map(|pattern| {
             format!("fetched-tree source wildcard has no owning %fetch declaration: `{pattern}`")
         }));
@@ -968,7 +1026,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // Preparation binds normal and cold declaration metadata together below.
     // The full resolver would otherwise erase rejected raw link options or
     // rebind aliases before cold source-owned producers are visible.
-    let unresolved_libs = if args.source_inventory_only {
+    let unresolved_libs = if args.source_inventory_only || args.mesa_genmodule_inventory_only {
         Vec::new()
     } else {
         graph.resolve_use_libs()
@@ -1100,6 +1158,68 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         graph.discharge_bound_header_provider_failures(&mut capability_errors);
     }
     skipped_copy_directories.extend(graph.resolve_copy_directories());
+    if let Some(contract) = &full_inventory_contract {
+        // These diagnostics can be discovered after the initial parser gate.
+        // A data-only return must not bypass their refusal just because no
+        // CMake graph is emitted.
+        if !capability_errors.is_empty() {
+            return Err(diagnostics_error(capability_errors));
+        }
+        if !unowned_port_sources.is_empty() {
+            return Err(diagnostics_error(
+                unowned_port_sources
+                    .iter()
+                    .map(|message| {
+                        Diagnostic::error(DiagnosticCode::GraphValidation,
+                    DiagnosticStage::GraphValidation,
+                    format!("full-target source input has no owning %fetch declaration: {message}"))
+                    })
+                    .collect(),
+            ));
+        }
+        let context = target.as_ref().ok_or_else(|| ArosError::Configuration {
+            file: args.output.display().to_string(),
+            message: "full-target Mesa inventory requires explicit selectors".into(),
+        })?;
+        let data = aros_transpiler::capability::mesa::configured_genmodule_full::full_inventory(
+            &graph, context,
+        )
+        .map_err(|message| ArosError::Configuration {
+            file: args.output.display().to_string(),
+            message,
+        })?;
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "aros-mesa-genmodule-selection-v1",
+            "selection": {
+                "profile": contract.invocation().profile,
+                "kind": contract.kind(),
+                "scope": "full-target",
+                "contract_sha256": contract.sha256(),
+            },
+            "inventory": data,
+        }))
+        .map_err(|error| ArosError::Configuration {
+            file: args.output.display().to_string(),
+            message: format!("cannot serialize full-target Mesa genmodule inventory: {error}"),
+        })?;
+        let reloaded = load_native_selection(args, Some(context))?.ok_or_else(|| {
+            ArosError::Configuration {
+                file: args.output.display().to_string(),
+                message: "full-target Mesa configuration binding disappeared".into(),
+            }
+        })?;
+        if reloaded.sha256() != contract.sha256() {
+            return Err(ArosError::Configuration {
+                file: args.output.display().to_string(),
+                message: "full-target Mesa configuration binding changed during inventory".into(),
+            });
+        }
+        let mut inventory = Publication::for_output(&args.output);
+        inventory.present(args.output.clone(), bytes);
+        inventory.publish()?;
+        aros_common::outputln!("Full-target Mesa genmodule declaration inventory written; no CMake graph or source inventory published.");
+        return Ok(());
+    }
     // GNU Make drops a circular phony prerequisite during traversal; CMake
     // rejects utility-target cycles outright. Collapse each meta-only SCC to
     // its shared external prerequisite closure and make that visible.
@@ -1145,7 +1265,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             &mut unscoped_diagnostics,
             selected_package_errors,
         );
-        if args.source_inventory_only {
+        if args.source_inventory_only || args.mesa_genmodule_inventory_only {
             append_unscoped_diagnostics(
                 &mut capability_errors,
                 &mut unscoped_diagnostics,
@@ -1310,6 +1430,8 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 args.output.with_extension("coverage.json"),
                 args.output.with_extension("source-inventory.cmake"),
                 args.output.with_extension("native-invocation.json"),
+                args.output
+                    .with_extension("mesa-configuration-binding.json"),
             ];
             if audit_path
                 .extension()
@@ -1396,7 +1518,10 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         if !errors.is_empty() {
             return Err(diagnostics_error(errors));
         }
-        if !args.source_inventory_only && !patterns.is_empty() {
+        if !args.source_inventory_only
+            && !args.mesa_genmodule_inventory_only
+            && !patterns.is_empty()
+        {
             return Err(diagnostics_error(vec![Diagnostic::error(
                 DiagnosticCode::GraphValidation,
                 DiagnosticStage::GraphValidation,
@@ -1405,8 +1530,9 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         }
         graph.resolve_selected_header_inventory_fetches(args.ports_dir.as_deref(), Some(&selected));
         if args.source_inventory_only {
-            // Only preparation may use pending declaration identities. The
-            // marker contains sources, never a partial or source-less graph.
+            // Preparation publishes sources, never a partial or source-less
+            // compilation graph. The separate genmodule mode below publishes
+            // declaration metadata only.
             let output = args.output.with_extension("source-inventory.cmake");
             let mut inventory = Publication::for_output(&output);
             inventory.present(output, render_source_inventory_manifest(&graph));
@@ -1416,8 +1542,39 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 inventory.absent(args.output.with_extension("native-invocation.json"));
             }
             reverify_native_owner_projection(native_owner_projection.as_ref(), &args.source_dir)?;
+            mesa_configuration_input::stage(mesa_input.as_ref(), &mut inventory, &args.output)?;
             inventory.publish()?;
             aros_common::outputln!("Selected source inventory prepared; no build graph published.");
+            return Ok(());
+        }
+        if args.mesa_genmodule_inventory_only {
+            graph.retain_native_genmodule_inventory(&selected, context)?;
+            graph.validate_cycles()?;
+            let data =
+                aros_transpiler::capability::mesa::configured_genmodule::inventory(&graph, context)
+                    .map_err(|message| ArosError::Configuration {
+                        file: args.output.display().to_string(),
+                        message,
+                    })?;
+            let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "aros-mesa-genmodule-selection-v1",
+                "selection": {
+                    "profile": contract.invocation().profile,
+                    "kind": contract.kind(),
+                    "scope": "contract-roots",
+                    "contract_sha256": contract.sha256(),
+                },
+                "inventory": data,
+            }))
+            .map_err(|error| ArosError::Configuration {
+                file: args.output.display().to_string(),
+                message: format!("cannot serialize Mesa genmodule inventory: {error}"),
+            })?;
+            let mut inventory = Publication::for_output(&args.output);
+            inventory.present(args.output.clone(), bytes);
+            reverify_native_owner_projection(native_owner_projection.as_ref(), &args.source_dir)?;
+            inventory.publish()?;
+            aros_common::outputln!("Selected Mesa genmodule declaration inventory written; no CMake graph or source inventory published.");
             return Ok(());
         }
         graph.retain_native_selection(&selected, context)?;
@@ -1763,6 +1920,9 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     );
 
     graph.validate_cycles()?;
+    if let Some(binding) = &mut mesa_input {
+        binding.project_graph(args, &dirs, target.as_ref(), &mut graph)?;
+    }
     logger
         .event(
             LogLevel::Info,
@@ -1827,6 +1987,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // replaced after every sidecar and report in the same transaction.
     publication.present(args.output.clone(), cmake_content);
     reverify_native_owner_projection(native_owner_projection.as_ref(), &args.source_dir)?;
+    mesa_configuration_input::stage(mesa_input.as_ref(), &mut publication, &args.output)?;
     publication.publish().map_err(|error| {
         diagnostics_error(vec![Diagnostic::error(
             DiagnosticCode::OutputIo,

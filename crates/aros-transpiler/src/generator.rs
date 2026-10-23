@@ -3,6 +3,9 @@ use crate::graph::DependencyGraph;
 use std::collections::HashSet;
 use std::fmt::Write;
 
+#[cfg(test)]
+#[path = "generator/configured_mesa_execution_tests.rs"]
+mod configured_mesa_execution_tests;
 mod endpoints;
 mod external;
 mod generated;

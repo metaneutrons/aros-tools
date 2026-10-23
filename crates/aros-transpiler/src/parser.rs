@@ -504,6 +504,43 @@ pub(crate) fn join_continuations_with_origins(content: &str) -> (String, Vec<usi
     (joined, origins)
 }
 
+/// Joins Make continuation lines and returns the unjoined source byte interval
+/// represented by each joined output line.
+///
+/// Each interval starts at the first physical line and includes every
+/// continued physical line and its final line terminator. The intervals
+/// partition the source; they identify a source-order span, not character by
+/// character provenance through the continuation normalization.
+#[must_use]
+pub fn join_continuations_with_source_ranges(
+    content: &str,
+) -> (String, Vec<std::ops::Range<usize>>) {
+    let (joined, origins) = join_continuations_with_origins(content);
+    let line_count = joined.lines().count();
+
+    let mut physical_line_starts = vec![0];
+    physical_line_starts.extend(content.match_indices('\n').map(|(offset, _)| offset + 1));
+
+    let joined_line_starts = origins
+        .into_iter()
+        .take(line_count)
+        .map(|physical_line| physical_line_starts[physical_line])
+        .collect::<Vec<_>>();
+    let ranges = joined_line_starts
+        .iter()
+        .enumerate()
+        .map(|(index, &start)| {
+            let end = joined_line_starts
+                .get(index + 1)
+                .copied()
+                .unwrap_or(content.len());
+            start..end
+        })
+        .collect();
+
+    (joined, ranges)
+}
+
 /// Concrete target values available while scanning Make conditionals.
 ///
 /// Every field is optional on purpose.  An omitted value is not the same as an
@@ -598,24 +635,76 @@ impl TargetContext {
     }
 
     pub(crate) fn value(&self, name: &str) -> Option<String> {
+        if name == "AROS_TARGET_PLATFORM" {
+            return self.legacy_platform();
+        }
+        self.scalar_value(name).map(str::to_owned)
+    }
+
+    pub(crate) fn value_nonempty(&self, name: &str) -> Option<bool> {
+        if name == "AROS_TARGET_PLATFORM" {
+            // A complete compound platform always contains its joining '-'.
+            self.platform.as_ref()?;
+            self.variant.as_ref()?;
+            self.cpu.as_ref()?;
+            return Some(true);
+        }
+        self.scalar_value(name).map(|value| !value.is_empty())
+    }
+
+    pub(crate) fn value_bounded(
+        &self,
+        name: &str,
+        ceiling: usize,
+    ) -> std::result::Result<Option<String>, &'static str> {
+        if name == "AROS_TARGET_PLATFORM" {
+            let (Some(platform), Some(variant), Some(cpu)) = (
+                self.platform.as_deref(),
+                self.variant.as_deref(),
+                self.cpu.as_deref(),
+            ) else {
+                return Ok(None);
+            };
+            let machine = if variant.is_empty() || platform == "pc" {
+                platform
+            } else {
+                variant
+            };
+            if machine
+                .len()
+                .checked_add(cpu.len())
+                .and_then(|bytes| bytes.checked_add(1))
+                .is_none_or(|bytes| bytes > ceiling)
+            {
+                return Err("configured value exceeds conditional expansion limit");
+            }
+            return Ok(self.legacy_platform());
+        }
+        let value = self.scalar_value(name);
+        if value.is_some_and(|value| value.len() > ceiling) {
+            return Err("configured value exceeds conditional expansion limit");
+        }
+        Ok(value.map(str::to_owned))
+    }
+
+    fn scalar_value(&self, name: &str) -> Option<&str> {
         match name {
-            "AROS_TARGET_CPU" | "CPU" => self.cpu.clone(),
+            "AROS_TARGET_CPU" | "CPU" => self.cpu.as_deref(),
             // Historic MetaMake calls the machine ARCH.  Its
             // AROS_TARGET_PLATFORM is instead the compound machine/CPU name.
-            "AROS_TARGET_ARCH" | "ARCH" => self.platform.clone(),
-            "AROS_TARGET_PLATFORM" => self.legacy_platform(),
-            "AROS_TARGET_FAMILY" | "FAMILY" => self.family.clone(),
-            "AROS_TARGET_VARIANT" => self.variant.clone(),
-            "AROS_TOOLCHAIN" => self.toolchain.clone(),
-            "AROS_TARGET_CPU32" => self.cpu32.clone(),
-            "USE_MMU" => self.use_mmu.clone(),
-            "GCC_CONFIG_FLOAT_ABI" => self.float_abi.clone(),
-            "OPT_MESAGL" => self.mesa_version.clone(),
-            "TARGET_LLVM_VER" => self.target_llvm_ver.clone(),
-            "TARGET_LLVM_RUNTIMES_STYLE" => self.target_llvm_runtimes_style.clone(),
-            "TARGET_RUST" => self.target_rust.clone(),
-            "TARGET_RUST_VER" => self.target_rust_ver.clone(),
-            _ => self.make_variables.get(name).cloned(),
+            "AROS_TARGET_ARCH" | "ARCH" => self.platform.as_deref(),
+            "AROS_TARGET_FAMILY" | "FAMILY" => self.family.as_deref(),
+            "AROS_TARGET_VARIANT" => self.variant.as_deref(),
+            "AROS_TOOLCHAIN" => self.toolchain.as_deref(),
+            "AROS_TARGET_CPU32" => self.cpu32.as_deref(),
+            "USE_MMU" => self.use_mmu.as_deref(),
+            "GCC_CONFIG_FLOAT_ABI" => self.float_abi.as_deref(),
+            "OPT_MESAGL" => self.mesa_version.as_deref(),
+            "TARGET_LLVM_VER" => self.target_llvm_ver.as_deref(),
+            "TARGET_LLVM_RUNTIMES_STYLE" => self.target_llvm_runtimes_style.as_deref(),
+            "TARGET_RUST" => self.target_rust.as_deref(),
+            "TARGET_RUST_VER" => self.target_rust_ver.as_deref(),
+            _ => self.make_variables.get(name).map(String::as_str),
         }
     }
 }
@@ -1146,3 +1235,7 @@ mod source_inventory_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "joined_source_ranges_tests.rs"]
+mod joined_source_ranges_tests;

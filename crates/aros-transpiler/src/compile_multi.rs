@@ -865,34 +865,36 @@ fn prove_source_lookup(
     expected: &str,
 ) -> Result<(), String> {
     let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
-    for directory in directories {
-        let relative = if directory.is_empty() {
-            format!("{stem}.c")
-        } else {
-            format!("{directory}/{stem}.c")
-        };
-        let candidate = canonical_root.join(&relative);
-        match std::fs::symlink_metadata(&candidate) {
-            Ok(_) => {
-                aros_common::open_regular_file_nofollow(&candidate)
-                    .map_err(|error| format!("compile-multi vpath candidate is unsafe: {error}"))?;
-                return if relative == expected {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "compile-multi vpath selects {relative} instead of declared {expected}"
-                    ))
-                };
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => {
-                return Err(format!(
+    let candidates = directories
+        .iter()
+        .map(|directory| canonical_root.join(directory).join(format!("{stem}.c")))
+        .collect::<Vec<_>>();
+    let selected =
+        crate::make_vpath::first_present(
+            &candidates,
+            &|candidate| match std::fs::symlink_metadata(candidate) {
+                Ok(_) => {
+                    aros_common::open_regular_file_nofollow(candidate).map_err(|error| {
+                        format!("compile-multi vpath candidate is unsafe: {error}")
+                    })?;
+                    Ok(true)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(format!(
                     "compile-multi vpath candidate cannot be inspected: {error}"
-                ))
-            }
-        }
+                )),
+            },
+        )?
+        .ok_or("compile-multi vpath does not resolve the declared source")?;
+    if selected == canonical_root.join(expected) {
+        Ok(())
+    } else {
+        let relative = selected.strip_prefix(&canonical_root).unwrap_or(&selected);
+        Err(format!(
+            "compile-multi vpath selects {} instead of declared {expected}",
+            relative.display()
+        ))
     }
-    Err("compile-multi vpath does not resolve the declared source".into())
 }
 
 #[allow(clippy::too_many_arguments)]
