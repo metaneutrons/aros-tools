@@ -1663,6 +1663,7 @@ mod tests {
         ResolvedToolchain {
             paths: get_toolchain_paths(&root),
             target_triple: "x86_64-unknown-aros".into(),
+            compiler_identity: None,
             release_id: None,
             source: ToolchainSource::LocalManifest,
         }

@@ -8,12 +8,17 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
+use aros_common::mesa_genmodule_inventory::{
+    MesaGenmoduleInventoryScope, MesaGenmoduleSelectionBinding,
+};
 use aros_common::Sha256Digest;
 use clap::Args;
 use miette::Result;
 use serde::Deserialize;
 
 const SELECTION_SCHEMA: &str = "aros-sdk-generation-readback-selection-v1";
+const MESA_SELECTION_SCHEMA: &str = "aros-sdk-generation-readback-selection-v2";
+const MESA_GENMODULE_SELECTION_SCHEMA: &str = "aros-sdk-generation-readback-selection-v3";
 const INPUT_COLLECTION_FILE: &str = "toolchain-release-inputs-v2.json";
 const MAX_SELECTED_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -93,6 +98,12 @@ struct CompatibilitySelection {
     directory: PathBuf,
     manifest_sha256: Sha256Digest,
     inputs: SelectedDocument,
+    /// Raw source-inspection policy selected independently of result evidence.
+    #[serde(default)]
+    source_policy: Option<SelectedDocument>,
+    /// Measured genmodule-inventory helper selected independently of result evidence.
+    #[serde(default)]
+    mesa_genmodule_helper_sha256: Option<Sha256Digest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,14 +116,34 @@ struct SelectedDocument {
 fn parse_selection(bytes: &[u8]) -> Result<ReadbackSelection> {
     let selection: ReadbackSelection = serde_json::from_slice(bytes)
         .map_err(|_| miette::miette!("SDK generation selection is not closed JSON"))?;
-    if selection.schema != SELECTION_SCHEMA {
+    if ![
+        SELECTION_SCHEMA,
+        MESA_SELECTION_SCHEMA,
+        MESA_GENMODULE_SELECTION_SCHEMA,
+    ]
+    .contains(&selection.schema.as_str())
+    {
         miette::bail!("SDK generation selection has an unsupported schema");
+    }
+    if selection.schema != MESA_GENMODULE_SELECTION_SCHEMA
+        && selection
+            .compatibility
+            .mesa_genmodule_helper_sha256
+            .is_some()
+    {
+        miette::bail!("legacy SDK generation selection cannot select a Mesa helper");
+    }
+    if selection.schema == SELECTION_SCHEMA && selection.compatibility.source_policy.is_some() {
+        miette::bail!("legacy SDK generation selection cannot enable Mesa source policy");
     }
     validate_selection_values(&selection)?;
     Ok(selection)
 }
 
 fn validate_selection_values(selection: &ReadbackSelection) -> Result<()> {
+    if let Some(policy) = &selection.compatibility.source_policy {
+        require_nonzero_digest("source policy", &policy.sha256)?;
+    }
     for (label, digest) in [
         ("compiler archive", &selection.compiler.archive_sha256),
         (
@@ -133,6 +164,9 @@ fn validate_selection_values(selection: &ReadbackSelection) -> Result<()> {
     ] {
         require_nonzero_digest(label, digest)?;
     }
+    if let Some(helper) = &selection.compatibility.mesa_genmodule_helper_sha256 {
+        require_nonzero_digest("Mesa genmodule helper", helper)?;
+    }
     if selection.compiler.archive_size == 0 || selection.sdk.archive_size == 0 {
         miette::bail!("selected compiler and SDK archive sizes must be positive");
     }
@@ -144,6 +178,45 @@ fn require_nonzero_digest(label: &str, digest: &Sha256Digest) -> Result<()> {
         miette::bail!("selected {label} SHA-256 must be nonzero");
     }
     Ok(())
+}
+
+fn selected_mesa_genmodule_binding(
+    schema: &str,
+    mesa_required: bool,
+    llvm_lane: bool,
+    source_preset: &str,
+    source_contract_sha256: &Sha256Digest,
+    helper_sha256: Option<&Sha256Digest>,
+) -> Result<Option<(MesaGenmoduleSelectionBinding, Sha256Digest)>> {
+    if helper_sha256.is_some()
+        && (schema != MESA_GENMODULE_SELECTION_SCHEMA || !mesa_required || !llvm_lane)
+    {
+        miette::bail!("Mesa genmodule helper selection requires a v3 Mesa LLVM lane");
+    }
+    if !mesa_required {
+        return Ok(None);
+    }
+    if !llvm_lane {
+        miette::bail!("Mesa generation read-back requires an LLVM lane");
+    }
+    if schema != MESA_GENMODULE_SELECTION_SCHEMA {
+        // Preserve the historical v2 source-policy binding. It did not carry
+        // an independently selected inventory-helper digest.
+        return Ok(None);
+    }
+    let helper = helper_sha256.ok_or_else(|| {
+        miette::miette!("v3 Mesa generation read-back requires a selected genmodule helper")
+    })?;
+    require_nonzero_digest("Mesa genmodule helper", helper)?;
+    Ok(Some((
+        MesaGenmoduleSelectionBinding {
+            profile: source_preset.to_owned(),
+            kind: "sdk-consumer".into(),
+            scope: MesaGenmoduleInventoryScope::ContractRoots,
+            contract_sha256: source_contract_sha256.clone(),
+        },
+        helper.clone(),
+    )))
 }
 
 #[cfg(unix)]
@@ -249,6 +322,53 @@ fn run_unix(args: &VerifyGenerationArgs) -> Result<()> {
         miette::bail!("selected SDK has no compiler reference for this group, profile and host");
     }
 
+    let source_policy_file = selection
+        .compatibility
+        .source_policy
+        .as_ref()
+        .map(|selected| {
+            require_outside_roots(&selected.path, &roots, "source policy")?;
+            read_selected_file(
+                &selected.path,
+                &selected.sha256,
+                "source policy",
+                aros_toolchain::canonical::MAX_DOCUMENT_BYTES as u64,
+            )
+        })
+        .transpose()?;
+    let mesa_required = match (group.source_lock().family(), source_policy_file.as_ref()) {
+        (CompilerFamily::Llvm, Some(policy)) => {
+            aros_toolchain::source_policy::readback_sdk_mesa_policy(
+                &policy.bytes,
+                sdk.identity(),
+                sdk.source_preset(),
+                profile.name(),
+            )
+            .map_err(|error| native_error(&error))?
+        }
+        (CompilerFamily::Llvm, None)
+            if [MESA_SELECTION_SCHEMA, MESA_GENMODULE_SELECTION_SCHEMA]
+                .contains(&selection.schema.as_str()) =>
+        {
+            miette::bail!("LLVM SDK generation requires a separately selected source policy");
+        }
+        (CompilerFamily::Gnu, Some(_)) => {
+            miette::bail!("Mesa source policy requires an LLVM SDK generation lane");
+        }
+        _ => false,
+    };
+    let selected_genmodule = selected_mesa_genmodule_binding(
+        &selection.schema,
+        mesa_required,
+        matches!(group.source_lock().family(), CompilerFamily::Llvm),
+        sdk.source_preset(),
+        &sdk.identity().source.contract_sha256,
+        selection
+            .compatibility
+            .mesa_genmodule_helper_sha256
+            .as_ref(),
+    )?;
+
     let input_files = selected_input_file_snapshots(&args.inputs_dir, &inputs, sdk, group)?;
     let generation_file = read_selected_file(
         &selection.generation.path,
@@ -281,6 +401,7 @@ fn run_unix(args: &VerifyGenerationArgs) -> Result<()> {
         &compatibility_inputs_file.snapshot,
     ];
     file_snapshots.extend(input_files.iter());
+    file_snapshots.extend(source_policy_file.iter().map(|file| &file.snapshot));
     require_unique_file_identities(&file_snapshots)?;
 
     let verified_compiler = aros_toolchain::package_verify::verify_with_format(
@@ -319,9 +440,26 @@ fn run_unix(args: &VerifyGenerationArgs) -> Result<()> {
         host: &args.host,
     };
     let expected = match group.source_lock().family() {
-        CompilerFamily::Llvm => claims
-            .expectations_with_llvm_sdk(expected_package, group.profiles(), profile, sdk.identity())
-            .map_err(|error| native_error(&error))?,
+        CompilerFamily::Llvm => match &selected_genmodule {
+            Some((binding, helper_sha256)) => claims
+                .expectations_with_llvm_sdk_mesa_selection(
+                    expected_package,
+                    group.profiles(),
+                    profile,
+                    sdk.identity(),
+                    (binding, helper_sha256),
+                )
+                .map_err(|error| native_error(&error))?,
+            None => claims
+                .expectations_with_llvm_sdk_policy(
+                    expected_package,
+                    group.profiles(),
+                    profile,
+                    sdk.identity(),
+                    mesa_required,
+                )
+                .map_err(|error| native_error(&error))?,
+        },
         CompilerFamily::Gnu => claims
             .expectations(expected_package, group.profiles(), profile, true)
             .map_err(|error| native_error(&error))?,
@@ -367,6 +505,12 @@ fn run_unix(args: &VerifyGenerationArgs) -> Result<()> {
             aros_toolchain::canonical::MAX_DOCUMENT_BYTES as u64,
         )?;
     }
+    if let Some(policy) = &source_policy_file {
+        revalidate_file_snapshot(
+            &policy.snapshot,
+            aros_toolchain::canonical::MAX_DOCUMENT_BYTES as u64,
+        )?;
+    }
     for root in roots {
         revalidate_directory_snapshot(root)?;
     }
@@ -408,6 +552,9 @@ fn run_unix(args: &VerifyGenerationArgs) -> Result<()> {
 }
 
 fn validate_selection_paths(selection: &ReadbackSelection) -> Result<()> {
+    if let Some(policy) = &selection.compatibility.source_policy {
+        validate_normalized_absolute_path(&policy.path, "source policy")?;
+    }
     for (path, label) in [
         (&selection.compiler.directory, "compiler package directory"),
         (
@@ -896,6 +1043,164 @@ mod tests {
         assert_eq!(selection.sdk.archive_size, 12);
     }
 
+    #[test]
+    fn mesa_source_policy_reference_requires_the_new_selection_schema() {
+        let mut value: serde_json::Value = serde_json::from_str(&selection_json()).unwrap();
+        value["compatibility"]["source_policy"] =
+            serde_json::json!({"path":"/tmp/source-policy.json","sha256":"a".repeat(64)});
+        assert!(parse_selection(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["schema"] = serde_json::json!(MESA_SELECTION_SCHEMA);
+        let selected = parse_selection(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(selected.compatibility.source_policy.is_some());
+        validate_selection_paths(&selected).unwrap();
+        value["compatibility"]["source_policy"]["sha256"] = serde_json::json!("0".repeat(64));
+        assert!(parse_selection(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["compatibility"]["source_policy"]["sha256"] = serde_json::json!("a".repeat(64));
+        value["compatibility"]["source_policy"]["path"] = serde_json::json!("relative-policy.json");
+        let unsafe_path = parse_selection(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(validate_selection_paths(&unsafe_path).is_err());
+    }
+
+    #[test]
+    fn mesa_genmodule_helper_is_required_only_by_v3_and_is_never_adopted_from_evidence() {
+        let mut value: serde_json::Value = serde_json::from_str(&selection_json()).unwrap();
+        value["compatibility"]["source_policy"] = serde_json::json!({
+            "path":"/tmp/source-policy.json",
+            "sha256":"2".repeat(64)
+        });
+        value["schema"] = serde_json::json!(MESA_GENMODULE_SELECTION_SCHEMA);
+        value["compatibility"]["mesa_genmodule_helper_sha256"] = serde_json::json!("3".repeat(64));
+        let selected = parse_selection(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            selected
+                .compatibility
+                .mesa_genmodule_helper_sha256
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "3".repeat(64)
+        );
+
+        let contract_sha256 = Sha256Digest::parse(&"4".repeat(64)).unwrap();
+        let helper_sha256 = Sha256Digest::parse(&"3".repeat(64)).unwrap();
+        let binding = selected_mesa_genmodule_binding(
+            MESA_GENMODULE_SELECTION_SCHEMA,
+            true,
+            true,
+            "source-arm-raspi",
+            &contract_sha256,
+            Some(&helper_sha256),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(binding.0.profile, "source-arm-raspi");
+        assert_eq!(binding.0.kind, "sdk-consumer");
+        assert_eq!(binding.0.scope, MesaGenmoduleInventoryScope::ContractRoots);
+        assert_eq!(binding.0.contract_sha256, contract_sha256);
+        assert_eq!(binding.1, helper_sha256);
+
+        let mut missing: serde_json::Value = serde_json::from_value(value.clone()).unwrap();
+        missing["compatibility"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mesa_genmodule_helper_sha256");
+        let missing = parse_selection(&serde_json::to_vec(&missing).unwrap()).unwrap();
+        assert!(missing.compatibility.mesa_genmodule_helper_sha256.is_none());
+        assert!(selected_mesa_genmodule_binding(
+            MESA_GENMODULE_SELECTION_SCHEMA,
+            true,
+            true,
+            "source-arm-raspi",
+            &contract_sha256,
+            missing.compatibility.mesa_genmodule_helper_sha256.as_ref(),
+        )
+        .is_err());
+
+        let mut zero: serde_json::Value = serde_json::from_value(value.clone()).unwrap();
+        zero["compatibility"]["mesa_genmodule_helper_sha256"] = serde_json::json!("0".repeat(64));
+        assert!(parse_selection(&serde_json::to_vec(&zero).unwrap()).is_err());
+
+        let mut explicit_none: serde_json::Value = serde_json::from_value(value).unwrap();
+        explicit_none["compatibility"]["mesa_genmodule_helper_sha256"] = serde_json::Value::Null;
+        let explicit_none = parse_selection(&serde_json::to_vec(&explicit_none).unwrap()).unwrap();
+        assert!(explicit_none
+            .compatibility
+            .mesa_genmodule_helper_sha256
+            .is_none());
+        assert!(selected_mesa_genmodule_binding(
+            MESA_GENMODULE_SELECTION_SCHEMA,
+            true,
+            true,
+            "source-arm-raspi",
+            &contract_sha256,
+            explicit_none
+                .compatibility
+                .mesa_genmodule_helper_sha256
+                .as_ref(),
+        )
+        .is_err());
+
+        assert!(selected_mesa_genmodule_binding(
+            MESA_GENMODULE_SELECTION_SCHEMA,
+            false,
+            true,
+            "source-arm-raspi",
+            &contract_sha256,
+            Some(&helper_sha256),
+        )
+        .is_err());
+        assert!(selected_mesa_genmodule_binding(
+            MESA_GENMODULE_SELECTION_SCHEMA,
+            false,
+            false,
+            "source-arm-raspi",
+            &contract_sha256,
+            Some(&helper_sha256),
+        )
+        .is_err());
+        assert_eq!(
+            selected_mesa_genmodule_binding(
+                MESA_GENMODULE_SELECTION_SCHEMA,
+                false,
+                true,
+                "source-arm-raspi",
+                &contract_sha256,
+                None,
+            )
+            .unwrap(),
+            None
+        );
+
+        for legacy_schema in [SELECTION_SCHEMA, MESA_SELECTION_SCHEMA] {
+            let mut legacy: serde_json::Value = serde_json::from_str(&selection_json()).unwrap();
+            legacy["schema"] = serde_json::json!(legacy_schema);
+            if legacy_schema == MESA_SELECTION_SCHEMA {
+                legacy["compatibility"]["source_policy"] = serde_json::json!({
+                    "path":"/tmp/source-policy.json",
+                    "sha256":"2".repeat(64)
+                });
+            }
+            legacy["compatibility"]["mesa_genmodule_helper_sha256"] =
+                serde_json::json!("3".repeat(64));
+            assert!(parse_selection(&serde_json::to_vec(&legacy).unwrap()).is_err());
+        }
+
+        // Historical v2 Mesa source-policy read-back retains its previous
+        // binding path and does not pretend it independently selected a helper.
+        assert_eq!(
+            selected_mesa_genmodule_binding(
+                MESA_SELECTION_SCHEMA,
+                true,
+                true,
+                "source-arm-raspi",
+                &contract_sha256,
+                None,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn independent_documents_reject_filesystem_ancestry_aliases() {
@@ -1017,6 +1322,10 @@ mod tests {
     fn environment_reader_rejects_duplicate_keys() {
         let valid = br#"{"schema":"aros-toolchain-build-environment-v1","host":"macos-aarch64","nested":{"x":1}}"#;
         parse_build_environment(valid, "macos-aarch64").unwrap();
+        assert!(parse_build_environment(valid, "linux-x86_64").is_err());
+        let wrong_schema =
+            br#"{"schema":"aros-toolchain-build-environment-v2","host":"macos-aarch64"}"#;
+        assert!(parse_build_environment(wrong_schema, "macos-aarch64").is_err());
         let duplicate = br#"{"schema":"aros-toolchain-build-environment-v1","host":"macos-aarch64","nested":{"x":1,"x":2}}"#;
         assert!(parse_build_environment(duplicate, "macos-aarch64").is_err());
     }

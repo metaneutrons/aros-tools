@@ -14,6 +14,8 @@ use serde_json::{Map, Value};
 
 const MAX_SELECTION_BYTES: usize = 16 * 1024 * 1024;
 const SELECTION_SCHEMA: &str = "aros-toolchain-release-evidence-selection-v2";
+const MESA_SELECTION_SCHEMA: &str = "aros-toolchain-release-evidence-selection-v3";
+const COLLECTION_SELECTION_SCHEMA: &str = "aros-toolchain-release-evidence-selection-v4";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +31,16 @@ pub(super) struct Selection {
     /// origin proof. Omission preserves compiler-only selections.
     #[serde(default)]
     pub sdk_generations: Vec<SdkGenerationSelection>,
+}
+
+impl Selection {
+    pub(super) fn requires_source_policy(&self) -> bool {
+        [MESA_SELECTION_SCHEMA, COLLECTION_SELECTION_SCHEMA].contains(&self.schema.as_str())
+    }
+
+    pub(super) fn requires_mesa_collection(&self) -> bool {
+        self.schema == COLLECTION_SELECTION_SCHEMA
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,6 +108,14 @@ pub(super) struct Compatibility {
     /// Independently selected source-contract policy, not a report or inputs
     /// document marker. Mandatory presence prevents silent legacy downgrade.
     pub native_sdk_required: bool,
+    /// Separately selected source-inspection output, never a result marker.
+    /// Required for LLVM SDK lanes in selection-v3; forbidden in legacy v2.
+    #[serde(default)]
+    pub source_policy: Option<SelectedFile>,
+    /// Caller-selected measured inventory helper, not a digest adopted from
+    /// compatibility input claims or the generated receipt. Only selection-v4.
+    #[serde(default)]
+    pub mesa_genmodule_helper_sha256: Option<Sha256Digest>,
 }
 
 /// Parse bounded, closed selection declarations without opening selected paths.
@@ -113,10 +133,49 @@ pub(super) fn parse(bytes: &[u8]) -> miette::Result<Selection> {
     })?;
     let selection: Selection = serde_json::from_value(unique.0)
         .map_err(|_| miette::miette!("release evidence selection must match the closed schema"))?;
-    if selection.schema != SELECTION_SCHEMA || selection.lanes.is_empty() {
+    if ![
+        SELECTION_SCHEMA,
+        MESA_SELECTION_SCHEMA,
+        COLLECTION_SELECTION_SCHEMA,
+    ]
+    .contains(&selection.schema.as_str())
+        || selection.lanes.is_empty()
+    {
         return Err(miette::miette!(
             "release evidence selection schema or lane set is invalid"
         ));
+    }
+    for compatibility in selection
+        .lanes
+        .values()
+        .map(|lane| &lane.compatibility)
+        .chain(
+            selection
+                .sdk_generations
+                .iter()
+                .map(|sdk| &sdk.compatibility),
+        )
+    {
+        if let Some(helper) = &compatibility.mesa_genmodule_helper_sha256 {
+            if !selection.requires_mesa_collection()
+                || compatibility.native_sdk_required
+                || compatibility.source_policy.is_none()
+                || helper.as_str().bytes().all(|byte| byte == b'0')
+            {
+                return Err(miette::miette!("Mesa helper selection requires collection-v4, LLVM source policy and a nonzero measured digest"));
+            }
+        }
+        if let Some(policy) = &compatibility.source_policy {
+            if !selection.requires_source_policy() {
+                return Err(miette::miette!(
+                    "legacy evidence selection cannot enable Mesa source policy"
+                ));
+            }
+            validate_selected_path(&policy.path)?;
+            if policy.sha256.as_str().bytes().all(|byte| byte == b'0') {
+                return Err(miette::miette!("source policy digest must be nonzero"));
+            }
+        }
     }
 
     for (asset, lane) in &selection.lanes {
@@ -446,6 +505,36 @@ mod tests {
                 "native_sdk_required":true
             }
         })
+    }
+
+    #[test]
+    fn mesa_policy_reference_is_versioned_closed_and_independently_selected() {
+        let mut value = valid_selection();
+        let compatibility = &mut value["lanes"]["llvm-pc-x86_64-linux.tar.xz"]["compatibility"];
+        compatibility["source_policy"] =
+            json!({"path":"/tmp/source-policy.json","sha256":"a".repeat(64)});
+        assert!(
+            parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+            "legacy format must not enable Mesa"
+        );
+        value["schema"] = json!(super::MESA_SELECTION_SCHEMA);
+        let selected = parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(selected.requires_source_policy());
+        let policy = selected.lanes["llvm-pc-x86_64-linux.tar.xz"]
+            .compatibility
+            .source_policy
+            .as_ref()
+            .unwrap();
+        assert_eq!(policy.path, std::path::Path::new("/tmp/source-policy.json"));
+        for invalid in [
+            json!({"path":"relative.json","sha256":"a".repeat(64)}),
+            json!({"path":"/tmp/policy.json","sha256":"0".repeat(64)}),
+            json!({"path":"/tmp/policy.json","sha256":"a".repeat(64),"trusted":true}),
+        ] {
+            value["lanes"]["llvm-pc-x86_64-linux.tar.xz"]["compatibility"]["source_policy"] =
+                invalid;
+            assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
     }
 
     fn sdk_generation_input_fixture() -> aros_toolchain::release_inputs::ReleaseInputs {
@@ -948,5 +1037,65 @@ mod tests {
         value["lanes"]["llvm-pc-x86_64-linux.tar.xz"]["compatibility"]["inputs"]["path"] =
             json!("relative/inputs.json");
         assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn mesa_collection_v4_requires_independent_policy_and_measured_helper() {
+        let asset = "llvm-pc-x86_64-linux.tar.xz";
+        let mut v2 = valid_selection();
+        let legacy = parse(&serde_json::to_vec(&v2).unwrap()).unwrap();
+        assert!(!legacy.requires_source_policy());
+        assert!(!legacy.requires_mesa_collection());
+        v2["lanes"][asset]["compatibility"]["mesa_genmodule_helper_sha256"] = json!("d".repeat(64));
+        assert!(
+            parse(&serde_json::to_vec(&v2).unwrap()).is_err(),
+            "legacy v2 must not opt into Mesa collection with a helper digest"
+        );
+
+        let mut v3 = valid_selection();
+        v3["schema"] = json!(super::MESA_SELECTION_SCHEMA);
+        v3["lanes"][asset]["compatibility"]["source_policy"] =
+            json!({"path":"/tmp/source-policy.json","sha256":"a".repeat(64)});
+        let selected_v3 = parse(&serde_json::to_vec(&v3).unwrap()).unwrap();
+        assert!(selected_v3.requires_source_policy());
+        assert!(!selected_v3.requires_mesa_collection());
+        v3["lanes"][asset]["compatibility"]["mesa_genmodule_helper_sha256"] = json!("d".repeat(64));
+        assert!(
+            parse(&serde_json::to_vec(&v3).unwrap()).is_err(),
+            "v3 source-policy selections must not silently acquire collection semantics"
+        );
+
+        let mut v4 = v3;
+        v4["schema"] = json!(super::COLLECTION_SELECTION_SCHEMA);
+        v4["lanes"][asset]["compatibility"]["mesa_genmodule_helper_sha256"] = json!("d".repeat(64));
+        let selected_v4 = parse(&serde_json::to_vec(&v4).unwrap()).unwrap();
+        assert!(selected_v4.requires_source_policy());
+        assert!(selected_v4.requires_mesa_collection());
+        let expected_helper = "d".repeat(64);
+        assert_eq!(
+            selected_v4.lanes[asset]
+                .compatibility
+                .mesa_genmodule_helper_sha256
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            expected_helper.as_str()
+        );
+
+        let mut zero_helper = v4.clone();
+        zero_helper["lanes"][asset]["compatibility"]["mesa_genmodule_helper_sha256"] =
+            json!("0".repeat(64));
+        assert!(parse(&serde_json::to_vec(&zero_helper).unwrap()).is_err());
+
+        let mut missing_policy = v4.clone();
+        missing_policy["lanes"][asset]["compatibility"]
+            .as_object_mut()
+            .unwrap()
+            .remove("source_policy");
+        assert!(parse(&serde_json::to_vec(&missing_policy).unwrap()).is_err());
+
+        let mut gnu_policy = v4;
+        gnu_policy["lanes"][asset]["compatibility"]["native_sdk_required"] = json!(true);
+        assert!(parse(&serde_json::to_vec(&gnu_policy).unwrap()).is_err());
     }
 }

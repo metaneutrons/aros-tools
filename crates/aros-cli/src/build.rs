@@ -14,6 +14,7 @@ const MAX_LOCAL_TOOLCHAIN_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
 
 mod host_inputs;
 mod local_identity;
+mod mesa_runtime;
 mod native_contract;
 
 use native_contract::NativeContractSelection;
@@ -262,6 +263,10 @@ fn profile_cache_variables(
             build_type.cmake_value().to_owned(),
         ),
         ("CMAKE_EXPORT_COMPILE_COMMANDS".to_owned(), "ON".to_owned()),
+        // Unconfigured CLI builds must clear any previous private Mesa input
+        // in a reusable CMake cache. The retained configured owner selects bound
+        // only after retaining and revalidating its completed preflight.
+        ("AROS_MESA_CONFIGURATION_MODE".to_owned(), "off".to_owned()),
     ];
     if let Some(context) = &profile.transpiler {
         variables.extend([
@@ -459,6 +464,9 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     )
     .await?;
     let lease = crate::toolchain_lifecycle::acquire_for_build(repo_root, &resolved)?;
+    if let Some(compiler) = &resolved.compiler_identity {
+        toolchain::validate_profile_compiler(&profile, compiler, &resolved.target_triple)?;
+    }
     let native_variables =
         native_contract_variables(native_contract.as_ref(), &resolved, &profile)?;
     if resolved.source == toolchain::ToolchainSource::LocalCompilerOnly && native_contract.is_some()
@@ -513,7 +521,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     }
     let is_local_native = resolved.source == toolchain::ToolchainSource::LocalCompilerOnly
         && native_contract.is_some();
-    let cmake_executor = if is_local_native {
+    let cmake_executor = if is_local_native || mesa_runtime::required(&profile) {
         which::which("cmake")
             .into_diagnostic()?
             .canonicalize()
@@ -608,12 +616,35 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     if options.verbose {
         configure.arg("--log-level=VERBOSE");
     }
-    if is_local_native {
+    if is_local_native || mesa_runtime::required(&profile) {
         let ninja = which::which("ninja")
             .into_diagnostic()?
             .canonicalize()
             .into_diagnostic()?;
         configure.arg(format!("-DCMAKE_MAKE_PROGRAM={}", ninja.display()));
+    }
+    // Retain the execution owner, not merely its JSON receipt, through every
+    // configure/build pass. Bound arguments follow the default-off selection.
+    if native_contract.is_some() && mesa_runtime::required(&profile) {
+        miette::bail!("configured Mesa ordinary native-root builds require an explicit matching genmodule scope; the SDK roots cannot substitute for that selection");
+    }
+    let mesa = mesa_runtime::prepare(
+        repo_root,
+        &options.preset,
+        &profile,
+        &resolved,
+        options.input_policy.offline,
+        &build_tools.bin_dir.join("aros-transpiler"),
+    )
+    .await?;
+    if let Some(owner) = &mesa {
+        owner.configure(&mut configure)?;
+        // Only selected values may overlay the closed environment. The normal
+        // cache apply_to method reconstructs ambient variables and is unsuitable
+        // for this already sealed child.
+        if let aros_cache::CompilerCacheBuildSelection::Managed(cache) = &compiler_cache {
+            configure.envs(cache.environment().values());
+        }
     }
     // Local source identity is not a clean Git/released-toolchain receipt.
     // Capture before execution, refuse adoption of historical output trees,
@@ -651,6 +682,9 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         },
     )?;
 
+    if let Some(owner) = &mesa {
+        owner.revalidate()?;
+    }
     if let Some(expected) = &local_native {
         let selected_contract = native_contract
             .as_ref()
@@ -682,6 +716,13 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     if let Some(jobs) = options.jobs {
         build.args(["-j", &jobs.to_string()]);
     }
+    if let Some(owner) = &mesa {
+        owner.revalidate()?;
+        owner.apply_environment(&mut build)?;
+        if let aros_cache::CompilerCacheBuildSelection::Managed(cache) = &compiler_cache {
+            build.envs(cache.environment().values());
+        }
+    }
     crate::observability::run_command_at(
         &mut build,
         &format!("CMake build for preset '{}'", options.preset),
@@ -692,6 +733,9 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         },
     )?;
 
+    if let Some(owner) = &mesa {
+        owner.revalidate()?;
+    }
     if let Some(expected) = &local_native {
         let selected_contract = native_contract
             .as_ref()
@@ -1023,6 +1067,7 @@ mod tests {
             target_triple: "riscv-aros".into(),
             release_id: None,
             source: crate::toolchain::ToolchainSource::LocalCompilerOnly,
+            compiler_identity: Some(descriptor.compiler),
         };
         (root, profile, resolved)
     }
@@ -1144,6 +1189,7 @@ mod tests {
             target_triple: "x86_64-unknown-aros".into(),
             release_id: Some("test-release".into()),
             source: crate::toolchain::ToolchainSource::LockedRelease,
+            compiler_identity: None,
         };
         let values: std::collections::HashMap<_, _> =
             native_contract_variables(None, &resolved, &profile)
@@ -1356,6 +1402,13 @@ mod tests {
         assert_eq!(
             values.get("AROS_MESA_VERSION").map(String::as_str),
             Some("26.0.0")
+        );
+        assert_eq!(
+            values
+                .get("AROS_MESA_CONFIGURATION_MODE")
+                .map(String::as_str),
+            Some("off"),
+            "an unconfigured frontend invocation must not reuse cached input"
         );
     }
 

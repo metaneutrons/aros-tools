@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
 
+use aros_common::mesa_genmodule_inventory::{
+    MesaGenmoduleInventoryScope, MesaGenmoduleSelectionBinding,
+};
 use aros_common::publication::{
     publish_atomic_file, validate_existing_directory_prefix_nofollow, AtomicFilePolicy,
     PortableOutputName,
@@ -189,6 +192,8 @@ fn sdk_compatibility_requests<'a>(
     measured: &'a IndexedPackageReadbackV2,
     selections: &BTreeMap<ExpectedSdkGenerationLane, &SdkGenerationSelection>,
     claims: &'a BTreeMap<ExpectedSdkGenerationLane, NativeCompatibilityInputClaims>,
+    requires_source_policy: bool,
+    requires_mesa_collection: bool,
 ) -> miette::Result<BTreeMap<ExpectedSdkGenerationLane, PortableNativeCompatibilityRequest<'a>>> {
     selections.iter().map(|(lane, selected)| {
         let target_profile = lane.profile();
@@ -211,15 +216,195 @@ fn sdk_compatibility_requests<'a>(
             archive_size: package.archive_size, compiler: artifact.compiler(),
             source_commit: artifact.source_commit(), host: artifact.host(),
         };
+        let mesa_required = selected_mesa_policy(
+            &selected.compatibility, requires_source_policy,
+            (group.source_lock().family() == CompilerFamily::Llvm).then_some(sdk), profile.name(),
+        )?;
+        let genmodule = selected_mesa_genmodule(
+            &selected.compatibility, requires_mesa_collection, mesa_required,
+            (group.source_lock().family() == CompilerFamily::Llvm).then_some(sdk),
+        )?;
         let expected = match group.source_lock().family() {
             CompilerFamily::Gnu => claims[lane].expectations(expected_package, group.profiles(), profile, true),
-            CompilerFamily::Llvm => claims[lane].expectations_with_llvm_sdk(expected_package, group.profiles(), profile, sdk.identity()),
+            CompilerFamily::Llvm => match &genmodule {
+                Some((binding, helper)) => claims[lane].expectations_with_llvm_sdk_mesa_selection(expected_package, group.profiles(), profile, sdk.identity(), (binding, helper)),
+                None => claims[lane].expectations_with_llvm_sdk_policy(expected_package, group.profiles(), profile, sdk.identity(), mesa_required),
+            },
         }.map_err(|error| native_error(&error))?;
         Ok((lane.clone(), PortableNativeCompatibilityRequest {
             directory: selected.compatibility.directory.clone(),
             manifest_sha256: selected.compatibility.manifest_sha256.clone(), expected,
         }))
     }).collect()
+}
+
+fn compiler_compatibility_requests<'a>(
+    packages: &'a IndexedPackageReadbackRequestV2,
+    measured: &'a IndexedPackageReadbackV2,
+    selection: &Selection,
+    claims: &'a BTreeMap<String, NativeCompatibilityInputClaims>,
+    profiles: &BTreeMap<String, &'a aros_toolchain::profiles::Profile>,
+    lane_llvm_sdks: &BTreeMap<String, Option<&SdkIdentity>>,
+) -> miette::Result<BTreeMap<String, PortableNativeCompatibilityRequest<'a>>> {
+    packages
+        .index
+        .artifacts()
+        .iter()
+        .zip(measured.packages())
+        .map(|(artifact, package)| {
+            if artifact.asset() != package.asset() {
+                return Err(miette::miette!(
+                    "measured package order differs from the selected index"
+                ));
+            }
+            let group = packages
+                .inputs
+                .groups()
+                .iter()
+                .find(|group| group.id() == artifact.group_id())
+                .ok_or_else(|| {
+                    miette::miette!("indexed evidence lane has no selected input group")
+                })?;
+            let package = package.package();
+            let expected_package = NativeCompatibilityExpectedPackage {
+                manifest: &package.manifest,
+                archive_sha256: &package.archive_sha256,
+                archive_size: package.archive_size,
+                compiler: artifact.compiler(),
+                source_commit: artifact.source_commit(),
+                host: artifact.host(),
+            };
+            let selected = &selection.lanes[artifact.asset()].compatibility;
+            let sdk = lane_llvm_sdks[artifact.asset()]
+                .map(|identity| {
+                    packages
+                        .inputs
+                        .sdks()
+                        .iter()
+                        .find(|sdk| sdk.id() == identity.sdk_id)
+                        .ok_or_else(|| {
+                            miette::miette!("LLVM SDK policy has no independent product")
+                        })
+                })
+                .transpose()?;
+            let mesa_required = selected_mesa_policy(
+                selected,
+                selection.requires_source_policy(),
+                sdk,
+                artifact.target_profile(),
+            )?;
+            let genmodule = selected_mesa_genmodule(
+                selected,
+                selection.requires_mesa_collection(),
+                mesa_required,
+                sdk,
+            )?;
+            let expected = if let Some(identity) = lane_llvm_sdks[artifact.asset()] {
+                if let Some((binding, helper)) = &genmodule {
+                    claims[artifact.asset()].expectations_with_llvm_sdk_mesa_selection(
+                        expected_package,
+                        group.profiles(),
+                        profiles[artifact.asset()],
+                        identity,
+                        (binding, helper),
+                    )
+                } else {
+                    claims[artifact.asset()].expectations_with_llvm_sdk_policy(
+                        expected_package,
+                        group.profiles(),
+                        profiles[artifact.asset()],
+                        identity,
+                        mesa_required,
+                    )
+                }
+            } else {
+                claims[artifact.asset()].expectations(
+                    expected_package,
+                    group.profiles(),
+                    profiles[artifact.asset()],
+                    selected.native_sdk_required,
+                )
+            }
+            .map_err(|error| native_error(&error))?;
+            Ok((
+                artifact.asset().to_owned(),
+                PortableNativeCompatibilityRequest {
+                    directory: selected.directory.clone(),
+                    manifest_sha256: selected.manifest_sha256.clone(),
+                    expected,
+                },
+            ))
+        })
+        .collect::<miette::Result<BTreeMap<_, _>>>()
+}
+
+fn selected_mesa_policy(
+    compatibility: &release_evidence_selection::Compatibility,
+    required: bool,
+    sdk: Option<&BoundSdk>,
+    compiler_profile: &str,
+) -> miette::Result<bool> {
+    let Some(sdk) = sdk else {
+        if compatibility.source_policy.is_some() {
+            return Err(miette::miette!(
+                "Mesa source policy requires an independently selected LLVM SDK lane"
+            ));
+        }
+        return Ok(false);
+    };
+    if !required {
+        if compatibility.source_policy.is_some() {
+            return Err(miette::miette!(
+                "legacy evidence cannot enable Mesa source policy"
+            ));
+        }
+        return Ok(false);
+    }
+    let selected = compatibility.source_policy.as_ref().ok_or_else(|| {
+        miette::miette!("LLVM SDK evidence requires a separately selected source policy")
+    })?;
+    let bytes = read_selected(&selected.path, &selected.sha256)?;
+    aros_toolchain::source_policy::readback_sdk_mesa_policy(
+        &bytes,
+        sdk.identity(),
+        sdk.source_preset(),
+        compiler_profile,
+    )
+    .map_err(|error| native_error(&error))
+}
+
+fn selected_mesa_genmodule(
+    compatibility: &super::release_evidence_selection::Compatibility,
+    collection_required: bool,
+    mesa_required: bool,
+    sdk: Option<&BoundSdk>,
+) -> miette::Result<Option<(MesaGenmoduleSelectionBinding, Sha256Digest)>> {
+    let helper = compatibility.mesa_genmodule_helper_sha256.as_ref();
+    if !collection_required || !mesa_required {
+        if helper.is_some() {
+            return Err(miette::miette!(
+                "Mesa helper selection is forbidden without an independent collection policy"
+            ));
+        }
+        return Ok(None);
+    }
+    let sdk = sdk.ok_or_else(|| {
+        miette::miette!("Mesa collection requires an independently selected LLVM SDK")
+    })?;
+    let helper = helper
+        .filter(|digest| digest.as_str().bytes().any(|byte| byte != b'0'))
+        .ok_or_else(|| {
+            miette::miette!("Mesa collection requires an independently selected helper digest")
+        })?;
+    Ok(Some((
+        MesaGenmoduleSelectionBinding {
+            profile: sdk.source_preset().to_owned(),
+            kind: "sdk-consumer".into(),
+            scope: MesaGenmoduleInventoryScope::ContractRoots,
+            contract_sha256: sdk.identity().source.contract_sha256.clone(),
+        },
+        helper.clone(),
+    )))
 }
 
 fn selected_bound_llvm_sdk<'a>(
@@ -467,61 +652,14 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
             Ok((artifact.asset().to_owned(), profile))
         })
         .collect::<miette::Result<BTreeMap<_, _>>>()?;
-    let lanes = packages
-        .index
-        .artifacts()
-        .iter()
-        .zip(measured.packages())
-        .map(|(artifact, package)| {
-            if artifact.asset() != package.asset() {
-                return Err(miette::miette!(
-                    "measured package order differs from the selected index"
-                ));
-            }
-            let group = packages
-                .inputs
-                .groups()
-                .iter()
-                .find(|group| group.id() == artifact.group_id())
-                .ok_or_else(|| {
-                    miette::miette!("indexed evidence lane has no selected input group")
-                })?;
-            let package = package.package();
-            let expected_package = NativeCompatibilityExpectedPackage {
-                manifest: &package.manifest,
-                archive_sha256: &package.archive_sha256,
-                archive_size: package.archive_size,
-                compiler: artifact.compiler(),
-                source_commit: artifact.source_commit(),
-                host: artifact.host(),
-            };
-            let selected = &selection.lanes[artifact.asset()].compatibility;
-            let expected = if let Some(identity) = lane_llvm_sdks[artifact.asset()] {
-                claims[artifact.asset()].expectations_with_llvm_sdk(
-                    expected_package,
-                    group.profiles(),
-                    profiles[artifact.asset()],
-                    identity,
-                )
-            } else {
-                claims[artifact.asset()].expectations(
-                    expected_package,
-                    group.profiles(),
-                    profiles[artifact.asset()],
-                    selected.native_sdk_required,
-                )
-            }
-            .map_err(|error| native_error(&error))?;
-            Ok((
-                artifact.asset().to_owned(),
-                PortableNativeCompatibilityRequest {
-                    directory: selected.directory.clone(),
-                    manifest_sha256: selected.manifest_sha256.clone(),
-                    expected,
-                },
-            ))
-        })
-        .collect::<miette::Result<BTreeMap<_, _>>>()?;
+    let lanes = compiler_compatibility_requests(
+        &packages,
+        &measured,
+        &selection,
+        &claims,
+        &profiles,
+        &lane_llvm_sdks,
+    )?;
     // This factory acquires all A/B bytes itself, then joins all compatibility
     // closures. No partial lane result or caller-created proof is accepted.
     let complete_request = ReleaseCompatibilityReadbackRequestV2 {
@@ -548,8 +686,14 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
         })
         .collect::<miette::Result<BTreeMap<_, _>>>()?;
     let sdk_packages = sdk_generation_packages(&packages, &sdk_selections)?;
-    let sdk_compatibility =
-        sdk_compatibility_requests(&packages, &measured, &sdk_selections, &sdk_claims)?;
+    let sdk_compatibility = sdk_compatibility_requests(
+        &packages,
+        &measured,
+        &sdk_selections,
+        &sdk_claims,
+        selection.requires_source_policy(),
+        selection.requires_mesa_collection(),
+    )?;
     let sdk_requests = expected_sdk_generations
         .iter()
         .map(|lane| {
@@ -671,12 +815,18 @@ fn run_selected(args: &EvidenceArgs, operation: Operation<'_>) -> miette::Result
     read_selected(&index_path, &args.index_sha256)?;
     read_selected(&args.directory.join(INPUTS_NAME), &args.inputs_sha256)?;
     for lane in selection.lanes.values() {
+        if let Some(policy) = &lane.compatibility.source_policy {
+            read_selected(&policy.path, &policy.sha256)?;
+        }
         read_selected(
             &lane.compatibility.inputs.path,
             &lane.compatibility.inputs.sha256,
         )?;
     }
     for selected in &selection.sdk_generations {
+        if let Some(policy) = &selected.compatibility.source_policy {
+            read_selected(&policy.path, &policy.sha256)?;
+        }
         read_selected(&selected.record.path, &selected.record.sha256)?;
         read_selected(
             &selected.compatibility.inputs.path,
@@ -960,7 +1110,22 @@ fn selected_evidence_paths<'a>(args: &'a EvidenceArgs, selection: &'a Selection)
                 sdk.compatibility.inputs.path.as_path(),
             ]
         }));
-    protected.collect()
+    protected
+        .chain(
+            selection
+                .lanes
+                .values()
+                .map(|lane| &lane.compatibility)
+                .chain(
+                    selection
+                        .sdk_generations
+                        .iter()
+                        .map(|sdk| &sdk.compatibility),
+                )
+                .filter_map(|compatibility| compatibility.source_policy.as_ref())
+                .map(|policy| policy.path.as_path()),
+        )
+        .collect()
 }
 
 fn build_request(
@@ -1075,6 +1240,20 @@ fn validate_selection(
         }));
     for document in documents {
         require_independent_document(args, selection, document)?;
+    }
+    for policy in selection
+        .lanes
+        .values()
+        .map(|lane| &lane.compatibility)
+        .chain(
+            selection
+                .sdk_generations
+                .iter()
+                .map(|sdk| &sdk.compatibility),
+        )
+        .filter_map(|compatibility| compatibility.source_policy.as_ref())
+    {
+        require_independent_document(args, selection, &policy.path)?;
     }
     Ok(())
 }
@@ -1397,6 +1576,61 @@ mod tests {
     }
 
     #[test]
+    fn selected_mesa_policy_reads_independent_bytes_and_refuses_missing_or_rebound_policy() {
+        let inputs = llvm_inputs();
+        let sdk = inputs
+            .sdks()
+            .iter()
+            .find(|sdk| sdk.id() == "llvm-sdk")
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("source-policy.json");
+        let mut compatibility: super::release_evidence_selection::Compatibility =
+            serde_json::from_value(json!({
+                "directory":"/tmp/compatibility",
+                "inputs":{"path":"/tmp/input.json","sha256":"a".repeat(64)},
+                "manifest_sha256":"b".repeat(64),"native_sdk_required":false
+            }))
+            .unwrap();
+        assert!(
+            !super::selected_mesa_policy(&compatibility, false, Some(sdk), "pc-x86_64").unwrap()
+        );
+        assert!(super::selected_mesa_policy(&compatibility, true, Some(sdk), "pc-x86_64").is_err());
+        let mut policy = json!({
+            "source_commit":sdk.identity().source.commit,"source_tree":sdk.identity().source.git_tree,
+            "source_preset":sdk.source_preset(),"compiler_profile":"pc-x86_64",
+            "profiles_sha256":"c".repeat(64),"native_sdk_required":true,"mesa_preflight_required":true,
+            "native_consumer":{"file":"contracts/sdk.json","schema":"aros-sdk-consumer-contract-v1","sha256":sdk.identity().source.contract_sha256}
+        });
+        for required in [false, true] {
+            policy["mesa_preflight_required"] = json!(required);
+            let bytes = serde_json::to_vec(&policy).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            compatibility.source_policy = Some(super::release_evidence_selection::SelectedFile {
+                path: path.clone(),
+                sha256: sha256_bytes(&bytes),
+            });
+            assert_eq!(
+                super::selected_mesa_policy(&compatibility, true, Some(sdk), "pc-x86_64").unwrap(),
+                required
+            );
+        }
+        assert!(
+            super::selected_mesa_policy(&compatibility, false, Some(sdk), "pc-x86_64").is_err()
+        );
+        assert!(super::selected_mesa_policy(&compatibility, true, None, "pc-x86_64").is_err());
+        assert!(
+            super::selected_mesa_policy(&compatibility, true, Some(sdk), "other-profile").is_err()
+        );
+        std::fs::write(&path, b"changed policy").unwrap();
+        assert!(super::selected_mesa_policy(&compatibility, true, Some(sdk), "pc-x86_64").is_err());
+    }
+
+    #[test]
     fn selected_llvm_sdk_requires_exact_bound_product_context() {
         let inputs = llvm_inputs();
         let identity =
@@ -1435,6 +1669,88 @@ mod tests {
         let inputs = llvm_inputs();
         assert!(
             lane_llvm_sdk_identity(&inputs, None, false, "llvm-pc", "pc-x86_64")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn selected_mesa_genmodule_uses_independent_bound_sdk_and_helper() {
+        let inputs = llvm_inputs();
+        let sdk = inputs
+            .sdks()
+            .iter()
+            .find(|sdk| sdk.id() == "llvm-sdk")
+            .unwrap();
+        let digest = "d".repeat(64);
+        let compatibility: super::super::release_evidence_selection::Compatibility =
+            serde_json::from_value(json!({
+                "directory":"/tmp/compatibility",
+                "inputs":{"path":"/tmp/input.json","sha256":"a".repeat(64)},
+                "manifest_sha256":"b".repeat(64),
+                "native_sdk_required":false,
+                "source_policy":{"path":"/tmp/source-policy.json","sha256":"c".repeat(64)},
+                "mesa_genmodule_helper_sha256":digest
+            }))
+            .unwrap();
+
+        let (binding, helper) =
+            super::selected_mesa_genmodule(&compatibility, true, true, Some(sdk))
+                .unwrap()
+                .unwrap();
+        assert_eq!(binding.profile, sdk.source_preset());
+        assert_eq!(binding.kind, "sdk-consumer");
+        assert_eq!(
+            binding.scope,
+            aros_common::mesa_genmodule_inventory::MesaGenmoduleInventoryScope::ContractRoots
+        );
+        assert_eq!(
+            binding.contract_sha256,
+            sdk.identity().source.contract_sha256
+        );
+        assert_eq!(helper.as_str(), digest.as_str());
+
+        let missing_helper: super::super::release_evidence_selection::Compatibility =
+            serde_json::from_value(json!({
+                "directory":"/tmp/compatibility",
+                "inputs":{"path":"/tmp/input.json","sha256":"a".repeat(64)},
+                "manifest_sha256":"b".repeat(64),"native_sdk_required":false
+            }))
+            .unwrap();
+        assert!(super::selected_mesa_genmodule(&missing_helper, true, true, Some(sdk)).is_err());
+
+        let zero_helper: super::super::release_evidence_selection::Compatibility =
+            serde_json::from_value(json!({
+                "directory":"/tmp/compatibility",
+                "inputs":{"path":"/tmp/input.json","sha256":"a".repeat(64)},
+                "manifest_sha256":"b".repeat(64),"native_sdk_required":false,
+                "mesa_genmodule_helper_sha256":"0".repeat(64)
+            }))
+            .unwrap();
+        assert!(super::selected_mesa_genmodule(&zero_helper, true, true, Some(sdk)).is_err());
+
+        assert!(
+            super::selected_mesa_genmodule(&compatibility, false, true, Some(sdk)).is_err(),
+            "legacy selection must refuse a collection helper"
+        );
+        assert!(
+            super::selected_mesa_genmodule(&compatibility, true, false, Some(sdk)).is_err(),
+            "a helper cannot enable a collection without Mesa policy"
+        );
+        assert!(
+            super::selected_mesa_genmodule(&compatibility, true, true, None).is_err(),
+            "a collection needs an independently bound LLVM SDK"
+        );
+
+        let legacy_none: super::super::release_evidence_selection::Compatibility =
+            serde_json::from_value(json!({
+                "directory":"/tmp/compatibility",
+                "inputs":{"path":"/tmp/input.json","sha256":"a".repeat(64)},
+                "manifest_sha256":"b".repeat(64),"native_sdk_required":false
+            }))
+            .unwrap();
+        assert!(
+            super::selected_mesa_genmodule(&legacy_none, false, false, None)
                 .unwrap()
                 .is_none()
         );

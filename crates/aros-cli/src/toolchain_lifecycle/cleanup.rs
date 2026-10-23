@@ -1514,6 +1514,7 @@ mod tests {
         ResolvedToolchain {
             paths: get_toolchain_paths(&root),
             target_triple: "x86_64-unknown-aros".to_owned(),
+            compiler_identity: None,
             release_id: Some(release_id.to_owned()),
             source: ToolchainSource::LockedRelease,
         }

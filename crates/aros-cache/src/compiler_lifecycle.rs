@@ -233,7 +233,9 @@ impl CompilerCacheEnvironment {
         command.envs(&self.values);
     }
 
-    /// Stable values, intended for diagnostics and integration tests only.
+    /// Stable, explicitly selected cache values for diagnostics or overlay on
+    /// an already closed child environment. Unlike [`Self::apply_to`], reading
+    /// this map does not import unrelated ambient process variables.
     #[must_use]
     pub const fn values(&self) -> &BTreeMap<&'static str, String> {
         &self.values

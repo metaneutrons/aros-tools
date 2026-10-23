@@ -787,9 +787,10 @@ fn profile(args: &ProfileArgs) -> miette::Result<()> {
             );
             if let Some(policy) = source_policy {
                 aros_common::outputln!(
-                    "Source preset: {}\nOrdinary SDK links required: {}\nSource commit: {}",
+                    "Source preset: {}\nOrdinary SDK links required: {}\nConfigured Mesa preflight required: {}\nSource commit: {}",
                     policy.source_preset,
                     policy.native_sdk_required,
+                    policy.mesa_preflight_required,
                     policy.source_commit,
                 );
             }

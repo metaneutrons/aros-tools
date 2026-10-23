@@ -433,6 +433,7 @@ mod tests {
                 executable_roles: Vec::new(),
             },
             target_triple: "riscv-aros".into(),
+            compiler_identity: None,
             release_id: None,
             source: ToolchainSource::LocalCompilerOnly,
         };

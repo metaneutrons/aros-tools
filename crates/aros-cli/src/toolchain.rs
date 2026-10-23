@@ -73,6 +73,8 @@ pub struct ResolvedToolchain {
     pub paths: ToolchainPaths,
     /// Exact target triple supplied to the compiler.
     pub target_triple: String,
+    /// Compiler identity retained from the verified toolchain metadata, when declared.
+    pub compiler_identity: Option<ArosCompilerIdentity>,
     /// Release identity, absent only for explicit local toolchains.
     pub release_id: Option<String>,
     /// Provenance class of the selection.
@@ -355,7 +357,7 @@ pub async fn install(
             })?;
             if !force {
                 return Ok(ToolchainInstallOutcome::new(
-                    resolved_locked(paths, &lock, artifact),
+                    resolved_locked(paths, &lock, artifact)?,
                     ToolchainInstallDisposition::Reused,
                 ));
             }
@@ -379,7 +381,7 @@ pub async fn install(
                 "{CHECK} Refreshed the verified archive cache; installed toolchain was unchanged"
             );
             return Ok(ToolchainInstallOutcome::new(
-                resolved_locked(paths, &lock, artifact),
+                resolved_locked(paths, &lock, artifact)?,
                 ToolchainInstallDisposition::ArchiveRefreshed,
             ));
         }
@@ -417,7 +419,7 @@ pub async fn install(
                 )
             })?;
             return Ok(ToolchainInstallOutcome::new(
-                resolved_locked(paths, &lock, artifact),
+                resolved_locked(paths, &lock, artifact)?,
                 ToolchainInstallDisposition::Reused,
             ));
         }
@@ -455,7 +457,7 @@ pub async fn install(
     let paths = verify_locked_install(&payload, &lock, artifact, true)?;
     aros_common::outputln!("{CHECK} Installed at {}", payload.display());
     Ok(ToolchainInstallOutcome::new(
-        resolved_locked(paths, &lock, artifact),
+        resolved_locked(paths, &lock, artifact)?,
         ToolchainInstallDisposition::Published,
     ))
 }
@@ -497,7 +499,7 @@ pub fn path(repo_root: &Path, preset: &str, local: Option<&Path>) -> Result<Reso
     let artifact = select_locked_artifact(repo_root, &lock, host, preset)?;
     let destination = locked_store_path(&lock, artifact)?;
     let paths = verify_locked_install(&destination, &lock, artifact, true)?;
-    Ok(resolved_locked(paths, &lock, artifact))
+    resolved_locked(paths, &lock, artifact)
 }
 
 /// Fully verify an installed toolchain and smoke-test its executables.
@@ -688,6 +690,7 @@ fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<Resolved
         return Ok(ResolvedToolchain {
             paths,
             target_triple: descriptor.target_triple,
+            compiler_identity: Some(descriptor.compiler),
             release_id: None,
             source: ToolchainSource::LocalCompilerOnly,
         });
@@ -728,17 +731,15 @@ fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<Resolved
         if actual_files != manifest.files {
             bail!("local toolchain file inventory does not match its manifest");
         }
-        validate_profile_compiler(
-            &profile,
-            &manifest
-                .compiler_identity()
-                .map_err(|error| miette::miette!("{error}"))?,
-            &manifest.target_triple,
-        )?;
+        let compiler_identity = manifest
+            .compiler_identity()
+            .map_err(|error| miette::miette!("{error}"))?;
+        validate_profile_compiler(&profile, &compiler_identity, &manifest.target_triple)?;
         let paths = verified_manifest_tools(&root, &manifest, None)?;
         return Ok(ResolvedToolchain {
             paths,
             target_triple: manifest.target_triple,
+            compiler_identity: Some(compiler_identity),
             release_id: Some(manifest.release_id),
             source: ToolchainSource::LocalManifest,
         });
@@ -755,6 +756,7 @@ fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<Resolved
     Ok(ResolvedToolchain {
         paths: get_toolchain_paths(&root),
         target_triple: expected_triple,
+        compiler_identity: None,
         release_id: None,
         source: ToolchainSource::LegacyLocal,
     })
@@ -1035,13 +1037,25 @@ fn resolved_locked(
     paths: ToolchainPaths,
     lock: &ArosToolchainLock,
     artifact: &ArosToolchainArtifact,
-) -> ResolvedToolchain {
-    ResolvedToolchain {
+) -> Result<ResolvedToolchain> {
+    // A legacy lock can omit llvm_version; keep the family selection separate
+    // from a version claim when that metadata is absent.
+    let compiler_identity = if artifact.compiler.is_none() && artifact.llvm_version.is_none() {
+        None
+    } else {
+        Some(
+            artifact
+                .compiler_identity()
+                .map_err(|error| miette::miette!("{error}"))?,
+        )
+    };
+    Ok(ResolvedToolchain {
         paths,
         target_triple: artifact.target_triple.clone(),
+        compiler_identity,
         release_id: Some(lock.release_id.clone()),
         source: ToolchainSource::LockedRelease,
-    }
+    })
 }
 
 fn is_legacy_aros_prefix(repo_root: &Path, root: &Path, preset: &str) -> bool {
@@ -1273,6 +1287,42 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_local_llvm_manifest(root: &Path) -> ArosCompilerIdentity {
+        let _paths = working_tools(root);
+        let (tree_sha256, files) = toolchain_tree_inventory(root).unwrap();
+        let compiler_identity = ArosCompilerIdentity::Llvm {
+            version: "11.0.0".into(),
+        };
+        let manifest = ArosToolchainManifest {
+            schema: AROS_TOOLCHAIN_MANIFEST_SCHEMA,
+            release_id: "local-fixture".into(),
+            host: host_platform_key().unwrap().into(),
+            target_profile: "pc-x86_64".into(),
+            target_triple: "x86_64-unknown-aros".into(),
+            tree_sha256,
+            llvm_version: Some("11.0.0".into()),
+            compiler: None,
+            recipe_sha256: "b".repeat(64),
+            source_lock_sha256: "c".repeat(64),
+            profiles_sha256: "d".repeat(64),
+            source_commit: "1".repeat(40),
+            producer_commit: "2".repeat(40),
+            tools_commit: "3".repeat(40),
+            source_date_epoch: 1,
+            capabilities: vec!["collector".into()],
+            build_environment: serde_json::Map::new(),
+            files,
+        };
+        manifest.validate().unwrap();
+        fs::write(
+            root.join(AROS_TOOLCHAIN_MANIFEST_FILE),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        compiler_identity
+    }
+
+    #[cfg(unix)]
     fn local_gnu_checkout() -> tempfile::TempDir {
         let checkout = tempfile::tempdir().unwrap();
         fs::write(
@@ -1314,6 +1364,96 @@ mod tests {
     }
 
     #[test]
+    fn locked_resolution_retains_only_the_artifact_compiler_identity() {
+        let checkout = tempfile::tempdir().unwrap();
+        let artifact_for = |llvm_version: Option<&str>, compiler: Option<ArosCompilerIdentity>| {
+            ArosToolchainArtifact {
+                host: "fixture-host".into(),
+                target_profile: "pc-x86_64".into(),
+                target_triple: "x86_64-unknown-aros".into(),
+                asset: "toolchain.tar.xz".into(),
+                sha256: "a".repeat(64),
+                tree_sha256: "b".repeat(64),
+                llvm_version: llvm_version.map(str::to_owned),
+                compiler,
+                size: None,
+                enabled: true,
+                disabled_reason: None,
+                strip_components: 1,
+                required_paths: Vec::new(),
+            }
+        };
+
+        for (schema, llvm_version, compiler, expected) in [
+            (
+                1,
+                Some("11.0.0"),
+                None,
+                Some(ArosCompilerIdentity::Llvm {
+                    version: "11.0.0".into(),
+                }),
+            ),
+            (
+                2,
+                None,
+                Some(ArosCompilerIdentity::Llvm {
+                    version: "12.0.0".into(),
+                }),
+                Some(ArosCompilerIdentity::Llvm {
+                    version: "12.0.0".into(),
+                }),
+            ),
+            (1, None, None, None),
+        ] {
+            let lock = ArosToolchainLock {
+                schema,
+                release_id: "fixture-release".into(),
+                base_url: Some("https://example.invalid".into()),
+                artifacts: vec![artifact_for(llvm_version, compiler)],
+            };
+            lock.validate().unwrap();
+            let artifact =
+                select_locked_artifact(checkout.path(), &lock, "fixture-host", "pc-x86_64")
+                    .unwrap();
+            let resolved = resolved_locked(
+                ToolchainPaths {
+                    root: PathBuf::new(),
+                    executable_roles: Vec::new(),
+                },
+                &lock,
+                artifact,
+            )
+            .unwrap();
+
+            assert_eq!(resolved.compiler_identity, expected);
+        }
+
+        let inconsistent_artifact = artifact_for(
+            Some("11.0.0"),
+            Some(ArosCompilerIdentity::Llvm {
+                version: "11.0.0".into(),
+            }),
+        );
+        let error = resolved_locked(
+            ToolchainPaths {
+                root: PathBuf::new(),
+                executable_roles: Vec::new(),
+            },
+            &ArosToolchainLock {
+                schema: 1,
+                release_id: "fixture-release".into(),
+                base_url: None,
+                artifacts: Vec::new(),
+            },
+            &inconsistent_artifact,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("mixes llvm_version and compiler"));
+    }
+
+    #[test]
     fn selection_requires_checkout_lock_and_explicit_local_argument() {
         let checkout = Path::new("/reviewed/checkout");
         assert_eq!(
@@ -1335,14 +1475,29 @@ mod tests {
         write_local_compiler_prefix(prefix.path(), "fixture-target");
 
         let resolved = resolve_local(checkout.path(), prefix.path(), "fixture-target").unwrap();
+        let descriptor = LocalToolchainDescriptor::load(prefix.path()).unwrap();
         assert_eq!(resolved.source, ToolchainSource::LocalCompilerOnly);
         assert_eq!(resolved.target_triple, "riscv-aros");
+        assert_eq!(resolved.compiler_identity, Some(descriptor.compiler));
         assert_eq!(resolved.release_id, None);
         assert!(resolved
             .paths
             .executable_roles
             .iter()
             .any(|(role, _)| *role == "objdump"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_manifest_resolution_retains_its_validated_compiler_identity() {
+        let checkout = tempfile::tempdir().unwrap();
+        let prefix = tempfile::tempdir().unwrap();
+        let compiler_identity = write_local_llvm_manifest(prefix.path());
+
+        let resolved = resolve_local(checkout.path(), prefix.path(), "pc-x86_64").unwrap();
+
+        assert_eq!(resolved.source, ToolchainSource::LocalManifest);
+        assert_eq!(resolved.compiler_identity, Some(compiler_identity));
     }
 
     #[cfg(unix)]
@@ -1433,6 +1588,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(explicit.source, ToolchainSource::LegacyLocal);
+        assert_eq!(explicit.compiler_identity, None);
 
         let error = resolve_for_build(checkout.path(), "pc-x86_64", None, true)
             .await
