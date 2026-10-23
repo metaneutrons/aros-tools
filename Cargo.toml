@@ -67,6 +67,7 @@ aros-common = { path = "crates/aros-common" }
 aros-cache = { path = "crates/aros-cache" }
 aros-fetch = { path = "crates/aros-fetch" }
 aros-toolchain = { path = "crates/aros-toolchain" }
+aros-transpiler = { path = "crates/aros-transpiler" }
 aros-release = { path = "crates/aros-release" }
 aros-macos-disk-claim = { path = "crates/aros-macos-disk-claim" }
 aros-verify = { path = "crates/aros-verify" }
@@ -129,6 +130,8 @@ fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc
 # Safe POSIX file-descriptor operations used by the Linux SD writer to open a
 # whole block device with O_EXCL | O_NOFOLLOW without local unsafe code.
 rustix = { version = "1.1", default-features = false, features = ["std", "fs", "mount", "process", "event"] }
+# Host path limits for GNU Make-compatible captured filesystem expressions.
+libc = "0.2"
 # Minimal, typed bindings used by the macOS whole-disk claim RAII guard.
 # They are linked only on macOS by the guard crate.
 objc2-disk-arbitration = { version = "0.3.2", default-features = false, features = ["std", "DADisk", "DADissenter", "DASession", "libc"] }
