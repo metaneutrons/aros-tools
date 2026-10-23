@@ -1014,6 +1014,7 @@ struct TreeMeasurementBudget {
     limits: Option<TreeTraversalLimits>,
     entries: usize,
     regular_file_bytes: u64,
+    symbolic_link_target_bytes: usize,
 }
 
 impl TreeMeasurementBudget {
@@ -1022,6 +1023,7 @@ impl TreeMeasurementBudget {
             limits: None,
             entries: 0,
             regular_file_bytes: 0,
+            symbolic_link_target_bytes: 0,
         }
     }
 
@@ -1030,6 +1032,7 @@ impl TreeMeasurementBudget {
             limits: Some(limits),
             entries: 0,
             regular_file_bytes: 0,
+            symbolic_link_target_bytes: 0,
         }
     }
 
@@ -1076,6 +1079,74 @@ impl TreeMeasurementBudget {
         }
         self.regular_file_bytes = next;
         Ok(())
+    }
+
+    fn reserve_symbolic_link_target_bytes(&mut self, size: usize) -> std::io::Result<()> {
+        if size > TreeContentCas::MAX_RETAINED_SYMBOLIC_LINK_TARGET_BYTES {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "symbolic-link target exceeds the {}-byte retained-data limit",
+                    TreeContentCas::MAX_RETAINED_SYMBOLIC_LINK_TARGET_BYTES
+                ),
+            ));
+        }
+        let next = self
+            .symbolic_link_target_bytes
+            .checked_add(size)
+            .ok_or_else(|| {
+                std::io::Error::other("retained symbolic-link target byte count overflowed")
+            })?;
+        if next > TreeContentCas::MAX_RETAINED_SYMBOLIC_LINK_TARGET_BYTES_TOTAL {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "tree exceeds the {}-byte retained symbolic-link target limit",
+                    TreeContentCas::MAX_RETAINED_SYMBOLIC_LINK_TARGET_BYTES_TOTAL
+                ),
+            ));
+        }
+        self.symbolic_link_target_bytes = next;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tree_measurement_budget_tests {
+    use super::*;
+
+    #[test]
+    fn symbolic_link_target_budget_accepts_exact_limit_and_rejects_one_over() {
+        let mut budget = TreeMeasurementBudget::unrestricted();
+        let target_limit = TreeContentCas::MAX_RETAINED_SYMBOLIC_LINK_TARGET_BYTES;
+        let total_limit = TreeContentCas::MAX_RETAINED_SYMBOLIC_LINK_TARGET_BYTES_TOTAL;
+        for _ in 0..(total_limit / target_limit) {
+            budget
+                .reserve_symbolic_link_target_bytes(target_limit)
+                .unwrap();
+        }
+        let remainder = total_limit % target_limit;
+        budget
+            .reserve_symbolic_link_target_bytes(remainder)
+            .unwrap();
+
+        assert_eq!(budget.symbolic_link_target_bytes, total_limit);
+        assert!(budget.reserve_symbolic_link_target_bytes(1).is_err());
+        assert_eq!(budget.symbolic_link_target_bytes, total_limit);
+    }
+
+    #[test]
+    fn symbolic_link_target_budget_rejects_overlong_target_without_reserving() {
+        let mut budget = TreeMeasurementBudget::bounded(
+            TreeTraversalLimits::new(1, 1).expect("nonzero traversal limits are valid"),
+        );
+
+        assert!(budget
+            .reserve_symbolic_link_target_bytes(
+                TreeContentCas::MAX_RETAINED_SYMBOLIC_LINK_TARGET_BYTES + 1
+            )
+            .is_err());
+        assert_eq!(budget.symbolic_link_target_bytes, 0);
     }
 }
 

@@ -23,6 +23,9 @@ macro_rules! outputln {
 
 pub mod arch;
 pub mod board_registry;
+pub mod captured_programs;
+#[cfg(all(test, unix))]
+mod captured_programs_tests;
 pub mod diagnostic;
 pub mod digest;
 pub mod elf;
@@ -31,12 +34,36 @@ pub mod esp_partition;
 pub mod flash_plan;
 pub mod local_source;
 pub mod local_toolchain;
+pub mod make_child_command;
+pub mod make_environment_prefix;
+pub mod make_initial_values;
+#[cfg(test)]
+mod make_input_output_transition_tests;
+pub mod make_input_snapshot;
+#[cfg(test)]
+mod make_input_snapshot_tests;
+pub mod make_namespace;
+#[cfg(unix)]
+pub mod make_native_collection;
+pub mod make_native_invocation;
+pub mod make_native_observation;
+#[cfg(unix)]
+pub mod make_native_sampler;
+pub mod make_observer;
+pub mod make_scope_snapshot;
+pub mod make_startup_arguments;
 pub mod media_input_lock;
 pub mod media_plan;
 pub mod media_profile;
 pub mod media_receipt;
 pub mod media_tree;
 pub mod mesa_configuration;
+pub mod mesa_configuration_input;
+pub mod mesa_genmodule_collection;
+pub mod mesa_genmodule_inventory;
+pub mod mesa_genmodule_make;
+pub mod mesa_native_make;
+pub mod mesa_source;
 pub mod native_build_contract;
 pub mod native_consumer_contract;
 pub(crate) mod native_consumer_graph;
@@ -93,7 +120,7 @@ pub use publication::{
     validate_private_directory_nofollow, AdvisoryFileLock, AdvisoryLockMode,
     AdvisoryLockObservation, AdvisoryLockState, AtomicFilePolicy, DurableFileSet, FileIdentity,
     PortableOutputName, PublicationError, PublicationFailureClass, PublicationReceipt,
-    RecoveryOutcome, TreeContentCas, TreeTraversalLimits,
+    RecoveryOutcome, TreeContentCas, TreeContentEntryKind, TreeTraversalLimits,
 };
 pub use sdk_companion_role::{SdkCompanionRole, MAX_SDK_COMPANION_ROLES};
 pub use target::{BootstrapAbiProfile, TargetProfile, TranspilerProfile};

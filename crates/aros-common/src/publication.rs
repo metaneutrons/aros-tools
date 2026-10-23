@@ -192,7 +192,7 @@ pub use limits::{
 };
 
 mod tree_cas;
-pub use tree_cas::TreeContentCas;
+pub use tree_cas::{TreeContentCas, TreeContentEntryKind};
 use tree_cas::{TreeContentEntry, TreeNodeSnapshot};
 mod payload_path;
 pub use payload_path::payload_casefold_path_key;

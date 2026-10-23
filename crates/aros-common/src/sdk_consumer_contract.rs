@@ -33,6 +33,13 @@ pub struct SdkConsumerContract {
     pub roots: Vec<String>,
     pub inputs: Vec<NativeBuildInput>,
     pub target: SdkTarget,
+    /// Exact upstream configure target for the selected Mesa 26 source graph.
+    /// It is not derived from a board/compiler profile name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesa_configure_target: Option<String>,
+    /// Source-relative sealed standalone host-Python package lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesa_host_python_lock: Option<String>,
     pub metamake_projection: String,
     #[serde(
         default,
@@ -156,6 +163,34 @@ fn validate_contract(
         ));
     }
     validate_sdk_target(&contract.target, profile)?;
+    if let Some(configure_target) = &contract.mesa_configure_target {
+        if configure_target.is_empty()
+            || configure_target.len() > 128
+            || !configure_target.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'+' | b'.')
+            })
+            || !profile.transpiler.as_ref().is_some_and(|selection| {
+                selection.toolchain == "llvm" && selection.mesa_version.as_deref() == Some("26.0.0")
+            })
+        {
+            return Err(invalid(
+                "mesa_configure_target",
+                "requires a safe explicit target and LLVM Mesa 26 selection",
+            ));
+        }
+    }
+    if let Some(lock) = &contract.mesa_host_python_lock {
+        native_build_contract::validate_source_relative_path(lock)
+            .map_err(|reason| invalid("mesa_host_python_lock", reason))?;
+        if contract.mesa_configure_target.is_none()
+            || !contract.inputs.iter().any(|input| &input.path == lock)
+        {
+            return Err(invalid(
+                "mesa_host_python_lock",
+                "requires an explicit Mesa configure target and a sealed source input",
+            ));
+        }
+    }
     validate_companion_roles(&contract.companion_roles, &contract.target, profile)
         .map_err(|reason| invalid("companion_roles", &reason))?;
     validate_native_consumer_graph(

@@ -2099,6 +2099,79 @@ fn tree_content_cas_double_pass_rejects_early_entry_race() {
 
 #[cfg(unix)]
 #[test]
+fn tree_content_cas_retained_directory_names_preserve_nested_prefixes_and_links() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("tree");
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir(root.join("z-empty")).unwrap();
+    std::fs::write(root.join("a/leaf"), b"one").unwrap();
+    std::fs::write(root.join("ab"), b"two").unwrap();
+    symlink("a/leaf", root.join("link")).unwrap();
+    let limits = TreeTraversalLimits::new(5, 64).unwrap();
+    let measured = measure_tree_content_cas_bounded(&root, limits).unwrap();
+    assert_eq!(measured.entry_count(), 5);
+    assert_eq!(measured.regular_file_bytes(), Some(6));
+    assert_eq!(
+        measured.entry_kind("a"),
+        Some(TreeContentEntryKind::Directory)
+    );
+    assert_eq!(
+        measured.entry_kind("a/leaf"),
+        Some(TreeContentEntryKind::RegularFile)
+    );
+    assert_eq!(
+        measured.entry_kind("ab"),
+        Some(TreeContentEntryKind::RegularFile)
+    );
+    assert_eq!(
+        measured.entry_kind("link"),
+        Some(TreeContentEntryKind::SymbolicLink)
+    );
+    assert_eq!(
+        measured.entry_kind("z-empty"),
+        Some(TreeContentEntryKind::Directory)
+    );
+    let repeated = measure_tree_content_cas_bounded(&root, limits).unwrap();
+    assert_eq!(measured, repeated);
+    assert_eq!(
+        measured.payload_digest_excluding(None),
+        repeated.payload_digest_excluding(None)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tree_content_cas_rejects_directory_names_changed_within_a_pass() {
+    for remove in [false, true] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("tree");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("original"), b"stable").unwrap();
+        let selected = root.clone();
+        let result = at_boundary(
+            "tree-content-cas-before-directory-recheck",
+            move |path| path == selected,
+            move |path| {
+                if remove {
+                    std::fs::remove_file(path.join("original")).unwrap();
+                } else {
+                    std::fs::write(path.join("added"), b"late").unwrap();
+                }
+            },
+            || measure_tree_content_cas_bounded(&root, TreeTraversalLimits::new(4, 64).unwrap()),
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("changed while measuring content"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn bounded_snapshot_copy_preserves_a_stable_tree_without_following_links() {
     use std::os::unix::fs::{symlink, PermissionsExt as _};
 

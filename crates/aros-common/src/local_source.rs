@@ -61,6 +61,13 @@ impl LocalSourceIdentity {
     /// submodule, tracked generated output, unsafe link/special file, resource
     /// excess, or changing source/Git selection during measurement.
     pub fn capture(root: &Path, preset: &str) -> Result<Self, String> {
+        Self::capture_with_tree(root, preset).map(|(identity, _)| identity)
+    }
+
+    fn capture_with_tree(
+        root: &Path,
+        preset: &str,
+    ) -> Result<(Self, crate::TreeContentCas), String> {
         validate_preset(preset)?;
         let root = source_root(root)?;
         let generated_subtree = format!("build/{preset}");
@@ -78,7 +85,7 @@ impl LocalSourceIdentity {
         if before != after {
             return Err("Git source selection changed during local source measurement".into());
         }
-        Ok(Self {
+        let identity = Self {
             schema: SCHEMA.into(),
             head_baseline: before.head,
             submodules_sha256: crate::sha256_bytes(&before.submodules),
@@ -88,7 +95,8 @@ impl LocalSourceIdentity {
             regular_file_bytes: tree
                 .regular_file_bytes()
                 .ok_or("source byte count overflowed")?,
-        })
+        };
+        Ok((identity, tree))
     }
 
     /// Require the actual current inputs to equal this pre-build snapshot.
@@ -97,14 +105,22 @@ impl LocalSourceIdentity {
     /// Rejects malformed metadata or any source, preset or baseline difference;
     /// capture errors are propagated rather than weakening verification.
     pub fn verify(&self, root: &Path, preset: &str) -> Result<(), String> {
+        self.verified_tree(root, preset).map(|_| ())
+    }
+
+    pub(crate) fn verified_tree(
+        &self,
+        root: &Path,
+        preset: &str,
+    ) -> Result<crate::TreeContentCas, String> {
         if self.schema != SCHEMA {
             return Err("unsupported local source identity schema".into());
         }
-        let actual = Self::capture(root, preset)?;
+        let (actual, tree) = Self::capture_with_tree(root, preset)?;
         if *self != actual {
             return Err("actual local source inputs differ from the pre-build snapshot".into());
         }
-        Ok(())
+        Ok(tree)
     }
 }
 

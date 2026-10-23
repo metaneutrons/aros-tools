@@ -1,7 +1,8 @@
 use super::{
-    BuiltinSelectors, MesaConfigurationIdentity, MesaConfigurationWire, ValidatedMesaConfiguration,
-    CONFIGURATION_FILE, MAX_CONFIGURATION_BYTES, MAX_TARGET_ISA_FLAGS, MESA_BASELINE_VARIABLES,
-    MESA_COMPILER_OPTION_VARIABLES,
+    BuiltinSelectors, MesaConfigurationIdentity, MesaConfigurationWire, MesaLlvmConfiguration,
+    MesaMakeVersionValue, ValidatedMesaConfiguration, CONFIGURATION_FILE, MAX_CONFIGURATION_BYTES,
+    MAX_TARGET_ISA_FLAGS, MESA_BASELINE_VARIABLES, MESA_COMPILER_OPTION_VARIABLES,
+    MESA_UNDEFINED_SCOPE_VARIABLES,
 };
 use crate::{ArosCompilerIdentity, ArosError, Result, Sha256Digest};
 use serde_json::{json, Value};
@@ -47,7 +48,25 @@ fn wire(
 ) -> MesaConfigurationWire {
     MesaConfigurationWire {
         version: 1,
+        initial_namespace: None,
+        initial_values: None,
         identity: identity.clone(),
+        undefined_variables: MESA_UNDEFINED_SCOPE_VARIABLES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+        recipe_configuration: serde_json::from_value(json!({
+            "safety_cflags": {"state":"defined","value":[]}, "target_lto":"no",
+            "lto_cflags":[], "cflags_iquote":["-iquote"], "cflags_iquote_end":[],
+            "target_cc":"/compiler/bin/clang", "target_cxx":"/compiler/bin/clang++",
+            "target_sysroot":[],
+            "make_coordinates":{"source_root":"/source","build_root":"/make-build","ports_root":"/make-build/Ports","generated_root":"/make-build/gen"}
+        }))
+        .unwrap(),
+        llvm_configuration: MesaLlvmConfiguration {
+            opt_llvm: MesaMakeVersionValue::Undefined,
+            target_llvm_ver: MesaMakeVersionValue::Defined("11.0.0".into()),
+        },
         baseline_variables: MESA_BASELINE_VARIABLES
             .iter()
             .map(|name| ((*name).into(), Vec::new()))
@@ -64,6 +83,83 @@ fn wire(
 
 fn encoded(wire: &MesaConfigurationWire) -> Vec<u8> {
     serde_json::to_vec(wire).unwrap()
+}
+
+#[test]
+fn initial_values_require_version_three_and_the_exact_observed_name_set() {
+    use crate::make_initial_values::ValidatedMakeInitialValues;
+    use crate::make_namespace::ValidatedMakeNamespace;
+    let identity = identity("armv7", "armv7-unknown-aros");
+    let namespace = ValidatedMakeNamespace::from_measurement(
+        "v1:3;.VARIABLES|default;MAKE_VERSION|default;SOURCE_RAW|file;end",
+    )
+    .unwrap();
+    let values = ValidatedMakeInitialValues::from_measurement(
+        "v1;MAKE_VERSION|default|simple|4.4.1;SOURCE_RAW|file|recursive|$(LATER);end",
+        &namespace,
+    )
+    .unwrap();
+    let mut packet = wire(&identity, Vec::new(), selectors(false));
+    packet.initial_namespace = Some(namespace.to_observation());
+    packet.initial_values = Some(values.to_observation());
+    assert!(ValidatedMesaConfiguration::parse_bound(&encoded(&packet), &identity).is_err());
+    packet.version = 2;
+    assert!(ValidatedMesaConfiguration::parse_bound(&encoded(&packet), &identity).is_err());
+    packet.version = 3;
+    let configuration =
+        ValidatedMesaConfiguration::parse_bound(&encoded(&packet), &identity).unwrap();
+    assert_eq!(configuration.initial_values(), Some(&values));
+    packet.initial_values.as_mut().unwrap().entries.pop();
+    assert!(ValidatedMesaConfiguration::parse_bound(&encoded(&packet), &identity).is_err());
+    packet.initial_values = Some(values.to_observation());
+    packet.initial_namespace = None;
+    assert!(ValidatedMesaConfiguration::parse_bound(&encoded(&packet), &identity).is_err());
+}
+
+#[test]
+fn initial_namespace_requires_explicit_version_and_cannot_contradict_absence() {
+    use crate::make_namespace::ValidatedMakeNamespace;
+    let identity = identity("armv7", "armv7-unknown-aros");
+    let mut packet = wire(&identity, Vec::new(), selectors(false));
+    assert!(
+        ValidatedMesaConfiguration::parse_bound(&encoded(&packet), &identity)
+            .unwrap()
+            .initial_namespace()
+            .is_none()
+    );
+    packet.initial_namespace = Some(
+        ValidatedMakeNamespace::from_measurement(
+            "v1:2;.VARIABLES|default;MAKE_VERSION|default;end",
+        )
+        .unwrap()
+        .to_observation(),
+    );
+    assert!(ValidatedMesaConfiguration::parse_bound(&encoded(&packet), &identity).is_err());
+    packet.version = 2;
+    let validated = ValidatedMesaConfiguration::parse_bound(&encoded(&packet), &identity).unwrap();
+    assert!(validated
+        .initial_namespace()
+        .unwrap()
+        .proves_absent("UNASSIGNED"));
+    assert_eq!(
+        validated.make_variables(),
+        ValidatedMesaConfiguration::parse_bound(
+            &encoded(&wire(&identity, Vec::new(), selectors(false))),
+            &identity
+        )
+        .unwrap()
+        .make_variables()
+    );
+    packet.initial_namespace = None;
+    assert!(ValidatedMesaConfiguration::parse_bound(&encoded(&packet), &identity).is_err());
+    packet.initial_namespace = Some(
+        ValidatedMakeNamespace::from_measurement(
+            "v1:3;.VARIABLES|default;MAKE_VERSION|default;CUR_MESADIR|file;end",
+        )
+        .unwrap()
+        .to_observation(),
+    );
+    assert!(ValidatedMesaConfiguration::parse_bound(&encoded(&packet), &identity).is_err());
 }
 
 fn configuration_error(result: Result<ValidatedMesaConfiguration>) -> String {
@@ -107,6 +203,199 @@ fn accepts_ordered_duplicate_arm_atoms_and_empty_aarch64_flags() {
 }
 
 #[test]
+fn llvm_projection_preserves_defined_and_undefined_states() {
+    let expected = identity("aarch64", "aarch64-unknown-aros");
+    let configured = wire(&expected, vec![], selectors(false));
+    let parsed = ValidatedMesaConfiguration::parse_bound(&encoded(&configured), &expected).unwrap();
+
+    assert_eq!(parsed.llvm_configuration(), &configured.llvm_configuration);
+    assert!(!parsed.make_variables().contains_key("OPT_LLVM"));
+    assert_eq!(parsed.make_variables()["TARGET_LLVM_VER"], "11.0.0");
+    assert_eq!(parsed.undefined_variables(), &["CUR_MESADIR".to_owned()]);
+    assert_eq!(
+        parsed.llvm_configuration().undefined_variables(),
+        vec!["OPT_LLVM"]
+    );
+
+    let mut explicit_empty = configured;
+    explicit_empty.llvm_configuration.opt_llvm = MesaMakeVersionValue::Defined(String::new());
+    explicit_empty.llvm_configuration.target_llvm_ver = MesaMakeVersionValue::Undefined;
+    let parsed =
+        ValidatedMesaConfiguration::parse_bound(&encoded(&explicit_empty), &expected).unwrap();
+    let variables = parsed.make_variables();
+    assert!(variables.contains_key("OPT_LLVM"));
+    assert_eq!(variables["OPT_LLVM"], "");
+    assert!(!variables.contains_key("TARGET_LLVM_VER"));
+    assert_eq!(
+        parsed.llvm_configuration().undefined_variables(),
+        vec!["TARGET_LLVM_VER"]
+    );
+}
+
+#[test]
+fn llvm_wire_field_and_members_are_required_and_unique() {
+    let expected = identity("aarch64", "aarch64-unknown-aros");
+    let configured = wire(&expected, vec![], selectors(false));
+    let serialized = String::from_utf8(encoded(&configured)).unwrap();
+
+    let mut missing_configuration: Value = serde_json::from_str(&serialized).unwrap();
+    missing_configuration
+        .as_object_mut()
+        .unwrap()
+        .remove("llvm_configuration");
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &serde_json::to_vec(&missing_configuration).unwrap(),
+        &expected,
+    ))
+    .contains("missing field `llvm_configuration`"));
+
+    let mut missing_member: Value = serde_json::from_str(&serialized).unwrap();
+    missing_member["llvm_configuration"]
+        .as_object_mut()
+        .unwrap()
+        .remove("opt_llvm");
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &serde_json::to_vec(&missing_member).unwrap(),
+        &expected,
+    ))
+    .contains("missing field `opt_llvm`"));
+
+    let duplicate_configuration = serialized.replacen(
+        "\"llvm_configuration\":{\"opt_llvm\":{\"state\":\"undefined\"},\"target_llvm_ver\":{\"state\":\"defined\",\"value\":\"11.0.0\"}}",
+        "\"llvm_configuration\":{\"opt_llvm\":{\"state\":\"undefined\"},\"target_llvm_ver\":{\"state\":\"defined\",\"value\":\"11.0.0\"}},\"llvm_configuration\":{\"opt_llvm\":{\"state\":\"undefined\"},\"target_llvm_ver\":{\"state\":\"defined\",\"value\":\"11.0.0\"}}",
+        1,
+    );
+    assert_ne!(duplicate_configuration, serialized);
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        duplicate_configuration.as_bytes(),
+        &expected,
+    ))
+    .contains("duplicate field `llvm_configuration`"));
+
+    let duplicate_member = serialized.replacen(
+        "\"opt_llvm\":",
+        "\"opt_llvm\":{\"state\":\"undefined\"},\"opt_llvm\":",
+        1,
+    );
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        duplicate_member.as_bytes(),
+        &expected,
+    ))
+    .contains("duplicate field `opt_llvm`"));
+}
+
+#[test]
+fn recipe_wire_is_required_and_historical_payloads_cannot_infer_flags() {
+    let expected = identity("aarch64", "aarch64-unknown-aros");
+    let mut value = serde_json::to_value(wire(&expected, vec![], selectors(false))).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("recipe_configuration");
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &serde_json::to_vec(&value).unwrap(),
+        &expected
+    ))
+    .contains("missing field `recipe_configuration`"));
+}
+
+#[test]
+fn llvm_versions_accept_canonical_values_and_reject_out_of_projection_values() {
+    let expected = identity("aarch64", "aarch64-unknown-aros");
+    let mut configured = wire(&expected, vec![], selectors(false));
+    for version in ["", "0.0", "11.0.0", "255.255.255"] {
+        configured.llvm_configuration.target_llvm_ver =
+            MesaMakeVersionValue::Defined(version.into());
+        let parsed =
+            ValidatedMesaConfiguration::parse_bound(&encoded(&configured), &expected).unwrap();
+        assert_eq!(parsed.make_variables()["TARGET_LLVM_VER"], version);
+    }
+
+    for version in [
+        "0", "1.2.3.4", ".1", "1.", "1..2", "01.2", "1.02.3", "256.0", "0.256.0", "1.2.256",
+        " 1.2", "1.2\n", "1.2;echo", "$(touch)",
+    ] {
+        configured.llvm_configuration.target_llvm_ver =
+            MesaMakeVersionValue::Defined(version.into());
+        let message = configuration_error(ValidatedMesaConfiguration::parse_bound(
+            &encoded(&configured),
+            &expected,
+        ));
+        assert!(
+            message.contains("TARGET_LLVM_VER must be empty or a canonical"),
+            "wrong rejection for version {version:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn undefined_scope_variables_are_exact_and_excluded_from_make_projection() {
+    let expected = identity("aarch64", "aarch64-unknown-aros");
+    let bytes = encoded(&wire(&expected, vec![], selectors(false)));
+    let parsed = ValidatedMesaConfiguration::parse_bound(&bytes, &expected).unwrap();
+
+    assert_eq!(
+        parsed
+            .undefined_variables()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        MESA_UNDEFINED_SCOPE_VARIABLES.to_vec()
+    );
+    assert!(!parsed.make_variables().contains_key("CUR_MESADIR"));
+}
+
+#[test]
+fn rejects_missing_wrong_and_duplicate_undefined_scope_variables() {
+    let expected = identity("aarch64", "aarch64-unknown-aros");
+    let configured = wire(&expected, vec![], selectors(false));
+
+    let mut missing: Value = serde_json::from_slice(&encoded(&configured)).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("undefined_variables");
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &serde_json::to_vec(&missing).unwrap(),
+        &expected
+    ))
+    .contains("missing field `undefined_variables`"));
+
+    for values in [Vec::<String>::new(), vec!["UNREVIEWED".into()]] {
+        let mut wrong = configured.clone();
+        wrong.undefined_variables = values;
+        assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+            &encoded(&wrong),
+            &expected
+        ))
+        .contains("must exactly match the reviewed Mesa undefined-scope variables"));
+    }
+
+    let mut duplicate_entry = configured.clone();
+    duplicate_entry
+        .undefined_variables
+        .push("CUR_MESADIR".into());
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        &encoded(&duplicate_entry),
+        &expected
+    ))
+    .contains("must exactly match the reviewed Mesa undefined-scope variables"));
+
+    let serialized = String::from_utf8(encoded(&configured)).unwrap();
+    let duplicate_field = serialized.replacen(
+        "\"undefined_variables\":[\"CUR_MESADIR\"]",
+        "\"undefined_variables\":[\"CUR_MESADIR\"],\"undefined_variables\":[\"CUR_MESADIR\"]",
+        1,
+    );
+    assert_ne!(duplicate_field, serialized);
+    assert!(configuration_error(ValidatedMesaConfiguration::parse_bound(
+        duplicate_field.as_bytes(),
+        &expected
+    ))
+    .contains("duplicate field `undefined_variables`"));
+}
+
+#[test]
 fn maps_all_eleven_boolean_selectors_to_fixed_options_or_empty_values() {
     let expected = identity("aarch64", "aarch64-unknown-aros");
     let enabled = ValidatedMesaConfiguration::parse_bound(
@@ -130,7 +419,7 @@ fn maps_all_eleven_boolean_selectors_to_fixed_options_or_empty_values() {
     ];
     assert_eq!(
         enabled_variables.len(),
-        13 + MESA_BASELINE_VARIABLES.len() + MESA_COMPILER_OPTION_VARIABLES.len()
+        22 + MESA_BASELINE_VARIABLES.len() + MESA_COMPILER_OPTION_VARIABLES.len()
     );
     for (name, option) in pairs {
         assert_eq!(enabled_variables[name], option, "selector {name}");
@@ -144,7 +433,7 @@ fn maps_all_eleven_boolean_selectors_to_fixed_options_or_empty_values() {
     let disabled_variables = disabled.make_variables();
     assert_eq!(
         disabled_variables.len(),
-        13 + MESA_BASELINE_VARIABLES.len() + MESA_COMPILER_OPTION_VARIABLES.len()
+        22 + MESA_BASELINE_VARIABLES.len() + MESA_COMPILER_OPTION_VARIABLES.len()
     );
     for (name, _) in pairs {
         assert_eq!(disabled_variables[name], "", "selector {name}");

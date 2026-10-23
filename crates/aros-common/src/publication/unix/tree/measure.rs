@@ -25,7 +25,7 @@ pub(super) fn measure_tree_content_at(
     let directory_identity = identity_from_stat(&directory_before);
     let names = directory_entry_names_with_budget(directory, budget)?;
     let mut entries = BTreeMap::new();
-    for name in names {
+    for name in &names {
         let name_bytes = name.as_bytes();
         if name_bytes.contains(&b'/') || name_bytes.is_empty() {
             return Err(std::io::Error::new(
@@ -45,10 +45,11 @@ pub(super) fn measure_tree_content_at(
                 format!("tree exceeds the {SOURCE_TREE_MAX_DEPTH}-component depth limit"),
             ));
         }
-        let child_display = display_path.join(&name);
-        let stat_before = rfs::statat(directory, Path::new(&name), AtFlags::SYMLINK_NOFOLLOW)?;
+        let child_display = display_path.join(name);
+        let stat_before = rfs::statat(directory, Path::new(name), AtFlags::SYMLINK_NOFOLLOW)?;
         let prepared = prepared_snapshot(&stat_before)?;
         let snapshot = tree_node_snapshot(&stat_before)?;
+        let mut symbolic_link_target = None;
         let content = match prepared.kind {
             PreparedNodeKind::File => {
                 budget.reserve_regular_file_bytes(prepared.size, &child_display)?;
@@ -67,7 +68,7 @@ pub(super) fn measure_tree_content_at(
                 test_pause_point("tree-content-cas-before-file-open");
                 let fd = rfs::openat(
                     directory,
-                    Path::new(&name),
+                    Path::new(name),
                     OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                     Mode::empty(),
                 )?;
@@ -84,7 +85,7 @@ pub(super) fn measure_tree_content_at(
                     || tree_node_snapshot(&rfs::fstat(&file)?)? != snapshot
                     || tree_node_snapshot(&rfs::statat(
                         directory,
-                        Path::new(&name),
+                        Path::new(name),
                         AtFlags::SYMLINK_NOFOLLOW,
                     )?)? != snapshot
                 {
@@ -96,10 +97,10 @@ pub(super) fn measure_tree_content_at(
                 Some(measured.digest)
             }
             PreparedNodeKind::Symlink => {
-                let target = rfs::readlinkat(directory, Path::new(&name), Vec::new())?;
+                let target = rfs::readlinkat(directory, Path::new(name), Vec::new())?;
                 if prepared_snapshot(&rfs::statat(
                     directory,
-                    Path::new(&name),
+                    Path::new(name),
                     AtFlags::SYMLINK_NOFOLLOW,
                 )?)? != prepared
                 {
@@ -108,12 +109,16 @@ pub(super) fn measure_tree_content_at(
                         child_display.display()
                     )));
                 }
-                Some(sha256_bytes(target.as_bytes()))
+                budget.reserve_symbolic_link_target_bytes(target.as_bytes().len())?;
+                let target = target.as_bytes().to_vec();
+                let digest = sha256_bytes(&target);
+                symbolic_link_target = Some(target);
+                Some(digest)
             }
             PreparedNodeKind::Directory => {
                 let fd = rfs::openat(
                     directory,
-                    Path::new(&name),
+                    Path::new(name),
                     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                     Mode::empty(),
                 )?;
@@ -139,15 +144,27 @@ pub(super) fn measure_tree_content_at(
             }
         };
         if entries
-            .insert(relative, TreeContentEntry { snapshot, content })
+            .insert(
+                relative,
+                TreeContentEntry {
+                    snapshot,
+                    content,
+                    symbolic_link_target,
+                },
+            )
             .is_some()
         {
             return Err(std::io::Error::other("duplicate tree entry"));
         }
     }
+    #[cfg(test)]
+    crate::publication::publication_tests::run_boundary(
+        "tree-content-cas-before-directory-recheck",
+        display_path,
+    );
     if identity_from_stat(&rfs::fstat(directory)?) != directory_identity
         || directory_entry_names_capped(directory, budget.limits.map(|limits| limits.max_entries))?
-            != directory_entry_names_from_keys(&entries, prefix)
+            != names
     {
         return Err(std::io::Error::other(format!(
             "tree directory '{}' changed while measuring content",
@@ -424,6 +441,7 @@ pub(super) fn measure_source_tree_contents_at(
                         child_display.display()
                     )));
                 }
+                budget.reserve_symbolic_link_target_bytes(target.as_bytes().len())?;
                 nodes.insert(
                     relative,
                     SourceTreeNode {
@@ -775,12 +793,14 @@ pub(super) fn finalize_source_tree_pass(
         } else {
             node.content
         };
+        let symbolic_link_target = node.link_target;
         if entries
             .insert(
                 path,
                 TreeContentEntry {
                     snapshot: node.snapshot,
                     content,
+                    symbolic_link_target,
                 },
             )
             .is_some()

@@ -52,6 +52,12 @@ pub fn filesystem_paths_overlap(left: &Path, right: &Path) -> std::io::Result<bo
         };
         let left_ancestors = ancestors(left)?;
         let right_ancestors = ancestors(right)?;
+        let both_existing = left_ancestors
+            .first()
+            .is_some_and(|(path, _, _)| path == left)
+            && right_ancestors
+                .first()
+                .is_some_and(|(path, _, _)| path == right);
         for (left_parent, device, inode) in left_ancestors {
             if let Some((right_parent, _, _)) =
                 right_ancestors
@@ -66,6 +72,13 @@ pub fn filesystem_paths_overlap(left: &Path, right: &Path) -> std::io::Result<bo
                 let right_suffix = right
                     .strip_prefix(right_parent)
                     .map_err(std::io::Error::other)?;
+                // Both exact directories exist: inode ancestry is definitive.
+                // Case-insensitive suffix guessing is only for absent paths.
+                if both_existing {
+                    return Ok(
+                        left_suffix.as_os_str().is_empty() || right_suffix.as_os_str().is_empty()
+                    );
+                }
                 let left_parts = left_suffix.components().collect::<Vec<_>>();
                 let right_parts = right_suffix.components().collect::<Vec<_>>();
                 return Ok(left_parts.iter().zip(&right_parts).all(|(left, right)| {

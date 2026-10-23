@@ -4,12 +4,24 @@
 //! identity. It does not establish who produced the values, prove that a probe
 //! ran, or prove parity with another build system.
 
+use crate::make_initial_values::{MakeInitialValuesObservation, ValidatedMakeInitialValues};
+use crate::make_namespace::{MakeNamespaceObservation, ValidatedMakeNamespace};
 use crate::{ArosCompilerIdentity, ArosError, Result, Sha256Digest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[path = "mesa_configuration_llvm.rs"]
+mod mesa_configuration_llvm;
+pub use mesa_configuration_llvm::{MesaLlvmConfiguration, MesaMakeVersionValue};
+#[path = "mesa_configuration_recipe.rs"]
+mod mesa_configuration_recipe;
+pub use mesa_configuration_recipe::{
+    MesaMakeCoordinates, MesaRecipeConfiguration, MesaRecipeFlagValue, MesaTargetLto,
+};
+
 const CONFIGURATION_FILE: &str = "mesa-configuration.json";
 const MAX_CONFIGURATION_BYTES: usize = 32 * 1024;
+const MAX_NAMESPACE_CONFIGURATION_BYTES: usize = 512 * 1024;
 const MAX_TARGET_ISA_FLAGS: usize = 64;
 const MAX_TARGET_ISA_FLAG_BYTES: usize = 256;
 
@@ -35,6 +47,10 @@ pub const MESA_COMPILER_OPTION_VARIABLES: &[&str] = &[
     "NOWARN_RETURN_TYPE",
     "NOWARN_UNUSED_CONST_VARIABLE",
     "NOWARN_ARRAY_BOUNDS",
+    "NOWARN_UNUSED_VARIABLE",
+    "NOWARN_UNUSED_VALUE",
+    "NOWARN_UNUSED_FUNCTION",
+    "NOWARN_MISLEADING_INDENTATION",
 ];
 
 /// Required configure-measured baseline variables transported to Make.
@@ -55,6 +71,11 @@ pub const MESA_BASELINE_VARIABLES: &[&str] = &[
     "OPTIMIZATION_CFLAGS",
     "LLVM_NOWARN",
 ];
+
+/// Mesa variables that the configure preflight must establish are globally undefined.
+///
+/// This is an explicit scope assertion. It is not producer authentication.
+pub const MESA_UNDEFINED_SCOPE_VARIABLES: &[&str] = &["CUR_MESADIR"];
 
 /// Caller-measured identity for one configured Mesa target.
 ///
@@ -91,7 +112,12 @@ impl MesaConfigurationIdentity {
 /// producer authentication, a compiler probe, or build-system parity proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedMesaConfiguration {
+    initial_namespace: Option<ValidatedMakeNamespace>,
+    initial_values: Option<ValidatedMakeInitialValues>,
     identity: MesaConfigurationIdentity,
+    undefined_variables: Vec<String>,
+    llvm_configuration: MesaLlvmConfiguration,
+    recipe_configuration: MesaRecipeConfiguration,
     baseline_variables: BTreeMap<String, Vec<String>>,
     target_isa_flags: Vec<String>,
     builtin_selectors: BuiltinSelectors,
@@ -111,19 +137,38 @@ impl ValidatedMesaConfiguration {
     ///
     /// # Errors
     /// Rejects oversized or malformed JSON, unsupported versions, invalid
-    /// identities, identity mismatches, unsafe baseline/ISA/compiler-option/
-    /// bundle atoms, and selector values outside the closed schema.
+    /// identities, identity mismatches, undefined-scope assertions outside
+    /// the reviewed contract, invalid LLVM version projections, unsafe
+    /// baseline/ISA/compiler-option/bundle atoms, and selector values outside
+    /// the closed schema.
     pub fn parse_bound(bytes: &[u8], expected: &MesaConfigurationIdentity) -> Result<Self> {
-        if bytes.len() > MAX_CONFIGURATION_BYTES {
+        if bytes.len() > MAX_NAMESPACE_CONFIGURATION_BYTES {
             return Err(configuration_error(format!(
-                "input exceeds the {MAX_CONFIGURATION_BYTES}-byte limit"
+                "input exceeds the {MAX_NAMESPACE_CONFIGURATION_BYTES}-byte limit"
             )));
         }
         expected.validate()?;
 
-        let wire: MesaConfigurationWire = serde_json::from_slice(bytes)
-            .map_err(|error| configuration_error(format!("invalid configuration JSON: {error}")))?;
-        if wire.version != 1 {
+        let wire: MesaConfigurationWire = serde_json::from_slice(bytes).map_err(|error| {
+            if bytes.len() > MAX_CONFIGURATION_BYTES {
+                configuration_error(format!("input exceeds the {MAX_CONFIGURATION_BYTES}-byte limit or is invalid version-2 JSON"))
+            } else {
+                configuration_error(format!("invalid configuration JSON: {error}"))
+            }
+        })?;
+        if wire.version == 1 && bytes.len() > MAX_CONFIGURATION_BYTES {
+            return Err(configuration_error(format!(
+                "input exceeds the {MAX_CONFIGURATION_BYTES}-byte limit"
+            )));
+        }
+        if !matches!(
+            (
+                wire.version,
+                wire.initial_namespace.is_some(),
+                wire.initial_values.is_some()
+            ),
+            (1, false, false) | (2, true, false) | (3, true, true)
+        ) {
             return Err(configuration_error(format!(
                 "unsupported Mesa configuration version {}",
                 wire.version
@@ -135,13 +180,45 @@ impl ValidatedMesaConfiguration {
                 "configuration identity does not match the caller-provided expected identity",
             ));
         }
+        validate_undefined_variables(&wire.undefined_variables)?;
+        wire.llvm_configuration.validate()?;
+        wire.recipe_configuration.validate()?;
         validate_baseline_variables(&wire.baseline_variables)?;
         validate_isa_flags(&wire.target_isa_flags)?;
         validate_compiler_options(&wire.compiler_options)?;
         validate_isa_flags(&wire.mesa_compile_options)?;
+        let initial_namespace = wire
+            .initial_namespace
+            .map(ValidatedMakeNamespace::validate)
+            .transpose()?;
+        let initial_values = wire
+            .initial_values
+            .map(|values| {
+                ValidatedMakeInitialValues::validate(
+                    values,
+                    initial_namespace.as_ref().ok_or_else(|| {
+                        configuration_error("initial values require their namespace")
+                    })?,
+                )
+            })
+            .transpose()?;
+        if initial_namespace.as_ref().is_some_and(|namespace| {
+            wire.undefined_variables
+                .iter()
+                .any(|name| namespace.contains(name))
+        }) {
+            return Err(configuration_error(
+                "undefined scope conflicts with initial Make namespace",
+            ));
+        }
 
         Ok(Self {
+            initial_namespace,
+            initial_values,
             identity: wire.identity,
+            undefined_variables: wire.undefined_variables,
+            llvm_configuration: wire.llvm_configuration,
+            recipe_configuration: wire.recipe_configuration,
             baseline_variables: wire.baseline_variables,
             target_isa_flags: wire.target_isa_flags,
             builtin_selectors: wire.builtin_selectors,
@@ -154,6 +231,31 @@ impl ValidatedMesaConfiguration {
     #[must_use]
     pub const fn identity(&self) -> &MesaConfigurationIdentity {
         &self.identity
+    }
+
+    /// Names/origins observed before source evaluation, when explicitly supplied
+    /// by configuration version 2. This is data binding, not execution proof.
+    #[must_use]
+    pub const fn initial_namespace(&self) -> Option<&ValidatedMakeNamespace> {
+        self.initial_namespace.as_ref()
+    }
+
+    /// Raw initial values and flavors; source/producer authority is external.
+    #[must_use]
+    pub const fn initial_values(&self) -> Option<&ValidatedMakeInitialValues> {
+        self.initial_values.as_ref()
+    }
+
+    /// Return the exact list of Mesa variables asserted globally undefined.
+    #[must_use]
+    pub fn undefined_variables(&self) -> &[String] {
+        &self.undefined_variables
+    }
+
+    /// Return the exact configure-measured LLVM version projection.
+    #[must_use]
+    pub const fn llvm_configuration(&self) -> &MesaLlvmConfiguration {
+        &self.llvm_configuration
     }
 
     /// Return ISA flag atoms in their original order, including duplicates.
@@ -232,7 +334,15 @@ impl ValidatedMesaConfiguration {
             "MESA_COMPILEOPTIONS".into(),
             self.mesa_compile_options.join(" "),
         );
+        variables.extend(self.llvm_configuration.defined_variables());
+        variables.extend(self.recipe_configuration.make_variables());
         variables
+    }
+
+    /// Required measured Make recipe inputs; this is data binding, not execution proof.
+    #[must_use]
+    pub const fn recipe_configuration(&self) -> &MesaRecipeConfiguration {
+        &self.recipe_configuration
     }
 }
 
@@ -240,7 +350,14 @@ impl ValidatedMesaConfiguration {
 #[serde(deny_unknown_fields)]
 struct MesaConfigurationWire {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial_namespace: Option<MakeNamespaceObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial_values: Option<MakeInitialValuesObservation>,
     identity: MesaConfigurationIdentity,
+    undefined_variables: Vec<String>,
+    llvm_configuration: MesaLlvmConfiguration,
+    recipe_configuration: MesaRecipeConfiguration,
     #[serde(deserialize_with = "deserialize_baseline_variables")]
     baseline_variables: BTreeMap<String, Vec<String>>,
     target_isa_flags: Vec<String>,
@@ -248,6 +365,20 @@ struct MesaConfigurationWire {
     #[serde(deserialize_with = "deserialize_compiler_options")]
     compiler_options: BTreeMap<String, Vec<String>>,
     mesa_compile_options: Vec<String>,
+}
+
+fn validate_undefined_variables(variables: &[String]) -> Result<()> {
+    if variables.len() != MESA_UNDEFINED_SCOPE_VARIABLES.len()
+        || variables
+            .iter()
+            .zip(MESA_UNDEFINED_SCOPE_VARIABLES)
+            .any(|(actual, expected)| actual.as_str() != *expected)
+    {
+        return Err(configuration_error(
+            "undefined_variables must exactly match the reviewed Mesa undefined-scope variables",
+        ));
+    }
+    Ok(())
 }
 
 fn deserialize_baseline_variables<'de, D>(
