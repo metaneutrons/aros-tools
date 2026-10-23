@@ -50,6 +50,50 @@ The external selection is bounded to 16 MiB and uses the closed JSON schema
 | `sdk_generations[n].record` | Selected-file record for the original closed generation record |
 | `sdk_generations[n].compatibility` | Same closed selector as compiler lanes; explicit `native_sdk_required` is true for GNU and false for LLVM, whose SDK identity is bound separately from release inputs |
 
+### Source-selected Mesa policy
+
+The historical configured-Mesa singleton path uses
+`aros-toolchain-release-evidence-selection-v3`. Its compatibility selectors add
+`source_policy: { "path": ABSOLUTE_FILE,
+"sha256": RAW_DIGEST }`. Every selected LLVM SDK lane, including each SDK
+generation, requires this independently selected document; compiler-only and
+GNU lanes cannot use it. Version v2 remains the historical no-Mesa policy and
+cannot enable this field or admit configured input observations.
+
+The selected file contains the `source_policy` object emitted by
+`aros toolchain producer profile --source-dir ... --source-preset ...` against
+the pinned clean source. The inspection derives `mesa_preflight_required` from
+the actual committed LLVM/Mesa selection. The collector binds source commit,
+tree, source preset, compiler profile and generic contract digest to the
+release-input SDK. It never uses result or input-observation markers to choose
+this policy. Configured policy requires the complete v4 input/v7 aggregate/v5
+portable evidence join; nonconfigured policy preserves historical formats.
+
+For source-selected multi-owner genmodule collections, use
+`aros-toolchain-release-evidence-selection-v4`. In every configured-Mesa
+compatibility selector, also supply `mesa_genmodule_helper_sha256`: the nonzero
+digest of the independently selected and measured inventory-helper executable.
+Retain that expectation from the selected Tools runtime before acquiring result
+evidence; do not copy it from compatibility input claims or the Mesa receipt.
+The collector derives the Source preset and contract digest from the independent
+release-input SDK, fixes scope to `contract-roots`, and requires exact agreement
+with the portable selection and collection. Missing or changed helper bindings
+refuse. Non-Mesa, compiler-only and GNU lanes cannot supply this field. Earlier
+selection versions cannot admit it or silently adopt collection identities.
+This is byte/selection consistency, not execution or publication authority.
+Historical v2/v3 readback remains available only under the caller's explicit
+legacy selection. It is not evidence that the current multi-owner Mesa contract
+was satisfied. The current protected selector/admission policy must require v4
+for collection-era qualification; version choice must not come from downloaded
+evidence. Protected selector generation/admission wiring is a separate required
+integration step, not established by this reader implementation.
+
+Policy references remain outside selected release/package/compatibility roots,
+are protected from output overlap, are read with selected raw digests, and are
+reread before success. Neither that byte binding nor the policy JSON proves
+source inspection executed or authenticates its producer. The protected caller
+must independently establish policy origin and source/runtime selection.
+
 LLVM SDK-style compiler compatibility requires the explicit `llvm_sdk_id`.
 An absent, unrelated or GNU-lane selection cannot admit that proof. Omission
 preserves ordinary LLVM compiler-only compatibility; no SDK identity is inferred

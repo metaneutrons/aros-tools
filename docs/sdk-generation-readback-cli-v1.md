@@ -13,7 +13,10 @@ release-input validator owns product membership and source/ABI identity. A
 separate selection document and its raw SHA-256 supply expected bytes and local
 paths. They must be retained independently of the downloaded records.
 
-The closed selection schema is `aros-sdk-generation-readback-selection-v1`:
+The historical closed selection schema is
+`aros-sdk-generation-readback-selection-v1`. It admits only nonconfigured
+compatibility evidence. Use `aros-sdk-generation-readback-selection-v2` for
+source-selected Mesa policy:
 
 | Field | Selected material |
 | --- | --- |
@@ -25,6 +28,38 @@ The closed selection schema is `aros-sdk-generation-readback-selection-v1`:
 | `generation.path`, `generation.sha256` | Exact generation record |
 | `compatibility.directory`, `compatibility.manifest_sha256` | Complete portable six-phase compatibility evidence |
 | `compatibility.inputs.path`, `compatibility.inputs.sha256` | Exact retained compatibility input observation |
+| `compatibility.source_policy.path`, `compatibility.source_policy.sha256` | In selection-v2, required for LLVM SDK lanes: separately retained source-inspection policy, not compatibility output |
+
+Source-selected multi-owner genmodule evidence uses
+`aros-sdk-generation-readback-selection-v3`. It retains the source-policy
+requirements and additionally requires `compatibility.mesa_genmodule_helper_sha256`
+for configured-Mesa evidence: the nonzero digest of the inventory-helper binary
+measured from the independently selected Tools runtime. Select this value before
+acquiring outputs; never derive it from input claims or a receipt. The collector
+joins it to the independently selected SDK Source preset/contract and fixes the
+inventory scope to `contract-roots`. Missing, zero, changed or context-incompatible
+helper selection refuses. Historical v1/v2 cannot carry this field; non-Mesa and
+GNU selections cannot enable it. No selection format authenticates execution.
+Historical v2 singleton readback does not satisfy current multi-owner Mesa
+qualification. The independently selected current generation/admission policy
+must require v3; maintaining historical byte readback is not an automatic
+admission fallback. Protected selector-generation wiring remains separate.
+
+Generate the policy through `aros toolchain producer profile` with paired
+`--source-dir` and `--source-preset`, against the independently pinned source.
+Retain its `source_policy` JSON object as a separate selected document and pin
+the raw file digest before acquiring result evidence. The collector binds its
+source commit/tree, source preset, compiler profile and generic contract hash to
+the independent release-input SDK selection. Its explicit
+`mesa_preflight_required` boolean selects configured input-v4/receipt-v7/
+measurement-v5 evidence, or the nonconfigured path. Never derive it from an
+input observation or receipt marker. Legacy v1 cannot carry this policy;
+GNU lanes reject it. The policy file stays outside all selected roots and is
+subject to bounded, no-follow, alias/identity and final drift checks.
+
+Policy parsing does not prove that source inspection ran or authenticate its
+origin. The protected caller must verify that independently, like every other
+selection used here.
 
 Paths are explicit normalized absolute paths. The selection document remains
 outside the input, package and evidence roots. Metadata reads are bounded and

@@ -79,6 +79,13 @@ requirement without reading compatibility exports. No policy is emitted when
 the source options are absent. A protected producer must require this projection
 and independently pin its source; a projection does not authenticate execution.
 
+The same inspection now emits `mesa_preflight_required`, derived only from
+the selected LLVM/Mesa26 source configuration. New release-evidence selection
+v3 and SDK-generation selection v2 bind a separate raw-digest-selected policy
+object to the exact SDK source/preset/compiler/contract. They do not infer this
+choice from exported compatibility data. Older selection formats retain the
+no-Mesa path and reject configured inputs.
+
 Still required before release: actual execution through this new integration,
 authenticated owning-job/artifact provenance, a released runtime and the
 complete selected three-host release matrix.
