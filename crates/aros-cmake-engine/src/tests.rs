@@ -31,6 +31,66 @@ use std::fs;
 use std::process::Command;
 
 #[test]
+fn mesa_source_context_preserves_proxy_identity_quote_order_and_target_isolation() {
+    run_embedded_kobj_contract_test("ConfiguredMesaSourcesTest.cmake");
+}
+
+#[test]
+fn mesa_proxy_origin_is_selected_from_the_actual_engine_producer() {
+    run_embedded_kobj_contract_test("ConfiguredMesaProxyTest.cmake");
+}
+
+#[test]
+fn mesa_generated_source_origin_uses_the_actual_genmodule_manifest() {
+    run_embedded_kobj_contract_test("ConfiguredMesaGenmoduleTest.cmake");
+}
+
+#[test]
+fn mesa_python_source_context_uses_the_actual_output_producer() {
+    run_embedded_kobj_contract_test("ConfiguredMesaPythonTest.cmake");
+}
+
+#[test]
+fn mesa_compiler_roles_preserve_driver_mode_and_explicit_sdk_selection() {
+    run_embedded_kobj_contract_test("ConfiguredMesaDriverTest.cmake");
+}
+
+#[test]
+fn mesa_configuration_input_is_rechecked_and_forwarded_as_data_only() {
+    let directory = tempfile::tempdir().expect("fresh Mesa input fixture");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("exact embedded engine");
+    let mut command = Command::new("cmake");
+    command
+        .arg("-P")
+        .arg(engine.join("tests/MesaConfigurationInputTest.cmake"));
+    let result = aros_common::run_output_with_control(
+        &mut command,
+        1024 * 1024,
+        std::time::Duration::from_secs(60),
+        &aros_common::CancellationToken::default(),
+    )
+    .expect("supervised Mesa data-channel fixture");
+    assert!(
+        result.status.success() && !result.timed_out && !result.cancelled,
+        "{}\n{}",
+        result.stdout.rendered_lossy(),
+        result.stderr.rendered_lossy()
+    );
+    let entry = file("CMakeLists.txt").expect("embedded entrypoint");
+    assert_eq!(
+        entry.matches("aros_mesa_configuration_arguments(").count(),
+        2,
+        "recheck before each of the two graph passes"
+    );
+    assert_eq!(
+        entry.matches("${_aros_mesa_configuration_args}").count(),
+        4,
+        "both graph commands, stable-argument check, and replay record retain the input"
+    );
+}
+
+#[test]
 fn grub_python_selection_preserves_closed_policy_and_rejects_changed_interpreters() {
     run_embedded_kobj_contract_test("GrubPythonTest.cmake");
 }
@@ -874,6 +934,11 @@ fn literal_objects_preserve_command_order_and_refuse_unsafe_outputs() {
 #[test]
 fn literal_objects_preserve_selected_cross_compiler_roles() {
     run_embedded_kobj_contract_test("LiteralCompilerRoleTest.cmake");
+}
+
+#[test]
+fn configured_mesa_gca_requires_complete_ordered_projection() {
+    run_embedded_kobj_contract_test("ConfiguredMesaGcaContractTest.cmake");
 }
 
 #[test]

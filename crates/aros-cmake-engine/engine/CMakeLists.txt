@@ -301,6 +301,8 @@ endif()
 
 message(STATUS "⚡ AROS-NX: Running Rust aros-transpiler on mmakefile tree...")
 aros_native_transpiler_arguments(_aros_native_transpiler_args)
+include("${AROS_CMAKE_ENGINE_DIR}/MesaConfigurationInput.cmake")
+aros_mesa_configuration_arguments(_aros_mesa_configuration_args)
 if(AROS_ENABLE_MMU)
     set(_aros_transpiler_use_mmu "1")
 else()
@@ -314,6 +316,7 @@ execute_process(
     COMMAND "${TRANSPILER_BIN}"
             ${_aros_inventory_prepare_args}
             ${_aros_native_transpiler_args}
+            ${_aros_mesa_configuration_args}
             "--source-dir" "${AROS_SOURCE_DIR}"
             "--output" "${GENERATED_TARGETS_CMAKE}"
             "--ports-dir" "${AROS_PORTS_DIR}"
@@ -371,9 +374,15 @@ if(AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
 endif()
 if(AROS_NATIVE_BUILD_CONTRACT OR AROS_NATIVE_CONSUMER_CONTRACT OR
    AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
+    aros_mesa_configuration_arguments(_aros_mesa_configuration_next_args)
+    if(NOT "${_aros_mesa_configuration_next_args}" STREQUAL
+       "${_aros_mesa_configuration_args}")
+        message(FATAL_ERROR "Mesa configuration input changed between graph passes")
+    endif()
     execute_process(
         COMMAND "${TRANSPILER_BIN}"
                 ${_aros_native_transpiler_args}
+                ${_aros_mesa_configuration_args}
                 "--source-dir" "${AROS_SOURCE_DIR}"
                 "--output" "${GENERATED_TARGETS_CMAKE}"
                 "--ports-dir" "${AROS_PORTS_DIR}"
@@ -420,6 +429,7 @@ endif()
 # than trusted.
 set(_aros_transpiler_record
     ${_aros_native_transpiler_args}
+    ${_aros_mesa_configuration_args}
     "--source-dir" "${AROS_SOURCE_DIR}"
     "--output" "${GENERATED_TARGETS_CMAKE}"
     "--ports-dir" "${AROS_PORTS_DIR}"

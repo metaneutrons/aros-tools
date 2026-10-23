@@ -586,6 +586,15 @@ function(aros_generate_python_outputs)
         list(APPEND _outputs "${_output}")
         set_property(GLOBAL PROPERTY
             "AROS_PYTHON_OUTPUT_OWNER_${_output_key}" "${PG_OWNER}")
+        # Retain the actual producer's root-relative identity. Configured Mesa
+        # joins this to its separately source-evaluated nominal Make root;
+        # it must not reverse-engineer identity from a physical gen/ prefix.
+        cmake_path(RELATIVE_PATH _output BASE_DIRECTORY "${_build_root}"
+            OUTPUT_VARIABLE _output_relative)
+        set_property(GLOBAL PROPERTY
+            "AROS_PYTHON_OUTPUT_BUILD_ROOT_${_output_key}" "${_build_root}")
+        set_property(GLOBAL PROPERTY
+            "AROS_PYTHON_OUTPUT_RELATIVE_${_output_key}" "${_output_relative}")
         set(_job_marker ${_next_job})
     endwhile()
 

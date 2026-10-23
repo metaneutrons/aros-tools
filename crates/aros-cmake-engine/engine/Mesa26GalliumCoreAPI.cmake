@@ -22,6 +22,38 @@ function(_aros_mesa26_gca_abi_flags out_var compiler_target c_flags defines)
     set(${out_var} "${_flags}" PARENT_SCOPE)
 endfunction()
 
+# Verify the complete selected module set before touching any generated files.
+function(_aros_mesa26_require_configured_targets)
+    foreach(_target IN LISTS ARGN)
+        if(NOT TARGET "${_target}")
+            message(FATAL_ERROR "Configured Mesa GCA target is missing: ${_target}")
+        endif()
+        get_target_property(_member_configured "${_target}" AROS_MESA_CONFIGURED_CONTRACT)
+        get_target_property(_member_languages "${_target}" AROS_ORDERED_COMPILE_CONTRACT_LANGUAGES)
+        list(LENGTH _member_languages _language_count)
+        if(NOT _member_configured OR NOT "C" IN_LIST _member_languages OR
+           NOT "CXX" IN_LIST _member_languages OR NOT _language_count EQUAL 2)
+            message(FATAL_ERROR "Configured Mesa GCA cannot mix static and configured targets: ${_target}")
+        endif()
+    endforeach()
+endfunction()
+
+# The configured path must switch compilation and the frozen Make ABI string
+# together. Missing metadata never falls back to the historical static hash.
+function(_aros_mesa26_configured_gca_flags out_var target)
+    get_target_property(_configured "${target}" AROS_MESA_CONFIGURED_CONTRACT)
+    get_target_property(_languages "${target}" AROS_ORDERED_COMPILE_CONTRACT_LANGUAGES)
+    list(LENGTH _languages _language_count)
+    get_property(_has_flags TARGET "${target}" PROPERTY AROS_MESA_GCA_ABI_FLAGS SET)
+    get_target_property(_flags "${target}" AROS_MESA_GCA_ABI_FLAGS)
+    if(NOT _configured OR NOT "C" IN_LIST _languages OR NOT "CXX" IN_LIST _languages OR
+       NOT _language_count EQUAL 2 OR
+       NOT _has_flags OR _flags STREQUAL "" OR _flags MATCHES "[;\r\n$<>]")
+        message(FATAL_ERROR "Configured Mesa GCA requires complete ordered compilation and frozen ABI flags")
+    endif()
+    set(${out_var} "${_flags}" PARENT_SCOPE)
+endfunction()
+
 # Mesa 26's ARM pipe HIDDs live in separate modules from mesa3dgl.library.
 # Their imports must use one generated, versioned provider table. This is a
 # closed source capability, not a generic invocation of galliumglue.py.
@@ -31,7 +63,8 @@ function(aros_build_mesa26_gallium_core_api)
     endif()
 
     get_target_property(_vc4_defines linklibs-gallium_vc4 COMPILE_DEFINITIONS)
-    if(NOT "AROS_MESA_MAJOR=26" IN_LIST _vc4_defines)
+    get_target_property(_configured linklibs-gallium_vc4 AROS_MESA_CONFIGURED_CONTRACT)
+    if(NOT _configured AND NOT "AROS_MESA_MAJOR=26" IN_LIST _vc4_defines)
         return()
     endif()
     if(NOT AROS_TARGET_CPU STREQUAL "arm" AND
@@ -57,6 +90,9 @@ function(aros_build_mesa26_gallium_core_api)
             message(FATAL_ERROR "Mesa 26 GalliumCoreAPI requires ${_target}")
         endif()
     endforeach()
+    if(_configured)
+        _aros_mesa26_require_configured_targets(${_required_targets})
+    endif()
 
     set(_source_script
         "${AROS_SOURCE_DIR}/workbench/libs/mesa/galliumglue.py")
@@ -78,8 +114,17 @@ function(aros_build_mesa26_gallium_core_api)
         message(FATAL_ERROR "Mesa 26 GalliumCoreAPI ABI patch changed without review")
     endif()
 
-    _aros_mesa26_gca_abi_flags(_abi_flags "${CMAKE_C_COMPILER_TARGET}"
-        "${CMAKE_C_FLAGS}" "${_vc4_defines}")
+    if(_configured)
+        _aros_mesa26_configured_gca_flags(_abi_flags linklibs-gallium_vc4)
+        get_target_property(_vc4_c_options linklibs-gallium_vc4 AROS_MESA_C_OPTIONS)
+        get_target_property(_vc4_bridge_options linklibs-gallium_vc4 AROS_MESA_VC4_BRIDGE_OPTIONS)
+        if(NOT _vc4_c_options OR NOT _vc4_bridge_options)
+            message(FATAL_ERROR "Configured Mesa GCA lacks source-derived auxiliary compile options")
+        endif()
+    else()
+        _aros_mesa26_gca_abi_flags(_abi_flags "${CMAKE_C_COMPILER_TARGET}"
+            "${CMAKE_C_FLAGS}" "${_vc4_defines}")
+    endif()
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(NOT Python3_Interpreter_FOUND OR NOT Python3_EXECUTABLE)
@@ -172,6 +217,10 @@ function(aros_build_mesa26_gallium_core_api)
     foreach(_target IN ITEMS mesa26-gca-provider mesa26-gca-consumer-objects)
         add_dependencies(${_target} mesa26-gca-generate)
         target_include_directories(${_target} PRIVATE "${_generated}")
+        if(_configured)
+            # Make's default compile_q rule also supplies these flags to .S.
+            _aros_target_ordered_compile_contract(${_target} ALL ${_vc4_c_options})
+        endif()
     endforeach()
     set_target_properties(mesa26-gca-provider PROPERTIES
         OUTPUT_NAME galliumcoreapi
@@ -188,10 +237,16 @@ function(aros_build_mesa26_gallium_core_api)
     if(_vc4_includes)
         target_include_directories(mesa26-gca-vc4-drm-raw PRIVATE ${_vc4_includes})
     endif()
-    if(_vc4_options)
+    if(_vc4_options AND NOT _configured)
         target_compile_options(mesa26-gca-vc4-drm-raw PRIVATE ${_vc4_options})
     endif()
-    target_compile_definitions(mesa26-gca-vc4-drm-raw PRIVATE ${_vc4_defines})
+    if(_configured)
+        # The handwritten winsys rule repeats USER fields deliberately. Use
+        # that separate ordered view, not a deduplicated copy of VC4 options.
+        _aros_target_ordered_compile_contract(mesa26-gca-vc4-drm-raw ALL ${_vc4_bridge_options})
+    else()
+        target_compile_definitions(mesa26-gca-vc4-drm-raw PRIVATE ${_vc4_defines})
+    endif()
     target_include_directories(mesa26-gca-vc4-drm-raw PRIVATE
         "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"
         "${_generated}")

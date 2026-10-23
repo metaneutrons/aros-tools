@@ -44,6 +44,240 @@ function(_assert_list_sorted list_var label)
     endif()
 endfunction()
 
+# Parse only the straightforward += lists emitted by genmodule.  This is not a
+# Make evaluator: unsupported syntax, duplicate assignments, and missing
+# assignments are returned as errors instead of silently selecting one value.
+function(_parse_genmodule_make_list output_var error_var makefile variable)
+    set(_value "")
+    set(_error "")
+    if(NOT EXISTS "${makefile}")
+        set(_error "makefile does not exist: ${makefile}")
+    else()
+        # file(STRINGS) treats a backslash-newline as an escaped CMake list
+        # separator. Read raw Make text instead and join its continuations
+        # before creating the line list, without accepting literal semicolons.
+        file(READ "${makefile}" _text)
+        if(_text MATCHES ";")
+            set(${output_var} "" PARENT_SCOPE)
+            set(${error_var} "unsupported semicolon in Make fragment" PARENT_SCOPE)
+            return()
+        endif()
+        string(REPLACE "\\\n" " " _text "${_text}")
+        string(REPLACE "\n" ";" _lines "${_text}")
+        list(LENGTH _lines _line_count)
+        string(LENGTH "${variable}" _variable_length)
+        set(_selected_assignments 0)
+        set(_line_index 0)
+        while(_line_index LESS _line_count AND _error STREQUAL "")
+            list(GET _lines ${_line_index} _line)
+            string(LENGTH "${_line}" _line_length)
+            set(_selected FALSE)
+            if(_line_length GREATER_EQUAL _variable_length)
+                string(SUBSTRING "${_line}" 0 ${_variable_length} _prefix)
+                if(_prefix STREQUAL variable)
+                    set(_selected TRUE)
+                    if(_line_length GREATER _variable_length)
+                        string(SUBSTRING "${_line}" ${_variable_length} 1 _next_char)
+                        if(_next_char MATCHES "^[A-Za-z0-9_]$")
+                            set(_selected FALSE)
+                        endif()
+                    endif()
+                endif()
+            endif()
+
+            if(_selected)
+                math(EXPR _selected_assignments "${_selected_assignments} + 1")
+                if(_selected_assignments GREATER 1)
+                    set(_error "duplicate selected assignment for ${variable}")
+                    break()
+                endif()
+                if(NOT _line MATCHES "^${variable}[ \t]*\\+=[ \t]*(.*)$")
+                    set(_error "unsupported assignment syntax for ${variable}: ${_line}")
+                    break()
+                endif()
+
+                set(_fragment "${CMAKE_MATCH_1}")
+                set(_continuing TRUE)
+                while(_continuing)
+                    if(_fragment MATCHES "\\\\[ \t]*$")
+                        string(REGEX REPLACE "[ \t]*\\\\[ \t]*$" "" _fragment "${_fragment}")
+                        if(NOT _fragment STREQUAL "")
+                            string(APPEND _value " ${_fragment}")
+                        endif()
+                        math(EXPR _line_index "${_line_index} + 1")
+                        if(_line_index GREATER_EQUAL _line_count)
+                            set(_error "unterminated continuation for ${variable}")
+                            break()
+                        endif()
+                        list(GET _lines ${_line_index} _continuation)
+                        if(NOT _continuation MATCHES "^[ \t]+[^ \t]")
+                            set(_error "unsupported continuation syntax for ${variable}: ${_continuation}")
+                            break()
+                        endif()
+                        string(STRIP "${_continuation}" _fragment)
+                        if(_fragment STREQUAL "")
+                            set(_error "empty continuation for ${variable}")
+                            break()
+                        endif()
+                    else()
+                        if(NOT _fragment STREQUAL "")
+                            string(APPEND _value " ${_fragment}")
+                        endif()
+                        set(_continuing FALSE)
+                    endif()
+                endwhile()
+            endif()
+            math(EXPR _line_index "${_line_index} + 1")
+        endwhile()
+        if(_error STREQUAL "" AND _selected_assignments EQUAL 0)
+            set(_error "missing selected assignment for ${variable}")
+        endif()
+    endif()
+
+    string(STRIP "${_value}" _value)
+    if(_error STREQUAL "" AND NOT _value STREQUAL "" AND
+       NOT _value MATCHES "^[A-Za-z0-9_+./ \t-]*$")
+        set(_error "unsupported list value syntax for ${variable}: ${_value}")
+    endif()
+    set(_tokens "")
+    if(_error STREQUAL "" AND NOT _value STREQUAL "")
+        string(REGEX REPLACE "[ \t]+" ";" _tokens "${_value}")
+    endif()
+    set(${output_var} "${_tokens}" PARENT_SCOPE)
+    set(${error_var} "${_error}" PARENT_SCOPE)
+endfunction()
+
+function(_assert_make_list_parse_refused makefile variable expected_error label)
+    _parse_genmodule_make_list(_parsed _parse_error
+        "${makefile}" "${variable}")
+    if(NOT _parse_error MATCHES "${expected_error}")
+        message(FATAL_ERROR
+            "${label}: parser did not refuse the fixture as expected: '${_parse_error}'")
+    endif()
+endfunction()
+
+function(_assert_unique_list_membership actual_var expected_var label)
+    set(_actual ${${actual_var}})
+    set(_expected ${${expected_var}})
+    list(LENGTH _actual _actual_count)
+    list(LENGTH _expected _expected_count)
+    set(_actual_unique ${_actual})
+    set(_expected_unique ${_expected})
+    list(REMOVE_DUPLICATES _actual_unique)
+    list(REMOVE_DUPLICATES _expected_unique)
+    list(LENGTH _actual_unique _actual_unique_count)
+    list(LENGTH _expected_unique _expected_unique_count)
+    if(NOT _actual_count EQUAL _actual_unique_count OR
+       NOT _expected_count EQUAL _expected_unique_count)
+        message(FATAL_ERROR
+            "${label}: duplicate membership (actual ${_actual_count}/${_actual_unique_count}, "
+            "expected ${_expected_count}/${_expected_unique_count})")
+    endif()
+    if(NOT _actual_count EQUAL _expected_count)
+        message(FATAL_ERROR
+            "${label}: entry count differs (actual ${_actual_count}, expected ${_expected_count})")
+    endif()
+    list(SORT _actual_unique)
+    list(SORT _expected_unique)
+    if(NOT _actual_unique STREQUAL _expected_unique)
+        message(FATAL_ERROR
+            "${label}: membership differs\nexpected: ${_expected_unique}\nactual: ${_actual_unique}")
+    endif()
+endfunction()
+
+function(_manifest_make_stems output_var)
+    set(_stems "")
+    foreach(_path IN LISTS ARGN)
+        get_filename_component(_basename "${_path}" NAME)
+        if(NOT _basename MATCHES "\\.c$")
+            message(FATAL_ERROR "manifest output is not a C source: ${_path}")
+        endif()
+        string(REGEX REPLACE "\\.c$" "" _stem "${_basename}")
+        list(APPEND _stems "${_stem}")
+    endforeach()
+    set(${output_var} "${_stems}" PARENT_SCOPE)
+endfunction()
+
+function(_manifest_lifecycle_stem output_var outputs_var module suffix label)
+    set(_expected_name "${module}_${suffix}.c")
+    set(_stems "")
+    foreach(_path IN LISTS ${outputs_var})
+        get_filename_component(_basename "${_path}" NAME)
+        if(_basename STREQUAL _expected_name)
+            string(REGEX REPLACE "\\.c$" "" _stem "${_basename}")
+            list(APPEND _stems "${_stem}")
+        endif()
+    endforeach()
+    _assert_list_length(_stems 1 "${label} manifest lifecycle output")
+    set(${output_var} "${_stems}" PARENT_SCOPE)
+endfunction()
+
+function(_make_definitions_from_flags output_var flags_var label)
+    set(_definitions "")
+    foreach(_flag IN LISTS ${flags_var})
+        if(NOT _flag MATCHES "^-D[A-Za-z0-9_]+$")
+            message(FATAL_ERROR "${label}: unsupported define token '${_flag}'")
+        endif()
+        string(SUBSTRING "${_flag}" 2 -1 _definition)
+        list(APPEND _definitions "${_definition}")
+    endforeach()
+    set(${output_var} "${_definitions}" PARENT_SCOPE)
+endfunction()
+
+function(_assert_make_definitions makefile make_variable expected_var label)
+    _parse_genmodule_make_list(_flags _parse_error "${makefile}" "${make_variable}")
+    if(NOT _parse_error STREQUAL "")
+        message(FATAL_ERROR "${label}: ${_parse_error}")
+    endif()
+    _make_definitions_from_flags(_actual_definitions _flags "${label}")
+    set(_expected_definitions "${${expected_var}}")
+    if(NOT _actual_definitions STREQUAL _expected_definitions)
+        message(FATAL_ERROR
+            "${label}: ordered definitions differ\n"
+            "expected: ${_expected_definitions}\nactual: ${_actual_definitions}")
+    endif()
+endfunction()
+
+function(_assert_make_manifest_membership makefile make_variable expected_paths_var label)
+    _parse_genmodule_make_list(_actual _parse_error "${makefile}" "${make_variable}")
+    if(NOT _parse_error STREQUAL "")
+        message(FATAL_ERROR "${label}: ${_parse_error}")
+    endif()
+    set(_manifest_paths ${${expected_paths_var}})
+    _manifest_make_stems(_expected ${_manifest_paths})
+    # Source declaration order is not compared: Make's wildcard expansion sorts
+    # these client targets before use. Counts and unique membership remain exact.
+    _assert_unique_list_membership(_actual _expected "${label}")
+endfunction()
+
+set(_make_parser_probe_root
+    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/genmodule-make-parser-probes")
+file(REMOVE_RECURSE "${_make_parser_probe_root}")
+file(MAKE_DIRECTORY "${_make_parser_probe_root}")
+set(_make_parser_probe "${_make_parser_probe_root}/unsupported.mk")
+file(WRITE "${_make_parser_probe}" "probe_CPPFLAGS += -DFIRST\\\n -DSECOND -DFIRST\n")
+_parse_genmodule_make_list(_parser_positive _parser_positive_error
+    "${_make_parser_probe}" probe_CPPFLAGS)
+if(NOT _parser_positive_error STREQUAL "" OR
+   NOT _parser_positive STREQUAL "-DFIRST;-DSECOND;-DFIRST")
+    message(FATAL_ERROR
+        "continued Make list did not preserve order/repetition: "
+        "${_parser_positive} / ${_parser_positive_error}")
+endif()
+_assert_make_list_parse_refused("${_make_parser_probe}" absent_CPPFLAGS
+    "missing selected assignment" "missing Make assignment probe")
+file(WRITE "${_make_parser_probe}" "probe_CPPFLAGS += -DFIRST;-DSECOND\n")
+_assert_make_list_parse_refused("${_make_parser_probe}" probe_CPPFLAGS
+    "unsupported semicolon" "literal Make semicolon probe")
+file(WRITE "${_make_parser_probe}" "probe_CPPFLAGS := -DUNSUPPORTED\n")
+_assert_make_list_parse_refused("${_make_parser_probe}" probe_CPPFLAGS
+    "unsupported assignment syntax" "unsupported Make assignment probe")
+file(WRITE "${_make_parser_probe}"
+    "probe_CPPFLAGS += -DFIRST\nprobe_CPPFLAGS += -DSECOND\n")
+_assert_make_list_parse_refused("${_make_parser_probe}" probe_CPPFLAGS
+    "duplicate selected assignment" "duplicate Make assignment probe")
+file(REMOVE_RECURSE "${_make_parser_probe_root}")
+
 function(_test_manifest label config module
         expected_total expected_stack expected_regcall)
     set(_root "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/genmodule-manifest-${label}")
@@ -321,6 +555,166 @@ if(NOT _mesa_override_HAS_REL_LINKLIB OR
     message(FATAL_ERROR
         "Mesa override base-selection facts mismatch: "
         "${_mesa_override_RUNTIME_DEFINES} / ${_mesa_override_LINKLIB_DEFINES}")
+endif()
+if(NOT _mesa_override_RUNTIME_DEFINES STREQUAL
+   "__Z1_RELLIBBASE__;__POSIXC_RELLIBBASE__;__STDC_RELLIBBASE__;__MESA3DGL26_0_NOLIBBASE__")
+    message(FATAL_ERROR
+        "Mesa override full runtime definition order is wrong: "
+        "${_mesa_override_RUNTIME_DEFINES}")
+endif()
+
+if(DEFINED AROS_HOST_GENMODULE AND AROS_HOST_GENMODULE)
+    set(_mesa_base_config "${_source_root}/workbench/libs/gl/gl.conf")
+    set(_mesa_override_config "${_source_root}/workbench/libs/mesa/mesa3dgl.conf")
+    set(_mesa_oracle_root
+        "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/genmodule-make-oracle-mesa")
+    set(_mesa_oracle_output "${_mesa_oracle_root}/actual")
+    file(REMOVE_RECURSE "${_mesa_oracle_root}")
+    file(MAKE_DIRECTORY "${_mesa_oracle_output}")
+    execute_process(
+        COMMAND "${AROS_HOST_GENMODULE}"
+            -c "${_mesa_base_config}"
+            -o "${_mesa_override_config}"
+            -d "${_mesa_oracle_output}"
+            writemakefile mesa3dgl26-0 library
+        RESULT_VARIABLE _mesa_oracle_result
+        ERROR_VARIABLE _mesa_oracle_stderr
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT})
+    if(NOT _mesa_oracle_result EQUAL 0)
+        message(FATAL_ERROR
+            "Mesa writemakefile reference failed (${_mesa_oracle_result}): "
+            "${_mesa_oracle_stderr}")
+    endif()
+    set(_mesa_makefile "${_mesa_oracle_output}/Makefile.mesa3dgl26-0library")
+    if(NOT EXISTS "${_mesa_makefile}")
+        message(FATAL_ERROR
+            "Mesa writemakefile reference did not produce ${_mesa_makefile}")
+    endif()
+
+    _assert_make_definitions("${_mesa_makefile}" mesa3dgl26-0_CPPFLAGS
+        _mesa_override_RUNTIME_DEFINES "Mesa runtime CPPFLAGS")
+    _assert_make_definitions("${_mesa_makefile}" mesa3dgl26-0_LINKLIBCPPFLAGS
+        _mesa_override_LINKLIB_DEFINES "Mesa client LINKLIBCPPFLAGS")
+
+    set(_mesa_normal_manifest
+        ${_mesa_override_NORMAL_STUBS}
+        ${_mesa_override_NORMAL_AUTOINIT}
+        ${_mesa_override_NORMAL_GETLIBBASE})
+    set(_mesa_relative_manifest
+        ${_mesa_override_REL_STUBS}
+        ${_mesa_override_REL_AUTOINIT}
+        ${_mesa_override_REL_GETLIBBASE})
+    _assert_make_manifest_membership("${_mesa_makefile}"
+        mesa3dgl26-0_LINKLIBFILES _mesa_normal_manifest
+        "Mesa normal client files")
+    _assert_make_manifest_membership("${_mesa_makefile}"
+        mesa3dgl26-0_RELLINKLIBFILES _mesa_relative_manifest
+        "Mesa relative client files")
+
+    _manifest_lifecycle_stem(_mesa_expected_start _mesa_override_ALL_OUTPUTS
+        mesa3dgl26-0 start "Mesa STARTFILES")
+    _manifest_lifecycle_stem(_mesa_expected_end _mesa_override_ALL_OUTPUTS
+        mesa3dgl26-0 end "Mesa ENDFILES")
+    _parse_genmodule_make_list(_mesa_actual_start _mesa_start_error
+        "${_mesa_makefile}" mesa3dgl26-0_STARTFILES)
+    _parse_genmodule_make_list(_mesa_actual_end _mesa_end_error
+        "${_mesa_makefile}" mesa3dgl26-0_ENDFILES)
+    if(NOT _mesa_start_error STREQUAL "" OR NOT _mesa_end_error STREQUAL "")
+        message(FATAL_ERROR
+            "Mesa lifecycle Make lists could not be parsed: "
+            "${_mesa_start_error}; ${_mesa_end_error}")
+    endif()
+    _assert_unique_list_membership(_mesa_actual_start _mesa_expected_start
+        "Mesa STARTFILES")
+    _assert_unique_list_membership(_mesa_actual_end _mesa_expected_end
+        "Mesa ENDFILES")
+
+    # Remove exactly one inherited rellib from a private override copy. This
+    # proves both flag vectors follow config order while NOLIBBASE remains a
+    # module-only definition; neither the source config nor Make is modified.
+    file(READ "${_mesa_override_config}" _mesa_override_text)
+    string(REGEX MATCHALL "rellib[ \t]+posixc" _mesa_counter_rellib_matches
+        "${_mesa_override_text}")
+    list(LENGTH _mesa_counter_rellib_matches _mesa_counter_rellib_count)
+    if(NOT _mesa_counter_rellib_count EQUAL 1)
+        message(FATAL_ERROR
+            "Mesa counter expected one 'rellib posixc' directive, found "
+            "${_mesa_counter_rellib_count}")
+    endif()
+    # The original parser rejects blank lines inside ##begin config. Remove
+    # the complete directive line, not just its words.
+    string(REGEX REPLACE "rellib[ \t]+posixc\n" "" _mesa_counter_text
+        "${_mesa_override_text}")
+    set(_mesa_counter_root "${_mesa_oracle_root}/counter")
+    set(_mesa_counter_override "${_mesa_counter_root}/mesa3dgl-counter.conf")
+    set(_mesa_counter_output "${_mesa_counter_root}/actual")
+    file(MAKE_DIRECTORY "${_mesa_counter_root}" "${_mesa_counter_output}")
+    file(WRITE "${_mesa_counter_override}" "${_mesa_counter_text}")
+    aros_genmodule_writefiles_manifest(_mesa_counter_manifest
+        CONFIG "${_mesa_base_config}"
+        CONFIG_OVERRIDE "${_mesa_counter_override}"
+        MODULE mesa3dgl26-0
+        MODTYPE library
+        GEN_DIR "${_mesa_counter_root}/manifest/gen"
+        STUB_DIR "${_mesa_counter_root}/manifest/stubs")
+    if(NOT _mesa_counter_manifest_RELLIBS STREQUAL "z1;stdc" OR
+       NOT _mesa_counter_manifest_RUNTIME_DEFINES STREQUAL
+           "__Z1_RELLIBBASE__;__STDC_RELLIBBASE__;__MESA3DGL26_0_NOLIBBASE__" OR
+       NOT _mesa_counter_manifest_LINKLIB_DEFINES STREQUAL
+           "__Z1_RELLIBBASE__;__STDC_RELLIBBASE__")
+        message(FATAL_ERROR
+            "Mesa counter manifest did not remove only posixc in order: "
+            "${_mesa_counter_manifest_RELLIBS} / "
+            "${_mesa_counter_manifest_RUNTIME_DEFINES} / "
+            "${_mesa_counter_manifest_LINKLIB_DEFINES}")
+    endif()
+    if(_mesa_counter_manifest_RUNTIME_DEFINES STREQUAL
+           _mesa_override_RUNTIME_DEFINES OR
+       _mesa_counter_manifest_LINKLIB_DEFINES STREQUAL
+           _mesa_override_LINKLIB_DEFINES)
+        message(FATAL_ERROR "Mesa counter did not change both definition vectors")
+    endif()
+    execute_process(
+        COMMAND "${AROS_HOST_GENMODULE}"
+            -c "${_mesa_base_config}"
+            -o "${_mesa_counter_override}"
+            -d "${_mesa_counter_output}"
+            writemakefile mesa3dgl26-0 library
+        RESULT_VARIABLE _mesa_counter_result
+        ERROR_VARIABLE _mesa_counter_stderr
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT})
+    if(NOT _mesa_counter_result EQUAL 0)
+        message(FATAL_ERROR
+            "Mesa counter writemakefile reference failed (${_mesa_counter_result}): "
+            "${_mesa_counter_stderr}")
+    endif()
+    set(_mesa_counter_makefile
+        "${_mesa_counter_output}/Makefile.mesa3dgl26-0library")
+    _assert_make_definitions("${_mesa_counter_makefile}" mesa3dgl26-0_CPPFLAGS
+        _mesa_counter_manifest_RUNTIME_DEFINES "Mesa counter runtime CPPFLAGS")
+    _assert_make_definitions("${_mesa_counter_makefile}" mesa3dgl26-0_LINKLIBCPPFLAGS
+        _mesa_counter_manifest_LINKLIB_DEFINES
+        "Mesa counter client LINKLIBCPPFLAGS")
+    file(REMOVE_RECURSE "${_mesa_oracle_root}")
+endif()
+
+set(_module_punctuation_config
+    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/genmodule-module-punctuation.conf")
+file(WRITE "${_module_punctuation_config}"
+    "##begin config\noptions rellinklib\n##end config\n")
+aros_genmodule_writefiles_manifest(_module_punctuation
+    CONFIG "${_module_punctuation_config}"
+    MODULE probe.name-2
+    MODTYPE resource
+    GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/genmodule-module-punctuation/gen"
+    STUB_DIR "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/genmodule-module-punctuation/stubs")
+if(NOT _module_punctuation_RUNTIME_DEFINES STREQUAL
+   "__PROBE_NAME_2_NOLIBBASE__" OR
+   NOT _module_punctuation_LINKLIB_DEFINES STREQUAL "")
+    message(FATAL_ERROR
+        "punctuation-bearing module definition normalization is wrong: "
+        "${_module_punctuation_RUNTIME_DEFINES} / "
+        "${_module_punctuation_LINKLIB_DEFINES}")
 endif()
 
 aros_genmodule_writefiles_manifest(_z1

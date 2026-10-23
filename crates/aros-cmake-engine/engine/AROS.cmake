@@ -17,6 +17,9 @@ include("${CMAKE_CURRENT_LIST_DIR}/ModuleKobjInputs.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/QuoteIncludes.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/Executable.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/GenmoduleManifest.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/GenmoduleSourceOrigins.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ConfiguredMesaSources.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ConfiguredMesaDriver.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/GenmoduleTargets.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/GenmoduleHeaders.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/DirectorySetup.cmake")
@@ -2261,6 +2264,12 @@ function(_aros_port_source_proxy out_var source_stem language explicit_suffix)
         set(_candidate_suffixes ".c")
     endif()
     set(_proxy "${_proxy_dir}/${_source_hash}${_proxy_suffix}")
+    if(IS_SYMLINK "${CMAKE_BINARY_DIR}/CMakeFiles" OR IS_SYMLINK "${_proxy_dir}")
+        message(FATAL_ERROR "AROS port proxy directory is a symlink")
+    endif()
+    if(IS_SYMLINK "${_proxy}" OR IS_DIRECTORY "${_proxy}")
+        message(FATAL_ERROR "AROS port proxy output is not a regular owned path")
+    endif()
     # The physical proxy name is a hash, but Make's object basename remains
     # the original declaration's name. Keep that identity independently of
     # whether the fetched source already exists at configure time.
@@ -2314,6 +2323,12 @@ function(_aros_port_source_proxy out_var source_stem language explicit_suffix)
         if(_write_proxy)
             file(WRITE "${_proxy}" "${_content}")
         endif()
+        # Retain the exact origin set and expected body from this producer.
+        # Configured Mesa may bind an original only after checking both; a
+        # hashed proxy filename or a parsed include comment is not provenance.
+        string(SHA256 _proxy_body_sha256 "${_content}")
+        set_property(GLOBAL PROPERTY "AROS_PORT_SOURCE_CANDIDATES_${_proxy_key}" "${_candidates}")
+        set_property(GLOBAL PROPERTY "AROS_PORT_SOURCE_BODY_${_proxy_key}" "${_proxy_body_sha256}")
         set_property(GLOBAL PROPERTY
             "AROS_PORT_SOURCE_PROXY_${_source_hash}" TRUE)
     endif()
@@ -4392,6 +4407,9 @@ function(_aros_generate_module_support out_prefix)
         MODTYPE "${GM_MODTYPE}"
         GEN_DIR "${_gen_dir}"
         STUB_DIR "${_stub_dir}")
+    _aros_register_genmodule_sources("${GM_MMAKE_ID}" "${_module_dir}"
+        "${_conf}" "${_override}" "${_gen_dir}" "${_stub_dir}"
+        ${_manifest_ALL_OUTPUTS})
 
     set(_include_rel
         "clib/${_manifest_INCLUDE_NAME}_protos.h"

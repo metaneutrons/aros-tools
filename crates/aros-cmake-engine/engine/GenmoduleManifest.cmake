@@ -453,7 +453,13 @@ function(aros_genmodule_writefiles_manifest prefix)
         list(APPEND _linklib_defines "__${_rellib_upper}_RELLIBBASE__")
     endforeach()
     if(_rellinklib)
-        string(TOUPPER "${GM_MODULE}" _module_upper)
+        # config.c constructs modulenameupper by replacing every non-alnum
+        # character before uppercasing. Versioned names such as mesa3dgl26-0
+        # therefore use MESA3DGL26_0, not an invalid '-' in the definition.
+        # Relative-library names above use writemakefile.c's different upname
+        # operation and must not receive this module-only normalization.
+        string(REGEX REPLACE "[^A-Za-z0-9]" "_" _module_upper "${GM_MODULE}")
+        string(TOUPPER "${_module_upper}" _module_upper)
         list(APPEND _runtime_defines "__${_module_upper}_NOLIBBASE__")
     endif()
 

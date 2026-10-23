@@ -1,0 +1,203 @@
+cmake_minimum_required(VERSION 3.24)
+get_filename_component(_engine "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+set(_root "${CMAKE_CURRENT_BINARY_DIR}/mesa source context")
+file(MAKE_DIRECTORY "${_root}/source/module")
+file(WRITE "${_root}/source/CMakeLists.txt" [=[
+cmake_minimum_required(VERSION 3.24)
+project(MesaSourceContext LANGUAGES C CXX)
+include("${ENGINE}/ConfiguredMesaSources.cmake")
+if(COMMAND _aros_mesa_source_compile_contract)
+    message(FATAL_ERROR "test-only Mesa compile helper leaked into productive module")
+endif()
+include("${ENGINE}/tests/support/ConfiguredMesaSourceCompileContract.cmake")
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(AROS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+set(AROS_BUILD_DIR "${CMAKE_BINARY_DIR}")
+file(MAKE_DIRECTORY "${AROS_BUILD_DIR}/module" "${AROS_BUILD_DIR}/Ports/mesa/src")
+file(WRITE "${AROS_BUILD_DIR}/module/context.h" "#define CONTEXT_ROOT 1\n")
+file(WRITE "${AROS_SOURCE_DIR}/module/context.h" "#define CONTEXT_ROOT 2\n")
+set(_content [==[
+#ifdef EXPECT_CONTRACT
+#include "context.h"
+#if CONTEXT_ROOT != 1 || ORDER != 2
+#error Make quote order or language option order changed
+#endif
+#ifdef __cplusplus
+static_assert(__builtin_strcmp(__SRCFILENAME__, EXPECT_ID) == 0, "logical filename mismatch");
+#else
+_Static_assert(__builtin_strcmp(__SRCFILENAME__, EXPECT_ID) == 0, "logical filename mismatch");
+#endif
+#else
+#if defined(__SRCFILENAME__) || defined(ORDER)
+#error source contract leaked into ordinary target
+#endif
+#endif
+int probe;
+]==])
+set(_c "${AROS_BUILD_DIR}/Ports/mesa/src/original.c")
+set(_xx "${AROS_BUILD_DIR}/Ports/mesa/src/original.cpp")
+file(WRITE "${_c}" "${_content}")
+file(WRITE "${_xx}" "${_content}")
+set(_proxy "${AROS_BUILD_DIR}/proxy.c")
+set(_proxyxx "${AROS_BUILD_DIR}/proxy.cpp")
+file(WRITE "${_proxy}" "#include \"${_c}\"\n")
+file(WRITE "${_proxyxx}" "#include \"${_xx}\"\n")
+add_library(configured OBJECT "${_proxy}" "${_proxyxx}")
+add_library(ordinary OBJECT "${_proxy}" "${_proxyxx}")
+set(_directory "${AROS_SOURCE_DIR}/module")
+set(_quote_extra "${AROS_BUILD_DIR}/module")
+if(CASE STREQUAL "module-parent")
+    set(_quote_extra "${AROS_BUILD_DIR}")
+    file(WRITE "${AROS_BUILD_DIR}/context.h" "#define CONTEXT_ROOT 1\n")
+    file(WRITE "${AROS_BUILD_DIR}/module/context.h" "#define CONTEXT_ROOT 2\n")
+endif()
+set(_make_source "${AROS_SOURCE_DIR}")
+set(_make_build "${AROS_BUILD_DIR}")
+set(_make_c "${_c}")
+set(_make_xx "${_xx}")
+if(CASE STREQUAL "relocated")
+    set(_make_source "/nominal/source")
+    set(_make_build "/nominal/private-configure")
+    set(_make_c "${_make_build}/Ports/mesa/src/original.c")
+    set(_make_xx "${_make_build}/Ports/mesa/src/original.cpp")
+elseif(CASE STREQUAL "nested")
+    set(_make_source "/nominal/source")
+    set(_make_build "${_make_source}/build")
+    set(_make_c "${_make_build}/Ports/mesa/src/original.c")
+    set(_make_xx "${_make_build}/Ports/mesa/src/original.cpp")
+endif()
+if(CASE STREQUAL "wrong-order")
+    # Same source and contract, but the first available context root now has
+    # the deliberately wrong value. Compilation must observe the difference.
+    file(WRITE "${AROS_BUILD_DIR}/module/context.h" "#define CONTEXT_ROOT 2\n")
+elseif(CASE STREQUAL "wrong-filename")
+    set(_make_c "${_proxy}")
+elseif(CASE STREQUAL "wrong-owner")
+    set(_proxy "${AROS_BUILD_DIR}/not-owned.c")
+elseif(CASE STREQUAL "nonnormal")
+    set(_proxy "${AROS_BUILD_DIR}/../not-normal.c")
+elseif(CASE STREQUAL "outside-declaration")
+    set(_directory "${AROS_BUILD_DIR}")
+endif()
+if(CASE STREQUAL "wrong-language")
+    _aros_mesa_source_compile_contract(configured "${_proxy}" "${_c}" "${_directory}" CXX
+        "${_make_c}" "${_make_source}" "${_make_build}" "${_quote_extra}" -DOTHER=1)
+elseif(CASE STREQUAL "unsafe-option")
+    _aros_mesa_source_compile_contract(configured "${_proxy}" "${_c}" "${_directory}" C
+        "${_make_c}" "${_make_source}" "${_make_build}" "${_quote_extra}" "-DUNSAFE=1;other")
+elseif(CASE STREQUAL "missing-options")
+    _aros_mesa_source_compile_contract(configured "${_proxy}" "${_c}" "${_directory}" C
+        "${_make_c}" "${_make_source}" "${_make_build}" "${_quote_extra}")
+elseif(CASE STREQUAL "existing-options")
+    set_source_files_properties("${_proxy}" PROPERTIES COMPILE_OPTIONS "-DUNMEASURED=1")
+elseif(CASE STREQUAL "target-options")
+    target_compile_options(configured PRIVATE "-iquote${AROS_SOURCE_DIR}/module")
+endif()
+set(_expected_prefix "")
+if(CASE STREQUAL "nested")
+    set(_expected_prefix "build/")
+endif()
+_aros_mesa_source_compile_contract(configured "${_proxy}" "${_c}" "${_directory}" C
+    "${_make_c}" "${_make_source}" "${_make_build}" "${_quote_extra}"
+    -DEXPECT_CONTRACT=1 "-DEXPECT_ID=\"${_expected_prefix}Ports/mesa/src/original.c\""
+    -DORDER=1 -UORDER -DORDER=2 -DORDER=2)
+_aros_mesa_source_compile_contract(configured "${_proxyxx}" "${_xx}" "${_directory}" CXX
+    "${_make_xx}" "${_make_source}" "${_make_build}" "${_quote_extra}"
+    -DEXPECT_CONTRACT=1 "-DEXPECT_ID=\"${_expected_prefix}Ports/mesa/src/original.cpp\""
+    -DORDER=1 -UORDER -DORDER=2 -DORDER=2)
+if(CASE STREQUAL "second-configured" OR CASE STREQUAL "removed-owned")
+    add_library(other-configured OBJECT "${_proxy}" "${_proxyxx}")
+    if(CASE STREQUAL "removed-owned")
+        set_property(SOURCE "${_proxy}" PROPERTY COMPILE_OPTIONS)
+    endif()
+    _aros_mesa_source_compile_contract(other-configured "${_proxy}" "${_c}" "${_directory}" C
+        "${_make_c}" "${_make_source}" "${_make_build}" "${_quote_extra}"
+        -DEXPECT_CONTRACT=1 "-DEXPECT_ID=\"Ports/mesa/src/original.c\""
+        -DORDER=1 -UORDER -DORDER=2 -DORDER=2)
+    _aros_mesa_source_compile_contract(other-configured "${_proxyxx}" "${_xx}" "${_directory}" CXX
+        "${_make_xx}" "${_make_source}" "${_make_build}" "${_quote_extra}"
+        -DEXPECT_CONTRACT=1 "-DEXPECT_ID=\"Ports/mesa/src/original.cpp\""
+        -DORDER=1 -UORDER -DORDER=2 -DORDER=2)
+endif()
+if(CASE STREQUAL "duplicate")
+    _aros_mesa_source_compile_contract(configured "${_proxy}" "${_c}" "${_directory}" C
+        "${_make_c}" "${_make_source}" "${_make_build}" "${_quote_extra}" -DOTHER=1)
+endif()
+]=])
+foreach(_case IN ITEMS good relocated nested second-configured module-parent wrong-order wrong-filename wrong-owner duplicate
+        nonnormal outside-declaration wrong-language unsafe-option missing-options existing-options target-options removed-owned)
+    set(_build "${_root}/build-${_case}")
+    execute_process(COMMAND "${CMAKE_COMMAND}" -S "${_root}/source" -B "${_build}"
+        -G Ninja "-DENGINE=${_engine}" "-DCASE=${_case}"
+        RESULT_VARIABLE _configure OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+    set(_refusal "")
+    if(_case STREQUAL "wrong-owner")
+        set(_refusal "source is not owned by target")
+    elseif(_case STREQUAL "duplicate")
+        set(_refusal "cannot be applied twice")
+    elseif(_case STREQUAL "nonnormal")
+        set(_refusal "rejects nonnormalized paths")
+    elseif(_case STREQUAL "outside-declaration")
+        set(_refusal "declaration leaves the selected source")
+    elseif(_case STREQUAL "wrong-language")
+        set(_refusal "language differs from the actual source")
+    elseif(_case STREQUAL "unsafe-option")
+        set(_refusal "contains an unsafe option")
+    elseif(_case STREQUAL "missing-options")
+        set(_refusal "requires complete language options")
+    elseif(_case STREQUAL "existing-options")
+        set(_refusal "rejects unmeasured existing source options")
+    elseif(_case STREQUAL "target-options")
+        set(_refusal "rejects preceding target options")
+    elseif(_case STREQUAL "removed-owned")
+        set(_refusal "detects removed owned source options")
+    endif()
+    if(_refusal)
+        if(_configure EQUAL 0 OR NOT "${_out}${_err}" MATCHES "${_refusal}")
+            message(FATAL_ERROR "${_case} did not refuse at its source contract: ${_out}${_err}")
+        endif()
+        continue()
+    endif()
+    if(NOT _configure EQUAL 0)
+        message(FATAL_ERROR "${_case} configure failed: ${_out}${_err}")
+    endif()
+    execute_process(COMMAND "${CMAKE_COMMAND}" --build "${_build}" --parallel 1
+        RESULT_VARIABLE _result OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+    if(_case MATCHES "^(good|relocated|nested|second-configured|module-parent)$")
+        if(NOT _result EQUAL 0)
+            message(FATAL_ERROR "source-context compile failed: ${_out}${_err}")
+        endif()
+        file(READ "${_build}/compile_commands.json" _commands)
+        string(JSON _count LENGTH "${_commands}")
+        set(_expected_count 4)
+        if(_case STREQUAL "second-configured")
+            set(_expected_count 6)
+        endif()
+        if(NOT _count EQUAL _expected_count)
+            message(FATAL_ERROR "expected both languages and ordinary-target counters")
+        endif()
+        math(EXPR _last_command "${_count} - 1")
+        foreach(_i RANGE 0 ${_last_command})
+            string(JSON _command GET "${_commands}" ${_i} command)
+            if(_command MATCHES "EXPECT_CONTRACT")
+                if(NOT _command MATCHES "-DORDER=1 -UORDER -DORDER=2 -DORDER=2")
+                    message(FATAL_ERROR "source argv lost duplicates/order: ${_command}")
+                endif()
+                string(FIND "${_command}" "-iquote" _quote)
+                string(FIND "${_command}" "-DEXPECT_CONTRACT" _flags)
+                string(FIND "${_command}" "-D__SRCFILENAME__" _filename)
+                if(_quote LESS 0 OR _flags LESS _quote OR _filename LESS _flags)
+                    message(FATAL_ERROR "source argv ordering changed: ${_command}")
+                endif()
+            elseif(_command MATCHES "__SRCFILENAME__|ORDER=|iquote")
+                message(FATAL_ERROR "source options leaked to ordinary target: ${_command}")
+            endif()
+        endforeach()
+    elseif(_result EQUAL 0)
+        message(FATAL_ERROR "${_case} compiler counter incorrectly passed")
+    elseif(_case STREQUAL "wrong-order" AND NOT "${_out}${_err}" MATCHES "Make quote order")
+        message(FATAL_ERROR "quote-order counter failed for an unrelated reason: ${_out}${_err}")
+    elseif(_case STREQUAL "wrong-filename" AND NOT "${_out}${_err}" MATCHES "logical filename mismatch")
+        message(FATAL_ERROR "filename counter failed for an unrelated reason: ${_out}${_err}")
+    endif()
+endforeach()
