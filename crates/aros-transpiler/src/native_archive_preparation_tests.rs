@@ -94,11 +94,19 @@ fn fixture_with_wrappers(
     let projection = NativeOwnerProjection {
         sealed_configuration_inputs: BTreeMap::new(),
         architecture_context: TargetContext::default(),
+        optional_meta_dependencies: Vec::new(),
         metamake_globals: BTreeMap::new(),
+        runtime_configuration: None,
         graph: source_graph,
         expansion_origins: BTreeMap::new(),
+        expanded_program_sha256: BTreeMap::new(),
         architecture_hook_families: BTreeSet::new(),
+        mesa26_original_producers: Vec::new(),
         owners,
+        discovery_original_inputs: discovered_inputs
+            .iter()
+            .map(|name| (name.clone(), name.clone()))
+            .collect(),
         discovered_inputs,
         ignored_directories: BTreeSet::new(),
         excluded_paths: BTreeSet::new(),

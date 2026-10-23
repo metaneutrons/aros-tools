@@ -150,6 +150,45 @@ fn install_native_metamake_projection(fixture: &mut Fixture, recipe_inputs: &[&s
     install_native_metamake_projection_with_linklib_metadata(fixture, recipe_inputs, true);
 }
 
+#[test]
+#[cfg(unix)]
+fn native_discovery_retains_directory_alias_owners_at_process_boundary() {
+    let mut fixture = Fixture::new();
+    fixture.append("#MM- fixture-kernel : alias-probe\n");
+    fs::create_dir(fixture.root.path().join("physical")).unwrap();
+    fs::write(
+        fixture.root.path().join("physical/mmakefile.src"),
+        "#MM alias-probe :\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("physical", fixture.root.path().join("alias")).unwrap();
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src", "physical/mmakefile.src"]);
+    let report_path = fixture.root.path().join("alias-audit.json");
+    let result = fixture.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            report_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    let owners = report["native_owner_projection"]["selected_source_files"]
+        .as_array()
+        .unwrap();
+    for path in ["alias/mmakefile.src", "physical/mmakefile.src"] {
+        assert!(
+            owners.iter().any(|owner| owner.as_str() == Some(path)),
+            "{report}"
+        );
+    }
+}
+
 fn install_native_metamake_projection_with_linklib_metadata(
     fixture: &mut Fixture,
     recipe_inputs: &[&str],
@@ -495,11 +534,12 @@ fn diagnostic_graph_audit_collects_siblings_without_publishing_or_qualifying() {
 }
 
 #[test]
-fn diagnostic_graph_audit_cannot_replace_the_graph_or_coverage_sidecar() {
+fn diagnostic_graph_audit_cannot_replace_protected_graph_outputs() {
     let fixture = Fixture::new();
     let graph = fixture.root.path().join("protected.json");
     let coverage = graph.with_extension("coverage.json");
-    for path in [&graph, &coverage] {
+    let mesa_binding = graph.with_extension("mesa-configuration-binding.json");
+    for path in [&graph, &coverage, &mesa_binding] {
         fs::write(path, "existing artifact\n").unwrap();
         let result = fixture.invoke_at(
             true,

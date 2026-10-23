@@ -13,6 +13,11 @@ use crate::make_vars::ConditionalTruth;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+mod native_tuple;
+pub use native_tuple::validate_native_writefiles_tuple;
+mod native_makefile_tuple;
+pub use native_makefile_tuple::validate_native_makefile_tuple;
+
 const STAMP: &str = "$(GENDIR)/$(CURDIR)/.stubs-generated";
 const MODULE_DIRECTORY: &str = "$(GENDIR)/$(CURDIR)";
 

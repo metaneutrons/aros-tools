@@ -97,6 +97,296 @@ fn invoke(fixture: &Fixture, cpu: &str, extra: &[&str]) -> Output {
         .unwrap()
 }
 
+fn genmodule_inventory_fixture() -> Fixture {
+    let mut fixture = fixture("arm");
+    let profiles = fixture.root.path().join("aros-targets.toml");
+    let profile_text = fs::read_to_string(&profiles)
+        .unwrap()
+        .replace("platform = \"fixture\"", "platform = \"raspi\"")
+        .replace(
+            "use_mmu = true",
+            "use_mmu = true\nmesa_version = \"26.0.0\"",
+        );
+    fs::write(&profiles, profile_text).unwrap();
+    let mut context = fixture_native_selector_context();
+    context.cpu = Some("arm".into());
+    context.platform = Some("raspi".into());
+    context.toolchain = Some("llvm".into());
+    context.use_mmu = Some("1".into());
+    context.float_abi = Some("hard".into());
+    context.mesa_version = Some("26.0.0".into());
+    let globals = fixture_native_selector_globals(&context);
+    fs::write(fixture.root.path().join("meta/globals.snapshot"), &globals).unwrap();
+    let policy_path = fixture.root.path().join("meta/policy.json");
+    let mut policy: Value = serde_json::from_slice(&fs::read(&policy_path).unwrap()).unwrap();
+    policy["global_snapshots"][0]["text"] = json!(globals);
+    fs::write(&policy_path, serde_json::to_vec_pretty(&policy).unwrap()).unwrap();
+    for path in [
+        "aros-targets.toml",
+        "meta/globals.snapshot",
+        "meta/policy.json",
+    ] {
+        rebind_native_fixture_input(&mut fixture, path);
+    }
+    fixture.write_contract();
+    fixture
+}
+
+fn invoke_genmodule_inventory(fixture: &Fixture) -> Output {
+    invoke_genmodule_selection(fixture, true)
+}
+
+fn invoke_genmodule_selection(fixture: &Fixture, inventory_only: bool) -> Output {
+    invoke_genmodule_scope(fixture, inventory_only, false)
+}
+
+fn invoke_genmodule_scope(fixture: &Fixture, inventory_only: bool, full: bool) -> Output {
+    invoke_genmodule_scope_args(fixture, inventory_only, full, &[])
+}
+
+fn invoke_genmodule_scope_args(
+    fixture: &Fixture,
+    inventory_only: bool,
+    full: bool,
+    extra: &[&str],
+) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_aros-transpiler"))
+        .arg("--source-dir")
+        .arg(fixture.root.path())
+        .arg("--output")
+        .arg(fixture.output())
+        .args([
+            if full {
+                "--mesa-genmodule-full-inventory-profile"
+            } else {
+                "--native-consumer-profile"
+            },
+            "fixture-native",
+            "--cpu",
+            "arm",
+            "--platform",
+            "raspi",
+            "--family",
+            "",
+            "--variant",
+            "",
+            "--toolchain",
+            "llvm",
+            "--cpu32",
+            "",
+            "--use-mmu",
+            "1",
+            "--float-abi",
+            "hard",
+            "--mesa-version",
+            "26.0.0",
+        ])
+        .args(inventory_only.then_some("--mesa-genmodule-inventory-only"))
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn genmodule_full_scope_rejects_direct_unowned_port_inputs() {
+    let mut fixture = genmodule_inventory_fixture();
+    let initial = invoke_genmodule_scope(&fixture, true, true);
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let retained = fs::read(fixture.output()).unwrap();
+    fixture.append("USER_INCLUDES := -I$(PORTSDIR)/unowned-direct\n%build_linklib mmake=direct-port-consumer libname=direct files=probe\n");
+    rebind_native_fixture_input(&mut fixture, "mmakefile.src");
+    fixture.write_contract();
+    let rejected = invoke_genmodule_scope(&fixture, true, true);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("full-target source input has no owning %fetch declaration"),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("unowned-direct"));
+    assert_eq!(fs::read(fixture.output()).unwrap(), retained);
+}
+
+#[test]
+fn genmodule_full_scope_is_explicit_and_does_not_adopt_sdk_roots() {
+    let mut fixture = genmodule_inventory_fixture();
+    // A full-target pass binds configuration, not SDK reachability. Deliberate
+    // absent roots distinguish it from the selected-contract pass.
+    fixture.contract["roots"] = json!(["absent-sdk-root"]);
+    fixture.write_contract();
+    let selected = invoke_genmodule_inventory(&fixture);
+    assert!(!selected.status.success());
+    assert!(String::from_utf8_lossy(&selected.stderr).contains("absent-sdk-root"));
+    assert!(!fixture.output().exists());
+
+    let full = invoke_genmodule_scope(&fixture, true, true);
+    assert!(
+        full.status.success(),
+        "{}",
+        String::from_utf8_lossy(&full.stderr)
+    );
+    let retained = fs::read(fixture.output()).unwrap();
+    let document: Value = serde_json::from_slice(&retained).unwrap();
+    assert_eq!(document["selection"]["scope"], "full-target");
+    assert_eq!(document["selection"]["kind"], "sdk-consumer");
+    assert_eq!(document["selection"]["profile"], "fixture-native");
+    assert!(!fixture
+        .output()
+        .with_extension("native-invocation.json")
+        .exists());
+    assert!(!fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .exists());
+    let wrong_digest = "0".repeat(64);
+    let rejected = invoke_genmodule_scope_args(
+        &fixture,
+        true,
+        true,
+        &["--mesa-genmodule-full-contract-sha256", &wrong_digest],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("digest differs from the caller binding"));
+    assert_eq!(fs::read(fixture.output()).unwrap(), retained);
+    fs::write(
+        fixture.root.path().join("probe.c"),
+        "changed sealed source\n",
+    )
+    .unwrap();
+    let changed = invoke_genmodule_scope(&fixture, true, true);
+    assert!(!changed.status.success());
+    assert!(
+        String::from_utf8_lossy(&changed.stderr).contains("measured source input digest differs")
+    );
+    assert_eq!(fs::read(fixture.output()).unwrap(), retained);
+}
+
+#[test]
+fn genmodule_inventory_keeps_pending_sources_data_only_and_requires_fetch_ownership() {
+    let mut fixture = genmodule_inventory_fixture();
+    fixture.append("\
+%fetch mmake=pending-fetch archive=probe-1 destination=$(PORTSDIR)/probe location=$(PORTSSOURCEDIR) archive_origins=https://example.invalid suffixes=tar.gz\n\
+SOURCES := $(wildcard $(PORTSDIR)/probe/probe-1/lib/*.c)\n\
+%build_linklib mmake=pending-lib libname=probe files=\"$(SOURCES:.c=)\"\n\
+#MM- fixture-helper : pending-lib\n");
+    rebind_native_fixture_input(&mut fixture, "mmakefile.src");
+    fixture.write_contract();
+    let result = invoke_genmodule_inventory(&fixture);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let retained = fs::read(fixture.output()).unwrap();
+    let document: Value = serde_json::from_slice(&retained).unwrap();
+    assert!(document["inventory"]["records"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(!fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .exists());
+    assert!(!fixture
+        .output()
+        .with_extension("native-invocation.json")
+        .exists());
+
+    // Data-only export is not permission to emit a partial compilation graph.
+    let result = invoke_genmodule_selection(&fixture, false);
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("selected dependency pending-lib has no proven endpoint"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read(fixture.output()).unwrap(), retained);
+
+    fixture.append(
+        "\
+UNOWNED := $(wildcard $(PORTSDIR)/unowned/*.c)\n\
+%build_linklib mmake=unowned-lib libname=unowned files=\"$(UNOWNED:.c=)\"\n\
+#MM- fixture-helper : unowned-lib\n",
+    );
+    rebind_native_fixture_input(&mut fixture, "mmakefile.src");
+    fixture.write_contract();
+    let result = invoke_genmodule_inventory(&fixture);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("no owning %fetch declaration"));
+    assert_eq!(fs::read(fixture.output()).unwrap(), retained);
+    let full = invoke_genmodule_scope(&fixture, true, true);
+    assert!(!full.status.success());
+    assert!(String::from_utf8_lossy(&full.stderr).contains("no owning %fetch declaration"));
+    assert_eq!(fs::read(fixture.output()).unwrap(), retained);
+}
+
+#[test]
+fn genmodule_inventory_is_selected_data_only_and_preserves_output_on_source_drift() {
+    let fixture = genmodule_inventory_fixture();
+    let old_report = fixture.output().with_extension("skipped-flags.txt");
+    fs::write(&old_report, "prior report retained\n").unwrap();
+    let result = invoke_genmodule_inventory(&fixture);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let retained = fs::read(fixture.output()).unwrap();
+    let document: Value = serde_json::from_slice(&retained).unwrap();
+    assert_eq!(document["schema"], "aros-mesa-genmodule-selection-v1");
+    assert_eq!(document["selection"]["profile"], "fixture-native");
+    assert_eq!(document["selection"]["kind"], "sdk-consumer");
+    assert_eq!(document["selection"]["scope"], "contract-roots");
+    assert_eq!(
+        document["selection"]["contract_sha256"],
+        json!(aros_common::sha256_bytes(
+            &fs::read(fixture.root.path().join("native.json")).unwrap()
+        ))
+    );
+    // This selected graph has only an ordinary linklib. Empty module data is
+    // truthful; it must not acquire an invented default MesaGL declaration.
+    assert!(document["inventory"]["records"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    for extension in [
+        "native-invocation.json",
+        "source-inventory.cmake",
+        "coverage.json",
+    ] {
+        assert!(
+            !fixture.output().with_extension(extension).exists(),
+            "{extension}"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&old_report).unwrap(),
+        "prior report retained\n"
+    );
+    fs::write(
+        fixture.root.path().join("probe.c"),
+        "changed sealed input\n",
+    )
+    .unwrap();
+    let result = invoke_genmodule_inventory(&fixture);
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("measured source input digest differs")
+    );
+    assert_eq!(fs::read(fixture.output()).unwrap(), retained);
+    assert_eq!(
+        fs::read_to_string(&old_report).unwrap(),
+        "prior report retained\n"
+    );
+}
+
 #[test]
 fn generic_sdk_cli_selects_and_exports_three_llvm_graphs_without_boot_authority() {
     for cpu in ["x86_64", "arm", "aarch64"] {

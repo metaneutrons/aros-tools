@@ -363,6 +363,7 @@ pub fn load_native_selection(
         .native_profile
         .as_ref()
         .or(args.native_consumer_profile.as_ref())
+        .or(args.mesa_genmodule_full_inventory_profile.as_ref())
     else {
         return Ok(None);
     };
@@ -384,7 +385,14 @@ pub fn load_native_selection(
         .iter()
         .find(|profile| &profile.name == name)
         .ok_or_else(|| invalid("native profile is not declared by the selected source"))?;
-    let (loaded, expected) = if args.native_consumer_profile.is_some() {
+    let (loaded, expected) = if args.native_consumer_profile.is_some()
+        || args.mesa_genmodule_full_inventory_profile.is_some()
+    {
+        let expected = if args.mesa_genmodule_full_inventory_profile.is_some() {
+            &args.mesa_genmodule_full_contract_sha256
+        } else {
+            &args.native_consumer_contract_sha256
+        };
         match (
             profile.native_consumer_contract.as_deref(),
             profile.sdk_consumer_contract.as_deref(),
@@ -397,7 +405,7 @@ pub fn load_native_selection(
                         profile,
                     )?,
                 )),
-                &args.native_consumer_contract_sha256,
+                expected,
             ),
             (None, Some(relative)) => (
                 LoadedNativeSelection::SdkConsumer(Box::new(
@@ -407,7 +415,7 @@ pub fn load_native_selection(
                         profile,
                     )?,
                 )),
-                &args.native_consumer_contract_sha256,
+                expected,
             ),
             _ => {
                 return Err(invalid(
@@ -431,6 +439,13 @@ pub fn load_native_selection(
             &args.native_contract_sha256,
         )
     };
+    if args.mesa_genmodule_full_inventory_profile.is_some()
+        && !matches!(&loaded, LoadedNativeSelection::SdkConsumer(_))
+    {
+        return Err(invalid(
+            "full-target Mesa inventory requires a source SDK configuration contract",
+        ));
+    }
     if expected
         .as_ref()
         .is_some_and(|digest| digest != loaded.sha256().as_str())

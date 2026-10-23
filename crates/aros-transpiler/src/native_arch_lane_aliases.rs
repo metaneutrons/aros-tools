@@ -793,11 +793,19 @@ mod tests {
         .unwrap();
         let projection = NativeOwnerProjection {
             architecture_context: context.clone(),
+            optional_meta_dependencies: Vec::new(),
             metamake_globals: BTreeMap::new(),
+            runtime_configuration: None,
             graph,
             expansion_origins,
+            expanded_program_sha256: BTreeMap::new(),
             architecture_hook_families: BTreeSet::new(),
+            mesa26_original_producers: Vec::new(),
             owners,
+            discovery_original_inputs: discovered_inputs
+                .iter()
+                .map(|name| (name.clone(), name.clone()))
+                .collect(),
             discovered_inputs,
             ignored_directories: BTreeSet::new(),
             excluded_paths: BTreeSet::new(),

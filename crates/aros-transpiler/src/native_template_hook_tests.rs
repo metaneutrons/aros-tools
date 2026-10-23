@@ -155,6 +155,339 @@ fn standard_template() -> String {
 // full blocks (rather than test-only fingerprints) exercises production proof.
 const EMPTY_LIBRARY_TEMPLATE: &str = include_str!("../tests/fixtures/empty_library_lists.tmpl");
 
+fn quick_metadata_fixture(families: &[&str], extra: &str) -> Fixture {
+    let template = format!("{GEN_ARCHSPECIFICRULES}{EMPTY_LIBRARY_TEMPLATE}");
+    let source = format!(
+        "%build_module_library mmake=kernel-example modname=example modtype=library\n{extra}"
+    );
+    fixture_from_text(families, &source, &template)
+}
+
+#[test]
+fn source_metadata_quick_omission_requires_the_full_module_template_chain() {
+    let fixture = quick_metadata_fixture(&["quick"], "");
+    let root = "kernel-example-esp32p4-riscv-quick".to_owned();
+    let dependency = "kernel-example-esp32p4-riscv--quick";
+    assert!(fixture
+        .projection
+        .select(std::slice::from_ref(&root))
+        .unwrap()
+        .missing_endpoints
+        .contains(dependency));
+    let selected = fixture
+        .projection
+        .select_source_metadata(fixture.root.path(), std::slice::from_ref(&root))
+        .unwrap();
+    assert!(selected.selection().missing_endpoints.is_empty());
+    assert_eq!(selected.omissions().len(), 1);
+    assert_eq!(selected.omissions()[0].dependency, dependency);
+    let proof = selected.omissions()[0].proofs.iter().next().unwrap();
+    assert_eq!(proof.family, "quick");
+    assert_eq!(proof.recipe, RECIPE);
+
+    // Unknown requested roots cannot borrow prerequisite-only tolerance.
+    let requested = fixture
+        .projection
+        .select_source_metadata(fixture.root.path(), &[root, dependency.to_owned()])
+        .unwrap();
+    assert!(requested.selection().missing_endpoints.contains(dependency));
+    assert!(requested.omissions().is_empty());
+}
+
+#[test]
+fn source_metadata_quick_omission_is_opt_in_and_handwritten_collisions_veto_it() {
+    let root = "kernel-example-esp32p4-riscv-quick".to_owned();
+    let dependency = "kernel-example-esp32p4-riscv--quick";
+    for extra in [
+        "",
+        "#MM- kernel-example-esp32p4-riscv-quick : kernel-example-esp32p4-riscv--quick\n",
+        "#MM kernel-example-esp32p4-riscv-quick\n",
+    ] {
+        let families: &[&str] = if extra.is_empty() {
+            &["module"]
+        } else {
+            &["quick"]
+        };
+        let fixture = quick_metadata_fixture(families, extra);
+        let selected = fixture
+            .projection
+            .select_source_metadata(fixture.root.path(), std::slice::from_ref(&root))
+            .unwrap();
+        assert!(
+            selected.selection().missing_endpoints.contains(dependency),
+            "{extra}"
+        );
+        assert!(selected.omissions().is_empty(), "{extra}");
+    }
+}
+
+#[test]
+fn source_metadata_quick_cannot_erase_a_real_endpoint_or_a_foreign_incoming_edge() {
+    let root = "kernel-example-esp32p4-riscv-quick".to_owned();
+    let dependency = "kernel-example-esp32p4-riscv--quick";
+    let fixture = quick_metadata_fixture(&["quick"], "#MM kernel-example-esp32p4-riscv--quick\n");
+    let selected = fixture
+        .projection
+        .select_source_metadata(fixture.root.path(), std::slice::from_ref(&root))
+        .unwrap();
+    assert!(selected.selection().missing_endpoints.is_empty());
+    assert!(selected.omissions().is_empty());
+    assert!(selected.selection().selected_owner_targets[OWNER].contains(dependency));
+
+    let fixture = quick_metadata_fixture(
+        &["quick"],
+        "#MM- unrelated : kernel-example-esp32p4-riscv--quick\n",
+    );
+    let selected = fixture
+        .projection
+        .select_source_metadata(fixture.root.path(), &[root, "unrelated".to_owned()])
+        .unwrap();
+    assert!(selected.selection().missing_endpoints.contains(dependency));
+    assert!(selected.omissions().is_empty());
+}
+
+#[test]
+fn source_metadata_quick_rejects_unreviewed_core_and_nonmodule_callers() {
+    let root = "kernel-example-esp32p4-riscv-quick".to_owned();
+    let dependency = "kernel-example-esp32p4-riscv--quick";
+    for caller in ["build_module", "build_linklib", "build_prog", "build_progs"] {
+        let fixture = direct_caller_fixture(&["quick"], caller, "kernel-example", "-quick");
+        let selected = fixture
+            .projection
+            .select_source_metadata(fixture.root.path(), std::slice::from_ref(&root))
+            .unwrap();
+        assert!(
+            selected.selection().missing_endpoints.contains(dependency),
+            "{caller}"
+        );
+        assert!(selected.omissions().is_empty(), "{caller}");
+    }
+    let changed = EMPTY_LIBRARY_TEMPLATE.replacen(
+        "# Define metamake targets and their dependencies",
+        "# Unreviewed body revision\n# Define metamake targets and their dependencies",
+        1,
+    );
+    assert_ne!(changed, EMPTY_LIBRARY_TEMPLATE);
+    let fixture = fixture_from_text(
+        &["quick"],
+        "%build_module_library mmake=kernel-example modname=example modtype=library\n",
+        &format!("{GEN_ARCHSPECIFICRULES}{changed}"),
+    );
+    assert!(fixture
+        .projection
+        .select_source_metadata(fixture.root.path(), &[root])
+        .unwrap_err()
+        .contains("supported semantics"));
+}
+
+fn source_arch_metadata_fixture(extra_source: &str, arch_tag: Option<&str>) -> Fixture {
+    let effect = arch_tag.map_or_else(String::new, |tag| {
+        format!(
+            "%set_archincludes mainmmake=demo maindir=rom/demo modname=demo pri=10 arch={tag} includes=\"-DFLAG=1\"\n"
+        )
+    });
+    let source = format!("%build_module mainmmake=demo\n{effect}{extra_source}");
+    let template = format!("{GEN_ARCHSPECIFICRULES}{BUILD_MODULE}{ARCH_FLAG_TEMPLATE}");
+    let mut fixture = fixture_from_text(&["set-archincludes"], &source, &template);
+    fixture.projection.architecture_context = fixture.context.clone();
+    fixture
+}
+
+#[test]
+fn source_metadata_selected_set_archincludes_effect_qualifies_only_its_physical_parent() {
+    let fixture = source_arch_metadata_fixture("", Some("esp32p4-riscv"));
+    let root = "demo-esp32p4-riscv-set-archincludes".to_owned();
+    let missing_variant = "demo-esp32p4-riscv--set-archincludes";
+    let selected = fixture
+        .projection
+        .select_source_metadata(fixture.root.path(), std::slice::from_ref(&root))
+        .unwrap();
+
+    assert_eq!(selected.architecture_effects().len(), 1);
+    let effect = &selected.architecture_effects()[0];
+    assert_eq!(effect.recipe, RECIPE);
+    assert_eq!(effect.endpoint, root);
+    assert!(matches!(
+        &effect.data,
+        crate::arch_endpoint_effects::ArchEndpointEffectData::SetArchIncludes { .. }
+    ));
+    assert!(!selected
+        .selection()
+        .missing_endpoints
+        .contains(missing_variant));
+    assert!(selected.omissions().iter().any(|omission| {
+        omission.dependency == missing_variant
+            && omission
+                .proofs
+                .iter()
+                .any(|proof| proof.family == "set-archincludes")
+    }));
+    assert!(selected
+        .selection()
+        .selected_owner_targets
+        .get(OWNER)
+        .is_some_and(|targets| targets.contains(&root)));
+}
+
+#[test]
+fn source_metadata_without_an_applicable_set_archincludes_effect_keeps_variant_missing() {
+    let root = "demo-esp32p4-riscv-set-archincludes".to_owned();
+    let missing_variant = "demo-esp32p4-riscv--set-archincludes";
+
+    let no_effect = source_arch_metadata_fixture(&format!("#MM {root}\n"), None);
+    let selected = no_effect
+        .projection
+        .select_source_metadata(no_effect.root.path(), std::slice::from_ref(&root))
+        .unwrap();
+    assert!(selected.architecture_effects().is_empty());
+    assert!(selected
+        .selection()
+        .missing_endpoints
+        .contains(missing_variant));
+    assert!(selected.omissions().is_empty());
+
+    let wrong_tag = source_arch_metadata_fixture(&format!("#MM {root}\n"), Some("other-arch"));
+    let selected = wrong_tag
+        .projection
+        .select_source_metadata(wrong_tag.root.path(), std::slice::from_ref(&root))
+        .unwrap();
+    assert!(selected.architecture_effects().is_empty());
+    assert!(selected
+        .selection()
+        .missing_endpoints
+        .contains(missing_variant));
+    assert!(selected.omissions().is_empty());
+}
+
+#[test]
+fn handwritten_colliding_set_archincludes_ingress_vetoes_the_variant_omission() {
+    let root = "demo-esp32p4-riscv-set-archincludes".to_owned();
+    let missing_variant = "demo-esp32p4-riscv--set-archincludes";
+    let handwritten = format!("#MM- {root} : {missing_variant}\n");
+    let fixture = source_arch_metadata_fixture(&handwritten, Some("esp32p4-riscv"));
+    let selected = fixture
+        .projection
+        .select_source_metadata(fixture.root.path(), std::slice::from_ref(&root))
+        .unwrap();
+
+    assert_eq!(selected.architecture_effects().len(), 1);
+    assert!(selected
+        .selection()
+        .missing_endpoints
+        .contains(missing_variant));
+    assert!(selected.omissions().is_empty());
+}
+
+#[test]
+fn source_metadata_set_archincludes_effect_rejects_source_drift() {
+    let fixture = source_arch_metadata_fixture("", Some("esp32p4-riscv"));
+    let root = "demo-esp32p4-riscv-set-archincludes".to_owned();
+    let source_path = fixture.root.path().join(RECIPE);
+    let changed = fs::read_to_string(&source_path)
+        .unwrap()
+        .replace("FLAG=1", "FLAG=2");
+    fs::write(source_path, changed).unwrap();
+
+    assert!(fixture
+        .projection
+        .select_source_metadata(fixture.root.path(), std::slice::from_ref(&root))
+        .is_err());
+}
+
+#[test]
+fn source_metadata_replays_architecture_effects_from_original_latin1_recipe_bytes() {
+    let mut fixture = source_arch_metadata_fixture("# Copyright ©\n", Some("esp32p4-riscv"));
+    let path = fixture.root.path().join(RECIPE);
+    let text = fs::read_to_string(&path).unwrap();
+    let bytes = text
+        .chars()
+        .map(|character| u8::try_from(u32::from(character)).unwrap())
+        .collect::<Vec<_>>();
+    assert!(String::from_utf8(bytes.clone()).is_err());
+    fs::write(path, &bytes).unwrap();
+    fixture
+        .projection
+        .snapshots
+        .insert(RECIPE.into(), aros_common::sha256_bytes(&bytes).to_string());
+    let selected = fixture
+        .projection
+        .select_source_metadata(
+            fixture.root.path(),
+            &["demo-esp32p4-riscv-set-archincludes".to_owned()],
+        )
+        .unwrap();
+    assert_eq!(selected.architecture_effects().len(), 1);
+    assert!(selected.architecture_rejections().is_empty());
+    assert!(selected.selection().missing_endpoints.is_empty());
+}
+
+#[test]
+fn source_metadata_does_not_borrow_an_unselected_effect_from_a_selected_recipe() {
+    let fixture = source_arch_metadata_fixture("#MM requested : absent\n", Some("esp32p4-riscv"));
+    let selected = fixture
+        .projection
+        .select_source_metadata(fixture.root.path(), &["requested".to_owned()])
+        .unwrap();
+    assert!(selected.selection().selected_source_files.contains(RECIPE));
+    assert!(selected.architecture_effects().is_empty());
+    assert!(selected.omissions().is_empty());
+    assert!(selected.selection().missing_endpoints.contains("absent"));
+}
+
+#[test]
+fn complete_child_coverage_omits_only_the_verified_quick_leaf() {
+    use aros_common::make_native_invocation::NativeMakeInvocation;
+    let fixture = quick_metadata_fixture(
+        &["quick"],
+        "#MM- selected : ready kernel-example-esp32p4-riscv-quick\n#MM ready\n",
+    );
+    let roots = ["selected".to_owned()];
+    let bound = fixture
+        .projection
+        .select_source_metadata(fixture.root.path(), &roots)
+        .unwrap();
+    assert_eq!(bound.omissions().len(), 1);
+    assert_eq!(
+        bound.selection().selected_owner_targets[OWNER],
+        BTreeSet::from(["ready".to_owned()])
+    );
+    let build = std::path::Path::new("/selected/build");
+    let child = NativeMakeInvocation::new(
+        ["--file=mmakefile".to_owned(), "ready".to_owned()],
+        build.join("fixture"),
+        [],
+    )
+    .unwrap();
+    let matched = fixture
+        .projection
+        .match_complete_child_coordinates(fixture.root.path(), &roots, build, &[(OWNER, &child)])
+        .unwrap();
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0].goals(), ["ready"]);
+    assert!(fixture
+        .projection
+        .match_complete_child_coordinates(fixture.root.path(), &roots, build, &[],)
+        .is_err());
+    let phantom = NativeMakeInvocation::new(
+        [
+            "--file=mmakefile".to_owned(),
+            "kernel-example-esp32p4-riscv--quick".to_owned(),
+        ],
+        build.join("fixture"),
+        [],
+    )
+    .unwrap();
+    assert!(fixture
+        .projection
+        .match_complete_child_coordinates(
+            fixture.root.path(),
+            &roots,
+            build,
+            &[(OWNER, &child), (OWNER, &phantom)],
+        )
+        .is_err());
+}
+
 fn empty_library_fixture(extra: &str, args: &str) -> Fixture {
     let source = format!(
         "%build_module mmake=kernel-example modname=example modtype=library {args}\n{extra}"
@@ -456,11 +789,16 @@ fn fixture_from_text(families: &[&str], source: &str, template: &str) -> Fixture
     let projection = NativeOwnerProjection {
         sealed_configuration_inputs: BTreeMap::new(),
         architecture_context: TargetContext::default(),
+        optional_meta_dependencies: Vec::new(),
         metamake_globals: std::collections::BTreeMap::new(),
+        runtime_configuration: None,
         graph,
         expansion_origins,
+        expanded_program_sha256: BTreeMap::new(),
         architecture_hook_families: families.iter().map(|family| (*family).to_owned()).collect(),
+        mesa26_original_producers: Vec::new(),
         owners: BTreeMap::from([(OWNER.to_owned(), RECIPE.to_owned())]),
+        discovery_original_inputs: BTreeMap::from([(RECIPE.to_owned(), RECIPE.to_owned())]),
         discovered_inputs: BTreeSet::from([RECIPE.to_owned()]),
         ignored_directories: BTreeSet::new(),
         excluded_paths: BTreeSet::new(),

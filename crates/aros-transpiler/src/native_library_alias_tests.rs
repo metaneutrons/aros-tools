@@ -295,11 +295,19 @@ fn make_fixture(
     let projection = NativeOwnerProjection {
         sealed_configuration_inputs: BTreeMap::new(),
         architecture_context: TargetContext::default(),
+        optional_meta_dependencies: Vec::new(),
         metamake_globals: std::collections::BTreeMap::new(),
+        runtime_configuration: None,
         graph,
         expansion_origins,
+        expanded_program_sha256: BTreeMap::new(),
         architecture_hook_families: BTreeSet::new(),
+        mesa26_original_producers: Vec::new(),
         owners,
+        discovery_original_inputs: discovered_inputs
+            .iter()
+            .map(|name| (name.clone(), name.clone()))
+            .collect(),
         discovered_inputs,
         ignored_directories: BTreeSet::new(),
         excluded_paths: BTreeSet::new(),
@@ -343,6 +351,8 @@ fn identity(
         module_macro,
         target_dir: None,
         linklib_name: None,
+        config_file: None,
+        config_override_file: None,
         genmodule_linklibs: None,
         config_relative_libraries: Vec::new(),
         canonical_linklib_output: false,

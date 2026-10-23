@@ -8,6 +8,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "metamake_regeneration.rs"]
+mod regeneration;
+pub use regeneration::MetaMakeRegenerationPlan;
+#[path = "metamake_discovery_capture.rs"]
+mod discovery_capture;
+#[path = "metamake_discovery_links.rs"]
+mod discovery_links;
+pub use discovery_capture::CapturedProjectDiscovery;
+#[path = "metamake_launcher.rs"]
+mod launcher;
+pub use launcher::MetaMakeLauncherConfiguration;
+#[cfg(test)]
+#[path = "metamake_global_paths_tests.rs"]
+mod global_paths_tests;
+
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const MAX_GLOBAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BINDINGS: usize = 16_384;
@@ -25,6 +40,8 @@ pub struct ConfiguredProject {
     pub top: Option<String>,
     pub default_makefile: String,
     pub default_target: String,
+    /// Bare names match directories at any depth; slash paths match exact
+    /// logical project-relative directories and their descendants.
     pub ignored_directories: BTreeSet<String>,
     pub added_makefiles: Vec<String>,
     pub global_variable_files: Vec<String>,
@@ -40,6 +57,25 @@ pub struct ConfiguredProject {
 }
 
 impl ConfiguredProject {
+    /// Parse one configured project while refusing any other explicit section.
+    /// This closed subset is useful when only that project's generated writes
+    /// and globals have been independently selected. It does not bind a Root
+    /// target to the project or authorize native execution.
+    ///
+    /// # Errors
+    /// Refuses ordinary parse failures or any additional configured project.
+    pub fn parse_only_project(text: &str, project: &str) -> Result<Self, String> {
+        let selected = Self::parse(text, project)?;
+        let expected = format!("[{project}]");
+        for (index, physical) in text.split_inclusive('\n').enumerate() {
+            let line = physical_line(physical, "single-project configuration", index + 1)?;
+            if line.starts_with('[') && line != expected {
+                return Err("MetaMake configuration contains another project".into());
+            }
+        }
+        Ok(selected)
+    }
+
     /// Parse one explicitly named project from configured input text.
     ///
     /// # Errors
@@ -118,7 +154,11 @@ impl ConfiguredProject {
                 "defaulttarget" => selected.default_target = value.into(),
                 "top" => selected.top = Some(value.into()),
                 "ignoredir" => {
-                    single_component(value)?;
+                    if value.contains('/') {
+                        relative_path(value)?;
+                    } else {
+                        single_component(value)?;
+                    }
                     selected.ignored_directories.insert(value.into());
                 }
                 "add" => {
@@ -171,6 +211,248 @@ pub struct ProjectGlobals {
     pub assignments: Vec<GlobalAssignment>,
 }
 
+/// Sequential global values needed only to resolve later global-file paths.
+///
+/// Unsupported values are omitted from `known` and remembered so a later
+/// assignment can restore them without allowing an implicit empty value.
+pub struct ProjectGlobalPathContext {
+    known: BTreeMap<String, String>,
+    unavailable: BTreeSet<String>,
+    input_bytes: usize,
+    work: usize,
+    retained: usize,
+    files: usize,
+    assignments: usize,
+    failed: bool,
+}
+
+impl std::fmt::Debug for ProjectGlobalPathContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProjectGlobalPathContext")
+            .field("known_bindings", &self.known.len())
+            .field("unavailable_bindings", &self.unavailable.len())
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProjectGlobalPathContext {
+    /// Start a bounded path-only projection from independently selected values.
+    /// This does not qualify a complete global/compile-option configuration.
+    ///
+    /// # Errors
+    /// Refuses unsupported bindings and retained input limits.
+    pub fn new(initial: &BTreeMap<String, String>) -> Result<Self, String> {
+        if initial.len() > MAX_BINDINGS {
+            return Err("MetaMake globals exceed entry limit".into());
+        }
+        let mut retained = 0usize;
+        let mut initial_bytes = 0usize;
+        let mut known = BTreeMap::new();
+        let mut unavailable = BTreeSet::new();
+        for (name, value) in initial {
+            if !variable_name(name) || value.contains(['\0', '\r', '\n']) {
+                return Err("invalid initial MetaMake global".into());
+            }
+            charge(
+                &mut initial_bytes,
+                name.len() + value.len(),
+                MAX_RETAINED_BYTES,
+            )?;
+            if value.len() > MAX_VALUE_BYTES {
+                charge(&mut retained, name.len(), MAX_RETAINED_BYTES)?;
+                unavailable.insert(name.clone());
+            } else {
+                charge(&mut retained, name.len() + value.len(), MAX_RETAINED_BYTES)?;
+                known.insert(name.clone(), value.clone());
+            }
+        }
+        Ok(Self {
+            known,
+            unavailable,
+            input_bytes: 0,
+            work: 0,
+            retained,
+            files: 0,
+            assignments: 0,
+            failed: false,
+        })
+    }
+
+    /// Resolve a path, refusing every required unavailable or missing binding.
+    ///
+    /// # Errors
+    /// Refuses failed contexts, unsupported expressions and unresolved values.
+    pub fn resolve(&self, template: &str) -> Result<String, String> {
+        if self.failed {
+            return Err("MetaMake path context is failed".into());
+        }
+        substitute_globals(template, &self.known)
+    }
+
+    /// Compare bounded selected scalar values against this path projection.
+    ///
+    /// This is a selected-value check layered on the original path context.
+    /// The caller must independently bind the complete closed initial
+    /// environment, the ordered bytes of every global file, and the policy for
+    /// which values must be present or absent. It does not qualify the complete
+    /// compile-flags or ABI configuration. Unknown or unavailable values are
+    /// never treated as empty or supplied by a default.
+    ///
+    /// # Errors
+    /// Refuses failed contexts, invalid or oversized selections, conflicting
+    /// presence rules, mismatched values, and values that are missing or
+    /// unavailable.
+    pub fn verify_selected_values(
+        &self,
+        expected: &BTreeMap<String, String>,
+        absent: &BTreeSet<String>,
+    ) -> Result<(), String> {
+        if self.failed {
+            return Err("MetaMake path context is failed".into());
+        }
+
+        expected
+            .len()
+            .checked_add(absent.len())
+            .filter(|count| *count <= MAX_BINDINGS)
+            .ok_or("selected MetaMake values exceed entry limit")?;
+
+        let mut selected_bytes = 0usize;
+        for (name, value) in expected {
+            if !variable_name(name)
+                || value.len() > MAX_VALUE_BYTES
+                || value.contains(['\0', '\r', '\n'])
+            {
+                return Err("invalid selected MetaMake value".into());
+            }
+            if absent.contains(name) {
+                return Err("conflicting selected MetaMake presence rules".into());
+            }
+            let size = name
+                .len()
+                .checked_add(value.len())
+                .ok_or("selected MetaMake values exceed resource limit")?;
+            charge(&mut selected_bytes, size, MAX_RETAINED_BYTES)
+                .map_err(|_| "selected MetaMake values exceed resource limit")?;
+        }
+        for name in absent {
+            if !variable_name(name) {
+                return Err("invalid selected MetaMake absence".into());
+            }
+            charge(&mut selected_bytes, name.len(), MAX_RETAINED_BYTES)
+                .map_err(|_| "selected MetaMake values exceed resource limit")?;
+        }
+
+        for (name, expected_value) in expected {
+            match self.known.get(name) {
+                Some(actual) if actual == expected_value => {}
+                Some(_) => return Err("selected MetaMake value does not match".into()),
+                None if self.unavailable.contains(name) => {
+                    return Err("selected MetaMake value is unavailable".into());
+                }
+                None => return Err("selected MetaMake value is missing".into()),
+            }
+        }
+        for name in absent {
+            if self.known.contains_key(name) || self.unavailable.contains(name) {
+                return Err("selected MetaMake absence is not established".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Process assignments in native order for later FILE PATH resolution only.
+    /// Unsupported values become unavailable, never empty/default substitutions.
+    /// Non-UTF-8 bytes in native-ignored full-line comments remain inert.
+    ///
+    /// # Errors
+    /// Refuses syntax/encoding/resource failures and poisons this context on
+    /// failure, preventing consumers from using a partially processed file.
+    pub fn advance(&mut self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        if self.failed {
+            return Err("MetaMake path context is failed".into());
+        }
+        self.failed = true;
+        self.advance_inner(path, bytes)?;
+        self.failed = false;
+        Ok(())
+    }
+
+    fn advance_inner(&mut self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        if path.len() > MAX_VALUE_BYTES {
+            return Err("MetaMake global provenance path exceeds limit".into());
+        }
+        if self.files >= 256 {
+            return Err("MetaMake globals exceed entry limit".into());
+        }
+        charge(&mut self.input_bytes, bytes.len(), MAX_GLOBAL_BYTES)?;
+        self.files += 1;
+
+        for (index, physical) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+            validate_physical_bytes(physical, path, index + 1)?;
+            // The native reader discards comments before inspecting their
+            // encoding. Preserve that behavior for arbitrary comment bytes.
+            if physical.first() == Some(&b'#') {
+                continue;
+            }
+            let line = std::str::from_utf8(physical)
+                .map_err(|_| format!("non-UTF-8 MetaMake global in {path}:{}", index + 1))?;
+            let line = physical_line(line, path, index + 1)?;
+            if line.is_empty() {
+                continue;
+            }
+            let (name, value) = parse_global_assignment(line, path, index + 1)?;
+            let resolved = match substitute_globals(value, &self.known) {
+                Ok(value) => Some(value),
+                Err(error) if is_substitution_resource_error(&error) => return Err(error),
+                Err(_) => None,
+            };
+            charge(
+                &mut self.work,
+                line.len() + resolved.as_ref().map_or(0, String::len),
+                MAX_GLOBAL_BYTES,
+            )?;
+            if self.assignments >= MAX_BINDINGS {
+                return Err("MetaMake global assignment count exceeds limit".into());
+            }
+            self.store_assignment(name, resolved.as_deref())?;
+            self.assignments += 1;
+        }
+        Ok(())
+    }
+
+    fn store_assignment(&mut self, name: &str, value: Option<&str>) -> Result<(), String> {
+        let old_size = match self.known.get(name) {
+            Some(old) => name.len() + old.len(),
+            None if self.unavailable.contains(name) => name.len(),
+            None => 0,
+        };
+        let new_size = name.len() + value.map_or(0, str::len);
+        let retained = self
+            .retained
+            .checked_sub(old_size)
+            .and_then(|size| size.checked_add(new_size))
+            .filter(|size| *size <= MAX_RETAINED_BYTES)
+            .ok_or("MetaMake project resource limit exceeded")?;
+        let is_new_binding = !self.known.contains_key(name) && !self.unavailable.contains(name);
+        if is_new_binding && self.known.len() + self.unavailable.len() >= MAX_BINDINGS {
+            return Err("MetaMake global binding count exceeds limit".into());
+        }
+
+        self.known.remove(name);
+        self.unavailable.remove(name);
+        if let Some(value) = value {
+            self.known.insert(name.into(), value.into());
+        } else {
+            self.unavailable.insert(name.into());
+        }
+        self.retained = retained;
+        Ok(())
+    }
+}
+
 impl ProjectGlobals {
     /// Read global-variable snapshots in exact configured order, resolving
     /// each value against the variables known at that point, once only.
@@ -213,21 +495,7 @@ impl ProjectGlobals {
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                let line = line.trim_start_matches(|c: char| c.is_ascii_whitespace());
-                let end = line
-                    .find(|c: char| c.is_ascii_whitespace() || matches!(c, ':' | '='))
-                    .unwrap_or(line.len());
-                let name = &line[..end];
-                if !variable_name(name) {
-                    return Err(format!(
-                        "unsupported global assignment in {path}:{}",
-                        index + 1
-                    ));
-                }
-                let value = line[end..].trim_start_matches(|c: char| {
-                    c.is_ascii_whitespace() || matches!(c, ':' | '=')
-                });
-                let value = value.split('#').next().unwrap_or_default();
+                let (name, value) = parse_global_assignment(line, path, index + 1)?;
                 let value = substitute_globals(value, &projection.values)?;
                 charge(&mut work, value.len() + line.len(), MAX_GLOBAL_BYTES)?;
                 charge(
@@ -313,6 +581,40 @@ fn physical_line<'a>(line: &'a str, path: &str, number: usize) -> Result<&'a str
     Ok(&line[..line.len() - 1])
 }
 
+fn validate_physical_bytes(line: &[u8], path: &str, number: usize) -> Result<(), String> {
+    if line.len() > MAX_PHYSICAL_LINE_BYTES || !line.ends_with(b"\n") {
+        return Err(format!(
+            "unsupported MetaMake physical line in {path}:{number}"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_global_assignment<'a>(
+    line: &'a str,
+    path: &str,
+    number: usize,
+) -> Result<(&'a str, &'a str), String> {
+    let line = line.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let end = line
+        .find(|c: char| c.is_ascii_whitespace() || matches!(c, ':' | '='))
+        .unwrap_or(line.len());
+    let name = &line[..end];
+    if !variable_name(name) {
+        return Err(format!("unsupported global assignment in {path}:{number}"));
+    }
+    let value =
+        line[end..].trim_start_matches(|c: char| c.is_ascii_whitespace() || matches!(c, ':' | '='));
+    Ok((name, value.split('#').next().unwrap_or_default()))
+}
+
+fn is_substitution_resource_error(error: &str) -> bool {
+    matches!(
+        error,
+        "invalid MetaMake substitution input" | "MetaMake substitution exceeds reference buffer"
+    )
+}
+
 fn variable_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() < 256
@@ -328,7 +630,7 @@ fn single_component(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn relative_path(value: &str) -> Result<(), String> {
+pub(crate) fn relative_path(value: &str) -> Result<(), String> {
     if value.len() > MAX_VALUE_BYTES {
         return Err("MetaMake added path exceeds limit".into());
     }
@@ -336,6 +638,37 @@ fn relative_path(value: &str) -> Result<(), String> {
         single_component(component)?;
     }
     Ok(())
+}
+
+/// Whether an inventory entry is a configured ignored directory coordinate.
+/// Bare names retain the native any-depth behavior. Slash-containing names
+/// are exact logical project-relative directory paths, including descendants.
+/// File basenames do not participate; links are treated as directory
+/// candidates so an ignored directory link can be skipped without resolving
+/// it. A selected Makefile link is passed as a file by the caller.
+pub(crate) fn is_ignored_directory_path(
+    ignored_directories: &BTreeSet<String>,
+    path: &str,
+    kind: InventoryEntry,
+) -> bool {
+    let directory_path = match kind {
+        InventoryEntry::Directory | InventoryEntry::Link => path,
+        InventoryEntry::RegularFile | InventoryEntry::Other => {
+            path.rsplit_once('/').map_or("", |(parent, _)| parent)
+        }
+    };
+    let mut prefix_end = 0;
+    for (index, component) in directory_path.split('/').enumerate() {
+        prefix_end += component.len();
+        let prefix = &directory_path[..prefix_end];
+        if ignored_directories.contains(component)
+            || (index > 0 && ignored_directories.contains(prefix))
+        {
+            return true;
+        }
+        prefix_end += 1;
+    }
+    false
 }
 
 fn charge(current: &mut usize, amount: usize, limit: usize) -> Result<(), String> {
@@ -356,8 +689,11 @@ pub enum InventoryEntry {
     Other,
 }
 
-/// Logical generated owner and actual immutable input path. A `.src` input
-/// wins over a same-directory direct makefile, independently of file dates.
+/// Logical generated owner and discovered Source input coordinate. A `.src`
+/// input wins over a same-directory direct makefile, independently of dates.
+///
+/// A regeneration plan additionally binds link aliases to their original
+/// measured regular input via `MetaMakeRegenerationPlan::original_input`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerInput {
     pub owner: String,
@@ -369,7 +705,8 @@ pub struct OwnerInput {
 /// or executing any source. No filesystem completeness claim is made here.
 ///
 /// # Errors
-/// Refuses absent directory provenance, unsafe entries, unresolved top
+/// Refuses absent directory provenance, unsafe inventory coordinates,
+/// unsupported selected Make input names, unresolved top
 /// selection and explicit `add` directives. Classic `add` searches the build
 /// tree after regeneration; a source-only inventory cannot prove its inputs.
 /// A caller must handle that separate closure, never silently omit it.
@@ -391,18 +728,34 @@ pub fn plan_source_inputs(
     let mut bytes = 0usize;
     let mut owners = BTreeMap::<String, OwnerInput>::new();
     for (path, kind) in inventory {
-        relative_path(path)?;
+        // Discovery enumerates ordinary source assets too. Their basenames
+        // are filesystem data, not project variables or executable owner names.
+        // Keep the complete inventory and its directory provenance, but apply
+        // the stricter owner grammar only when a Make input is selected below.
+        inventory_relative_path(path)?;
         charge(&mut bytes, path.len(), MAX_RETAINED_BYTES)?;
         let components: Vec<_> = path.split('/').collect();
+        let basename = components.last().ok_or("empty inventory path")?;
+        let selected = *basename == project.default_makefile || *basename == source_basename;
         // Directory names, not file basenames, control ignoredir. A regular
         // makefile named exactly like an ignored directory remains visible.
-        let directory_count = components.len() - usize::from(*kind != InventoryEntry::Directory);
-        if components[..directory_count]
-            .iter()
-            .any(|name| project.ignored_directories.contains(*name))
-        {
+        let directory_path = if *kind == InventoryEntry::Directory {
+            path
+        } else {
+            path.rsplit_once('/').map_or("", |(parent, _)| parent)
+        };
+        if is_ignored_directory_path(
+            &project.ignored_directories,
+            directory_path,
+            InventoryEntry::Directory,
+        ) {
             continue;
         }
+        // Native discovery selects Make basenames first, then stat()s other
+        // entries and skips configured directory names. An ignored-name link
+        // cannot contribute an owner: directory targets are skipped, and
+        // non-directory targets are not selected. Never traverse the link or
+        // apply this exemption to a potentially selected Make basename.
         let mut parent = String::new();
         for component in &components[..components.len() - 1] {
             if !parent.is_empty() {
@@ -415,17 +768,23 @@ pub fn plan_source_inputs(
                 ));
             }
         }
+        if *kind == InventoryEntry::Link
+            && !selected
+            && is_ignored_directory_path(&project.ignored_directories, path, *kind)
+        {
+            continue;
+        }
         if matches!(kind, InventoryEntry::Link | InventoryEntry::Other) {
             return Err(format!(
                 "unsupported MetaMake source inventory entry {path}"
             ));
         }
-        let basename = components.last().ok_or("empty inventory path")?;
         if *kind != InventoryEntry::RegularFile
             || (*basename != project.default_makefile && *basename != source_basename)
         {
             continue;
         }
+        relative_path(path)?;
         let generated = *basename == source_basename;
         if generated && project.generator_command.is_none() {
             return Err("MetaMake .src input requires a configured generator contract".into());
@@ -450,6 +809,18 @@ pub fn plan_source_inputs(
         }
     }
     Ok(owners.into_values().collect())
+}
+
+fn inventory_relative_path(path: &str) -> Result<(), String> {
+    if path.len() > MAX_VALUE_BYTES
+        || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("invalid MetaMake source inventory path".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -496,6 +867,78 @@ mod tests {
         ] {
             assert!(ConfiguredProject::parse(input, "probe").is_err(), "{input}");
         }
+    }
+
+    #[test]
+    fn ignored_directories_accept_normalized_relative_paths_and_legacy_basenames() {
+        let project = ConfiguredProject::parse(
+            "[probe]\nignoredir build/arm-raspi\nignoredir vendor\n",
+            "probe",
+        )
+        .unwrap();
+        assert_eq!(
+            project.ignored_directories,
+            BTreeSet::from(["build/arm-raspi".into(), "vendor".into()])
+        );
+
+        for path in [
+            "",
+            "/build",
+            "build/",
+            "build//arm-raspi",
+            "build/./arm-raspi",
+            "build/../arm-raspi",
+            "build/arm-raspi/..",
+            "build/has space",
+        ] {
+            let config = format!("[probe]\nignoredir {path}\n");
+            assert!(
+                ConfiguredProject::parse(&config, "probe").is_err(),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_ignoredir_matching_is_directory_only_and_path_exact() {
+        use InventoryEntry::{Directory, RegularFile};
+        let ignored = BTreeSet::from(["build/arm-raspi".into(), "vendor".into()]);
+
+        assert!(is_ignored_directory_path(
+            &ignored,
+            "build/arm-raspi",
+            Directory
+        ));
+        assert!(is_ignored_directory_path(
+            &ignored,
+            "build/arm-raspi/deep",
+            Directory
+        ));
+        assert!(!is_ignored_directory_path(
+            &ignored,
+            "build/arm-raspi-copy",
+            Directory
+        ));
+        assert!(is_ignored_directory_path(
+            &ignored,
+            "vendor/arm-raspi",
+            Directory
+        ));
+        assert!(!is_ignored_directory_path(
+            &ignored,
+            "vendor-other/arm-raspi",
+            Directory
+        ));
+        assert!(!is_ignored_directory_path(
+            &ignored,
+            "build/arm-raspi",
+            RegularFile
+        ));
+        assert!(!is_ignored_directory_path(
+            &ignored,
+            "arm-raspi",
+            RegularFile
+        ));
     }
 
     #[test]
@@ -592,11 +1035,100 @@ mod tests {
     }
 
     #[test]
+    fn discovery_uses_exact_slash_ignoredir_and_keeps_sibling_subtrees() {
+        use InventoryEntry::{Directory, RegularFile};
+
+        let project = ConfiguredProject::parse(
+            "[probe]\ndefaultmakefilename rules\ngenmakefilescript generator\nignoredir build/arm-raspi\n",
+            "probe",
+        )
+        .unwrap();
+        let mut inventory = BTreeMap::new();
+        for directory in [
+            "build",
+            "build/arm-raspi",
+            "build/arm-raspi/deep",
+            "build/arm-raspi-copy",
+            "build/other",
+            "vendor",
+            "vendor/arm-raspi",
+        ] {
+            inventory.insert(directory.into(), Directory);
+        }
+        for path in [
+            "build/arm-raspi/rules.src",
+            "build/arm-raspi/deep/rules.src",
+            "build/arm-raspi-copy/rules.src",
+            "build/other/rules.src",
+            "vendor/arm-raspi/rules.src",
+        ] {
+            inventory.insert(path.into(), RegularFile);
+        }
+
+        let owners = plan_source_inputs(&project, &inventory).unwrap();
+        assert_eq!(
+            owners
+                .iter()
+                .map(|owner| owner.input.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "build/arm-raspi-copy/rules.src",
+                "build/other/rules.src",
+                "vendor/arm-raspi/rules.src",
+            ]
+        );
+    }
+
+    #[test]
+    fn ignoredir_does_not_hide_a_regular_file_with_the_same_basename() {
+        use InventoryEntry::RegularFile;
+
+        let project = ConfiguredProject::parse(
+            "[probe]\ndefaultmakefilename ignored\nignoredir ignored\n",
+            "probe",
+        )
+        .unwrap();
+        let inventory = BTreeMap::from([("ignored".into(), RegularFile)]);
+        assert_eq!(
+            plan_source_inputs(&project, &inventory).unwrap(),
+            [OwnerInput {
+                owner: "ignored".into(),
+                input: "ignored".into(),
+                generated: false,
+            }]
+        );
+    }
+
+    #[test]
     fn discovery_preserves_the_build_tree_add_obligation() {
         let project = ConfiguredProject::parse("[probe]\nadd custom/rules.src\n", "probe").unwrap();
         assert!(plan_source_inputs(&project, &BTreeMap::new())
             .unwrap_err()
             .contains("build-tree"));
+    }
+
+    #[test]
+    fn discovery_skips_only_unselected_links_with_configured_ignored_names() {
+        let project = ConfiguredProject::parse(
+            "[probe]\nignoredir bin\nignoredir Makefile\nignoredir Makefile.src\n",
+            "probe",
+        )
+        .unwrap();
+        let inventory = BTreeMap::from([
+            ("nested".into(), InventoryEntry::Directory),
+            ("nested/bin".into(), InventoryEntry::Link),
+        ]);
+        assert!(plan_source_inputs(&project, &inventory).unwrap().is_empty());
+        let missing_parent = BTreeMap::from([("missing/bin".into(), InventoryEntry::Link)]);
+        assert!(plan_source_inputs(&project, &missing_parent)
+            .unwrap_err()
+            .contains("lacks regular directory provenance"));
+        for name in ["ordinary", "Makefile", "Makefile.src"] {
+            let inventory = BTreeMap::from([(name.into(), InventoryEntry::Link)]);
+            assert!(plan_source_inputs(&project, &inventory)
+                .unwrap_err()
+                .contains("unsupported MetaMake source inventory entry"));
+        }
     }
 
     #[test]

@@ -183,8 +183,7 @@ impl NativeOwnerProjection {
         if aros_common::sha256_bytes(&source_bytes).as_str() != snapshot_digest {
             return Err(format!("architecture effect source changed: {recipe}"));
         }
-        let source = String::from_utf8(source_bytes)
-            .map_err(|_| format!("architecture effect source is not UTF-8: {recipe}"))?;
+        let source = aros_common::decode_source_bytes(source_bytes);
 
         // Re-derive from the exact captured recipe with a positional local
         // scope. This prevents a caller from substituting effect data that was
@@ -418,8 +417,7 @@ impl NativeOwnerProjection {
         if aros_common::sha256_bytes(&source_bytes).as_str() != snapshot_digest {
             return Err(format!("virtual edge source changed: {source_recipe}"));
         }
-        let source = String::from_utf8(source_bytes)
-            .map_err(|_| format!("virtual edge source is not UTF-8: {source_recipe}"))?;
+        let source = aros_common::decode_source_bytes(source_bytes);
 
         if origin.macro_stack.is_empty() {
             return verify_direct_source_dependency(
@@ -973,7 +971,7 @@ fn verify_frame_arguments(
             } => linklib_sources.as_slice(),
             ArchEndpointEffectData::EmptyLinklibAggregate { .. } => &[],
             ArchEndpointEffectData::SetArchIncludes { .. } => {
-                return Err("build_archspecific effect has the wrong data kind".into())
+                return Err("build_archspecific effect has the wrong data kind".into());
             }
         };
         let mut resolved_linklib_sources = Vec::new();
@@ -1010,17 +1008,17 @@ fn verify_frame_arguments(
             || !arg("linklibobjs")?.trim().is_empty()
             || (arg("files")?.trim().is_empty() && arg("asmfiles")?.trim().is_empty())
         {
-            return Err(
-                format!("build_archspecific frame arguments do not prove the exact linklib lane \
+            return Err(format!(
+                "build_archspecific frame arguments do not prove the exact linklib lane \
                     (compiler_matches={}, maindir_present={}, cxx_empty={}, linklib_sources_match={}, \
                     linklib_objects_empty={}, module_sources_present={})",
-                    arg("compiler")? == target_compiler.unwrap_or_default(),
-                    !arg("maindir")?.trim().is_empty(),
-                    arg("cxxfiles")?.trim().is_empty(),
-                    linklib_sources_match,
-                    arg("linklibobjs")?.trim().is_empty(),
-                    !arg("files")?.trim().is_empty() || !arg("asmfiles")?.trim().is_empty()),
-            );
+                arg("compiler")? == target_compiler.unwrap_or_default(),
+                !arg("maindir")?.trim().is_empty(),
+                arg("cxxfiles")?.trim().is_empty(),
+                linklib_sources_match,
+                arg("linklibobjs")?.trim().is_empty(),
+                !arg("files")?.trim().is_empty() || !arg("asmfiles")?.trim().is_empty()
+            ));
         }
         let (effect_mainmmake, effect_tag, declaration_target) = match &effect.data {
             ArchEndpointEffectData::ArchModuleObjects { mainmmake, tag, .. }
@@ -1029,7 +1027,7 @@ fn verify_frame_arguments(
                 (mainmmake.as_str(), tag.as_str(), effect.endpoint.as_str())
             }
             ArchEndpointEffectData::SetArchIncludes { .. } => {
-                return Err("build_archspecific effect has the wrong data kind".into())
+                return Err("build_archspecific effect has the wrong data kind".into());
             }
         };
         if effect_mainmmake != mainmmake || effect_tag != tag {

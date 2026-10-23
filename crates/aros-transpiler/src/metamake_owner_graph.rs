@@ -128,6 +128,10 @@ pub struct Selection {
     pub reached_targets: BTreeSet<String>,
     pub missing_endpoints: BTreeSet<String>,
     pub selected_owner_files: BTreeSet<String>,
+    /// Exact reached goals claimed by each generated Makefile. This is an
+    /// unordered metadata relation, not a native call or execution schedule.
+    /// Multiple owners remain explicit; virtual targets do not create calls.
+    pub selected_owner_targets: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl MetaMakeOwnerGraph {
@@ -362,6 +366,7 @@ impl MetaMakeOwnerGraph {
             }
             if let Some(owners) = self.owners.get(&target) {
                 for owner in owners {
+                    bump(&mut work, limits.max_work, "selection owner work")?;
                     charge_identity_copy(
                         &mut identity_copy_bytes,
                         owner.len(),
@@ -369,6 +374,17 @@ impl MetaMakeOwnerGraph {
                         "selected-owner path copy",
                     )?;
                     selection.selected_owner_files.insert(owner.clone());
+                    charge_identity_copy(
+                        &mut identity_copy_bytes,
+                        owner.len().saturating_add(target.len()),
+                        limits,
+                        "selected owner-goal copy",
+                    )?;
+                    selection
+                        .selected_owner_targets
+                        .entry(owner.clone())
+                        .or_default()
+                        .insert(target.clone());
                 }
             }
             if let Some(dependencies) = self.dependencies.get(&target) {
@@ -395,6 +411,140 @@ impl MetaMakeOwnerGraph {
             }
         }
         Ok(selection)
+    }
+}
+
+#[cfg(test)]
+mod owner_goal_tests {
+    use super::*;
+
+    #[test]
+    fn owner_goal_pair_costs_have_exact_positive_and_negative_boundaries() {
+        let graph = MetaMakeOwnerGraph::parse_expanded_files(
+            &BTreeMap::from([("x".into(), "#MM goal\n".into())]),
+            &BTreeMap::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        // Root4 + reached4 + old owner-file1 + new owner-goal(1+4) =14.
+        let limits = Limits {
+            max_total_identity_copy_bytes: 14,
+            max_work: 3,
+            ..Limits::default()
+        };
+        assert!(graph.select(&["goal".into()], limits).is_ok());
+        let bytes = graph
+            .select(
+                &["goal".into()],
+                Limits {
+                    max_total_identity_copy_bytes: 13,
+                    ..limits
+                },
+            )
+            .unwrap_err();
+        assert!(bytes.contains("selected owner-goal copy"));
+        // Root and reached traversal consume2; the owner relation consumes1.
+        let work = graph
+            .select(
+                &["goal".into()],
+                Limits {
+                    max_work: 2,
+                    ..limits
+                },
+            )
+            .unwrap_err();
+        assert!(work.contains("selection owner work"));
+    }
+
+    #[test]
+    fn selected_goals_keep_every_real_owner_and_no_virtual_calls() {
+        let graph = MetaMakeOwnerGraph::parse_expanded_files(
+            &BTreeMap::from([
+                (
+                    "one/Makefile".into(),
+                    "#MM- root : prepare absent\n#MM prepare\n#MM other\n".into(),
+                ),
+                ("two/Makefile".into(), "#MM prepare\n".into()),
+            ]),
+            &BTreeMap::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let selected = graph.select(&["root".into()], Limits::default()).unwrap();
+        assert_eq!(
+            selected.selected_owner_targets,
+            BTreeMap::from([
+                ("one/Makefile".into(), BTreeSet::from(["prepare".into()])),
+                ("two/Makefile".into(), BTreeSet::from(["prepare".into()])),
+            ])
+        );
+        assert_eq!(
+            selected.selected_owner_files,
+            selected.selected_owner_targets.keys().cloned().collect()
+        );
+        assert_eq!(
+            selected.missing_endpoints,
+            BTreeSet::from(["absent".into()])
+        );
+        assert!(graph
+            .select(&["unknown".into()], Limits::default())
+            .unwrap()
+            .selected_owner_targets
+            .is_empty());
+        assert!(graph
+            .select(
+                &["root".into()],
+                Limits {
+                    max_total_identity_copy_bytes: 1,
+                    ..Limits::default()
+                }
+            )
+            .is_err());
+        assert!(graph
+            .select(
+                &["root".into()],
+                Limits {
+                    max_work: 1,
+                    ..Limits::default()
+                }
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn actual_source_startup_preparation_retains_both_child_goals() {
+        let source = crate::testing::mesa26_root();
+        let expanded = crate::genmf_projection::expand_files(
+            &source.join("compiler/libinit/mmakefile.src"),
+            &source.join("config/make.tmpl"),
+            crate::genmf_projection::Limits::default(),
+        )
+        .unwrap();
+        let owner = "compiler/libinit/mmakefile";
+        let graph = MetaMakeOwnerGraph::parse_expanded_files(
+            &BTreeMap::from([(owner.into(), expanded.text)]),
+            &BTreeMap::from([
+                ("AROS_TOOLCHAIN_RELEASE".into(), "fixture".into()),
+                ("CPU".into(), "fixture".into()),
+                ("ARCH".into(), "fixture".into()),
+                ("AROS_TARGET_VARIANT".into(), "fixture".into()),
+                ("FAMILY".into(), "fixture".into()),
+            ]),
+            Limits::default(),
+        )
+        .unwrap();
+        let selected = graph
+            .select(&["linklibs-startup".into()], Limits::default())
+            .unwrap();
+        assert_eq!(
+            selected.selected_owner_targets.get(owner).unwrap(),
+            &BTreeSet::from(["libinit-libentry".into(), "libinit-kickentry".into(),])
+        );
+        assert_eq!(
+            selected.missing_endpoints,
+            BTreeSet::from(["sdk-includes-fixture".into()])
+        );
+        assert!(!selected.reached_targets.contains("linklibs-libinit"));
     }
 }
 

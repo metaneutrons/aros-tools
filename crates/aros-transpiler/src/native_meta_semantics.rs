@@ -15,6 +15,7 @@ use std::path::Path;
 
 const MAX_WORK: usize = 4_000_000;
 const MAX_ALIASES: usize = 20_000;
+const MAX_TEMPLATE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[path = "native_empty_library_lists.rs"]
 mod empty_library_lists;
@@ -618,7 +619,7 @@ impl NativeOwnerProjection {
     }
 
     /// Only the variant slot of the independently pinned template is optional.
-    fn template_variant_hook(
+    pub(super) fn template_variant_hook(
         &self,
         root: &Path,
         declaration: &crate::metamake_owner_graph::TargetDeclarationProvenance,
@@ -699,6 +700,7 @@ impl NativeOwnerProjection {
             "" => "module",
             "-linklib" => "linklib",
             "-set-archincludes" => "set-archincludes",
+            "-quick" if caller.name == "build_module_core" => "quick",
             _ => return Ok(None),
         };
         // Archives and programs declare only the base architecture slot. Their
@@ -738,15 +740,23 @@ impl NativeOwnerProjection {
                 .template_path
                 .strip_prefix(root)
                 .map_err(|_| "template hook definition is outside source")?;
-            if !self.snapshots.contains_key(
-                relative
-                    .to_str()
-                    .ok_or("non-UTF8 template hook definition")?,
-            ) {
-                return Err("template hook definition is not sealed".into());
+            let expected = self
+                .snapshots
+                .get(
+                    relative
+                        .to_str()
+                        .ok_or("non-UTF8 template hook definition")?,
+                )
+                .ok_or("template hook definition is not sealed")?;
+            let path = aros_common::canonical_source_file(root, relative)
+                .map_err(|error| error.to_string())?;
+            let (_, bytes) = aros_common::measure_regular_file_bounded(&path, MAX_TEMPLATE_BYTES)
+                .map_err(|error| error.to_string())?
+                .ok_or("template hook definition is missing")?;
+            if aros_common::sha256_bytes(&bytes).as_str() != expected {
+                return Err("template hook definition differs from captured Source bytes".into());
             }
-            let template =
-                std::fs::read_to_string(&frame.template_path).map_err(|error| error.to_string())?;
+            let template = String::from_utf8(bytes).map_err(|error| error.to_string())?;
             verify_variant_template(&template, frame.definition_line)?;
             if caller.name == "build_module_core" {
                 verify_reviewed_template_macro(
@@ -932,7 +942,7 @@ fn native_edge_spellings_proven(
 }
 
 /// A strict source selector expression, without identifier sanitization.
-fn architecture_expression(raw: &str) -> Option<String> {
+pub(super) fn architecture_expression(raw: &str) -> Option<String> {
     let mut rest = raw;
     let mut out = String::new();
     let mut selectors = 0usize;

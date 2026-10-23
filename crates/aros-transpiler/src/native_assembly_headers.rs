@@ -133,7 +133,7 @@ impl NativeOwnerProjection {
             Err(error) => {
                 return Err(format!(
                     "cannot inspect assembly header directory configuration: {error}"
-                ))
+                ));
             }
         };
         if configuration_exists {

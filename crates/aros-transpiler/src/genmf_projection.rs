@@ -75,6 +75,46 @@ pub struct ExpandedText {
     pub provenance: Vec<ExpandedLineProvenance>,
 }
 
+impl ExpandedText {
+    /// Emit the original GenMF file-mode byte encoding, without normalization.
+    ///
+    /// File-mode inputs are decoded as ISO-8859-15 for text interpretation.
+    /// Encoding them back preserves every original byte, including UTF-8 byte
+    /// sequences that the native byte-oriented GenMF does not reinterpret.
+    /// Provenance byte offsets still address `text`, not this encoded output.
+    ///
+    /// # Errors
+    /// Rejects text containing characters not representable in ISO-8859-15;
+    /// no replacement bytes, UTF-8 fallback or lossy conversion are permitted.
+    pub fn native_bytes(&self) -> Result<Vec<u8>, GenmfError> {
+        self.text
+            .chars()
+            .map(|character| {
+                let byte = match character {
+                    '\u{20ac}' => 0xa4,
+                    '\u{0160}' => 0xa6,
+                    '\u{0161}' => 0xa8,
+                    '\u{017d}' => 0xb4,
+                    '\u{017e}' => 0xb8,
+                    '\u{0152}' => 0xbc,
+                    '\u{0153}' => 0xbd,
+                    '\u{0178}' => 0xbe,
+                    value => {
+                        let byte = u8::try_from(u32::from(value)).map_err(|_| {
+                            error(None, None, "unrepresentable native GenMF output")
+                        })?;
+                        if matches!(byte, 0xa4 | 0xa6 | 0xa8 | 0xb4 | 0xb8 | 0xbc | 0xbd | 0xbe) {
+                            return Err(error(None, None, "unrepresentable native GenMF output"));
+                        }
+                        byte
+                    }
+                };
+                Ok(byte)
+            })
+            .collect()
+    }
+}
+
 /// Provenance for one physical output-line fragment.
 ///
 /// Usually a span is one complete emitted line. It can be only a fragment
@@ -128,6 +168,54 @@ pub struct MacroExpansionFrame {
 pub struct TemplateSnapshot {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
+}
+
+/// Effective definition locations after the same bounded include/override
+/// resolution as expansion, without executing or rendering any macro.
+pub(crate) fn template_definition_origins(
+    template_file: &Path,
+    names: &[&str],
+) -> Result<BTreeMap<String, SourceLineLocation>, GenmfError> {
+    let checked = reject_symlink_components(template_file)?;
+    let canonical = checked.canonicalize().map_err(|cause| {
+        error(
+            Some(template_file.to_path_buf()),
+            None,
+            format!("cannot resolve template file: {cause}"),
+        )
+    })?;
+    let root = canonical
+        .parent()
+        .ok_or_else(|| error(Some(canonical.clone()), None, "template has no parent"))?
+        .to_path_buf();
+    let mut loader = TemplateLoader {
+        root,
+        limits: Limits::default(),
+        budget: Budget::default(),
+        templates: BTreeMap::new(),
+        included: HashSet::new(),
+        snapshots: Vec::new(),
+    };
+    loader.read_file(&canonical, 0)?;
+    names
+        .iter()
+        .map(|name| {
+            let definition = loader.templates.get(*name).ok_or_else(|| {
+                error(
+                    Some(canonical.clone()),
+                    None,
+                    format!("missing effective {name} template"),
+                )
+            })?;
+            Ok((
+                (*name).to_owned(),
+                SourceLineLocation {
+                    path: definition.source.clone(),
+                    line: definition.line,
+                },
+            ))
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +292,43 @@ pub fn expand_text(
     template_file: &Path,
     limits: Limits,
 ) -> Result<ExpandedText, GenmfError> {
+    expand_positioned_impl(source, source_file, None, template_file, limits)
+}
+
+/// Expands an assembled input with caller-verified physical line origins.
+///
+/// `None` marks synthetic input. Template body locations remain unchanged;
+/// source invocation locations are translated through the supplied map. The
+/// map describes universal-newline-normalized input, before continuation joins.
+/// Expansion errors retain assembly coordinates rather than claiming physical
+/// coordinates that have not been translated.
+///
+/// # Errors
+/// Refuses invalid maps, an assembly label colliding with a loaded template,
+/// resource excess and every error returned by [`expand_text`].
+pub fn expand_positioned_text(
+    source: &str,
+    assembly_label: &Path,
+    locations: &[Option<SourceLineLocation>],
+    template_file: &Path,
+    limits: Limits,
+) -> Result<ExpandedText, GenmfError> {
+    expand_positioned_impl(
+        source,
+        assembly_label,
+        Some(locations),
+        template_file,
+        limits,
+    )
+}
+
+fn expand_positioned_impl(
+    source: &str,
+    source_file: &Path,
+    locations: Option<&[Option<SourceLineLocation>]>,
+    template_file: &Path,
+    limits: Limits,
+) -> Result<ExpandedText, GenmfError> {
     if source.len() > limits.max_source_bytes {
         return Err(error(
             Some(source_file.to_path_buf()),
@@ -221,6 +346,25 @@ pub fn expand_text(
             None,
             "source exceeds line budget",
         ));
+    }
+
+    let mut position_budget = Budget::default();
+    if let Some(locations) = locations {
+        if locations.len() != physical_lines.len()
+            || locations
+                .iter()
+                .flatten()
+                .any(|location| location.line == 0 || location.path.as_os_str().is_empty())
+        {
+            return Err(error(None, None, "invalid assembled source origin map"));
+        }
+        for location in locations {
+            position_budget
+                .charge_work(std::mem::size_of::<Option<SourceLineLocation>>(), limits)?;
+            if let Some(location) = location {
+                position_budget.charge_work(path_storage_bytes(&location.path), limits)?;
+            }
+        }
     }
 
     let checked_template = reject_symlink_components(template_file)?;
@@ -244,12 +388,24 @@ pub fn expand_text(
     let mut loader = TemplateLoader {
         root,
         limits,
-        budget: Budget::default(),
+        budget: position_budget,
         templates: BTreeMap::new(),
         included: HashSet::new(),
         snapshots: Vec::new(),
     };
     loader.read_file(&canonical_template, 0)?;
+    if locations.is_some()
+        && loader
+            .snapshots
+            .iter()
+            .any(|snapshot| snapshot.path == source_file)
+    {
+        return Err(error(
+            None,
+            None,
+            "assembly label collides with a template input",
+        ));
+    }
 
     let mut runtime = ExpansionRuntime {
         budget: loader.budget,
@@ -293,11 +449,83 @@ pub fn expand_text(
             )?;
         }
     }
+    if let Some(locations) = locations {
+        for span in &mut runtime.provenance {
+            if span.source_path.as_deref() == Some(source_file) {
+                let location = mapped_source_location(span.source_line, locations)?;
+                charge_location(&mut runtime.budget, location, limits)?;
+                span.source_path = location.map(|location| location.path.clone());
+                span.source_line = location.map(|location| location.line);
+            }
+            remap_invocation(
+                &mut span.top_level_source_invocation,
+                source_file,
+                locations,
+                &mut runtime.budget,
+                limits,
+            )?;
+            for frame in &mut span.macro_stack {
+                remap_invocation(
+                    &mut frame.invocation,
+                    source_file,
+                    locations,
+                    &mut runtime.budget,
+                    limits,
+                )?;
+            }
+        }
+    }
     Ok(ExpandedText {
         text: output,
         template_snapshots: loader.snapshots,
         provenance: runtime.provenance,
     })
+}
+
+fn mapped_source_location(
+    line: Option<usize>,
+    locations: &[Option<SourceLineLocation>],
+) -> Result<Option<&SourceLineLocation>, GenmfError> {
+    line.and_then(|line| line.checked_sub(1))
+        .and_then(|index| locations.get(index))
+        .map(Option::as_ref)
+        .ok_or_else(|| {
+            error(
+                None,
+                None,
+                "expanded source position is outside its origin map",
+            )
+        })
+}
+
+fn charge_location(
+    budget: &mut Budget,
+    location: Option<&SourceLineLocation>,
+    limits: Limits,
+) -> Result<(), GenmfError> {
+    if let Some(location) = location {
+        budget.charge_work(std::mem::size_of::<SourceLineLocation>(), limits)?;
+        budget.charge_work(path_storage_bytes(&location.path), limits)?;
+    }
+    Ok(())
+}
+
+fn remap_invocation(
+    invocation: &mut Option<SourceLineLocation>,
+    assembly_label: &Path,
+    locations: &[Option<SourceLineLocation>],
+    budget: &mut Budget,
+    limits: Limits,
+) -> Result<(), GenmfError> {
+    if let Some(original) = invocation
+        .as_ref()
+        .filter(|location| location.path == assembly_label)
+    {
+        let mapped = mapped_source_location(Some(original.line), locations)?;
+        charge_location(budget, mapped, limits)?;
+        *invocation = mapped.cloned();
+    }
+    Ok(())
 }
 
 /// Reads a source file as ISO-8859-15 and expands it without executing tools.

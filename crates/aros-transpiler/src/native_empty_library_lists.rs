@@ -208,9 +208,13 @@ impl NativeOwnerProjection {
             return Ok(None);
         };
         let expected_target = match raw {
-            "#M%(build_abi)- %(mmake) : %(mmake)-includes core-linklibs linklibs-%(uselibs)" => main.clone(),
+            "#M%(build_abi)- %(mmake) : %(mmake)-includes core-linklibs linklibs-%(uselibs)" => {
+                main.clone()
+            }
             "#%(build_library)M %(mmake)-kobj : core-linklibs linklibs-%(uselibs)"
-            | "#%(build_library)%(build_abi) %(mmake)-kobj : %(mmake)-includes core-linklibs linklibs-%(uselibs)" => format!("{main}-kobj"),
+            | "#%(build_library)%(build_abi) %(mmake)-kobj : %(mmake)-includes core-linklibs linklibs-%(uselibs)" => {
+                format!("{main}-kobj")
+            }
             _ => return Ok(None),
         };
         if declaration.raw_target != expected_target || declaration.target != expected_target {

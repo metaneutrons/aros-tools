@@ -2,6 +2,117 @@ use super::{expand_bytes, expand_files, expand_text, Limits};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn native_genmf_encoding_round_trips_all_bytes_without_lossy_fallback() {
+    let original: Vec<_> = (0..=u8::MAX).collect();
+    let mut expanded = super::ExpandedText {
+        text: super::decode_iso_8859_15(&original),
+        template_snapshots: Vec::new(),
+        provenance: Vec::new(),
+    };
+    assert_eq!(expanded.native_bytes().unwrap(), original);
+    for character in [
+        '\u{a4}',
+        '\u{a6}',
+        '\u{a8}',
+        '\u{b4}',
+        '\u{b8}',
+        '\u{bc}',
+        '\u{bd}',
+        '\u{be}',
+        '\u{1f600}',
+    ] {
+        expanded.text = character.to_string();
+        assert!(expanded.native_bytes().is_err());
+    }
+    // The native tool copies these bytes; it does not decode this UTF-8 dash.
+    let utf8_bytes = "a — b\n".as_bytes();
+    expanded.text = super::decode_iso_8859_15(utf8_bytes);
+    assert_ne!(expanded.text.as_bytes(), utf8_bytes);
+    assert_eq!(expanded.native_bytes().unwrap(), utf8_bytes);
+}
+
+#[test]
+#[ignore = "requires selected real Mesa26 Source and retained native generated Makefile roots"]
+fn actual_mesa26_entry_program_matches_retained_native_genmf_bytes() {
+    use aros_common::sha256_bytes;
+    let source_root = PathBuf::from(
+        std::env::var_os("AROS_TEST_MESA26_SOURCE_ROOT").expect("select actual Mesa26 Source"),
+    );
+    let generated_root = PathBuf::from(
+        std::env::var_os("AROS_TEST_GENERATED_MMAKE_ROOT").expect("select retained generated tree"),
+    );
+    let owner = "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/mmakefile";
+    let source = source_root.join(format!("{owner}.src"));
+    let template = source_root.join("config/make.tmpl");
+    let native = generated_root.join(owner);
+    let before = [&source, &template, &native]
+        .map(|path| sha256_bytes(&fs::read(path).expect("read selected original input")));
+    let expanded = expand_files(&source, &template, Limits::default())
+        .expect("expand real selected Source without execution");
+    let expected_bytes = expanded.native_bytes().expect("emit native GenMF encoding");
+    let expected = expected_bytes.as_slice();
+    let actual = fs::read(&native).expect("read retained native GenMF output");
+    for snapshot in &expanded.template_snapshots {
+        assert_eq!(
+            fs::read(&snapshot.path).unwrap(),
+            snapshot.bytes,
+            "template input changed during expansion"
+        );
+    }
+    assert_eq!(
+        [&source, &template, &native]
+            .map(|path| sha256_bytes(&fs::read(path).expect("recheck selected original input"))),
+        before
+    );
+    if let Some(directory) = std::env::var_os("AROS_TEST_GENMF_PARITY_EVIDENCE") {
+        let directory = PathBuf::from(directory);
+        fs::create_dir(&directory).expect("create fresh private parity evidence directory");
+        fs::write(directory.join("projected-mmakefile"), expected).unwrap();
+        fs::write(directory.join("native-mmakefile"), &actual).unwrap();
+        let metadata = serde_json::json!({
+            "source": source, "template": template, "native": native,
+            "before_sha256": before,
+            "projected_sha256": sha256_bytes(expected),
+            "native_sha256": sha256_bytes(&actual),
+            "projected_bytes": expected.len(), "native_bytes": actual.len(),
+            "template_inputs": expanded.template_snapshots.iter().map(|input| {
+                serde_json::json!({"path":input.path,"sha256":sha256_bytes(&input.bytes)})
+            }).collect::<Vec<_>>()
+        });
+        fs::write(
+            directory.join("comparison.json"),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        sha256_bytes(&actual),
+        sha256_bytes(expected),
+        "retained native bytes differ from selected Source expansion"
+    );
+    assert_eq!(actual, expected);
+    assert!(!actual.is_empty());
+    let counter_tree = TestTree::new();
+    let mut changed = actual.clone();
+    changed[0] ^= 1;
+    let counter = counter_tree.write("changed-mmakefile", &changed);
+    assert_ne!(
+        sha256_bytes(&fs::read(counter).unwrap()),
+        sha256_bytes(expected)
+    );
+    assert_eq!(
+        [&source, &template, &native]
+            .map(|path| sha256_bytes(&fs::read(path).expect("recheck selected original input"))),
+        before
+    );
+    eprintln!(
+        "retained native entry program: {} bytes, SHA256 {}, original inputs unchanged",
+        actual.len(),
+        sha256_bytes(&actual)
+    );
+}
+
 struct TestTree {
     root: tempfile::TempDir,
 }
@@ -30,6 +141,196 @@ impl TestTree {
         fs::write(&path, bytes).expect("write fixture");
         path
     }
+}
+
+#[test]
+fn assembled_input_maps_physical_lines_and_nested_invocations_without_changing_text() {
+    use super::{expand_positioned_text, SourceLineLocation};
+    let tree = TestTree::new();
+    let template = tree.write(
+        "root.tmpl",
+        b"%define inner\nINNER\n%end\n%define outer\n%inner\n%end\n%define common\n%end\n",
+    );
+    let assembly = tree.path("assembly");
+    let fragment = tree.path("included.cfg");
+    let source = "SYNTHETIC\r\nVALUE = present\r\n%outer\r\n";
+    let locations = vec![
+        None,
+        Some(SourceLineLocation {
+            path: fragment.clone(),
+            line: 17,
+        }),
+        Some(SourceLineLocation {
+            path: fragment.clone(),
+            line: 23,
+        }),
+    ];
+    let plain = expand_text(source, &assembly, &template, Limits::default()).unwrap();
+    let mapped =
+        expand_positioned_text(source, &assembly, &locations, &template, Limits::default())
+            .unwrap();
+    assert_eq!(plain.text, mapped.text);
+    assert_eq!(plain.template_snapshots, mapped.template_snapshots);
+    let synthetic = mapped
+        .provenance
+        .iter()
+        .find(|span| &mapped.text[span.output_start_byte..span.output_end_byte] == "SYNTHETIC\n")
+        .unwrap();
+    assert_eq!(
+        (synthetic.source_path.as_ref(), synthetic.source_line),
+        (None, None)
+    );
+    let value = mapped
+        .provenance
+        .iter()
+        .find(|span| {
+            &mapped.text[span.output_start_byte..span.output_end_byte] == "VALUE = present\n"
+        })
+        .unwrap();
+    assert_eq!(
+        (value.source_path.as_ref(), value.source_line),
+        (Some(&fragment), Some(17))
+    );
+    let inner = mapped
+        .provenance
+        .iter()
+        .find(|span| &mapped.text[span.output_start_byte..span.output_end_byte] == "INNER\n")
+        .unwrap();
+    assert_eq!(inner.source_path.as_ref(), Some(&template));
+    assert_eq!(inner.source_line, Some(2));
+    assert_eq!(inner.top_level_source_invocation, locations[2]);
+    assert_eq!(inner.macro_stack[0].invocation, locations[2]);
+    assert_eq!(
+        inner.macro_stack[1].invocation,
+        Some(SourceLineLocation {
+            path: template.clone(),
+            line: 5
+        })
+    );
+    let synthetic_calls = vec![None; 3];
+    let mapped = expand_positioned_text(
+        source,
+        &assembly,
+        &synthetic_calls,
+        &template,
+        Limits::default(),
+    )
+    .unwrap();
+    assert!(mapped
+        .provenance
+        .iter()
+        .all(|span| span.top_level_source_invocation.is_none()));
+    assert!(mapped
+        .provenance
+        .iter()
+        .flat_map(|span| &span.macro_stack)
+        .filter(|frame| frame.name == "outer")
+        .all(|frame| frame.invocation.is_none()));
+}
+
+#[test]
+fn assembled_input_refuses_invalid_maps_collisions_and_coordinate_amplification() {
+    use super::{expand_positioned_text, SourceLineLocation};
+    let tree = TestTree::new();
+    let template = tree.write("root.tmpl", b"%define common\n%end\n");
+    let assembly = tree.path("assembly");
+    let valid = vec![Some(SourceLineLocation {
+        path: tree.path("input"),
+        line: 2,
+    })];
+    assert!(
+        expand_positioned_text("VALUE\n", &assembly, &valid, &template, Limits::default()).is_ok()
+    );
+    assert!(
+        expand_positioned_text("VALUE\n", &assembly, &[], &template, Limits::default())
+            .unwrap_err()
+            .detail
+            .contains("origin map")
+    );
+    let mut invalid = valid.clone();
+    invalid[0].as_mut().unwrap().line = 0;
+    assert!(
+        expand_positioned_text("VALUE\n", &assembly, &invalid, &template, Limits::default())
+            .is_err()
+    );
+    invalid[0].as_mut().unwrap().line = 1;
+    invalid[0].as_mut().unwrap().path = PathBuf::new();
+    assert!(
+        expand_positioned_text("VALUE\n", &assembly, &invalid, &template, Limits::default())
+            .is_err()
+    );
+    assert!(
+        expand_positioned_text("VALUE\n", &template, &valid, &template, Limits::default())
+            .unwrap_err()
+            .detail
+            .contains("collides")
+    );
+    let limits = Limits {
+        max_work_bytes: 8,
+        ..Limits::default()
+    };
+    assert!(
+        expand_positioned_text("VALUE\n", &assembly, &valid, &template, limits)
+            .unwrap_err()
+            .detail
+            .contains("budget")
+    );
+    // The extra map and every copied physical coordinate share the expansion's
+    // work budget, rather than obtaining a fresh budget after expansion.
+    let mut low = 0;
+    let mut high = Limits::default().max_work_bytes;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if expand_text(
+            "VALUE\n",
+            &assembly,
+            &template,
+            Limits {
+                max_work_bytes: middle,
+                ..Limits::default()
+            },
+        )
+        .is_ok()
+        {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    assert!(expand_positioned_text(
+        "VALUE\n",
+        &assembly,
+        &valid,
+        &template,
+        Limits {
+            max_work_bytes: low,
+            ..Limits::default()
+        }
+    )
+    .unwrap_err()
+    .detail
+    .contains("budget"));
+    let path_bytes = valid[0].as_ref().unwrap().path.to_string_lossy().len();
+    let map_cost = std::mem::size_of::<Option<SourceLineLocation>>() + path_bytes;
+    let copy_cost = std::mem::size_of::<SourceLineLocation>() + path_bytes;
+    let run = |budget| {
+        expand_positioned_text(
+            "VALUE\n",
+            &assembly,
+            &valid,
+            &template,
+            Limits {
+                max_work_bytes: budget,
+                ..Limits::default()
+            },
+        )
+    };
+    assert!(run(low + map_cost).unwrap_err().detail.contains("budget"));
+    assert!(run(low + map_cost + copy_cost - 1)
+        .unwrap_err()
+        .detail
+        .contains("budget"));
+    assert!(run(low + map_cost + copy_cost).is_ok());
 }
 
 #[test]
