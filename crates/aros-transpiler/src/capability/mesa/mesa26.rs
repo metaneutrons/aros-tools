@@ -1095,6 +1095,19 @@ fn job(script: &str, output: &str, arguments: &[&str]) -> PythonGeneratorJob {
     }
 }
 
+/// Mesa 26 closes the V3D driver for the aarch64 profile only. On any other
+/// Mesa 26 profile the directory is not part of the product: `workbench-hidds-
+/// raspi-aarch64` is the only metatarget that reaches it. Its declarations
+/// would still reach `all` with whatever flags the Makefile spells, which build
+/// a driver without its compile contract.
+pub(crate) fn v3d_lane_is_absent(
+    relative_dir: &Path,
+    target: Option<&TargetContext>,
+) -> Result<bool, String> {
+    Ok(relative_dir == Path::new(super::V3D_RELATIVE_DIR)
+        && profile(target)?.is_some_and(|profile| profile != "aarch64"))
+}
+
 pub(crate) fn parse_v3d(
     root: &Path,
     relative_dir: &Path,

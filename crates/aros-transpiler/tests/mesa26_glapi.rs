@@ -201,6 +201,40 @@ fn mesa26_v3d_has_closed_aarch64_driver_and_generators() {
 }
 
 #[test]
+fn mesa26_v3d_is_not_part_of_the_arm_profile() {
+    // The V3D driver is closed for aarch64 only. `arm-raspi` has no contract
+    // for it, and its Makefile flags lack Mesa's base defines, so declaring the
+    // archive there builds 67 sources that cannot compile (HAVE_PTHREAD).
+    let root = mesa26_source_root();
+    let profile = context("arm", "raspi", "", "hard");
+    let fetches = collect_mmakefile_fetches_with_context(
+        &root.join("workbench/libs/mesa/mmakefile.src"),
+        &root,
+        &profile,
+    )
+    .unwrap();
+    let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
+        &root.join("arch/arm-native/soc/broadcom/2708/hidd/v3d/mmakefile.src"),
+        &root,
+        &DirVars::load(&root),
+        &profile,
+        &fetches,
+    )
+    .unwrap();
+    assert!(parsed.capability_errors.is_empty(), "{parsed:#?}");
+    assert!(
+        parsed.targets.is_empty(),
+        "{:?}",
+        parsed
+            .targets
+            .iter()
+            .map(|target| target.mmake_name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(parsed.python_outputs.is_empty());
+}
+
+#[test]
 fn mesa26_vc4_has_closed_driver_on_raspberry_pi_profiles() {
     let root = mesa26_source_root();
     for (cpu, float_abi) in [("arm", "hard"), ("aarch64", "")] {
