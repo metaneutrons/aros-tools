@@ -49,8 +49,11 @@ fn target_llvm_has_real_closed_fetch_host_tool_and_component_products() {
     assert!(declaration
         .options
         .contains(&"-DLLVM_ENABLE_RTTI=ON".to_owned()));
+    assert!(declaration
+        .options
+        .contains(&"-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON".to_owned()));
     assert_eq!(
-        &declaration.options[2..5],
+        &declaration.options[3..6],
         [
             "-DLLVM_TARGETS_TO_BUILD=X86",
             "-DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-aros",
