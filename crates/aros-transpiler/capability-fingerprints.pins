@@ -59,15 +59,29 @@ mesa26-v3d-recipe = 1d4ee5e8fc4a17d67c0652a932bed4e0c1913c6044fdc4bf981533db0dab
 # Upstream 13484a98 adds v3d_dt to the HIDD; the Mesa archive remains unchanged.
 mesa26-v3d-recipe-device-tree = 40d2c7eb95513fa214b4aa393881337b04e9f0eb5adc4fcb7d0f7976ca85b7ed
 mesa26-v3d-manifest = 70d630491d5504f450633e9cc31532a9e54e524fb7ca4286377b5f711f2e821a
-mesa26-vc4-recipe = 0be62fd0125ffd144ede01d53b0c611cd5185ff8b866b2d77c13829f6aae1f54
+# The archive rule gained gca_private.list as a prerequisite so that plain
+# MetaMake orders it. Both revisions expand to the same jobs. The CMake engine already generates it together with
+# gca_redefs.txt in one command that the archive rewrite depends on.
+mesa26-vc4-recipe = 9d7afd020c08847512409e7d55460e2c8821e285e1e93ec9db346c25ba74d7a2
+mesa26-vc4-recipe-without-private-list = 0be62fd0125ffd144ede01d53b0c611cd5185ff8b866b2d77c13829f6aae1f54
 mesa26-vc4-manifest = e90bf4e7f7ffc73ab6aa1bfc464c6b8bdd47ace229146a6dd77870c381c17dec
 
 # Mesa 26's target LLVM lane expands a versioned Gallivm inventory, a recipe
 # source list, and the local HIDD recipe into closed archive/module sources.
-mesa26-gallivm-recipe = 3a6d383b548f0702783c181c2f8e7b999f48e8c2ff36db9e494073715bd2add4
+# libc++ 23 needs its headers ahead of the posixc ones, so the recipe puts
+# -nostdinc++ and the libc++ directory into USER_CXXFLAGS for LLVM toolchains.
+# The earlier revision stays admitted: both expand to the same lane.
+# This lane is closed on LLVM 11 (HAVE_LLVM=0x0b00) and takes its flags from the
+# compile contract, not from the recipe, so the change does not apply here.
+mesa26-gallivm-recipe = d1c1eb42140590d235afb901c03c65991868b37e2cf34c5905f95cd704b6278a
+mesa26-gallivm-recipe-without-libcxx-order = 3a6d383b548f0702783c181c2f8e7b999f48e8c2ff36db9e494073715bd2add4
 mesa26-gallivm-manifest = cebea7414b4ee5da97c20007fbb8e867b96b2ca615b1cc8226bd060b75f40e50
 mesa26-llvmpipe-recipe = 69e33ce5cd26222b774f8193b818f7a49034e959731ee45587f4d39239e14daf
 mesa26-llvmpipe-hidd-recipe = 6b20993b095bd65868aa27fd036aece5734b8eeb684c04e6980238d9b3ae3bb4
 
 # LLVM 11's target build recipe is expanded into a fixed external provider.
-llvm11-target-recipe = d5ea6a24e95c19997b841659ff4c943f6a3ed13f6e7e7569b662597f65ac4b80
+# The recipe disables precompiled headers (LLVM 23 needs that); the fixed
+# provider passes the same option. The earlier revision stays admitted, since
+# precompiled headers only change build time.
+llvm11-target-recipe = 4f95d02cdaca1e124abc4ada281390b702e9991f5932eb8bda5fd2c12ada7ef1
+llvm11-target-recipe-with-precompiled-headers = d5ea6a24e95c19997b841659ff4c943f6a3ed13f6e7e7569b662597f65ac4b80

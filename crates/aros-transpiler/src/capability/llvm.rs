@@ -3,7 +3,7 @@
 //! No Make shell predicate or wildcard patch command is executed. The audited
 //! release layout uses the ordinary fetch engine and local AROS patch tracking.
 
-use super::require_file_fingerprint;
+use super::require_file_fingerprint_one_of;
 use crate::{
     ast::ExternalCMakeDecl, fetch::FetchDecl, fingerprints::fingerprint, parser::TargetContext,
 };
@@ -61,10 +61,13 @@ pub(crate) fn admit(
             target.target_llvm_ver.as_deref().unwrap_or_default()
         ));
     }
-    require_file_fingerprint(
+    require_file_fingerprint_one_of(
         root,
         "workbench/libs/llvm/mmakefile.src",
-        fingerprint("llvm11-target-recipe")?,
+        &[
+            fingerprint("llvm11-target-recipe")?,
+            fingerprint("llvm11-target-recipe-with-precompiled-headers")?,
+        ],
         "LLVM11 static target MCJIT",
     )?;
     let patch = root.join("tools/crosstools/llvm/llvm-11.0.0.src-aros.diff");
@@ -100,6 +103,7 @@ pub(crate) fn admit(
         patches: "llvm-11.0.0.src-aros.diff:llvm-11.0.0.src:-p1".to_owned(), dir: DIRECTORY.to_owned(),
     };
     let mut options = [
+        "-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON",
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
         "-DCMAKE_BUILD_TYPE=Release",
         "-DLLVM_ENABLE_PROJECTS=",
@@ -136,7 +140,7 @@ pub(crate) fn admit(
     // LLVM_HOST_TRIPLE names where these libraries run, not the build machine.
     // LLVM 11 uses it to select the native MCJIT initialization entry points.
     options.splice(
-        2..2,
+        3..3,
         [
             format!("-DLLVM_TARGETS_TO_BUILD={backend}"),
             format!("-DLLVM_DEFAULT_TARGET_TRIPLE={triple}"),
