@@ -129,6 +129,9 @@ pub(super) fn collect_python_outputs(
             ));
         }
     }
+    if mesa26 && mesa26::v3d_lane_is_absent(rel_dir, target).unwrap_or(false) {
+        targets.retain(|candidate| candidate.dir_path != rel_dir);
+    }
     let v3d = if mesa26 {
         mesa26::parse_v3d(root, rel_dir, target, targets, ownership_fetches)
             .map(|declaration| declaration.into_iter().collect())
