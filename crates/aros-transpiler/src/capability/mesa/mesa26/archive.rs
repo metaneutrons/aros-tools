@@ -29,10 +29,13 @@ pub(super) fn archive_sources(
     };
     match identity {
         Mesa26Target::GalliumVmLibrary => {
-            require_file_fingerprint(
+            require_file_fingerprint_one_of(
                 root,
                 "workbench/libs/mesa/libgalliumvm/mmakefile.src",
-                fingerprint("mesa26-gallivm-recipe")?,
+                &[
+                    fingerprint("mesa26-gallivm-recipe")?,
+                    fingerprint("mesa26-gallivm-recipe-without-libcxx-order")?,
+                ],
                 "Mesa 26 Gallivm source closure",
             )?;
             require_file_fingerprint(
@@ -257,6 +260,18 @@ pub(super) fn archive_sources(
             &[
                 fingerprint(recipe_pin)?,
                 fingerprint("mesa26-v3d-recipe-device-tree")?,
+            ],
+            family,
+        )?;
+    } else if family == "vc4" {
+        // The archive rule's extra gca_private.list prerequisite only orders
+        // plain MetaMake; the CMake engine generates it with gca_redefs.txt.
+        require_file_fingerprint_one_of(
+            root,
+            recipe,
+            &[
+                fingerprint(recipe_pin)?,
+                fingerprint("mesa26-vc4-recipe-without-private-list")?,
             ],
             family,
         )?;
