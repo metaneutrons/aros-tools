@@ -820,3 +820,36 @@ endif
     assert!(own_flags.defines.is_empty(), "{:?}", own_flags.defines);
     assert_eq!(own_flags.skipped, ["$(USER_CPPFLAGS)"]);
 }
+
+#[test]
+fn an_append_after_a_frozen_flag_string_keeps_the_flags_before_it() {
+    // compiler/crt/stdc: linklibs-stdc-static32 appends -DSTDC_LIB32 to the
+    // USER_CPPFLAGS that froze an undecided STDC_MATH_CPPFLAGS. Without
+    // -D__ISO_C_VISIBLE=2011 the 32-bit math sources never see
+    // FLT_EVAL_METHOD, so STRICT_ASSIGN is undefined in e_rem_pio2.c.
+    let text = "\
+ifneq ($(UNDECIDED),)
+MATH := -DSECTIONCOMMENT=x
+endif
+USER_CPPFLAGS := $(MATH) -D_GNU_SOURCE -D__ISO_C_VISIBLE=2011 -Dlint '-D__FBSDID(x)='
+%build_linklib mmake=first libname=a files=f
+USER_CPPFLAGS += -DSTDC_LIB32
+%build_linklib mmake=second libname=a files=f
+";
+    let scope = collect_vars_with_context(text, &TargetContext::default());
+    assert_eq!(scope.raw_at("USER_CPPFLAGS", usize::MAX), None);
+    let flags = crate::flags::collect_flags_at(&scope, usize::MAX);
+    assert_eq!(
+        flags.defines,
+        ["_GNU_SOURCE", "__ISO_C_VISIBLE=2011", "lint", "STDC_LIB32"]
+    );
+    assert_eq!(flags.compile_options, ["-D__FBSDID(x)="]);
+    assert_eq!(flags.skipped, ["$(MATH)"]);
+
+    // The declaration before the append still gets only its own flags.
+    let before = crate::flags::collect_flags_at(&scope, 5);
+    assert_eq!(
+        before.defines,
+        ["_GNU_SOURCE", "__ISO_C_VISIBLE=2011", "lint"]
+    );
+}

@@ -365,6 +365,23 @@ impl VarScope {
             .or_else(|| self.configuration.get(name).map(String::as_str))
     }
 
+    /// The value an append (`+=`) extends. An earlier `:=` that froze a
+    /// reference to an unresolved configuration value is still the text the
+    /// append adds to: dropping it would leave only the appended tokens, as
+    /// `USER_CPPFLAGS += -DSTDC_LIB32` once lost every flag assigned before it.
+    /// Readers that need a decided value keep refusing that text through
+    /// `raw_at`; only an opaque definition leaves nothing to extend.
+    fn latest_raw_for_append(&self, name: &str) -> Option<&str> {
+        if self.has_opaque_assignment_before(name, usize::MAX) {
+            return None;
+        }
+        self.raw
+            .get(name)
+            .and_then(|h| h.last())
+            .map(|(_, value)| value.as_str())
+            .or_else(|| self.configuration.get(name).map(String::as_str))
+    }
+
     fn is_defined_before(&self, name: &str, line: usize) -> bool {
         if self.has_opaque_assignment_before(name, line) {
             return true;
@@ -1381,7 +1398,7 @@ pub(crate) fn collect_vars_impl_with_forward_locals(
             value.to_owned()
         };
         let expanded = if kind == AssignmentKind::Append {
-            match scope.latest_raw(var_name) {
+            match scope.latest_raw_for_append(var_name) {
                 Some(old) if !old.is_empty() && !expanded_rhs.is_empty() => {
                     format!("{old} {expanded_rhs}")
                 }
