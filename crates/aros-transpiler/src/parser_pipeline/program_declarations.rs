@@ -76,7 +76,15 @@ pub(super) fn collect_programs(inputs: DeclarationInputs<'_>, outputs: Declarati
             || include_set.clone(),
             |_| collect_includes_at(joined, scope, inv.line, rel_dir),
         );
-        let mmake_name = sanitize_ident(&mmake_raw);
+        let mmake_name = if target.is_some_and(|context| {
+            context
+                .shared_program_mmake_names
+                .contains(&sanitize_ident(&mmake_raw))
+        }) {
+            crate::parser::shared_program_id(&mmake_raw, rel_dir)
+        } else {
+            sanitize_ident(&mmake_raw)
+        };
 
         // progname is declared /A, so a declaration without one is malformed
         // rather than something to guess a name for.

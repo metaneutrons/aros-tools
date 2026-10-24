@@ -3836,3 +3836,68 @@ fn module_client_archives_go_where_make_puts_them() {
         parsed.unresolved_output_paths
     );
 }
+
+#[test]
+fn programs_sharing_a_metamake_name_get_their_own_ids_and_stay_under_the_name() {
+    let tree = TempTree::new();
+    fs::create_dir_all(tree.0.join("config")).unwrap();
+    fs::write(tree.0.join("config/aros.cfg"), "").unwrap();
+    for (directory, content) in [
+        (
+            "group",
+            "include $(SRCDIR)/config/aros.cfg\n\
+             %build_progs mmake=shared files=\"one two\"\n",
+        ),
+        (
+            "Prog",
+            "include $(SRCDIR)/config/aros.cfg\n\
+             #MM shared : includes linklibs\n\
+             %build_prog mmake=shared progname=Prog files=main\n",
+        ),
+    ] {
+        fs::create_dir_all(tree.0.join(directory)).unwrap();
+        fs::write(tree.0.join(directory).join("mmakefile.src"), content).unwrap();
+    }
+    let dirs = DirVars::load(&tree.0);
+    let mut context = target_context("x86_64", "pc", "");
+    let parse = |directory: &str, context: &TargetContext| {
+        super::parse_mmakefile_with_dirs_and_context(
+            &tree.0.join(directory).join("mmakefile.src"),
+            &tree.0,
+            &dirs,
+            context,
+        )
+        .unwrap()
+    };
+
+    let first = [parse("group", &context), parse("Prog", &context)];
+    let shared = super::shared_program_mmake_names(&first);
+    assert_eq!(shared, BTreeSet::from(["shared".to_owned()]));
+
+    context.shared_program_mmake_names = shared;
+    let group = parse("group", &context);
+    let program = parse("Prog", &context);
+    assert!(group
+        .targets
+        .iter()
+        .any(|target| target.mmake_name == "shared"
+            && target.module_type == ModuleType::ProgramGroup));
+    assert!(program
+        .targets
+        .iter()
+        .any(|target| target.mmake_name == "shared-prog"
+            && target.module_type == ModuleType::Program));
+    let rule = |name: &str| {
+        program
+            .meta_rules
+            .iter()
+            .filter(|rule| rule.name == name)
+            .flat_map(|rule| rule.dependencies.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rule("shared-prog"), ["includes", "linklibs"]);
+    assert!(rule("shared").contains(&"shared-prog".to_owned()));
+    assert!(program
+        .make_meta_providers
+        .contains(&"shared-prog".to_owned()));
+}

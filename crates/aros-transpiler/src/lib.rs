@@ -101,7 +101,7 @@ pub use make_opts::MakeOptsFile;
 pub use parser::{
     collect_mmakefile_fetches_with_context, parse_mmakefile, parse_mmakefile_with_context,
     parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context,
-    parse_mmakefile_with_dirs_and_context_and_fetches, TargetContext,
+    parse_mmakefile_with_dirs_and_context_and_fetches, shared_program_mmake_names, TargetContext,
 };
 
 #[cfg(test)]
