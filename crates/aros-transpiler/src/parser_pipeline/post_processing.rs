@@ -223,6 +223,41 @@ pub(super) fn collect_meta_rules_and_apply_llvm(
         }
     }
 
+    // A program whose `mmake=` name other makefiles declare as well was given
+    // its own target id by the declaration parser. MetaMake lets several
+    // makefiles provide one target, so the shared name keeps building every
+    // such program, and the program inherits the rules written for the name.
+    if let Some(context) = target {
+        for original in &context.shared_program_mmake_names {
+            let derived = crate::parser::shared_program_id(original, rel_dir);
+            if &derived == original
+                || !targets
+                    .iter()
+                    .any(|declaration| declaration.mmake_name == derived)
+            {
+                continue;
+            }
+            let inherited: Vec<_> = meta_rules
+                .iter()
+                .filter(|rule| &rule.name == original)
+                .map(|rule| rule.dependencies.clone())
+                .collect();
+            for dependencies in inherited {
+                meta_rules.push(MetaTargetRule {
+                    name: derived.clone(),
+                    dependencies,
+                });
+            }
+            meta_rules.push(MetaTargetRule {
+                name: original.clone(),
+                dependencies: vec![derived.clone()],
+            });
+            if make_meta_providers.contains(original) {
+                make_meta_providers.push(derived);
+            }
+        }
+    }
+
     // A bare #MM marker names the ordinary Make target on the next line.
     // MetaMake treats that provider as nonvirtual even when its prerequisites
     // are empty. Record its existence without inventing an executable recipe.

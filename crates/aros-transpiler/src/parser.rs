@@ -60,6 +60,43 @@ static CONTINUATION_RE: LazyLock<Regex> =
 /// A dot survives: CMake admits it, and dropping it renamed the binary. The
 /// reference builds `atheros5000.device` and `wasapiaudio.dll`, which came out
 /// as `atheros5000_device` and `wasapiaudio_dll`.
+/// Unique target id of a `%build_prog` whose `mmake=` name is shared with
+/// another declaration: the sanitized name plus the lower-cased directory name.
+pub(crate) fn shared_program_id(mmake_raw: &str, rel_dir: &std::path::Path) -> String {
+    let base = rel_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    format!("{}-{}", sanitize_ident(mmake_raw), sanitize_ident(&base))
+}
+
+/// Names that several directories declare, at least one as a program.
+///
+/// Groups, libraries and modules keep their name; only programs are renamed,
+/// so the result does not depend on file order.
+#[must_use]
+pub fn shared_program_mmake_names<'a>(
+    parsed: impl IntoIterator<Item = &'a ParsedMmakefile>,
+) -> std::collections::BTreeSet<String> {
+    let mut by_name = std::collections::BTreeMap::<
+        &str,
+        (std::collections::BTreeSet<&std::path::Path>, bool),
+    >::new();
+    let parsed: Vec<_> = parsed.into_iter().collect();
+    for file in &parsed {
+        for target in &file.targets {
+            let entry = by_name.entry(&target.mmake_name).or_default();
+            entry.0.insert(&target.dir_path);
+            entry.1 |= target.module_type == ModuleType::Program;
+        }
+    }
+    by_name
+        .into_iter()
+        .filter(|(_, (dirs, has_program))| dirs.len() > 1 && *has_program)
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
 pub(crate) fn sanitize_ident(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -513,6 +550,12 @@ pub(crate) fn join_continuations_with_origins(content: &str) -> (String, Vec<usi
 /// context retain the conservative, target-agnostic parser behaviour.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TargetContext {
+    /// MetaMake target names that several makefiles declare as concrete
+    /// programs or program groups. A `%build_prog` using one of these names
+    /// gets its own unique target id (see `shared_program_id`) and joins the
+    /// shared name through a meta rule, as MetaMake lets several makefiles
+    /// provide one target. Filled by `shared_program_mmake_names`.
+    pub shared_program_mmake_names: std::collections::BTreeSet<String>,
     /// Original object endpoints selected through opaque, source-verified
     /// handwritten lane routes. This never implies a companion compiler ABI.
     pub native_arch_lane_alias_endpoints: std::collections::BTreeSet<String>,
