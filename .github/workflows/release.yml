@@ -1052,7 +1052,15 @@ jobs:
 
   sign-aggregate:
     name: Sign complete release inventory
-    if: needs.metadata.outputs.is_release == 'true'
+    # always(): without a status function the job also needs every ancestor to
+    # have succeeded, and native-ab is skipped whenever the release does not
+    # require independent A/B qualification. That skipped the signing and with
+    # it every publication job of such a release.
+    if: >-
+      always() &&
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.release-recovery.result == 'success' &&
+      needs.aggregate.result == 'success'
     needs: [metadata, release-recovery, aggregate]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -1446,6 +1454,7 @@ jobs:
   homebrew-credential-preflight:
     name: Verify the isolated Homebrew credential
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.channel-preflight.result == 'success' &&
@@ -1485,6 +1494,7 @@ jobs:
   archive-credential-preflight:
     name: Verify the isolated central archive dispatch identity
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.channel-preflight.result == 'success' &&
@@ -1521,6 +1531,7 @@ jobs:
   aur-credential-preflight:
     name: Verify the isolated AUR SSH credential
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.channel-preflight.result == 'success' &&
@@ -2036,8 +2047,10 @@ jobs:
   ecosystem:
     name: Roll forward and verify stable package channels
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
-      needs.metadata.outputs.is_stable == 'true'
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.publish.result == 'success'
     needs: [metadata, publish]
     # A reusable workflow cannot raise the calling job's GITHUB_TOKEN ceiling.
     # Its recovery job verifies attestations before any channel mutation.
@@ -2059,8 +2072,10 @@ jobs:
   final-audit:
     name: Reverify immutable stable release after channel convergence
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
-      needs.metadata.outputs.is_stable == 'true'
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.ecosystem.result == 'success'
     needs: [metadata, ecosystem]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -2173,6 +2188,7 @@ jobs:
   finalize-release-please:
     name: Finalize the exact Release Please lifecycle
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.final-audit.result == 'success'

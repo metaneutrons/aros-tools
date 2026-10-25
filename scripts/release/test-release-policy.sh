@@ -1386,5 +1386,6 @@ PY
 expect_failure "$root/scripts/release/check-actions-policy.sh" "$work/policy"
 
 python3 "$root/scripts/release/test-wait-aur-index.py"
+python3 "$root/scripts/release/test-release-job-graph.py"
 printf '%s\n' 'release policy fixtures passed'
 bash "$root/scripts/release/test-prepare-homebrew-openssl.sh"
