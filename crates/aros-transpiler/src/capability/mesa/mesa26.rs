@@ -774,7 +774,7 @@ pub(crate) fn compile_contract(
                     "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
                     "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util/format",
                     "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util/format",
-                    "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429",
+                    "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7",
                 ]
                 .map(str::to_owned),
             );
@@ -796,6 +796,24 @@ pub(crate) fn compile_contract(
         includes,
         options,
     }))
+}
+
+/// The util recipe is admitted with either reviewed Chromium zlib include
+/// directory; every other include must match exactly.
+fn util_includes_match(actual: &[String], expected: &[String]) -> bool {
+    const PREVIOUS: &str =
+        "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7";
+    const CURRENT: &str =
+        "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429";
+    if actual == expected {
+        return true;
+    }
+    match (expected.split_last(), actual.split_last()) {
+        (Some((expected_last, expected_head)), Some((actual_last, actual_head))) => {
+            expected_last == PREVIOUS && actual_last == CURRENT && expected_head == actual_head
+        }
+        _ => false,
+    }
 }
 
 fn verify_mesa_fetch(fetches: &[FetchDecl]) -> Result<(), String> {
@@ -999,7 +1017,7 @@ pub(crate) fn parse_mesautil(
         let contract = compile_contract(relative_dir, mmake, target)?
             .ok_or_else(|| format!("Mesa 26 util lacks compile contract for {mmake}"))?;
         let defines_match = declaration.defines == contract.defines;
-        let includes_match = declaration.include_dirs == contract.includes;
+        let includes_match = util_includes_match(&declaration.include_dirs, &contract.includes);
         let options_match = declaration.compile_options == contract.options;
         if declaration.target_name
             != if mmake.ends_with("mesadevutil") {
