@@ -411,7 +411,7 @@ for workflow_name in ('publish-ecosystem.yml',):
             # The pinned token action revokes its short-lived installation token
             # in its post step. There is no plaintext key file or shell cleanup.
             if (step_domains == {'apt-archive-publication'} and
-                'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' in step and
+                'actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510' in step and
                 'repositories: apt-archive' in step and
                 'permission-actions: write' in step and
                 'permission-contents: read' in step and
@@ -489,7 +489,7 @@ if rp_path.exists():
     rp_job = rp_jobs.get('release-pr', '')
     required_rp = (
         "if: github.ref == 'refs/heads/main' && github.event_name != 'workflow_run'",
-        'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
+        'actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510',
         'client-id: ${{ vars.RELEASE_PLEASE_CLIENT_ID }}',
         'private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}',
         'GH_TOKEN: ${{ steps.app-token.outputs.token }}',
@@ -638,7 +638,7 @@ if homebrew_users:
     factory = homebrew_action.read_text() if homebrew_action.is_file() else ''
     required_factory = (
         'using: composite',
-        'uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
+        'uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510',
         'client-id: ${{ inputs.client-id }}', 'private-key: ${{ inputs.private-key }}',
         'owner: metaneutrons', 'repositories: homebrew-tap',
         'permission-contents: write', 'permission-pull-requests: write',
