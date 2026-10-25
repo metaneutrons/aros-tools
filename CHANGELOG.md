@@ -4,6 +4,14 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.3](https://github.com/metaneutrons/aros-tools/compare/v0.6.2...v0.6.3) (2026-10-24)
+
+
+### Bug Fixes
+
+* **transpiler:** keep the flags before an append to a frozen flag string ([#497](https://github.com/metaneutrons/aros-tools/issues/497)) ([8a2c4f2](https://github.com/metaneutrons/aros-tools/commit/8a2c4f228c26ec55bc459cd2c480bc378d7296c6))
+* **transpiler:** leave the Mesa 26 V3D driver out of non-aarch64 profiles ([#498](https://github.com/metaneutrons/aros-tools/issues/498)) ([c79c777](https://github.com/metaneutrons/aros-tools/commit/c79c777cfec4ea5ce35fdb722a446db8635339aa))
+
 ## [0.6.2](https://github.com/metaneutrons/aros-tools/compare/v0.6.0...v0.6.2) (2026-10-24)
 
 
