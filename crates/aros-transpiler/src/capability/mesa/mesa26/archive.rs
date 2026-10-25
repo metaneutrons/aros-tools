@@ -251,6 +251,18 @@ pub(super) fn archive_sources(
     };
     if family == "galliumaux" {
         require_file_fingerprint_one_of(root, recipe, &galliumaux_recipes()?, family)?;
+    } else if family == "util" {
+        // The two reviewed recipes differ only in the Chromium zlib include
+        // directory and expand to the same archive and generator jobs.
+        require_file_fingerprint_one_of(
+            root,
+            recipe,
+            &[
+                fingerprint("mesa26-util-recipe")?,
+                fingerprint("mesa26-util-recipe-chromium-2b1b62f")?,
+            ],
+            family,
+        )?;
     } else if family == "v3d" {
         // Upstream added v3d_dt to the HIDD, not to the closed Mesa archive.
         // Both reviewed recipes expand to the same archive and generator jobs.
