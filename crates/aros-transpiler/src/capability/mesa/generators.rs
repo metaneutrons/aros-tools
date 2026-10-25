@@ -418,7 +418,7 @@ pub(crate) fn parse_mesautil(
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/util/format",
         "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/src/util/format",
-        "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429",
+        "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7",
     ];
     let target_contract_ok = |declaration: &TargetDefinition, name: &str, embedded_device: bool| {
         let mut defines = expected_defines.clone();
