@@ -4,6 +4,40 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.4](https://github.com/metaneutrons/aros-tools/compare/v0.6.2...v0.6.4) (2026-10-25)
+
+
+### Bug Fixes
+
+* **release:** keep signing and publication when A/B qualification is skipped ([#500](https://github.com/metaneutrons/aros-tools/issues/500)) ([5b1e6cb](https://github.com/metaneutrons/aros-tools/commit/5b1e6cbd766378eef71a101711039837287d49af))
+* **transpiler:** keep the flags before an append to a frozen flag string ([#497](https://github.com/metaneutrons/aros-tools/issues/497)) ([8a2c4f2](https://github.com/metaneutrons/aros-tools/commit/8a2c4f228c26ec55bc459cd2c480bc378d7296c6))
+* **transpiler:** leave the Mesa 26 V3D driver out of non-aarch64 profiles ([#498](https://github.com/metaneutrons/aros-tools/issues/498)) ([c79c777](https://github.com/metaneutrons/aros-tools/commit/c79c777cfec4ea5ce35fdb722a446db8635339aa))
+
+## [0.6.3](https://github.com/metaneutrons/aros-tools/compare/v0.6.2...v0.6.3) (2026-10-24)
+
+
+### Bug Fixes
+
+* **transpiler:** keep the flags before an append to a frozen flag string ([#497](https://github.com/metaneutrons/aros-tools/issues/497)) ([8a2c4f2](https://github.com/metaneutrons/aros-tools/commit/8a2c4f228c26ec55bc459cd2c480bc378d7296c6))
+* **transpiler:** leave the Mesa 26 V3D driver out of non-aarch64 profiles ([#498](https://github.com/metaneutrons/aros-tools/issues/498)) ([c79c777](https://github.com/metaneutrons/aros-tools/commit/c79c777cfec4ea5ce35fdb722a446db8635339aa))
+
+## [0.6.2](https://github.com/metaneutrons/aros-tools/compare/v0.6.0...v0.6.2) (2026-10-24)
+
+
+### Features
+
+* **transpiler:** let several makefiles provide one MetaMake program target ([#493](https://github.com/metaneutrons/aros-tools/issues/493)) ([8041826](https://github.com/metaneutrons/aros-tools/commit/80418266a1d4e0b2e838a910b9cef54a032a789e))
+
+
+### Bug Fixes
+
+* **release:** admit tagged callers in channel recovery ([037fa70](https://github.com/metaneutrons/aros-tools/commit/037fa706ac79e17bd0bc022da79086f19de8775e))
+* **release:** wait resiliently for AUR index convergence ([d11f267](https://github.com/metaneutrons/aros-tools/commit/d11f267b70818feab0aa7fbfaafbad0ffea59941))
+* **toolchain:** expose GNU make to Darwin SDK subprocesses ([f701fc0](https://github.com/metaneutrons/aros-tools/commit/f701fc0d428de4752bcca41659f443f6f178639c))
+* **transpiler:** admit the reviewed LLVM, gallivm and vc4 recipe revisions ([#495](https://github.com/metaneutrons/aros-tools/issues/495)) ([43bcb2c](https://github.com/metaneutrons/aros-tools/commit/43bcb2c5dd3ea75b5a847dae4359de512dd6a0a7))
+* **transpiler:** provide LLVM components for ARM targets ([feb0d84](https://github.com/metaneutrons/aros-tools/commit/feb0d84183ed26d7adf5288b2ec571ab15cccd5f))
+* update docs and Rust dependencies for the new advisories ([#494](https://github.com/metaneutrons/aros-tools/issues/494)) ([9ab7ec1](https://github.com/metaneutrons/aros-tools/commit/9ab7ec1357654a804361b255dfe3f7f710a18700))
+
 ## [0.6.1](https://github.com/metaneutrons/aros-tools/compare/v0.6.0...v0.6.1) (2026-10-18)
 
 

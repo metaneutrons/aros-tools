@@ -227,6 +227,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     .iter()
     .any(|value| value.is_some())
     .then(|| TargetContext {
+        shared_program_mmake_names: std::collections::BTreeSet::new(),
         native_arch_lane_alias_endpoints: std::collections::BTreeSet::new(),
         native_arch_include_effects: Vec::new(),
         native_arch_include_errors: Vec::new(),
@@ -460,6 +461,56 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             (path, res)
         })
         .collect();
+
+    // Programs that share a MetaMake name with another declaration need their
+    // own target ids. Which names are shared is only known once every file is
+    // parsed, so the affected files are parsed again with that set.
+    let mut parsed_results = parsed_results;
+    if let Some(context) = target.as_ref() {
+        let shared = aros_transpiler::shared_program_mmake_names(
+            parsed_results
+                .iter()
+                .filter_map(|(_, result)| result.as_ref().ok()),
+        );
+        if !shared.is_empty() {
+            let mut shared_context = context.clone();
+            shared_context.shared_program_mmake_names = shared;
+            let affected: Vec<usize> = parsed_results
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, result))| {
+                    result.as_ref().is_ok_and(|parsed| {
+                        parsed.targets.iter().any(|declaration| {
+                            declaration.module_type == aros_transpiler::ModuleType::Program
+                                && shared_context
+                                    .shared_program_mmake_names
+                                    .contains(&declaration.mmake_name)
+                        })
+                    })
+                })
+                .map(|(index, _)| index)
+                .collect();
+            let reparsed: Vec<_> = affected
+                .par_iter()
+                .map(|&index| {
+                    let path = parsed_results[index].0;
+                    (
+                        index,
+                        parse_mmakefile_with_dirs_and_context_and_fetches(
+                            path,
+                            &args.source_dir,
+                            &dirs,
+                            &shared_context,
+                            &known_fetches,
+                        ),
+                    )
+                })
+                .collect();
+            for (index, result) in reparsed {
+                parsed_results[index].1 = result;
+            }
+        }
+    }
 
     pb.finish_with_message("Parsing complete");
 

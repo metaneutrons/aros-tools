@@ -448,12 +448,12 @@ jobs:
         include:
           - name: linux-x86_64
             runner: ubuntu-24.04
-            container: rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+            container: rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8
             target: x86_64-unknown-linux-gnu
             deb_arch: amd64
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
-            container: rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+            container: rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8
             target: aarch64-unknown-linux-gnu
             deb_arch: arm64
           - name: macos-aarch64
@@ -728,11 +728,11 @@ jobs:
         include:
           - name: linux-x86_64
             runner: ubuntu-24.04
-            container: rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+            container: rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8
             target: x86_64-unknown-linux-gnu
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
-            container: rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+            container: rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8
             target: aarch64-unknown-linux-gnu
           - name: macos-aarch64
             runner: macos-15
@@ -1052,7 +1052,15 @@ jobs:
 
   sign-aggregate:
     name: Sign complete release inventory
-    if: needs.metadata.outputs.is_release == 'true'
+    # always(): without a status function the job also needs every ancestor to
+    # have succeeded, and native-ab is skipped whenever the release does not
+    # require independent A/B qualification. That skipped the signing and with
+    # it every publication job of such a release.
+    if: >-
+      always() &&
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.release-recovery.result == 'success' &&
+      needs.aggregate.result == 'success'
     needs: [metadata, release-recovery, aggregate]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -1446,6 +1454,7 @@ jobs:
   homebrew-credential-preflight:
     name: Verify the isolated Homebrew credential
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.channel-preflight.result == 'success' &&
@@ -1485,6 +1494,7 @@ jobs:
   archive-credential-preflight:
     name: Verify the isolated central archive dispatch identity
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.channel-preflight.result == 'success' &&
@@ -1521,6 +1531,7 @@ jobs:
   aur-credential-preflight:
     name: Verify the isolated AUR SSH credential
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.channel-preflight.result == 'success' &&
@@ -2036,8 +2047,10 @@ jobs:
   ecosystem:
     name: Roll forward and verify stable package channels
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
-      needs.metadata.outputs.is_stable == 'true'
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.publish.result == 'success'
     needs: [metadata, publish]
     # A reusable workflow cannot raise the calling job's GITHUB_TOKEN ceiling.
     # Its recovery job verifies attestations before any channel mutation.
@@ -2059,8 +2072,10 @@ jobs:
   final-audit:
     name: Reverify immutable stable release after channel convergence
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
-      needs.metadata.outputs.is_stable == 'true'
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.ecosystem.result == 'success'
     needs: [metadata, ecosystem]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -2173,6 +2188,7 @@ jobs:
   finalize-release-please:
     name: Finalize the exact Release Please lifecycle
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.final-audit.result == 'success'

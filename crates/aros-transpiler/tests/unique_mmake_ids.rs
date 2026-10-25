@@ -1,8 +1,9 @@
 mod common;
 
 use aros_transpiler::{
-    collect_mmakefile_fetches_with_context, dirs::DirVars, parse_mmakefile_with_dirs_and_context,
-    parse_mmakefile_with_dirs_and_context_and_fetches, ModuleType, TargetContext,
+    collect_mmakefile_fetches_with_context, dirs::DirVars,
+    parse_mmakefile_with_dirs_and_context_and_fetches, shared_program_mmake_names, ModuleType,
+    TargetContext,
 };
 use std::{
     collections::BTreeMap,
@@ -17,6 +18,7 @@ fn source_root() -> PathBuf {
 #[test]
 fn formerly_colliding_programs_keep_distinct_ids_outputs_and_parent_edges() {
     let root = source_root();
+    let files = mmakefiles(&root);
     let dirs = DirVars::load(&root);
 
     for (cpu, platform, float_abi) in [
@@ -26,6 +28,15 @@ fn formerly_colliding_programs_keep_distinct_ids_outputs_and_parent_edges() {
         ("riscv64", "opensbi", ""),
     ] {
         let context = target_context(cpu, platform, float_abi);
+        let tree = parse_tree(&root, &files, &dirs, &context);
+        let lookup = |file: &str| {
+            let path = root.join(file);
+            &tree
+                .iter()
+                .find(|(candidate, _)| *candidate == path)
+                .unwrap_or_else(|| panic!("{file} is not in the parsed tree"))
+                .1
+        };
         let expectations = [
             (
                 "developer/demos/mmakefile.src",
@@ -72,9 +83,7 @@ fn formerly_colliding_programs_keep_distinct_ids_outputs_and_parent_edges() {
         ];
 
         for (file, mmake, name, source, kind) in expectations {
-            let parsed =
-                parse_mmakefile_with_dirs_and_context(&root.join(file), &root, &dirs, &context)
-                    .unwrap_or_else(|error| panic!("{file}: {error}"));
+            let parsed = lookup(file);
             let target = parsed
                 .targets
                 .iter()
@@ -106,9 +115,7 @@ fn formerly_colliding_programs_keep_distinct_ids_outputs_and_parent_edges() {
                 "workbench-c-zopfli",
             ),
         ] {
-            let parsed =
-                parse_mmakefile_with_dirs_and_context(&root.join(file), &root, &dirs, &context)
-                    .unwrap_or_else(|error| panic!("{file}: {error}"));
+            let parsed = lookup(file);
             assert!(
                 parsed.meta_rules.iter().any(|rule| {
                     rule.name == parent
@@ -122,6 +129,47 @@ fn formerly_colliding_programs_keep_distinct_ids_outputs_and_parent_edges() {
             );
         }
     }
+}
+
+/// Parses every makefile the way the transpiler does: programs that share a
+/// MetaMake name with another declaration are parsed again with their own ids.
+fn parse_tree(
+    root: &Path,
+    files: &[PathBuf],
+    dirs: &DirVars,
+    context: &TargetContext,
+) -> Vec<(PathBuf, aros_transpiler::ast::ParsedMmakefile)> {
+    let fetches = files
+        .iter()
+        .flat_map(|file| {
+            collect_mmakefile_fetches_with_context(file, root, context)
+                .unwrap_or_else(|error| panic!("{}: {error}", file.display()))
+        })
+        .collect::<Vec<_>>();
+    let parse = |file: &PathBuf, context: &TargetContext| {
+        parse_mmakefile_with_dirs_and_context_and_fetches(file, root, dirs, context, &fetches)
+            .unwrap_or_else(|error| panic!("{}: {error}", file.display()))
+    };
+    let mut parsed = files
+        .iter()
+        .map(|file| (file.clone(), parse(file, context)))
+        .collect::<Vec<_>>();
+    let shared = shared_program_mmake_names(parsed.iter().map(|(_, parsed)| parsed));
+    if !shared.is_empty() {
+        let mut shared_context = context.clone();
+        shared_context.shared_program_mmake_names = shared;
+        for (file, parsed) in &mut parsed {
+            if parsed.targets.iter().any(|target| {
+                target.module_type == ModuleType::Program
+                    && shared_context
+                        .shared_program_mmake_names
+                        .contains(&target.mmake_name)
+            }) {
+                *parsed = parse(file, &shared_context);
+            }
+        }
+    }
+    parsed
 }
 
 fn mmakefiles(root: &Path) -> Vec<PathBuf> {
@@ -175,21 +223,10 @@ fn concrete_profiles_have_unique_compiled_mmake_ids() {
         ("riscv64", "opensbi", ""),
     ] {
         let context = target_context(cpu, platform, float_abi);
-        let fetches = files
-            .iter()
-            .flat_map(|file| {
-                collect_mmakefile_fetches_with_context(file, &root, &context)
-                    .unwrap_or_else(|error| panic!("{}: {error}", file.display()))
-            })
-            .collect::<Vec<_>>();
         let mut declarations = BTreeMap::new();
         let mut duplicates = Vec::new();
 
-        for file in &files {
-            let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
-                file, &root, &dirs, &context, &fetches,
-            )
-            .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+        for (_, parsed) in parse_tree(&root, &files, &dirs, &context) {
             for target in parsed.targets {
                 let current = (target.target_name, target.dir_path);
                 if let Some(previous) =
