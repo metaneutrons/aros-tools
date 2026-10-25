@@ -2669,11 +2669,11 @@ fn zlib_port_scope_is_declaration_owned_and_profile_exact() {
             });
             assert_eq!(target.source_files.len(), source_count, "{cpu}: {mmake}");
             assert!(target.source_files.iter().all(|source| source.starts_with(
-                "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/"
+                "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429/"
             )));
             assert_eq!(
                 target.include_dirs,
-                ["${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7"],
+                ["${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429"],
                 "{cpu}: {mmake}"
             );
             assert_eq!(target.link_options, ["-lpthread"], "{cpu}: {mmake}");
@@ -2716,7 +2716,7 @@ fn zlib_port_scope_is_declaration_owned_and_profile_exact() {
         assert_eq!(
             minigzip.source_files,
             [
-                "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/test/minigzip"
+                "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429/test/minigzip"
             ]
         );
         assert!(minigzip.defines.iter().any(|value| value == "NO_GZIP"));
@@ -2731,19 +2731,19 @@ fn zlib_port_scope_is_declaration_owned_and_profile_exact() {
             .expect("production zlib fetch");
         assert_eq!(
             fetch.base,
-            "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7"
+            "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429"
         );
         assert_eq!(fetch.destination, fetch.base);
-        assert!(fetch.location.contains("chromium-da752eb2a3660cf1"));
+        assert!(fetch.location.contains("chromium-2b1b62fed03e8b8a"));
         assert!(!fetch.origins.contains("cache://"));
         assert!(fetch
             .origins
-            .contains("da752eb2a3660cf1bf8dac620f6380b89dd953a7"));
+            .contains("2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429"));
         let transform = &parsed.header_transforms[0];
         assert_eq!(transform.name, "workbench-libs-z-geninc");
         assert_eq!(
             transform.input,
-            "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/zconf.h.chr"
+            "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429/zconf.h.chr"
         );
         assert_eq!(transform.output, "${AROS_SDK_INCLUDE_DIR}/zconf.h");
         assert!(parsed

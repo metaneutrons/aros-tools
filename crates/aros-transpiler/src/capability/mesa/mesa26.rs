@@ -774,7 +774,7 @@ pub(crate) fn compile_contract(
                     "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
                     "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util/format",
                     "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util/format",
-                    "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7",
+                    "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429",
                 ]
                 .map(str::to_owned),
             );
