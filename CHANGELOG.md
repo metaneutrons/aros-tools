@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.5](https://github.com/metaneutrons/aros-tools/compare/v0.6.4...v0.6.5) (2026-10-25)
+
+
+### Bug Fixes
+
+* **transpiler:** follow the Chromium zlib revision 2b1b62f in the Mesa util capability ([#502](https://github.com/metaneutrons/aros-tools/issues/502)) ([166f448](https://github.com/metaneutrons/aros-tools/commit/166f448fe0c82714c6fbb48633e39a3b7e6721ef))
+
 ## [0.6.4](https://github.com/metaneutrons/aros-tools/compare/v0.6.2...v0.6.4) (2026-10-25)
 
 
