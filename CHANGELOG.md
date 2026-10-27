@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.6](https://github.com/metaneutrons/aros-tools/compare/v0.6.5...v0.6.6) (2026-10-27)
+
+
+### Bug Fixes
+
+* **transpiler:** accept the AHI configure environment with a pinned SFDC ([#506](https://github.com/metaneutrons/aros-tools/issues/506)) ([190cf75](https://github.com/metaneutrons/aros-tools/commit/190cf7517374eb1e387b6d82a7a6f918bb75115a))
+
 ## [0.6.5](https://github.com/metaneutrons/aros-tools/compare/v0.6.4...v0.6.5) (2026-10-25)
 
 
