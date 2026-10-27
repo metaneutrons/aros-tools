@@ -201,7 +201,7 @@ impl SourceLock {
         self.0
             .sources
             .iter()
-            .filter_map(|source| source.patch.as_deref())
+            .flat_map(|source| source.patches.iter().map(String::as_str))
     }
 
     /// Every host Python package, in the source-owned declaration order.
@@ -234,7 +234,7 @@ impl SourceLock {
             .0
             .sources
             .iter()
-            .filter_map(|source| source.patch.as_deref())
+            .flat_map(|source| source.patches.iter().map(String::as_str))
             .collect::<BTreeSet<_>>();
         let recipe_patches = recipe
             .patches()
@@ -291,7 +291,10 @@ struct Source {
     component: String,
     version: String,
     purpose: SourcePurpose,
-    patch: Option<String>,
+    /// One path, or a list when one archive carries several AROS patches (the
+    /// LLVM monorepo archive has one per component). Absent means no patch.
+    #[serde(default, rename = "patch", deserialize_with = "patch_paths")]
+    patches: Vec<String>,
     filename: String,
     url: String,
     #[serde(deserialize_with = "digest")]
@@ -401,7 +404,7 @@ fn validate(record: &Record) -> Result<(), ContractError> {
                 "source lock declares conflicting versions for one component",
             ));
         }
-        if let Some(patch) = &source.patch {
+        for patch in &source.patches {
             let patch_namespace = match record.family {
                 CompilerFamily::Llvm => "tools/crosstools/llvm/",
                 CompilerFamily::Gnu => "tools/crosstools/gnu/",
@@ -484,6 +487,27 @@ fn validate_gnu_components(record: &Record) -> Result<(), ContractError> {
         ));
     }
     Ok(())
+}
+
+fn patch_paths<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    // An explicit `null` keeps meaning "no patch", as it did for a single path.
+    match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => Ok(Vec::new()),
+        Some(OneOrMany::One(path)) => Ok(vec![path]),
+        Some(OneOrMany::Many(paths)) if paths.is_empty() => Err(serde::de::Error::custom(
+            "a patch list must name at least one patch",
+        )),
+        Some(OneOrMany::Many(paths)) => Ok(paths),
+    }
 }
 
 fn digest<'de, D>(deserializer: D) -> Result<Sha256Digest, D::Error>

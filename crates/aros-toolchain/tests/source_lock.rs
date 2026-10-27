@@ -350,3 +350,54 @@ fn v3_binds_source_owned_dependency_patches_without_a_compiler_namespace() {
         }
     }
 }
+
+#[test]
+fn one_archive_may_carry_a_list_of_patches() {
+    let components = [
+        "llvm",
+        "clang",
+        "compiler-rt",
+        "libcxx",
+        "libcxxabi",
+        "libunwind",
+    ];
+    let paths = components
+        .iter()
+        .map(|name| format!("tools/crosstools/llvm/{name}-23.1.0.src-aros.diff"))
+        .collect::<Vec<_>>();
+    let mut document = v3_llvm_lock();
+    document["version"] = json!("23.1.0");
+    document["sources"] = json!([{
+        "component": "llvm-project", "version": "23.1.0", "purpose": "toolchain-component",
+        "patch": paths,
+        "filename": "llvm-project-23.1.0.src.tar.xz",
+        "url": "https://example.invalid/llvm-project.tar.xz",
+        "sha256": "a".repeat(64), "size": 42
+    }]);
+    let parsed = SourceLock::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+    assert_eq!(parsed.source_patch_paths().count(), 6);
+
+    let closure = paths
+        .iter()
+        .map(|path| json!({"path": path, "sha256": "f".repeat(64)}))
+        .collect::<Vec<_>>();
+    let mut sorted = closure;
+    sorted.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+    parsed
+        .verify_recipe_patches(&recipe(&json!(sorted)))
+        .unwrap();
+    // A recipe that leaves one of the six out is a different closure.
+    parsed
+        .verify_recipe_patches(&recipe(&json!(sorted[1..])))
+        .unwrap_err();
+
+    for broken in [
+        json!([]),
+        json!([paths[0], paths[0]]),
+        json!(["tools/crosstools/gnu/gcc-23.1.0-aros.diff"]),
+    ] {
+        let mut changed = document.clone();
+        changed["sources"][0]["patch"] = broken;
+        assert!(SourceLock::parse(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+}
