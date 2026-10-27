@@ -1252,6 +1252,13 @@ jobs:
             sleep 1
           done
           brew tap-new --no-git "$tap"
+          # Current Homebrew refuses to load formulae from a tap it has not
+          # been told to trust. The tap is created above, from the measured
+          # candidate formula only; older Homebrew has no `trust` command.
+          brew commands --quiet --include-aliases >"$RUNNER_TEMP/brew-commands.txt"
+          if grep -qx trust "$RUNNER_TEMP/brew-commands.txt"; then
+            brew trust "$tap"
+          fi
           tap_root=$(brew --repository "$tap")
           formula="$tap_root/Formula/aros-tools.rb"
           sed -E \
