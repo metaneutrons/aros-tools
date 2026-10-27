@@ -12,6 +12,14 @@ use std::path::Path;
 
 const DIRECTORY: &str = "workbench/devs/AHI";
 
+/// The classic mmake build hands the AHI configure script the target
+/// binutils. Newer mmakefiles also pin `SFDC`, because a case-insensitive host
+/// file system lets configure's `SFDC` lookup find a foreign `sfdc` binary.
+/// The CMake path takes both from the downstream helper, so either exact form
+/// is accepted and nothing else.
+const CONFIG_ENV_BINUTILS: &str = "OBJCOPY=$(OBJCOPY) STRIP=$(STRIP_PLAIN)";
+const CONFIG_ENV_BINUTILS_SFDC: &str = "OBJCOPY=$(OBJCOPY) STRIP=$(STRIP_PLAIN) SFDC=$(SFDC)";
+
 /// Parses the one current AHI subsystem declaration without turning the
 /// legacy `%build_with_configure` macro into a general command runner.
 ///
@@ -63,6 +71,11 @@ pub(crate) fn parse(
         }
     };
 
+    let config_env = match macro_arg(&invocation.args, "config_env_extra").as_deref() {
+        Some(CONFIG_ENV_BINUTILS_SFDC) => CONFIG_ENV_BINUTILS_SFDC,
+        _ => CONFIG_ENV_BINUTILS,
+    };
+
     require_exact_macro_arguments(
         invocation,
         &[
@@ -71,10 +84,7 @@ pub(crate) fn parse(
             ("extraoptions", "$(AHI_OPTIONS)"),
             ("usecppflags", "no"),
             ("gnuflags", "no"),
-            (
-                "config_env_extra",
-                "OBJCOPY=$(OBJCOPY) STRIP=$(STRIP_PLAIN)",
-            ),
+            ("config_env_extra", config_env),
         ],
     )?;
 
@@ -135,6 +145,25 @@ mod tests {
         assert!(parse(&root, &changed, relative_dir, Some(&profile))
             .unwrap_err()
             .contains("gnuflags uses"));
+
+        let current = macro_arg(&invocation.args, "config_env_extra").unwrap();
+        let mut with_sfdc = invocation.clone();
+        with_sfdc.args = with_sfdc.args.replace(
+            &current,
+            "OBJCOPY=$(OBJCOPY) STRIP=$(STRIP_PLAIN) SFDC=$(SFDC)",
+        );
+        assert!(parse(&root, &with_sfdc, relative_dir, Some(&profile))
+            .unwrap()
+            .is_some());
+
+        let mut foreign_sfdc = invocation.clone();
+        foreign_sfdc.args = foreign_sfdc.args.replace(
+            &current,
+            "OBJCOPY=$(OBJCOPY) STRIP=$(STRIP_PLAIN) SFDC=sfdc",
+        );
+        assert!(parse(&root, &foreign_sfdc, relative_dir, Some(&profile))
+            .unwrap_err()
+            .contains("config_env_extra uses"));
 
         let unsupported_profile = target_context("arm", "raspi", "soft");
         assert!(
