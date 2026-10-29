@@ -26,9 +26,9 @@ mesautil-generator-capability = 9ff6ca66c503c1671c6bbd2a2d0b8a9a449a3368a8fcbed2
 
 # Mesa 26 glapi is a separate two-stage generated archive. The full source
 # recipe is pinned because the cold-tree evaluator cannot import mesa.cfg.
-mesa26-glapi-recipe = cbedcf70cfb2a3c5df6f638791e8e90a5a616ebfcf6fe1345c94449951357a26 # gitleaks:allow -- public SHA-256 of the audited source recipe, not a credential
-mesa26-egl-recipe = 7f2e4c2241f305bca95ad0080736c61a06f63c295a2d0fa9ec7f5c2c272a20a4 # gitleaks:allow -- public SHA-256 of the audited Mesa 26 EGL recipe
-mesa26-config = a93996e9e9bd71fe54d7be9edca1e06de06d04edd15b50570888d5c95bb9ea80
+mesa26-glapi-recipe = 0c7e7651effa1715778aa6372481f60149b1de1fb5ffd58f6e9079d8cef3fec4 # gitleaks:allow -- public SHA-256 of the audited source recipe, not a credential
+mesa26-egl-recipe = 7b508e09f4b908528ae4cbe336449440e52f0e043ea0a219b9e6a7f000a59bc4 # gitleaks:allow -- public SHA-256 of the audited Mesa 26 EGL recipe
+mesa26-config = 98ff8a696038f5b3ecd5734d2a36f5113de997a096f0b29a83e4f16c2b51bbaa
 
 # Remaining Mesa generator lanes. Each recipe fingerprint is paired with the
 # versioned inventory from which its hard-coded generator output closure was
@@ -43,30 +43,30 @@ mesa20-vc4-recipe = 04f2d449ef30ebb4b9dc9fa1fea55865303d9335c4873c7845cfb16eadf1
 mesa20-vc4-manifest = 27067482f43902b58872ae0c2e92a9e4f6bc51328b6b035e79d75357ec002a72
 mesa20-v3d-recipe = 471bb1ad3fa9020f23015bed29634d2812527cb8b415e4c9771202627bc9385e
 
-# Mesa 26.0.0 archive recipes and explicit source inventories. The capability
+# Mesa 26.2.5 archive recipes and explicit source inventories. The capability
 # expands these exact inputs into target source lists and generated products.
-mesa26-compiler-recipe = 4a2e0ce91877996fa764a977e908d932a88017a9e79b1794426a2c667213a68c
-mesa26-compiler-manifest = f5452181979700a6bfa941f0a7cc3fae6e9b420f93c013bb5967e21a5bed2fa6
-mesa26-core-recipe = cb9a53da44e93cd58bda21783d55fcea4adedef262c3fdda983ec1c9a68b984e
-mesa26-core-manifest = 0fe9d122a56ed4f98e85edcecb3d5f36bc94510e40e82683ad3f7687495864f5
-mesa26-galliumaux-recipe = 291b33bdbd5b4db1cbccd2a933bfdd6a0795066dc33b99d2e8e3ba0432f062de
+mesa26-compiler-recipe = 1b689b13ccd82aece1272c3fc784bf8cc23eb74b067c499b88178d3080f04dea
+mesa26-compiler-manifest = 882f15a8a8a962eab7f526898d0b539fb4110cc9347b47fd11769a2ef65d0a8a
+mesa26-core-recipe = 977b87d49a81ad6f7bb004078bac912c902f4fb38813fcd2cef158d6fe41665a
+mesa26-core-manifest = bb8b618e4a56efed656f72a340522910bf739630725949f969a8aa98d8d0af5d
+mesa26-galliumaux-recipe = 56a50e703f8945ef536d83252cf0bd2c036c1bae337836be13719d21ff453c91
 # Keeps galliumdrawllvm out of mesa3dgl-linklibs; sources and libraries are unchanged.
-mesa26-galliumaux-recipe-llvmpipe-only = cf353c235442d3056339f43317009c036aca00849e2a671c8cd32e100b9c0784
-mesa26-galliumaux-manifest = b24fcbebbbb2b1c32eb505e5d42b91d9e15470b04b5f57af4ac3238c3a0f180d
-mesa26-util-recipe = e8ce470d8eb25536171d69d988c6cc3f13a378a652a648a22ff33de0d483cabe
+mesa26-galliumaux-recipe-llvmpipe-only = 406b9e7483ef36ace8a3ee354f66e67ae514a221bc293f0b9d9add1985548e79
+mesa26-galliumaux-manifest = adac2a684f3773e07288b7ec60c0c25ed95c32fb574e04c2e10940d26097c560
+mesa26-util-recipe = ca9559255330524cf0d31bc9b7a3dc1ff7ca2b2d96d03a08641096248e0160fa
 # AROS-NX #90 moves the Chromium zlib include directory to 2b1b62fe; nothing else in the recipe changes.
 mesa26-util-recipe-chromium-2b1b62f = 48228fcadedf9c79b1647f5bf8eedafb769a6cc9dbd6120188955dfa4cdd5f01
-mesa26-util-manifest = e31d9aa580180ebac45f41a4364b60dce03595b35a457ae517affc78c0ae7471
-mesa26-v3d-recipe = 1d4ee5e8fc4a17d67c0652a932bed4e0c1913c6044fdc4bf981533db0dab744b
+mesa26-util-manifest = 5ad479c6dc8a07dea24ee6312327b2f368f13952c6a95783b1e8703c888dfc49
+mesa26-v3d-recipe = 9c352d4b1388c8f6e9d6faf2aae94b5870c21cfb51e5fa5fc55c68d1026fc4df
 # Upstream 13484a98 adds v3d_dt to the HIDD; the Mesa archive remains unchanged.
-mesa26-v3d-recipe-device-tree = 40d2c7eb95513fa214b4aa393881337b04e9f0eb5adc4fcb7d0f7976ca85b7ed
-mesa26-v3d-manifest = 70d630491d5504f450633e9cc31532a9e54e524fb7ca4286377b5f711f2e821a
+mesa26-v3d-recipe-device-tree = f697e709cf9a4678225469939841dc7c1debf62248c136ce00b8a82dd7190075
+mesa26-v3d-manifest = 42c058e9e928dd55cf95239ffffbcf55931de41f7c9d2377e50e861c42436e3d
 # The archive rule gained gca_private.list as a prerequisite so that plain
 # MetaMake orders it. Both revisions expand to the same jobs. The CMake engine already generates it together with
 # gca_redefs.txt in one command that the archive rewrite depends on.
-mesa26-vc4-recipe = 9d7afd020c08847512409e7d55460e2c8821e285e1e93ec9db346c25ba74d7a2
+mesa26-vc4-recipe = e1317c1cc0689a537b6b65bf60ea08378cdc57b621be07ec1a0dd2546ceeaa9f
 mesa26-vc4-recipe-without-private-list = 0be62fd0125ffd144ede01d53b0c611cd5185ff8b866b2d77c13829f6aae1f54
-mesa26-vc4-manifest = e90bf4e7f7ffc73ab6aa1bfc464c6b8bdd47ace229146a6dd77870c381c17dec
+mesa26-vc4-manifest = c6d8a4b861650bcabefa75bff26b1ba9e1949773c39dcd9a8ab1db4660fb51b4
 
 # Mesa 26's target LLVM lane expands a versioned Gallivm inventory, a recipe
 # source list, and the local HIDD recipe into closed archive/module sources.
@@ -75,11 +75,11 @@ mesa26-vc4-manifest = e90bf4e7f7ffc73ab6aa1bfc464c6b8bdd47ace229146a6dd77870c381
 # The earlier revision stays admitted: both expand to the same lane.
 # This lane is closed on LLVM 11 (HAVE_LLVM=0x0b00) and takes its flags from the
 # compile contract, not from the recipe, so the change does not apply here.
-mesa26-gallivm-recipe = d1c1eb42140590d235afb901c03c65991868b37e2cf34c5905f95cd704b6278a
+mesa26-gallivm-recipe = 083cb94858027da8e5cf78581acfc1c9bd28b15473b15b48a3e0702e1fe4cb62
 mesa26-gallivm-recipe-without-libcxx-order = 3a6d383b548f0702783c181c2f8e7b999f48e8c2ff36db9e494073715bd2add4
-mesa26-gallivm-manifest = cebea7414b4ee5da97c20007fbb8e867b96b2ca615b1cc8226bd060b75f40e50
+mesa26-gallivm-manifest = 7b4d7686b57b128fe2de662a223baf943e75a8ae2f434fe7c593cba631365f41
 mesa26-llvmpipe-recipe = 69e33ce5cd26222b774f8193b818f7a49034e959731ee45587f4d39239e14daf
-mesa26-llvmpipe-hidd-recipe = 6b20993b095bd65868aa27fd036aece5734b8eeb684c04e6980238d9b3ae3bb4
+mesa26-llvmpipe-hidd-recipe = 7af9894c09343c3fe423467f8b64eb415cfeabcc8f69c21cf5432bc40a165d15
 
 # LLVM 11's target build recipe is expanded into a fixed external provider.
 # The recipe disables precompiled headers (LLVM 23 needs that); the fixed

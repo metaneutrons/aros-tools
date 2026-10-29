@@ -17,7 +17,7 @@ fn context(cpu: &str, platform: &str, cpu32: &str, float_abi: &str) -> TargetCon
         cpu32: Some(cpu32.to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(float_abi.to_owned()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     }
 }
@@ -51,7 +51,7 @@ fn assert_llvm_compile_contract(target: &aros_transpiler::TargetDefinition, cont
         "GALLIVM_USE_ORCJIT=0",
         "LLVM_IS_SHARED=0",
         "MESA_LLVM_VERSION_STRING=\"11.0.0\"",
-        "PACKAGE_VERSION=\"26.0.0\"",
+        "PACKAGE_VERSION=\"26.2.5\"",
         "NDEBUG",
     ] {
         assert!(
@@ -147,7 +147,7 @@ fn mesa26_llvm_version_definitions_compile_as_adjacent_c_literals() {
         r#"
 #include <string.h>
 static const char combined_version[] = MESA_LLVM_VERSION_STRING "." PACKAGE_VERSION;
-int main(void) { return strcmp(combined_version, "11.0.0.26.0.0") != 0; }
+int main(void) { return strcmp(combined_version, "11.0.0.26.2.5") != 0; }
 "#,
     )
     .expect("write C literal concatenation probe");
@@ -208,7 +208,7 @@ fn mesa26_llvm_source_closures_and_flags_match_current_profiles() {
             (
                 "workbench/libs/mesa/libgalliumvm/mmakefile.src",
                 "mesa3d-linklib-galliumvm",
-                41,
+                42,
                 2,
                 "/src/gallium/auxiliary/gallivm/lp_bld_init",
             ),
@@ -265,7 +265,7 @@ fn mesa26_llvm_source_closures_and_flags_match_current_profiles() {
             }
             assert_eq!(
                 target.linklib_output_dir.as_deref(),
-                Some("${AROS_BUILD_DIR}/gen/lib/mesa26.0.0")
+                Some("${AROS_BUILD_DIR}/gen/lib/mesa26.2.5")
             );
             assert!(!target.canonical_linklib_output);
         }
@@ -293,7 +293,7 @@ fn mesa26_llvm_source_closures_and_flags_match_current_profiles() {
         assert_eq!(
             hidd.link_options,
             [
-                "-L${AROS_BUILD_DIR}/gen/lib/mesa26.0.0",
+                "-L${AROS_BUILD_DIR}/gen/lib/mesa26.2.5",
                 "--whole-archive",
                 "-lgalliumvm",
                 "--no-whole-archive",

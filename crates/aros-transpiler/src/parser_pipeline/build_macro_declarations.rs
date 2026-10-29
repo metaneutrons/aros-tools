@@ -278,7 +278,7 @@ pub(super) fn collect_build_macros(inputs: DeclarationInputs<'_>, outputs: Decla
             }
         }
         let mesa26_empty_sse41 = mmake_name == sse41::MMAKE
-            && target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0")
+            && target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.2.5")
             && mesa26_archive_active;
         let mesa_sse41_profile = (mmake_name == sse41::MMAKE
             && !mesa26_empty_sse41
@@ -578,7 +578,9 @@ pub(super) fn collect_build_macros(inputs: DeclarationInputs<'_>, outputs: Decla
             && (all_sources_are_fetch_owned(&sources, fetches)
                 || nouveau_drm_capability_active
                 || nouveau_gallium_capability_active);
-        let linklib_output_dir = if mesa26_archive_active {
+        let nouveau26_gallium_archive = nouveau_gallium_capability_active
+            && target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.2.5");
+        let linklib_output_dir = if mesa26_archive_active || nouveau26_gallium_archive {
             Some(mesa26::PRIVATE_LIBDIR.to_owned())
         } else if mesa_sse41_profile.is_some() || mesa20_capability_active {
             Some(PRIVATE_LIBDIR.to_owned())

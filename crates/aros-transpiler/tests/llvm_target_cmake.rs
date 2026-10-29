@@ -13,7 +13,7 @@ fn context() -> TargetContext {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     }
 }

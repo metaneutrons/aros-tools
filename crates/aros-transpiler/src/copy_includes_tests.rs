@@ -7,7 +7,7 @@ fn fetched_header_source_uses_selected_mesa_version() {
 top_srcdir := $(top_mesa3dgldir)\n\
 %copy_includes mmake=mesa-includes path=GL dir=$(top_srcdir)/include/GL includes=gl.h\n";
     let target = crate::parser::TargetContext {
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..Default::default()
     };
     let scope = crate::make_vars::collect_vars_with_context(source, &target);
@@ -21,7 +21,7 @@ top_srcdir := $(top_mesa3dgldir)\n\
     assert_eq!(scan.decls.len(), 1);
     assert_eq!(
         scan.decls[0].source_dir,
-        "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include/GL"
+        "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/include/GL"
     );
 }
 
@@ -411,7 +411,7 @@ fn actual_png_source_declares_the_bounded_whole_line_transform() {
     assert!(transform.replace_whole_line_containing);
     assert_eq!(
         transform.input,
-        "${AROS_PORTS_DIR}/libpng/libpng-1.6.58/scripts/pnglibconf.h.prebuilt"
+        "${AROS_PORTS_DIR}/libpng/libpng-1.6.59/scripts/pnglibconf.h.prebuilt"
     );
     assert_eq!(transform.output, "${AROS_SDK_INCLUDE_DIR}/pnglibconf.h");
 
@@ -804,8 +804,8 @@ fn vc4_cle_stdout_generators_are_modelled_exactly() {
     let rel = "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium";
     let content = aros_common::read_source(&root.join(rel).join("mmakefile.src")).unwrap();
     let external = |name: &str| match name {
-        "top_builddir" => Some("$(GENDIR)/workbench/libs/mesa/26.0.0".to_owned()),
-        "top_srcdir" => Some("$(PORTSDIR)/mesa/mesa-26.0.0".to_owned()),
+        "top_builddir" => Some("$(GENDIR)/workbench/libs/mesa/26.2.5".to_owned()),
+        "top_srcdir" => Some("$(PORTSDIR)/mesa/mesa-26.2.5".to_owned()),
         _ => None,
     };
     let scan =

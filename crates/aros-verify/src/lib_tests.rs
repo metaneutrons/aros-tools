@@ -334,10 +334,10 @@ fn current_architecture_denominators_are_pinned() {
     // The integration source restores Mesa 26 Gallivm and the October Vanilla
     // sync adds PC VMD plus five AArch64 Raspberry Pi diagnostic tools. Build
     // trees are excluded; these are source-owned IDs, not provisioning counts.
-    assert_eq!(global.len(), 1261);
-    assert_eq!(ids(&x86, true).len(), 1126);
-    assert_eq!(ids(&arm, true).len(), 1125);
-    assert_eq!(ids(&aarch64, true).len(), 1130);
+    assert_eq!(global.len(), 1315);
+    assert_eq!(ids(&x86, true).len(), 1164);
+    assert_eq!(ids(&arm, true).len(), 1163);
+    assert_eq!(ids(&aarch64, true).len(), 1168);
     assert!(global.contains("test-library-dummytest_auto"));
     assert!(global.contains("mesa3d-linklib-galliumvm"));
     assert!(ids(&x86, true).contains("kernel-hidd-pci-pcivmd"));
@@ -361,6 +361,7 @@ fn current_architecture_denominators_are_pinned() {
             "linklibs-amiga32".to_owned(),
             "linklibs-arossupport32".to_owned(),
             "linklibs-autoinit32".to_owned(),
+            "workbench-tools-esp32board".to_owned(),
         ])
     );
     let aarch64_removed: BTreeSet<String> = ids(&aarch64, false)
@@ -420,10 +421,10 @@ fn toolchain_provisioning_splits_the_target_obligations() {
         .map(|declaration| declaration.mmake.clone())
         .collect();
 
-    assert_eq!(global_target.len(), 1251);
-    assert_eq!(target_ids(&x86).len(), 1116);
-    assert_eq!(target_ids(&arm).len(), 1117);
-    assert_eq!(target_ids(&aarch64).len(), 1122);
+    assert_eq!(global_target.len(), 1305);
+    assert_eq!(target_ids(&x86).len(), 1154);
+    assert_eq!(target_ids(&arm).len(), 1155);
+    assert_eq!(target_ids(&aarch64).len(), 1160);
     assert!(global_target.contains("mesa3d-linklib-galliumvm"));
     let common_provisioning = BTreeSet::from([
         "crosstools-compiler-rt".to_owned(),

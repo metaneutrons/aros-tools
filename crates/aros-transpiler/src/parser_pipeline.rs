@@ -1447,7 +1447,7 @@ pub(super) fn parse_mmakefile_impl(
     }
 
     let sse41_result =
-        if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0") {
+        if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.2.5") {
             mesa26::validate_empty_sse41(root, &rel_dir, target, &targets, &ownership_fetches)
         } else {
             sse41::validate(

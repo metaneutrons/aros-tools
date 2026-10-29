@@ -375,7 +375,7 @@ struct Declaration {
 
 const LLVM_PROVISIONING_FILE: &str = "tools/crosstools/llvm/mmakefile.src";
 const GCC_PROVISIONING_FILE: &str = "tools/crosstools/gnu/mmakefile.src";
-const GCC_LIBATOMIC_ARGUMENTS: &str = "mmake=tools-crosstools-gcc-libatomic srcdir=\"$(LIBATOMIC_SRCDIR)\" basedir= gendir=\"$(LIBATOMIC_OBJDIR)\" extraoptions=\"$(LIBATOMIC_OPTS)\" install_env=\"$(LIBATOMIC_ENV)\"";
+const GCC_LIBATOMIC_ARGUMENTS: &str = "mmake=tools-crosstools-gcc-libatomic srcdir=\"$(LIBATOMIC_SRCDIR)\" targetincludes=\"sdk-includes-$(AROS_TOOLCHAIN_RELEASE)\" targetlinklibs=\"gnu-libatomic-linklibs-$(AROS_TOOLCHAIN_RELEASE)\" basedir= gendir=\"$(LIBATOMIC_OBJDIR)\" extraoptions=\"$(LIBATOMIC_OPTS)\" install_env=\"$(LIBATOMIC_ENV)\"";
 const LEGACY_GRUB_FILE: &str = "arch/all-pc/boot/grub/mmakefile.src";
 const LEGACY_GRUB_ARGUMENTS: &str = "mmake=grub compiler=kernel install_target= srcdir=$(ARCHSRCDIR) extraoptions=\"$(GRUBOPTS)\" extracflags=\"$(GRUBCFLAGS)\"";
 
@@ -568,7 +568,7 @@ fn detect_toolchain_provisioning_context(
         ) && lines.contains(
             "LIBATOMIC_SRCDIR := $(HOSTDIR)/Ports/host/gcc/gcc-$(GCC_VERSION)/libatomic",
         ) && lines.contains(
-            "#MM tools-crosstools-gcc-libatomic : crosstools-gcc--fetch tools-crosstools-autolibs linklibs-$(AROS_TARGET_CPU)",
+            "#MM tools-crosstools-gcc-libatomic : crosstools-gcc--fetch tools-crosstools-autolibs gnu-libatomic-cpu-linklibs-$(AROS_TOOLCHAIN_RELEASE)",
         )
     });
     Ok(ToolchainProvisioningContext {

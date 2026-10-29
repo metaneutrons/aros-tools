@@ -8,7 +8,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const INVENTORY_PATH: &str = "workbench/libs/mesa/libgalliumvm/gallivm-26.0.0.sources";
+const INVENTORY_PATH: &str = "workbench/libs/mesa/libgalliumvm/gallivm-26.2.5.sources";
 const RECIPE_PATH: &str = "workbench/libs/mesa/libgalliumvm/mmakefile.src";
 
 const EXPECTED_C_SOURCES: &str = "\
@@ -37,6 +37,7 @@ lp_bld_jit_types.c
 lp_bld_logic.c
 lp_bld_nir.c
 lp_bld_nir_aos.c
+lp_bld_nir_lower.c
 lp_bld_nir_soa.c
 lp_bld_pack.c
 lp_bld_passmgr.c
@@ -170,7 +171,7 @@ fn parse_inventory(text: &str) -> Result<GallivmInventory, String> {
 fn validate_inventory_files(text: &str, source_dir: &Path) -> Result<GallivmInventory, String> {
     let inventory = parse_inventory(text)?;
     if inventory != expected_inventory() {
-        return Err("Gallivm list differs from the versioned Mesa 26.0.0 inventory".to_owned());
+        return Err("Gallivm list differs from the versioned Mesa 26.2.5 inventory".to_owned());
     }
 
     let canonical_root = source_dir
@@ -208,7 +209,7 @@ fn render_inventory(c: &[String], cxx: &[String]) -> String {
     }
 
     format!(
-        "# Mesa 26.0.0 Gallivm MCJIT inventory\n{}\n{}",
+        "# Mesa 26.2.5 Gallivm MCJIT inventory\n{}\n{}",
         render_section("MESA26_GALLIVM_C_SOURCES", c),
         render_section("MESA26_GALLIVM_CXX_SOURCES", cxx)
     )
@@ -307,12 +308,12 @@ fn mesa26_gallivm_has_a_closed_versioned_mcjit_archive_contract() {
     let inventory_text = read_source(&inventory_path).expect("versioned Gallivm inventory");
     assert_eq!(
         inventory_path.file_name().and_then(|name| name.to_str()),
-        Some("gallivm-26.0.0.sources")
+        Some("gallivm-26.2.5.sources")
     );
-    assert!(inventory_text.contains("Mesa 26.0.0 Gallivm MCJIT inventory"));
+    assert!(inventory_text.contains("Mesa 26.2.5 Gallivm MCJIT inventory"));
     let inventory = parse_inventory(&inventory_text).expect("valid Gallivm source inventory");
     assert_eq!(inventory, expected_inventory());
-    assert_eq!(inventory.c.len(), 41);
+    assert_eq!(inventory.c.len(), 42);
     assert_eq!(inventory.cxx.len(), 2);
     assert!(!inventory
         .cxx
@@ -320,9 +321,9 @@ fn mesa26_gallivm_has_a_closed_versioned_mcjit_archive_contract() {
         .any(|source| source == "lp_bld_init_orc.cpp"));
 
     let recipe = read_source(&root.join(RECIPE_PATH)).expect("Gallivm build recipe");
-    assert!(recipe.contains("include $(SRCDIR)/$(CURDIR)/gallivm-26.0.0.sources"));
-    assert!(recipe.contains("ifneq ($(OPT_MESAGL),26.0.0)"));
-    assert!(recipe.contains("Gallivm requires the reviewed Mesa 26.0.0 source inventory"));
+    assert!(recipe.contains("include $(SRCDIR)/$(CURDIR)/gallivm-26.2.5.sources"));
+    assert!(recipe.contains("ifneq ($(OPT_MESAGL),26.2.5)"));
+    assert!(recipe.contains("Gallivm requires the reviewed Mesa 26.2.5 source inventory"));
 
     let gallivm_dependencies = active_meta_dependencies(&recipe, "mesa3d-linklib-galliumvm");
     assert_eq!(
@@ -372,7 +373,7 @@ fn mesa26_gallivm_has_a_closed_versioned_mcjit_archive_contract() {
 
     let compiler = read_source(&root.join("workbench/libs/mesa/libcompiler/mmakefile.src"))
         .expect("Mesa compiler generator recipe");
-    assert!(compiler.contains("include $(SRCDIR)/$(CURDIR)/compiler-26.0.0.sources"));
+    assert!(compiler.contains("include $(SRCDIR)/$(CURDIR)/compiler-26.2.5.sources"));
     assert!(compiler.contains(
         "MESA3DGL_NIR_GENERATED_FILES := $(addprefix $(top_builddir)/$(CUR_MESADIR)/,$(NIR_GENERATED_FILES))"
     ));
@@ -399,7 +400,7 @@ fn gallivm_inventory_validation_rejects_stale_duplicate_escaped_and_nonregular_i
     let stale_text = render_inventory(&stale, &expected.cxx);
     assert!(validate_inventory_files(&stale_text, &source_dir)
         .unwrap_err()
-        .contains("versioned Mesa 26.0.0 inventory"));
+        .contains("versioned Mesa 26.2.5 inventory"));
 
     let mut duplicate = expected.c.clone();
     duplicate.push(duplicate[0].clone());

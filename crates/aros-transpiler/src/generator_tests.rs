@@ -1068,7 +1068,7 @@ fn zlib_emits_positional_flags_outputs_provider_and_header_transform() {
     // Twenty source entries plus the one declaration-local include path.
     assert_eq!(
         module
-            .matches("${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1")
+            .matches("${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a")
             .count(),
         21
     );
@@ -1477,7 +1477,7 @@ fn the_banner_warns_names_its_version_and_states_the_target() {
 #[test]
 fn the_banner_records_changed_upstream_selectors_without_inventing_omitted_ones() {
     let mut target = crate::TargetContext {
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         target_llvm_ver: Some("23.0.0".to_owned()),
         target_llvm_runtimes_style: Some("umbrella".to_owned()),
         target_rust: Some("yes".to_owned()),
@@ -1486,7 +1486,7 @@ fn the_banner_records_changed_upstream_selectors_without_inventing_omitted_ones(
     };
     let selected = generated_header(Some(&target));
     for (flag, value) in [
-        ("--mesa-version", "26.0.0"),
+        ("--mesa-version", "26.2.5"),
         ("--target-llvm-ver", "23.0.0"),
         ("--target-llvm-runtimes-style", "umbrella"),
         ("--target-rust", "yes"),

@@ -40,7 +40,7 @@ pub(super) fn archive_sources(
             )?;
             require_file_fingerprint(
                 root,
-                "workbench/libs/mesa/libgalliumvm/gallivm-26.0.0.sources",
+                "workbench/libs/mesa/libgalliumvm/gallivm-26.2.5.sources",
                 fingerprint("mesa26-gallivm-manifest")?,
                 "Mesa 26 Gallivm source inventory",
             )?;
@@ -50,7 +50,7 @@ pub(super) fn archive_sources(
                 fingerprint("mesa26-config")?,
                 "Mesa 26 Gallivm configuration",
             )?;
-            let manifest = "workbench/libs/mesa/libgalliumvm/gallivm-26.0.0.sources";
+            let manifest = "workbench/libs/mesa/libgalliumvm/gallivm-26.2.5.sources";
             let prefix = format!("{SOURCE_ROOT}/src/gallium/auxiliary/gallivm");
             return Ok(Some(EvaluatedSources {
                 c: inventory_stems(root, manifest, "MESA26_GALLIVM_C_SOURCES", ".c", &prefix)?,
@@ -74,7 +74,7 @@ pub(super) fn archive_sources(
             )?;
             require_file_fingerprint(
                 root,
-                "workbench/libs/mesa/libgalliumaux/galliumaux-26.0.0.sources",
+                "workbench/libs/mesa/libgalliumaux/galliumaux-26.2.5.sources",
                 fingerprint("mesa26-galliumaux-manifest")?,
                 "Mesa 26 Gallium LLVM source inventory",
             )?;
@@ -84,7 +84,7 @@ pub(super) fn archive_sources(
                 fingerprint("mesa26-config")?,
                 "Mesa 26 Gallium LLVM configuration",
             )?;
-            let manifest = "workbench/libs/mesa/libgalliumaux/galliumaux-26.0.0.sources";
+            let manifest = "workbench/libs/mesa/libgalliumaux/galliumaux-26.2.5.sources";
             let prefix = format!("{SOURCE_ROOT}/src/gallium/auxiliary");
             let sources = match identity {
                 Mesa26Target::GalliumDrawLlvmLibrary => EvaluatedSources {
@@ -213,37 +213,37 @@ pub(super) fn archive_sources(
     let (recipe, manifest, recipe_pin, manifest_pin) = match family {
         "compiler" => (
             "workbench/libs/mesa/libcompiler/mmakefile.src",
-            "workbench/libs/mesa/libcompiler/compiler-26.0.0.sources",
+            "workbench/libs/mesa/libcompiler/compiler-26.2.5.sources",
             "mesa26-compiler-recipe",
             "mesa26-compiler-manifest",
         ),
         "core" => (
             "workbench/libs/mesa/libmesa/mmakefile.src",
-            "workbench/libs/mesa/libmesa/mesa-26.0.0.sources",
+            "workbench/libs/mesa/libmesa/mesa-26.2.5.sources",
             "mesa26-core-recipe",
             "mesa26-core-manifest",
         ),
         "galliumaux" => (
             "workbench/libs/mesa/libgalliumaux/mmakefile.src",
-            "workbench/libs/mesa/libgalliumaux/galliumaux-26.0.0.sources",
+            "workbench/libs/mesa/libgalliumaux/galliumaux-26.2.5.sources",
             "mesa26-galliumaux-recipe",
             "mesa26-galliumaux-manifest",
         ),
         "util" => (
             "workbench/libs/mesa/libmesautil/mmakefile.src",
-            "workbench/libs/mesa/libmesautil/mesautil-26.0.0.sources",
+            "workbench/libs/mesa/libmesautil/mesautil-26.2.5.sources",
             "mesa26-util-recipe",
             "mesa26-util-manifest",
         ),
         "v3d" => (
             "arch/arm-native/soc/broadcom/2708/hidd/v3d/mmakefile.src",
-            "arch/arm-native/soc/broadcom/2708/hidd/v3d/v3d-26.0.0.sources",
+            "arch/arm-native/soc/broadcom/2708/hidd/v3d/v3d-26.2.5.sources",
             "mesa26-v3d-recipe",
             "mesa26-v3d-manifest",
         ),
         "vc4" => (
             "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/mmakefile.src",
-            "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-26.0.0.sources",
+            "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-26.2.5.sources",
             "mesa26-vc4-recipe",
             "mesa26-vc4-manifest",
         ),
@@ -451,6 +451,9 @@ pub(super) fn archive_sources(
                 ".c",
                 &format!("{BUILD_ROOT}/src/gallium/auxiliary"),
             )?);
+            sources.c.push(format!(
+                "{BUILD_ROOT}/src/gallium/auxiliary/gallivm/lp_bld_nir_no_integer_algebraic"
+            ));
         }
         "v3d" => {
             for (variable, base) in [

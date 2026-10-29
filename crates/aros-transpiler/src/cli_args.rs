@@ -164,7 +164,7 @@ mod target_context_cli_tests {
         let selected = Args::try_parse_from([
             "aros-transpiler",
             "--mesa-version",
-            "26.0.0",
+            "26.2.5",
             "--target-llvm-ver",
             "23.0.0",
             "--target-llvm-runtimes-style",
@@ -175,7 +175,7 @@ mod target_context_cli_tests {
             "1.98.1",
         ])
         .expect("explicit upstream selectors");
-        assert_eq!(selected.mesa_version.as_deref(), Some("26.0.0"));
+        assert_eq!(selected.mesa_version.as_deref(), Some("26.2.5"));
         assert_eq!(selected.target_llvm_ver.as_deref(), Some("23.0.0"));
         assert_eq!(
             selected.target_llvm_runtimes_style.as_deref(),

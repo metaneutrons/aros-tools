@@ -36,6 +36,49 @@ string(JSON _target SET "${_target}" abi "${_abi}")
 string(JSON _response SET "${_response}" target "${_target}")
 "#;
 
+const HOST_ARCHIVE_TOOLS: &str = r#"
+# Prefer LLVM's archive tools. Homebrew keeps LLVM keg-only, so its normal
+# installation prefixes must be considered even when llvm-ar is not on PATH.
+set(_aros_test_llvm_hints
+    /opt/homebrew/opt/llvm/bin
+    /usr/local/opt/llvm/bin)
+find_program(_aros_test_llvm_ar NAMES llvm-ar
+    HINTS ${_aros_test_llvm_hints} NO_CACHE)
+find_program(_aros_test_llvm_ranlib NAMES llvm-ranlib
+    HINTS ${_aros_test_llvm_hints} NO_CACHE)
+if(_aros_test_llvm_ar AND _aros_test_llvm_ranlib)
+    set(AROS_TEST_AR "${_aros_test_llvm_ar}")
+    set(AROS_TEST_RANLIB "${_aros_test_llvm_ranlib}")
+else()
+    # GNU binutils may be installed with either prefixed or ordinary names.
+    # Reject Apple's ar/ranlib: ar does not expand response files and can
+    # silently discard the foreign ELF members produced by these probes.
+    find_program(_aros_test_gnu_ar NAMES gar ar NO_CACHE REQUIRED)
+    find_program(_aros_test_gnu_ranlib NAMES granlib ranlib NO_CACHE REQUIRED)
+    execute_process(
+        COMMAND "${_aros_test_gnu_ar}" --version
+        RESULT_VARIABLE _aros_test_ar_status
+        OUTPUT_VARIABLE _aros_test_ar_version
+        ERROR_VARIABLE _aros_test_ar_error)
+    execute_process(
+        COMMAND "${_aros_test_gnu_ranlib}" --version
+        RESULT_VARIABLE _aros_test_ranlib_status
+        OUTPUT_VARIABLE _aros_test_ranlib_version
+        ERROR_VARIABLE _aros_test_ranlib_error)
+    if(NOT _aros_test_ar_status EQUAL 0
+            OR NOT _aros_test_ranlib_status EQUAL 0
+            OR NOT _aros_test_ar_version MATCHES "GNU"
+            OR NOT _aros_test_ranlib_version MATCHES "GNU")
+        message(FATAL_ERROR
+            "SDK compiler probes require llvm-ar/llvm-ranlib or GNU "
+            "ar/ranlib; the discovered host tools do not support the "
+            "required response-file archive contract")
+    endif()
+    set(AROS_TEST_AR "${_aros_test_gnu_ar}")
+    set(AROS_TEST_RANLIB "${_aros_test_gnu_ranlib}")
+endif()
+"#;
+
 #[test]
 fn source_boolean_codegen_switches_apply_once_and_reject_direct_or_configuration_overrides() {
     let probe = Probe::new("x86_64", "x86_64-unknown-aros", "64", "")
@@ -551,10 +594,21 @@ file(MAKE_DIRECTORY
     "${_mock_prefix}/include/c++/v1"
     "${_mock_prefix}/lib/clang/17.0.0/lib/aros"
     "${_mock_prefix}/lib")
-foreach(_tool IN ITEMS clang clang++ llvm-ar llvm-ranlib)
+foreach(_tool IN ITEMS clang clang++)
     unset(_host_tool CACHE)
     unset(_host_tool)
     find_program(_host_tool NAMES "${_tool}" REQUIRED)
+    if(NOT EXISTS "${_mock_prefix}/bin/${_tool}")
+        file(CREATE_LINK "${_host_tool}" "${_mock_prefix}/bin/${_tool}" SYMBOLIC)
+    endif()
+endforeach()
+include("${ROOT}/host-archive-tools.cmake")
+foreach(_tool_pair IN ITEMS
+    "${AROS_TEST_AR}|llvm-ar"
+    "${AROS_TEST_RANLIB}|llvm-ranlib")
+    string(REPLACE "|" ";" _tool_fields "${_tool_pair}")
+    list(GET _tool_fields 0 _host_tool)
+    list(GET _tool_fields 1 _tool)
     if(NOT EXISTS "${_mock_prefix}/bin/${_tool}")
         file(CREATE_LINK "${_host_tool}" "${_mock_prefix}/bin/${_tool}" SYMBOLIC)
     endif()
@@ -668,6 +722,7 @@ fn harness(probe: &Probe) -> Harness {
         script = script.replace(placeholder, value);
     }
     fs::write(root.join("CMakeLists.txt"), script).unwrap();
+    fs::write(root.join("host-archive-tools.cmake"), HOST_ARCHIVE_TOOLS).unwrap();
     // A failed configure must remove both artifacts left by an earlier run.
     fs::write(build.join("aros-native-consumer-binding.json"), b"stale\n").unwrap();
     fs::write(root.join("passed"), b"stale\n").unwrap();
@@ -711,15 +766,16 @@ fn initialization_harness(
     // an empty archive provides no pointer-width evidence to CMake.
     fs::write(
         test_harness.root.join("toolchain.cmake"),
-        r"set(CMAKE_SYSTEM_NAME Generic)
+        r#"set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR arm)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 foreach(_language IN ITEMS C CXX ASM)
     set(CMAKE_${_language}_COMPILER_TARGET arm-unknown-aros)
 endforeach()
-find_program(CMAKE_AR NAMES llvm-ar REQUIRED)
-find_program(CMAKE_RANLIB NAMES llvm-ranlib REQUIRED)
-",
+include("${CMAKE_CURRENT_LIST_DIR}/host-archive-tools.cmake")
+set(CMAKE_AR "${AROS_TEST_AR}")
+set(CMAKE_RANLIB "${AROS_TEST_RANLIB}")
+"#,
     )
     .unwrap();
     fs::create_dir_all(test_harness.root.join("mock-release-toolchain")).unwrap();

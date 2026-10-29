@@ -603,11 +603,11 @@ endif
     #[test]
     fn explicit_target_selector_resolves_fetch_without_overriding_make() {
         let target = TargetContext {
-            mesa_version: Some("26.0.0".to_owned()),
+            mesa_version: Some("26.2.5".to_owned()),
             ..TargetContext::default()
         };
         let source = "\
-ifeq ($(OPT_MESAGL),26.0.0)
+ifeq ($(OPT_MESAGL),26.2.5)
 SUFFIX := tar.xz
 endif
 ARCHIVE := mesa-$(OPT_MESAGL)
@@ -622,7 +622,7 @@ ARCHIVE := mesa-$(OPT_MESAGL)
         );
         assert!(skipped.is_empty(), "{skipped:?}");
         assert_eq!(fetches.len(), 1);
-        assert_eq!(fetches[0].archive, "mesa-26.0.0");
+        assert_eq!(fetches[0].archive, "mesa-26.2.5");
         assert_eq!(fetches[0].suffixes, "tar.xz");
 
         let local = "OPT_MESAGL := 20.0.8\n%fetch mmake=mesa-fetch archive=mesa-$(OPT_MESAGL) destination=$(PORTSDIR)/mesa\n";
@@ -640,7 +640,7 @@ ARCHIVE := mesa-$(OPT_MESAGL)
     #[test]
     fn unknown_make_branch_cannot_be_replaced_by_target_selector() {
         let target = TargetContext {
-            mesa_version: Some("26.0.0".to_owned()),
+            mesa_version: Some("26.2.5".to_owned()),
             ..TargetContext::default()
         };
         let source = "\
