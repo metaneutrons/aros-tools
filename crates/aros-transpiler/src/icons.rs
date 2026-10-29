@@ -1023,7 +1023,7 @@ ICONS := A
     }
 
     #[test]
-    fn real_tree_has_all_181_declarations_and_178_identities() {
+    fn real_tree_has_all_183_declarations_and_180_identities() {
         let root = root();
         let dirs = dirs();
         let mut targets = Vec::new();
@@ -1046,14 +1046,14 @@ ICONS := A
             skipped.extend(scan.skipped);
         }
 
-        assert_eq!(targets.len(), 181);
+        assert_eq!(targets.len(), 183);
         let ids: HashSet<_> = targets.iter().map(|target| target.mmake.as_str()).collect();
-        assert_eq!(ids.len(), 178);
+        assert_eq!(ids.len(), 180);
         assert_eq!(skipped.len(), 1, "{skipped:#?}");
         assert!(skipped[0].contains("AROS_DIR__TOOLS"));
-        // 180 resolvable declarations plus ten conditional variants across
+        // 182 resolvable declarations plus ten conditional variants across
         // the Medium and Small monitor and raspi WiFi preference files.
-        assert_eq!(sets.len(), 190);
+        assert_eq!(sets.len(), 192);
 
         let env_sets: Vec<_> = sets
             .iter()

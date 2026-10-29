@@ -87,7 +87,7 @@ pub(super) fn collect_python_outputs(
         }
         _ => None,
     };
-    let mesa26 = target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0");
+    let mesa26 = target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.2.5");
     let remaining = if mesa26 {
         match rel_dir.to_str() {
             Some("workbench/libs/mesa/libcompiler") => {
@@ -288,7 +288,7 @@ pub(super) fn collect_meta_rules_and_apply_llvm(
 
     // LLVM is a structured multi-archive provider, not a configure-time SDK
     // wildcard. Its consumers acquire both the real build edge and includes.
-    if target.is_some_and(|context| context.mesa_version.as_deref() == Some("26.0.0")) {
+    if target.is_some_and(|context| context.mesa_version.as_deref() == Some("26.2.5")) {
         for declaration in targets {
             if matches!(
                 declaration.mmake_name.as_str(),
@@ -322,7 +322,7 @@ pub(super) fn collect_meta_rules_and_apply_llvm(
                 // helper archive. Preserve that semantics without importing
                 // its unresolved SDK LLVM wildcard or Make shell expansion.
                 declaration.link_options = [
-                    "-L${AROS_BUILD_DIR}/gen/lib/mesa26.0.0",
+                    "-L${AROS_BUILD_DIR}/gen/lib/mesa26.2.5",
                     "--whole-archive",
                     "-lgalliumvm",
                     "--no-whole-archive",

@@ -1621,7 +1621,7 @@ fn real_aros_source_sync_rejects_full_manifest_then_accepts_supported_fixture() 
     assert!(
         message.contains("opensbi-riscv64")
             && message.contains(
-                "Mesa 26.0.0 capability does not support target profile cpu=riscv64 platform=opensbi"
+                "Mesa 26.2.5 capability does not support target profile cpu=riscv64 platform=opensbi"
             ),
         "{message}"
     );
@@ -1641,7 +1641,8 @@ fn real_aros_source_sync_rejects_full_manifest_then_accepts_supported_fixture() 
 
     // Derive a test-only child commit from the exact source candidate. The
     // production checkout and its manifest remain untouched; TOML parsing
-    // verifies that the sole semantic change is removal of opensbi-riscv64.
+    // verifies that the sole semantic change is removal of the two profiles
+    // outside the complete transpiler capability set.
     let fixture_seed = temporary.path().join("qualified-seed");
     let cloned = Command::new("git")
         .args(["clone", "--no-local"])
@@ -1683,7 +1684,8 @@ fn real_aros_source_sync_rejects_full_manifest_then_accepts_supported_fixture() 
             "pc-x86_64".to_owned(),
             "rpi-aarch64".to_owned(),
             "arm-raspi".to_owned(),
-            "opensbi-riscv64".to_owned()
+            "opensbi-riscv64".to_owned(),
+            "esp32p4-riscv-gnu".to_owned()
         ]
     );
     let original_manifest = manifest.clone();
@@ -1710,12 +1712,15 @@ fn real_aros_source_sync_rejects_full_manifest_then_accepts_supported_fixture() 
             .get("transpiler")
             .and_then(|context| context.get("mesa_version"))
             .and_then(toml::Value::as_str),
-        Some("26.0.0")
+        Some("26.2.5")
     );
     let expected_targets = targets
         .iter()
         .filter(|profile| {
-            profile.get("name").and_then(toml::Value::as_str) != Some("opensbi-riscv64")
+            !matches!(
+                profile.get("name").and_then(toml::Value::as_str),
+                Some("opensbi-riscv64" | "esp32p4-riscv-gnu")
+            )
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -1758,7 +1763,7 @@ fn real_aros_source_sync_rejects_full_manifest_then_accepts_supported_fixture() 
         .args([
             "commit",
             "-m",
-            "Limit source-sync fixture to supported Mesa profiles",
+            "Limit source-sync fixture to supported transpiler profiles",
         ])
         .env("GIT_AUTHOR_NAME", "AROS fixture")
         .env("GIT_AUTHOR_EMAIL", "aros-fixture@example.invalid")

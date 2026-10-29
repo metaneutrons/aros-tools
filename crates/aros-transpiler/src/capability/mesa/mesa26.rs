@@ -1,4 +1,4 @@
-//! Closed Mesa 26.0.0 capabilities. These do not reuse Mesa 20 inventories.
+//! Closed Mesa 26.2.5 capabilities. These do not reuse Mesa 20 inventories.
 
 use super::{inventory_stems, CompileContract};
 use crate::ast::{
@@ -13,11 +13,11 @@ use std::path::Path;
 
 mod archive;
 
-pub(crate) const SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-26.0.0";
-pub(crate) const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0";
+pub(crate) const SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-26.2.5";
+pub(crate) const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5";
 pub(crate) const GLAPI_DIR: &str = "workbench/libs/mesa/libglapi";
 pub(crate) const GLAPI_MMAKE: &str = "mesa3d-linklib-glapi";
-pub(crate) const PRIVATE_LIBDIR: &str = "${AROS_BUILD_DIR}/gen/lib/mesa26.0.0";
+pub(crate) const PRIVATE_LIBDIR: &str = "${AROS_BUILD_DIR}/gen/lib/mesa26.2.5";
 const LLVM11_INCLUDE: &str = "${AROS_BUILD_DIR}/gen/external-install/llvm11/include";
 
 const LLVMPPIPE_SOURCE_NAMES: &[&str] = &[
@@ -175,7 +175,7 @@ const fn has_archive_sources(target: Mesa26Target) -> bool {
     )
 }
 
-fn common_defines(profile: &str) -> Vec<String> {
+pub(crate) fn common_defines(profile: &str) -> Vec<String> {
     let mut defines = [
         "__STDC_CONSTANT_MACROS",
         "__STDC_FORMAT_MACROS",
@@ -209,10 +209,10 @@ fn common_includes() -> Vec<String> {
     [
         "${AROS_SDK_INCLUDE_DIR}/aros/posixc",
         "${AROS_SDK_INCLUDE_DIR}/aros/stdc",
-        "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include",
-        "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include/GL",
-        "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src",
-        "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src",
+        "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/include",
+        "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/include/GL",
+        "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src",
+        "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -229,7 +229,7 @@ fn llvm_compile_contract(profile: &str, identity: Mesa26Target) -> CompileContra
             "MESA_LLVM_VERSION_STRING=\"11.0.0\"",
             "GALLIVM_USE_ORCJIT=0",
             "LLVM_IS_SHARED=0",
-            "PACKAGE_VERSION=\"26.0.0\"",
+            "PACKAGE_VERSION=\"26.2.5\"",
             "__AROS__",
         ]
         .map(str::to_owned),
@@ -242,48 +242,48 @@ fn llvm_compile_contract(profile: &str, identity: Mesa26Target) -> CompileContra
     let mut includes = common_includes();
     includes.extend(
         [
-            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
-            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
-            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/nir",
-            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src",
-            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler",
-            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/nir",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/nir",
             LLVM11_INCLUDE,
         ]
         .map(str::to_owned),
     );
     match identity {
         Mesa26Target::GalliumVmLibrary => includes.extend(
-            ["${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/gallivm"].map(str::to_owned),
+            ["${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary/gallivm"].map(str::to_owned),
         ),
         Mesa26Target::GalliumDrawLlvmLibrary | Mesa26Target::GalliumTessLibrary => includes.extend(
             [
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/util",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/indices",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/gallium/auxiliary",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/gallium/auxiliary/util",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/gallium/auxiliary/indices",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary/util",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary/indices",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/gallium/auxiliary",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/gallium/auxiliary/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/gallium/auxiliary/indices",
             ]
             .map(str::to_owned),
         ),
         Mesa26Target::LlvmPipeLibrary => includes.extend(
             [
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/util",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/indices",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/mesa/main",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary/util",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary/indices",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/mesa/main",
             ]
             .map(str::to_owned),
         ),
         Mesa26Target::LlvmPipeHidd => includes.extend(
             [
                 "${AROS_SOURCE_DIR}/workbench/hidds/llvmpipe",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/drivers",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util/format",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/include",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/util/format",
             ]
             .map(str::to_owned),
         ),
@@ -306,7 +306,7 @@ pub(crate) fn profile(target: Option<&TargetContext>) -> Result<Option<&'static 
     let Some(target) = target else {
         return Ok(None);
     };
-    if target.mesa_version.as_deref() != Some("26.0.0") {
+    if target.mesa_version.as_deref() != Some("26.2.5") {
         return Ok(None);
     }
     let key = (
@@ -328,7 +328,7 @@ pub(crate) fn profile(target: Option<&TargetContext>) -> Result<Option<&'static 
             Ok(Some("aarch64"))
         }
         _ => Err(format!(
-            "Mesa 26.0.0 capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
+            "Mesa 26.2.5 capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
             target.cpu.as_deref().unwrap_or("<unset>"),
             target.platform.as_deref().unwrap_or("<unset>"),
             target.toolchain.as_deref().unwrap_or("<unset>"),
@@ -355,13 +355,13 @@ pub(crate) fn glapi_sources(
         root,
         "workbench/libs/mesa/libglapi/mmakefile.src",
         fingerprint("mesa26-glapi-recipe")?,
-        "Mesa 26.0.0 glapi",
+        "Mesa 26.2.5 glapi",
     )?;
     require_file_fingerprint(
         root,
         "workbench/libs/mesa/mesa.cfg",
         fingerprint("mesa26-config")?,
-        "Mesa 26.0.0 common flags",
+        "Mesa 26.2.5 common flags",
     )?;
     Ok(Some(EvaluatedSources {
         c: vec![
@@ -465,13 +465,13 @@ pub(crate) fn glapi_compile_contract(
     let mut includes = common_includes();
     includes.extend(
         [
-            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/mesa/glapi",
-            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa/glapi",
-            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/mesa/glapi/glapi",
-            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa",
-            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa/glapi/glapi",
-            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util",
-            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/mesa/glapi/shared-glapi",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/mesa/glapi",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa/glapi",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/mesa/glapi/glapi",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa/glapi/glapi",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/mesa/glapi/shared-glapi",
             "${AROS_SOURCE_DIR}/workbench/libs/mesa",
         ]
         .map(str::to_owned),
@@ -536,15 +536,15 @@ pub(crate) fn compile_contract(
         Mesa26Target::GalliumHidd => {
             includes.extend(
                 [
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium",
                     "${AROS_SOURCE_DIR}/workbench/hidds/gallium",
                 ]
                 .map(str::to_owned),
             );
         }
         Mesa26Target::GalliumLibrary => {
-            includes.push("${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include".to_owned());
+            includes.push("${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include".to_owned());
         }
         Mesa26Target::EglLibrary => {
             defines.extend(
@@ -559,9 +559,9 @@ pub(crate) fn compile_contract(
             );
             includes.extend(
                 [
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/egl/main",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa/glapi",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/egl/main",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa/glapi",
                     "${AROS_SOURCE_DIR}/workbench/libs/egl",
                 ]
                 .map(str::to_owned),
@@ -573,15 +573,15 @@ pub(crate) fn compile_contract(
                 [
                     "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/v3d/drm-stubs",
                     "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/v3d",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/drivers/v3d",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom/compiler",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers/v3d",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom/compiler",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/util",
                 ]
                 .map(str::to_owned),
             );
@@ -601,18 +601,18 @@ pub(crate) fn compile_contract(
             includes.extend([
                 "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/drm_compat",
                 "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/drivers",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/drivers/vc4",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/nir",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/nir",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/galliumcoreapi",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers/vc4",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/nir",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/galliumcoreapi",
                 "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/include",
             ].map(str::to_owned));
         }
@@ -634,22 +634,22 @@ pub(crate) fn compile_contract(
                     "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/v3d",
                     "${AROS_BUILD_DIR}/gen/arch/arm-native/soc/broadcom/2708/hidd/v3d/cle-gen",
                     "${AROS_BUILD_DIR}/gen/arch/arm-native/soc/broadcom/2708/hidd/v3d/cle-gen/broadcom",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom/cle",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom/compiler",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom/common",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/drivers",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/drivers/v3d",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom/clif",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom/perfcntrs",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/nir",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/nir",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom/cle",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom/compiler",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom/common",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers/v3d",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom/clif",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom/perfcntrs",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/nir",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/util",
                 ]
                 .map(str::to_owned),
             );
@@ -663,13 +663,13 @@ pub(crate) fn compile_contract(
         Mesa26Target::MesaGlLibrary => {
             includes.extend(
                 [
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa/main",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mapi",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/mesa",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa/main",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mapi",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/mesa",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler",
                     "${AROS_SOURCE_DIR}/workbench/libs/mesa",
                 ]
                 .map(str::to_owned),
@@ -684,20 +684,20 @@ pub(crate) fn compile_contract(
         Mesa26Target::CompilerLibrary => {
             includes.extend(
                 [
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mapi",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/glsl",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/glsl/glcpp",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/nir",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/spirv",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/glsl",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/glsl/glcpp",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/nir",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/spirv",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mapi",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/glsl",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/glsl/glcpp",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/spirv",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/glsl",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/glsl/glcpp",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/nir",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/spirv",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary",
                 ]
                 .map(str::to_owned),
             );
@@ -705,43 +705,43 @@ pub(crate) fn compile_contract(
         }
         Mesa26Target::GalliumAuxLibrary => {
             includes.extend([
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/util",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary/indices",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/gallium/auxiliary",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/gallium/auxiliary/driver_trace",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/gallium/auxiliary/util",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/gallium/auxiliary/indices",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/glsl",
-                "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/nir",
-                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/nir",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary/util",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary/indices",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/gallium/auxiliary",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/gallium/auxiliary/driver_trace",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/gallium/auxiliary/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/gallium/auxiliary/indices",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/glsl",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/nir",
             ].map(str::to_owned));
         }
         Mesa26Target::MesaCoreLibrary => {
             defines.extend([
-                "PACKAGE_VERSION=\"26.0.0\"".to_owned(),
+                "PACKAGE_VERSION=\"26.2.5\"".to_owned(),
                 "PACKAGE_BUGREPORT=\"https://bugs.freedesktop.org/enter_bug.cgi?product=Mesa\""
                     .to_owned(),
             ]);
             includes.extend(
                 [
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/mesa",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/mesa/main",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mapi",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/glsl",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/glsl",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/nir",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/nir",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa/main",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/mesa",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/mesa/main",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mapi",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/glsl",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/glsl",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/nir",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa/main",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary",
                 ]
                 .map(str::to_owned),
             );
@@ -766,14 +766,14 @@ pub(crate) fn compile_contract(
             }
             includes.extend(
                 [
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mapi",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/auxiliary",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util/format",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util/format",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/util",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mapi",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util/format",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/util/format",
                     "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7",
                 ]
                 .map(str::to_owned),
@@ -827,20 +827,20 @@ fn verify_mesa_fetch(fetches: &[FetchDecl]) -> Result<(), String> {
             matches.len()
         ));
     };
-    if fetch.archive != "mesa-26.0.0"
+    if fetch.archive != "mesa-26.2.5"
         || fetch.suffixes != "tar.xz"
         || fetch.origins
             != "https://archive.mesa3d.org/ https://archive.mesa3d.org/older-versions/26.x"
         || fetch.checksums
-            != "mesa-26.0.0.tar.xz=sha256:2a44e98e64d5c36cec64633de2d0ec7eff64703ee25b35364ba8fcaa84f33f72"
+            != "mesa-26.2.5.tar.xz=sha256:794b3d1729075dae7ebd47c7283b7ca0cdb5dec668f7f11cc0a5d82f6138a0a5"
         || fetch.location != "${AROS_PORTS_SOURCE_DIR}"
         || fetch.destination != "${AROS_PORTS_DIR}/mesa"
         || !fetch.base.is_empty()
         || fetch.patch_origins != "${AROS_SOURCE_DIR}/workbench/libs/mesa"
-        || fetch.patches != "mesa-26.0.0-aros.diff:mesa-26.0.0:-p1"
+        || fetch.patches != "mesa-26.2.5-aros.diff:mesa-26.2.5:-p1"
         || fetch.dir != "workbench/libs/mesa"
     {
-        return Err("central Mesa 26.0.0 fetch differs from the audited source/patch contract".to_owned());
+        return Err("central Mesa 26.2.5 fetch differs from the audited source/patch contract".to_owned());
     }
 
     Ok(())
@@ -980,7 +980,7 @@ pub(crate) fn parse_glapi(
         python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
-            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.0.0-aros.diff".to_owned(),
+            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.2.5-aros.diff".to_owned(),
         ],
         consumers: vec![GLAPI_MMAKE.to_owned()],
         dir_path: relative_dir.to_path_buf(),
@@ -1088,7 +1088,7 @@ pub(crate) fn parse_mesautil(
         python_packages: vec![pyyaml],
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
-            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.0.0-aros.diff".to_owned(),
+            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.2.5-aros.diff".to_owned(),
         ],
         // The compiler's glsl_types source includes u_format_gen.h through
         // util/format/u_format.h. It is declared in a different mmakefile, so
@@ -1204,7 +1204,7 @@ pub(crate) fn parse_v3d(
         &[
             "python-stdout",
             "-p",
-            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/compiler/nir",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir",
         ],
     ));
     for (version, xml) in [
@@ -1218,9 +1218,9 @@ pub(crate) fn parse_v3d(
             &[
                 "python-stdout",
                 if xml == "vc4_packet.xml" {
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom/cle/vc4_packet.xml"
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom/cle/vc4_packet.xml"
                 } else {
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/broadcom/cle/v3d_packet.xml"
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/broadcom/cle/v3d_packet.xml"
                 },
                 version,
             ],
@@ -1239,7 +1239,7 @@ pub(crate) fn parse_v3d(
         python_packages: packages,
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
-            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.0.0-aros.diff".to_owned(),
+            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.2.5-aros.diff".to_owned(),
         ],
         consumers: vec![TARGET.to_owned()],
         dir_path: relative_dir.to_path_buf(),
@@ -1305,6 +1305,8 @@ pub(crate) fn parse_galliumaux(
             "src/gallium/include/pipe/p_defines.h".to_owned(),
             "src/gallium/include/pipe/p_video_enums.h".to_owned(),
             "src/util/blend.h".to_owned(),
+            "src/compiler/nir/nir_algebraic.py".to_owned(),
+            "src/compiler/nir/nir_opcodes.py".to_owned(),
         ],
         local_inputs: vec!["${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa20_generate.py".to_owned()],
         jobs: vec![
@@ -1326,7 +1328,7 @@ pub(crate) fn parse_galliumaux(
                     trace_c,
                     trace_h,
                     "-p",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util/perf",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util/perf",
                     "-C",
                     "@OUT_C@",
                     "-H",
@@ -1341,7 +1343,7 @@ pub(crate) fn parse_galliumaux(
                     trace_c,
                     trace_h,
                     "-p",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util/perf",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util/perf",
                     "-C",
                     "@OUT_C@",
                     "-H",
@@ -1355,9 +1357,9 @@ pub(crate) fn parse_galliumaux(
                     "python-dual-output",
                     c,
                     h,
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include/pipe/p_defines.h",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include/pipe/p_video_enums.h",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util/blend.h",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include/pipe/p_defines.h",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include/pipe/p_video_enums.h",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util/blend.h",
                     "-C",
                     "@OUT_C@",
                     "-H",
@@ -1371,13 +1373,31 @@ pub(crate) fn parse_galliumaux(
                     "python-dual-output",
                     c,
                     h,
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include/pipe/p_defines.h",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include/pipe/p_video_enums.h",
-                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util/blend.h",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include/pipe/p_defines.h",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include/pipe/p_video_enums.h",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/util/blend.h",
                     "-C",
                     "@OUT_C@",
                     "-H",
                     "@OUT_H@",
+                ],
+            ),
+            job(
+                &format!("{prefix}/draw/draw_nir_lower_opcodes.py"),
+                &format!("{prefix}/draw/draw_nir_lower_opcodes.c"),
+                &[
+                    "python-stdout",
+                    "-p",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir/",
+                ],
+            ),
+            job(
+                &format!("{prefix}/gallivm/lp_bld_nir_no_integer_algebraic.py"),
+                &format!("{prefix}/gallivm/lp_bld_nir_no_integer_algebraic.c"),
+                &[
+                    "python-stdout",
+                    "-p",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir/",
                 ],
             ),
         ],
@@ -1386,7 +1406,7 @@ pub(crate) fn parse_galliumaux(
         python_packages: packages,
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
-            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.0.0-aros.diff".to_owned(),
+            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.2.5-aros.diff".to_owned(),
         ],
         consumers: vec![TARGET.to_owned()],
         dir_path: relative_dir.to_path_buf(),
@@ -1649,7 +1669,7 @@ pub(crate) fn parse_compiler(
         python_packages: packages,
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
-            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.0.0-aros.diff".to_owned(),
+            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.2.5-aros.diff".to_owned(),
         ],
         consumers: vec![TARGET.to_owned()],
         dir_path: relative_dir.to_path_buf(),
@@ -1724,6 +1744,7 @@ pub(crate) fn parse_core(
     ];
     for (script, output, input) in [
         ("api_exec_init.py", "api_exec_init.c", xml.as_str()),
+        ("api_trace_c.py", "api_trace.c", xml.as_str()),
         ("api_exec_decl_h.py", "api_exec_decl.h", xml.as_str()),
         ("api_save_init_h.py", "api_save_init.h", xml.as_str()),
         ("api_save_h.py", "api_save.h", xml.as_str()),
@@ -1806,9 +1827,9 @@ pub(crate) fn parse_core(
             ],
         ),
     ]);
-    if jobs.len() != 25 {
+    if jobs.len() != 26 {
         return Err(format!(
-            "Mesa 26 core generator inventory has {} instead of 25 outputs",
+            "Mesa 26 core generator inventory has {} instead of 26 outputs",
             jobs.len()
         ));
     }
@@ -1842,7 +1863,7 @@ pub(crate) fn parse_core(
         python_packages: packages,
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
-            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.0.0-aros.diff".to_owned(),
+            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.2.5-aros.diff".to_owned(),
         ],
         consumers: vec![TARGET.to_owned()],
         dir_path: relative_dir.to_path_buf(),

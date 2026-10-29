@@ -35,7 +35,7 @@ fn runtime_identity_rejects_changed_source_module_names() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     };
     assert_eq!(
@@ -78,7 +78,7 @@ fn opensbi_riscv64_mesa26_profile() -> TargetContext {
         cpu32: Some(String::new()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     }
 }
@@ -121,7 +121,7 @@ fn mesa26_profile_validation_is_scoped_to_exact_capability_targets() {
         .err()
         .expect("recognized Mesa compile contract rejects unsupported RISC-V");
     assert!(compile_error.contains(
-        "Mesa 26.0.0 capability does not support target profile cpu=riscv64 platform=opensbi"
+        "Mesa 26.2.5 capability does not support target profile cpu=riscv64 platform=opensbi"
     ));
 
     let archive_error = archive_sources(
@@ -132,7 +132,7 @@ fn mesa26_profile_validation_is_scoped_to_exact_capability_targets() {
     )
     .expect_err("recognized Mesa archive capability rejects unsupported RISC-V");
     assert!(archive_error.contains(
-        "Mesa 26.0.0 capability does not support target profile cpu=riscv64 platform=opensbi"
+        "Mesa 26.2.5 capability does not support target profile cpu=riscv64 platform=opensbi"
     ));
 }
 
@@ -145,7 +145,7 @@ fn public_gallium_library_uses_the_selected_mesa26_pipe_headers() {
         cpu32: Some(String::new()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some("hard".to_owned()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     };
     let relative = Path::new("workbench/libs/gallium");
@@ -155,7 +155,7 @@ fn public_gallium_library_uses_the_selected_mesa26_pipe_headers() {
     assert!(contract
         .includes
         .iter()
-        .any(|path| { path == "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include" }));
+        .any(|path| { path == "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include" }));
     assert!(!contract
         .includes
         .iter()
@@ -182,7 +182,7 @@ fn egl_archive_is_versioned_and_rejects_recipe_drift() {
         cpu32: Some(String::new()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     };
     let relative = Path::new("workbench/libs/egl");
@@ -201,7 +201,7 @@ fn egl_archive_is_versioned_and_rejects_recipe_drift() {
         .unwrap();
     assert!(compile
         .includes
-        .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/egl/main".to_owned()));
+        .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/egl/main".to_owned()));
     assert!(compile.defines.contains(&"HAVE_AROS_BACKEND".to_owned()));
 
     let temporary = tempfile::tempdir().unwrap();
@@ -239,7 +239,7 @@ fn v3d_archive_admits_only_the_reviewed_device_tree_recipe() {
         cpu32: Some(String::new()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     };
     let relative = Path::new("arch/arm-native/soc/broadcom/2708/hidd/v3d");
@@ -258,7 +258,7 @@ fn v3d_archive_admits_only_the_reviewed_device_tree_recipe() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     };
     assert!(
@@ -270,7 +270,7 @@ fn v3d_archive_admits_only_the_reviewed_device_tree_recipe() {
     let temporary = tempfile::tempdir().unwrap();
     for path in [
         "arch/arm-native/soc/broadcom/2708/hidd/v3d/mmakefile.src",
-        "arch/arm-native/soc/broadcom/2708/hidd/v3d/v3d-26.0.0.sources",
+        "arch/arm-native/soc/broadcom/2708/hidd/v3d/v3d-26.2.5.sources",
         "workbench/libs/mesa/mesa.cfg",
     ] {
         let destination = temporary.path().join(path);
@@ -350,7 +350,7 @@ fn changed_glapi_recipe_is_rejected_before_source_override() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     };
     let relative = Path::new(GLAPI_DIR);
@@ -383,27 +383,27 @@ fn mesa26_archives_use_only_reviewed_inventories() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     };
     for (relative, mmake, c_count, cxx_count) in [
         (
             "workbench/libs/mesa/libcompiler",
             "mesa3d-linklib-compiler",
-            272,
+            276,
             51,
         ),
-        ("workbench/libs/mesa/libmesa", "mesa3d-linklib-mesa", 215, 4),
+        ("workbench/libs/mesa/libmesa", "mesa3d-linklib-mesa", 217, 4),
         (
             "workbench/libs/mesa/libgalliumaux",
             "mesa3d-linklib-galliumauxiliary",
-            150,
+            145,
             0,
         ),
         (
             "workbench/libs/mesa/libmesautil",
             "mesa3d-linklib-mesautil",
-            93,
+            94,
             4,
         ),
     ] {
@@ -420,7 +420,7 @@ fn mesa26_archives_use_only_reviewed_inventories() {
     for relative in [
         "workbench/libs/mesa/mesa.cfg",
         "workbench/libs/mesa/libmesa/mmakefile.src",
-        "workbench/libs/mesa/libmesa/mesa-26.0.0.sources",
+        "workbench/libs/mesa/libmesa/mesa-26.2.5.sources",
     ] {
         let output = temporary.path().join(relative);
         fs::create_dir_all(output.parent().unwrap()).unwrap();
@@ -428,7 +428,7 @@ fn mesa26_archives_use_only_reviewed_inventories() {
     }
     let manifest = temporary
         .path()
-        .join("workbench/libs/mesa/libmesa/mesa-26.0.0.sources");
+        .join("workbench/libs/mesa/libmesa/mesa-26.2.5.sources");
     let mut contents = fs::read_to_string(&manifest).unwrap();
     contents.push_str("\n# unreviewed inventory drift\n");
     fs::write(&manifest, contents).unwrap();
@@ -466,7 +466,7 @@ fn galliumaux_admits_only_the_reviewed_llvmpipe_only_recipe() {
         cpu32: Some(String::new()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     };
     let relative = Path::new("workbench/libs/mesa/libgalliumaux");
@@ -485,7 +485,7 @@ fn galliumaux_admits_only_the_reviewed_llvmpipe_only_recipe() {
     let temporary = tempfile::tempdir().unwrap();
     for path in [
         "workbench/libs/mesa/libgalliumaux/mmakefile.src",
-        "workbench/libs/mesa/libgalliumaux/galliumaux-26.0.0.sources",
+        "workbench/libs/mesa/libgalliumaux/galliumaux-26.2.5.sources",
         "workbench/libs/mesa/mesa.cfg",
     ] {
         let destination = temporary.path().join(path);

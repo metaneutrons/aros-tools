@@ -34,7 +34,7 @@ pub(crate) fn parse_glapi(
     const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
     const XML: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi/glapi/gen/gl_and_es_API.xml";
 
-    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0") {
+    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.2.5") {
         return super::mesa26::parse_glapi(relative_dir, target, targets, fetches);
     }
 
@@ -321,7 +321,7 @@ pub(crate) fn parse_mesautil(
         "vma",
     ];
 
-    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0") {
+    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.2.5") {
         return super::mesa26::parse_mesautil(root, relative_dir, target, targets, fetches);
     }
 
@@ -550,7 +550,7 @@ mod tests {
         let root = root();
         let relative_dir = Path::new("workbench/libs/mesa/libglapi");
         let mut profile = target_context("x86_64", "pc", "");
-        profile.mesa_version = Some("26.0.0".to_owned());
+        profile.mesa_version = Some("26.2.5".to_owned());
         let central_fetches = collect_mmakefile_fetches_with_context(
             &root.join("workbench/libs/mesa/mmakefile.src"),
             &root,
@@ -598,7 +598,7 @@ mod tests {
             .iter_mut()
             .find(|fetch| fetch.name == "mesa3d-fetch")
             .unwrap();
-        mesa_fetch.patches = "mesa-26.0.0-unreviewed.diff:mesa-26.0.0:-p1".to_owned();
+        mesa_fetch.patches = "mesa-26.2.5-unreviewed.diff:mesa-26.2.5:-p1".to_owned();
         assert!(parse(&parsed.targets, &changed_fetches, &profile)
             .contains("audited source/patch contract"));
         assert!(parse(&parsed.targets, &[], &profile).contains("one central mesa3d-fetch"));
@@ -614,7 +614,7 @@ mod tests {
         let root = root();
         let relative_dir = Path::new("workbench/libs/mesa/libmesautil");
         let mut profile = target_context("x86_64", "pc", "");
-        profile.mesa_version = Some("26.0.0".to_owned());
+        profile.mesa_version = Some("26.2.5".to_owned());
         let mut central_fetches = collect_mmakefile_fetches_with_context(
             &root.join("workbench/libs/mesa/mmakefile.src"),
             &root,
@@ -680,7 +680,7 @@ mod tests {
             .iter_mut()
             .find(|fetch| fetch.name == "mesa3d-fetch")
             .unwrap();
-        mesa_fetch.patches = "mesa-26.0.0-unreviewed.diff:mesa-26.0.0:-p1".to_owned();
+        mesa_fetch.patches = "mesa-26.2.5-unreviewed.diff:mesa-26.2.5:-p1".to_owned();
         assert!(parse(&parsed.targets, &changed_fetches, &profile)
             .contains("audited source/patch contract"));
         assert!(parse(&parsed.targets, &[], &profile).contains("one central mesa3d-fetch"));

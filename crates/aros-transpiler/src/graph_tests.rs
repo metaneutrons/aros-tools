@@ -1825,17 +1825,22 @@ fn real_tree_packages_resolve_to_exact_runtime_files() {
         .iter()
         .filter(|package| package.is_kickstart)
         .collect();
-    // Two source declarations are not closed: Efika spells PKG_HIDDS as
-    // PKD_HIDDS, and i386 leaves LEGACY_RSRCS undefined. Previously partial
-    // packages hid these defects; require explicit refusal rather than infer
-    // absent members. The valid x86-64 deferred path must still be retained.
-    assert_eq!(skipped_packages.len(), 2, "{skipped_packages:#?}");
+    // Three source declarations are not closed: Efika spells PKG_HIDDS as
+    // PKD_HIDDS, i386 leaves LEGACY_RSRCS undefined, and ESP32P4 assigns
+    // PKG_DEVS only inside a condition the parser cannot safely evaluate.
+    // Previously partial packages hid these defects; require explicit refusal
+    // rather than infer absent members. The valid x86-64 deferred path must
+    // still be retained.
+    assert_eq!(skipped_packages.len(), 3, "{skipped_packages:#?}");
     assert!(skipped_packages
         .iter()
         .any(|reason| reason.contains("kernel-package-efika-arm") && reason.contains("PKD_HIDDS")));
     assert!(skipped_packages
         .iter()
         .any(|reason| reason.contains("kernel-legacy-pc-i386") && reason.contains("LEGACY_RSRCS")));
+    assert!(skipped_packages.iter().any(
+        |reason| reason.contains("kernel-package-esp32p4-riscv") && reason.contains("PKG_DEVS")
+    ));
     assert_eq!(packages.len(), 15);
     assert_eq!(kickstarts.len(), 4);
     assert_eq!(

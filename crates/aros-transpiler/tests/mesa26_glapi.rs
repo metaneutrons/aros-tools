@@ -18,7 +18,7 @@ fn context(cpu: &str, platform: &str, cpu32: &str, float_abi: &str) -> TargetCon
         cpu32: Some(cpu32.to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(float_abi.to_owned()),
-        mesa_version: Some("26.0.0".to_owned()),
+        mesa_version: Some("26.2.5".to_owned()),
         ..TargetContext::default()
     }
 }
@@ -59,7 +59,7 @@ fn mesa26_egl_target_retains_the_full_upstream_core_and_local_backend() {
             .any(|source| source.ends_with("/src/egl/main/eglsurface")));
         assert!(target
             .include_dirs
-            .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/egl/main".to_owned()));
+            .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/egl/main".to_owned()));
     }
 }
 
@@ -147,14 +147,14 @@ fn mesa26_v3d_has_closed_aarch64_driver_and_generators() {
         .iter()
         .find(|candidate| candidate.mmake_name == "linklibs-gallium_v3d")
         .expect("V3D driver archive");
-    assert_eq!(driver.source_files.len(), 67);
+    assert_eq!(driver.source_files.len(), 71);
     assert!(driver.source_files.iter().all(|source| {
         !source.starts_with("${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/v3d/")
     }));
     assert!(driver.defines.contains(&"AROS_MESA26_V3D=1".to_owned()));
     assert!(driver
         .include_dirs
-        .contains(&"${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler".to_owned()));
+        .contains(&"${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler".to_owned()));
     let driver_rule = parsed
         .meta_rules
         .iter()
@@ -168,7 +168,7 @@ fn mesa26_v3d_has_closed_aarch64_driver_and_generators() {
         .contains(&"mesa3d-linklib-compiler-generated".to_owned()));
     assert_eq!(
         driver.linklib_output_dir.as_deref(),
-        Some("${AROS_BUILD_DIR}/gen/lib/mesa26.0.0")
+        Some("${AROS_BUILD_DIR}/gen/lib/mesa26.2.5")
     );
     let generator = parsed
         .python_outputs
@@ -197,7 +197,7 @@ fn mesa26_v3d_has_closed_aarch64_driver_and_generators() {
     );
     assert!(hidd
         .include_dirs
-        .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include".to_owned()));
+        .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include".to_owned()));
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn mesa26_vc4_has_closed_driver_on_raspberry_pi_profiles() {
         assert!(driver.defines.contains(&"AROS_MESA_MAJOR=26".to_owned()));
         assert!(driver
             .include_dirs
-            .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/drivers/vc4".to_owned()));
+            .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers/vc4".to_owned()));
         let hidd = parsed
             .targets
             .iter()
@@ -283,9 +283,9 @@ fn mesa26_vc4_has_closed_driver_on_raspberry_pi_profiles() {
             .all(|source| !source.contains("/src/gallium/drivers/vc4/")));
         assert!(hidd
             .include_dirs
-            .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include".to_owned()));
+            .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include".to_owned()));
         assert!(hidd.include_dirs.contains(
-            &"${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/galliumcoreapi".to_owned()
+            &"${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/galliumcoreapi".to_owned()
         ));
     }
 }
@@ -310,7 +310,7 @@ fn mesa26_gallium_hidd_resolves_current_pipe_headers() {
         .expect("Gallium HIDD");
     assert!(hidd
         .include_dirs
-        .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include".to_owned()));
+        .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include".to_owned()));
 }
 
 #[test]
@@ -344,14 +344,14 @@ fn mesa26_glapi_has_a_closed_two_stage_product_on_all_release_profiles() {
         assert_eq!(
         target.source_files,
         [
-            "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa/glapi/shared-glapi/core",
-            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/mesa/glapi/shared-glapi/public_glapi_wrappers",
+            "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa/glapi/shared-glapi/core",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/mesa/glapi/shared-glapi/public_glapi_wrappers",
         ],
     );
         assert!(target.asm_source_files.is_empty());
         assert_eq!(
             target.linklib_output_dir.as_deref(),
-            Some("${AROS_BUILD_DIR}/gen/lib/mesa26.0.0"),
+            Some("${AROS_BUILD_DIR}/gen/lib/mesa26.2.5"),
         );
         assert!(target
             .defines
@@ -414,7 +414,7 @@ fn mesa26_glapi_rejects_changed_fetch_and_unsupported_version() {
     assert!(parsed
         .capability_errors
         .iter()
-        .any(|error| error.message.contains("central Mesa 26.0.0 fetch")));
+        .any(|error| error.message.contains("central Mesa 26.2.5 fetch")));
 
     profile.mesa_version = Some("26.0.1".to_owned());
     let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
@@ -459,11 +459,11 @@ fn mesa26_mesautil_has_closed_archives_and_four_generators() {
             assert_eq!(target.cxx_source_files.len(), 4);
             assert_eq!(
                 target.linklib_output_dir.as_deref(),
-                Some("${AROS_BUILD_DIR}/gen/lib/mesa26.0.0")
+                Some("${AROS_BUILD_DIR}/gen/lib/mesa26.2.5")
             );
             assert!(target
                 .include_dirs
-                .contains(&"${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src".to_owned()));
+                .contains(&"${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src".to_owned()));
             assert!(target
                 .defines
                 .contains(&"HAVE_FUNC_ATTRIBUTE_PACKED".to_owned()));
@@ -632,7 +632,7 @@ fn mesa26_remaining_archives_parse_on_release_profiles() {
 }
 
 #[test]
-fn mesa26_galliumaux_declares_all_six_generator_outputs() {
+fn mesa26_galliumaux_declares_all_eight_generator_outputs() {
     let root = mesa26_source_root();
     let profile = context("x86_64", "pc", "i386", "");
     let fetches = collect_mmakefile_fetches_with_context(
@@ -653,7 +653,14 @@ fn mesa26_galliumaux_declares_all_six_generator_outputs() {
     let [generated] = parsed.python_outputs.as_slice() else {
         panic!("expected one galliumaux generator: {parsed:#?}");
     };
-    assert_eq!(generated.jobs.len(), 6);
+    assert_eq!(generated.jobs.len(), 8);
+    assert!(generated
+        .jobs
+        .iter()
+        .any(|job| job.output.ends_with("draw/draw_nir_lower_opcodes.c")));
+    assert!(generated.jobs.iter().any(|job| job
+        .output
+        .ends_with("gallivm/lp_bld_nir_no_integer_algebraic.c")));
 }
 
 #[test]

@@ -5,7 +5,7 @@ use clap::Parser;
 use serde_json::json;
 use std::fs;
 
-const PROFILE: &str = "[[targets]]\nname='example-sdk'\narch='riscv64'\nplatform='opensbi'\nbsp='example'\nfloat_abi='lp64d'\nnative_consumer_contract='consumer.json'\n[targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='gnu'\ncpu32=''\nuse_mmu=true\nmesa_version='26.0.0'\n[targets.bootstrap_abi]\nflavour='native'\nplatform_smp=true\n";
+const PROFILE: &str = "[[targets]]\nname='example-sdk'\narch='riscv64'\nplatform='opensbi'\nbsp='example'\nfloat_abi='lp64d'\nnative_consumer_contract='consumer.json'\n[targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='gnu'\ncpu32=''\nuse_mmu=true\nmesa_version='26.2.5'\n[targets.bootstrap_abi]\nflavour='native'\nplatform_smp=true\n";
 const ROOTS: [&str; 2] = ["includes", "linklibs"];
 type SelectorMutation = (&'static str, fn(&mut TargetContext));
 
@@ -72,7 +72,7 @@ impl Fixture {
             "--float-abi".to_owned(),
             "lp64d".to_owned(),
             "--mesa-version".to_owned(),
-            "26.0.0".to_owned(),
+            "26.2.5".to_owned(),
         ];
         if let Some(digest) = digest {
             values.extend([

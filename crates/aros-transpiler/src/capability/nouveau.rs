@@ -11,6 +11,7 @@ use crate::ast::{ModuleType, TargetDefinition};
 // contract and base defines. The coupling is real rather than accidental, and
 // it now reads as one capability using another rather than as two families
 // sharing a file.
+use super::mesa::mesa26;
 use super::mesa::{base_defines, CompileContract};
 use crate::parser::TargetContext;
 use crate::sources::EvaluatedSources;
@@ -30,6 +31,10 @@ const NOUVEAU_GALLIUM_SOURCE_MANIFEST: &str =
 const NOUVEAU_GALLIUM_C_SOURCE_COUNT: usize = 81;
 const NOUVEAU_GALLIUM_CXX_SOURCE_COUNT: usize = 24;
 const NOUVEAU_GALLIUM_SOURCE_PREFIX: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium";
+const NOUVEAU26_GALLIUM_C_SOURCE_COUNT: usize = 83;
+const NOUVEAU26_GALLIUM_CXX_SOURCE_COUNT: usize = 26;
+const NOUVEAU26_GALLIUM_SOURCE_PREFIX: &str =
+    "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers/nouveau";
 
 /// Selects the three profiles for which the DRM-side Nouveau source snapshot
 /// was audited.  The archive has no architecture-specific source lane, but a
@@ -270,6 +275,45 @@ pub(crate) fn gallium_sources(
     }
     nouveau_current_profile(target)?;
 
+    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.2.5") {
+        let c = manifest_inventory(root, "workbench/hidds/nouveau/mmakefile.src", "C_SOURCES")?;
+        let cxx = manifest_inventory(
+            root,
+            "workbench/hidds/nouveau/mmakefile.src",
+            "NV50_CODEGEN_SOURCES",
+        )?;
+        if c.len() != NOUVEAU26_GALLIUM_C_SOURCE_COUNT
+            || cxx.len() != NOUVEAU26_GALLIUM_CXX_SOURCE_COUNT
+        {
+            return Err(format!(
+                "Mesa 26.2.5 Nouveau inventory has {} C and {} C++ entries, expected {NOUVEAU26_GALLIUM_C_SOURCE_COUNT} and {NOUVEAU26_GALLIUM_CXX_SOURCE_COUNT}",
+                c.len(),
+                cxx.len()
+            ));
+        }
+        let materialize = |sources: Vec<String>, suffix: &str, language: &str| {
+            sources
+                .into_iter()
+                .map(|source| {
+                    source
+                        .strip_suffix(suffix)
+                        .map(|stem| format!("{NOUVEAU26_GALLIUM_SOURCE_PREFIX}/{stem}"))
+                        .ok_or_else(|| {
+                            format!(
+                                "Mesa 26.2.5 Nouveau {language} inventory entry lacks {suffix}: {source}"
+                            )
+                        })
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+        };
+        return Ok(Some(EvaluatedSources {
+            c: materialize(c, ".c", "C")?,
+            cxx: materialize(cxx, ".cpp", "C++")?,
+            declared: true,
+            ..EvaluatedSources::default()
+        }));
+    }
+
     let c = manifest_inventory(
         root,
         NOUVEAU_GALLIUM_SOURCE_MANIFEST,
@@ -324,6 +368,53 @@ pub(crate) fn gallium_compile_contract(
         return Ok(None);
     }
     let profile = nouveau_current_profile(target)?;
+    if target.and_then(|context| context.mesa_version.as_deref()) == Some("26.2.5") {
+        let mut defines = mesa26::common_defines(profile);
+        defines.extend(["PACKAGE_VERSION=\"26.2.5\"", "NOUVEAU_USE_UTIL_LIST"].map(str::to_owned));
+        return Ok(Some(CompileContract {
+            defines,
+            undefines: Vec::new(),
+            includes: [
+                "${AROS_SDK_INCLUDE_DIR}/aros/posixc",
+                "${AROS_SDK_INCLUDE_DIR}/aros/stdc",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/include",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/include",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/mesa",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers/nouveau",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/nir",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers/nouveau/codegen",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/mesa/main",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/glsl",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/util/format",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/src/compiler/nir",
+                "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/nouveau/headers",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/libdrm/nouveau",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/libdrm",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/libdrm/nouveau",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi/drm",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            options: [
+                "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>",
+                "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>",
+                "-fno-strict-aliasing",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        }));
+    }
     Ok(Some(CompileContract {
         defines: base_defines(profile),
         undefines: Vec::new(),
@@ -382,6 +473,7 @@ pub(crate) fn validate_gallium(
         ));
     };
     let includes_match = declaration.include_dirs == expected_flags.includes;
+    let mesa26 = target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.2.5");
     let exact = declaration.target_name == "gallium_nouveau"
         && declaration.module_type == ModuleType::LinkLib
         && !declaration.genmodule_only
@@ -400,9 +492,9 @@ pub(crate) fn validate_gallium(
         && declaration.mod_suffix.is_none()
         && declaration.linklib_name.is_none()
         && declaration.genmodule_linklibs.is_none()
-        && declaration.linklib_output_dir.is_none()
-        && declaration.canonical_linklib_output
-        && declaration.canonical_linklib_eligible
+        && declaration.linklib_output_dir.as_deref() == mesa26.then_some(mesa26::PRIVATE_LIBDIR)
+        && declaration.canonical_linklib_output != mesa26
+        && declaration.canonical_linklib_eligible != mesa26
         && declaration.compiler_flags.is_empty()
         && declaration.arch_modules.is_empty()
         && declaration.arch_includes.is_empty()

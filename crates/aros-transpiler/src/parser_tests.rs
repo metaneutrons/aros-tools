@@ -659,14 +659,14 @@ fn target_context_selects_build_invocations_and_reports_unknown_guards() {
 #[test]
 fn target_context_preserves_upstream_toolchain_selectors_and_omissions() {
     let mut target = target_context("x86_64", "pc", "");
-    target.mesa_version = Some("26.0.0".to_owned());
+    target.mesa_version = Some("26.2.5".to_owned());
     target.target_llvm_ver = Some("23.0.0".to_owned());
     target.target_llvm_runtimes_style = Some("umbrella".to_owned());
     target.target_rust = Some("yes".to_owned());
     target.target_rust_ver = Some("1.98.1".to_owned());
 
     for (name, expected) in [
-        ("OPT_MESAGL", "26.0.0"),
+        ("OPT_MESAGL", "26.2.5"),
         ("TARGET_LLVM_VER", "23.0.0"),
         ("TARGET_LLVM_RUNTIMES_STYLE", "umbrella"),
         ("TARGET_RUST", "yes"),
@@ -1643,16 +1643,16 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
             .find(|fetch| fetch.name == "mesa3d-fetch")
             .unwrap();
         assert_eq!(fetch.name, "mesa3d-fetch");
-        assert_eq!(fetch.archive, "mesa-26.0.0");
+        assert_eq!(fetch.archive, "mesa-26.2.5");
         assert_eq!(fetch.suffixes, "tar.xz");
         assert_eq!(
             fetch.checksums,
-            "mesa-26.0.0.tar.xz=sha256:2a44e98e64d5c36cec64633de2d0ec7eff64703ee25b35364ba8fcaa84f33f72"
+            "mesa-26.2.5.tar.xz=sha256:794b3d1729075dae7ebd47c7283b7ca0cdb5dec668f7f11cc0a5d82f6138a0a5"
         );
         assert_eq!(fetch.destination, "${AROS_PORTS_DIR}/mesa");
         assert_eq!(fetch.location, "${AROS_PORTS_SOURCE_DIR}");
         assert!(fetch.origins.ends_with("older-versions/26.x"));
-        assert_eq!(fetch.patches, "mesa-26.0.0-aros.diff:mesa-26.0.0:-p1");
+        assert_eq!(fetch.patches, "mesa-26.2.5-aros.diff:mesa-26.2.5:-p1");
         for (name, archive, origin) in [
             (
                 "mesa3d-mako-fetch",
@@ -1746,7 +1746,7 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
         );
         assert!(parsed.copy_includes.iter().all(|copy| {
             copy.source_dir
-                .starts_with("${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include/")
+                .starts_with("${AROS_PORTS_DIR}/mesa/mesa-26.2.5/include/")
         }));
     }
 }
@@ -2051,7 +2051,7 @@ fn btcore_plain_local_source_inventory_is_real_in_all_current_profiles() {
             .unwrap_or_else(|| panic!("{cpu}-{platform}: {:#?}", parsed.skipped_programs));
         assert_eq!(btcore.module_type, ModuleType::LinkLib);
         assert_eq!(btcore.target_name, "btcore");
-        assert_eq!(btcore.source_files.len(), 30, "{cpu}-{platform}");
+        assert_eq!(btcore.source_files.len(), 31, "{cpu}-{platform}");
         assert!(btcore
             .source_files
             .iter()
@@ -2669,11 +2669,11 @@ fn zlib_port_scope_is_declaration_owned_and_profile_exact() {
             });
             assert_eq!(target.source_files.len(), source_count, "{cpu}: {mmake}");
             assert!(target.source_files.iter().all(|source| source.starts_with(
-                "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/"
+                "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429/"
             )));
             assert_eq!(
                 target.include_dirs,
-                ["${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7"],
+                ["${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429"],
                 "{cpu}: {mmake}"
             );
             assert_eq!(target.link_options, ["-lpthread"], "{cpu}: {mmake}");
@@ -2699,7 +2699,7 @@ fn zlib_port_scope_is_declaration_owned_and_profile_exact() {
             .any(|value| { matches!(value.as_str(), "NO_STRERROR" | "NDEBUG" | "NO_GZIP") }));
 
         let static_lib = targets["linklibs-z-static"];
-        assert!(static_lib
+        assert!(!static_lib
             .defines
             .iter()
             .any(|value| value == "NO_STRERROR"));
@@ -2716,7 +2716,7 @@ fn zlib_port_scope_is_declaration_owned_and_profile_exact() {
         assert_eq!(
             minigzip.source_files,
             [
-                "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/test/minigzip"
+                "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429/test/minigzip"
             ]
         );
         assert!(minigzip.defines.iter().any(|value| value == "NO_GZIP"));
@@ -2731,19 +2731,19 @@ fn zlib_port_scope_is_declaration_owned_and_profile_exact() {
             .expect("production zlib fetch");
         assert_eq!(
             fetch.base,
-            "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7"
+            "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429"
         );
         assert_eq!(fetch.destination, fetch.base);
-        assert!(fetch.location.contains("chromium-da752eb2a3660cf1"));
+        assert!(fetch.location.contains("chromium-2b1b62fed03e8b8a"));
         assert!(!fetch.origins.contains("cache://"));
         assert!(fetch
             .origins
-            .contains("da752eb2a3660cf1bf8dac620f6380b89dd953a7"));
+            .contains("2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429"));
         let transform = &parsed.header_transforms[0];
         assert_eq!(transform.name, "workbench-libs-z-geninc");
         assert_eq!(
             transform.input,
-            "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/zconf.h.chr"
+            "${AROS_PORTS_DIR}/zlib/chromium-2b1b62fed03e8b8a64ea39a96d5cc74cd10e2429/zconf.h.chr"
         );
         assert_eq!(transform.output, "${AROS_SDK_INCLUDE_DIR}/zconf.h");
         assert!(parsed
@@ -3712,11 +3712,11 @@ fn real_tree_module_output_metadata_has_expected_coverage() {
     }
 
     assert!(output_errors.is_empty(), "{output_errors:#?}");
-    assert_eq!(install_dirs.len(), 64);
+    assert_eq!(install_dirs.len(), 68);
     assert!(install_dirs.iter().any(|(mmake, directory)| {
         mmake == "workbench-devs-networks-bcmgenet" && directory == "Devs/Networks"
     }));
-    assert_eq!(suffixes.len(), 49);
+    assert_eq!(suffixes.len(), 54);
     for expected in [
         "kernel-bluetooth-classes-btserial",
         "kernel-bluetooth-classes-btpan",

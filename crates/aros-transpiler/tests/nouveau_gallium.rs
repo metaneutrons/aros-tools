@@ -13,6 +13,10 @@ fn source_root() -> PathBuf {
     common::mesa20_source_root()
 }
 
+fn mesa26_source_root() -> PathBuf {
+    common::source_root()
+}
+
 fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {
     TargetContext {
         cpu: Some(cpu.to_owned()),
@@ -211,4 +215,60 @@ fn production_nouveau_gallium_is_closed_and_canonical_for_all_current_architectu
             "{cpu}: {target_block}"
         );
     }
+}
+
+#[test]
+fn mesa2625_nouveau_uses_the_versioned_private_archive_contract() {
+    let root = mesa26_source_root();
+    let dirs = DirVars::load(&root);
+    let mmakefile = root.join(NOUVEAU_DIR).join("mmakefile.src");
+    let mesa_mmakefile = root.join("workbench/libs/mesa/mmakefile.src");
+    let mut context = target_context("x86_64", "pc", "");
+    context.mesa_version = Some("26.2.5".to_owned());
+    let fetches = collect_mmakefile_fetches_with_context(&mesa_mmakefile, &root, &context)
+        .expect("collect Mesa 26.2.5 fetch");
+    let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
+        &mmakefile, &root, &dirs, &context, &fetches,
+    )
+    .expect("parse Mesa 26.2.5 Nouveau Gallium");
+    assert!(
+        parsed
+            .skipped_programs
+            .iter()
+            .all(|diagnostic| !diagnostic.contains("hidd-nouveau-gallium")),
+        "{:#?}",
+        parsed.skipped_programs
+    );
+    assert!(
+        parsed
+            .partial_source_lists
+            .iter()
+            .all(|diagnostic| !diagnostic.contains("hidd-nouveau-gallium")),
+        "{:#?}",
+        parsed.partial_source_lists
+    );
+    let target = parsed
+        .targets
+        .iter()
+        .find(|target| target.mmake_name == "hidd-nouveau-gallium")
+        .unwrap_or_else(|| panic!("Mesa 26.2.5 Nouveau Gallium target: {parsed:#?}"));
+    assert_eq!(target.source_files.len(), 83);
+    assert_eq!(target.cxx_source_files.len(), 26);
+    assert!(target.source_files.iter().all(|source| source
+        .starts_with("${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers/nouveau/")));
+    assert!(target.cxx_source_files.iter().all(|source| source
+        .starts_with("${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/drivers/nouveau/")));
+    assert_eq!(
+        target.linklib_output_dir.as_deref(),
+        Some("${AROS_BUILD_DIR}/gen/lib/mesa26.2.5")
+    );
+    assert!(!target.canonical_linklib_output);
+    assert!(!target.canonical_linklib_eligible);
+    assert!(target
+        .defines
+        .contains(&"PACKAGE_VERSION=\"26.2.5\"".to_owned()));
+    assert!(target.defines.contains(&"NOUVEAU_USE_UTIL_LIST".to_owned()));
+    assert!(target
+        .compile_options
+        .contains(&"$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>".to_owned()));
 }

@@ -149,7 +149,7 @@ pub(crate) fn compile_contract(
     if let Some(contract) = mesa26::compile_contract(relative_dir, mmake, target)? {
         return Ok(Some(contract));
     }
-    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0") {
+    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.2.5") {
         return Ok(None);
     }
     let supported = matches!(
@@ -370,7 +370,7 @@ pub(crate) fn remaining_linklib_sources(
     mmake: &str,
     target: Option<&TargetContext>,
 ) -> std::result::Result<Option<EvaluatedSources>, String> {
-    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0") {
+    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.2.5") {
         return Ok(None);
     }
     let supported_declaration = matches!(
