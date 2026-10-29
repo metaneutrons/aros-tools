@@ -4,6 +4,14 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.8](https://github.com/metaneutrons/aros-tools/compare/v0.6.7...v0.6.8) (2026-10-29)
+
+
+### Features
+
+* **toolchain:** let one source-lock archive declare several patches ([#510](https://github.com/metaneutrons/aros-tools/issues/510)) ([75ddbd3](https://github.com/metaneutrons/aros-tools/commit/75ddbd3bda1e2681b72cc22ceac89431edd76338))
+* **transpiler:** support Mesa 26.2.5 capabilities ([#512](https://github.com/metaneutrons/aros-tools/issues/512)) ([93b54b1](https://github.com/metaneutrons/aros-tools/commit/93b54b1e62faf3245e025824170afae255d2ddec))
+
 ## [0.6.7](https://github.com/metaneutrons/aros-tools/compare/v0.6.5...v0.6.7) (2026-10-27)
 
 
