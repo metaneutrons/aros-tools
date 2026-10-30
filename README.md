@@ -143,6 +143,13 @@ Raspberry Pi ARM64 and ESP32-P4 RV32 SDKs each start at `0.1.0` and are intended
 to ship together with compilers through `aros-toolchains`. Local generation
 does not qualify or publish that release.
 
+Current-source translation and producer contracts support LLVM 23.1.0 target
+libraries for PC x86-64, Raspberry Pi ARM32 and Raspberry Pi ARM64, including
+the Mesa 26.2.5 Gallivm boundary. LLVM 11 remains an explicit legacy path rather
+than an implicit fallback. This capability does not publish a compiler: actual
+availability is still determined by the selected checkout's immutable
+`aros-toolchains` lock and the release-status page.
+
 ## Trust, reproducibility, and failure behavior
 
 The project is deliberately strict about what it may infer:
