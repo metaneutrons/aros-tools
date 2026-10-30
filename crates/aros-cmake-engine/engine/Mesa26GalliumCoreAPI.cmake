@@ -61,7 +61,7 @@ function(aros_build_mesa26_gallium_core_api)
     set(_source_script
         "${AROS_SOURCE_DIR}/workbench/libs/mesa/galliumglue.py")
     set(_source_patch
-        "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.0.0-aros.diff")
+        "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.2.5-aros.diff")
     foreach(_source IN ITEMS "${_source_script}" "${_source_patch}")
         if(NOT EXISTS "${_source}" OR IS_DIRECTORY "${_source}")
             message(FATAL_ERROR "Mesa 26 GalliumCoreAPI input is missing: ${_source}")
@@ -74,7 +74,7 @@ function(aros_build_mesa26_gallium_core_api)
     endif()
     file(SHA256 "${_source_patch}" _patch_sha)
     if(NOT _patch_sha STREQUAL
-       "463c7b7930e02b9b44ba0edf893357eec50184f6634cef0f389f503780b64ff2")
+       "3fdbd183fd103162bba084ff5d17c7a7931016f485d6285dc742d085593db16e")
         message(FATAL_ERROR "Mesa 26 GalliumCoreAPI ABI patch changed without review")
     endif()
 
@@ -131,9 +131,9 @@ function(aros_build_mesa26_gallium_core_api)
         list(APPEND _consumer_paths "$<TARGET_FILE:${_target}>")
     endforeach()
 
-    set(_generated "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/galliumcoreapi")
+    set(_generated "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/galliumcoreapi")
     set(_generation_stamp "${_generated}/generation.stamp")
-    set(_libdir "${AROS_BUILD_DIR}/gen/lib/mesa26.0.0")
+    set(_libdir "${AROS_BUILD_DIR}/gen/lib/mesa26.2.5")
     set(_outputs
         "${_generated}/gallium_core_api.h"
         "${_generated}/gca_table.c"
@@ -153,7 +153,7 @@ function(aros_build_mesa26_gallium_core_api)
                 _util_cpu_caps_state glsl_type_builtin_int
                 glsl_type_builtin_uint glsl_type_builtin_vec4
                 util_dynarray_is_data_stack_allocated
-            --mesa-version 26.0.0 --arch "${AROS_TARGET_CPU}"
+            --mesa-version 26.2.5 --arch "${AROS_TARGET_CPU}"
             "--abi-flags=${_abi_flags}"
             --abi-files "${_source_patch}" --outdir "${_generated}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${_generation_stamp}"

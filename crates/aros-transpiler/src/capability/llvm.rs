@@ -1,4 +1,4 @@
-//! Closed LLVM 11 target-side MCJIT capability, distinct from host cross tools.
+//! Closed target-side LLVM MCJIT capabilities, distinct from host cross tools.
 //!
 //! No Make shell predicate or wildcard patch command is executed. The audited
 //! release layout uses the ordinary fetch engine and local AROS patch tracking.
@@ -10,7 +10,8 @@ use crate::{
 use std::path::{Path, PathBuf};
 
 pub(crate) const DIRECTORY: &str = "workbench/libs/llvm";
-pub(crate) const PREFIX: &str = "${AROS_BUILD_DIR}/gen/external-install/llvm11";
+pub(crate) const LLVM11_PREFIX: &str = "${AROS_BUILD_DIR}/gen/external-install/llvm11";
+pub(crate) const LLVM23_PREFIX: &str = "${AROS_BUILD_DIR}/gen/external-install/llvm23";
 
 pub(crate) fn admit(
     root: &Path,
@@ -23,7 +24,7 @@ pub(crate) fn admit(
     let Some(target) = target else {
         return Ok(None);
     };
-    let (backend, triple, manifest, component_count) = match (
+    let (backend, triple, llvm11_manifest, llvm23_manifest) = match (
         target.cpu.as_deref(),
         target.platform.as_deref(),
         target.toolchain.as_deref(),
@@ -35,46 +36,113 @@ pub(crate) fn admit(
             "X86",
             "x86_64-unknown-aros",
             include_str!("../../llvm11-x86-static.components"),
-            44,
+            include_str!("../../llvm23-x86-static.components"),
         ),
         (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard")) => (
             "ARM",
             "arm-unknown-aros",
             include_str!("../../llvm11-arm-static.components"),
-            45,
+            include_str!("../../llvm23-arm-static.components"),
         ),
         (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => (
             "AArch64",
             "aarch64-unknown-aros",
             include_str!("../../llvm11-aarch64-static.components"),
-            45,
+            include_str!("../../llvm23-aarch64-static.components"),
         ),
         _ => return Ok(None),
     };
-    if target
+    let recipe = root.join("workbench/libs/llvm/mmakefile.src");
+    let requested_version = target
         .target_llvm_ver
         .as_deref()
-        .is_some_and(|version| !version.is_empty() && version != "11.0.0")
-    {
-        return Err(format!(
-            "native {backend} Target-LLVM capability requires 11.0.0, not {}; review the requested source/component contract",
-            target.target_llvm_ver.as_deref().unwrap_or_default()
-        ));
-    }
-    require_file_fingerprint_one_of(
-        root,
-        "workbench/libs/llvm/mmakefile.src",
-        &[
-            fingerprint("llvm11-target-recipe")?,
-            fingerprint("llvm11-target-recipe-with-precompiled-headers")?,
-        ],
-        "LLVM11 static target MCJIT",
-    )?;
-    let patch = root.join("tools/crosstools/llvm/llvm-11.0.0.src-aros.diff");
-    let metadata = std::fs::symlink_metadata(&patch)
-        .map_err(|error| format!("missing LLVM target patch: {error}"))?;
-    if !metadata.file_type().is_file() {
-        return Err("LLVM target patch must be a regular source file".to_owned());
+        .filter(|version| !version.is_empty())
+        .map_or_else(
+            || {
+                std::fs::read_to_string(&recipe)
+                    .ok()
+                    .filter(|source| source.contains("OPT_LLVM := 23.1.0"))
+                    .map_or_else(|| "11.0.0".to_owned(), |_| "23.1.0".to_owned())
+            },
+            str::to_owned,
+        );
+
+    let (manifest, component_count, prefix, fetch, local_patch_files, host_tool) =
+        match requested_version.as_str() {
+            "11.0.0" => {
+                require_file_fingerprint_one_of(
+                    root,
+                    "workbench/libs/llvm/mmakefile.src",
+                    &[
+                        fingerprint("llvm11-target-recipe")?,
+                        fingerprint("llvm11-target-recipe-with-precompiled-headers")?,
+                        fingerprint("llvm-target-recipe-with-llvm23-default")?,
+                    ],
+                    "LLVM 11 static target MCJIT",
+                )?;
+                let patch = "tools/crosstools/llvm/llvm-11.0.0.src-aros.diff";
+                let fetch = FetchDecl {
+                    name: "workbench-libs-llvm-fetch".to_owned(),
+                    archive: "llvm-11.0.0.src".to_owned(),
+                    suffixes: "tar.xz".to_owned(),
+                    origins: "https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.0".to_owned(),
+                    checksums: "llvm-11.0.0.src.tar.xz=sha256:913f68c898dfb4a03b397c5e11c6a2f39d0f22ed7665c9cefa87a34423a72469".to_owned(),
+                    normalization: String::new(), normalized_size: String::new(),
+                    location: "${AROS_PORTS_SOURCE_DIR}".to_owned(), destination: "${AROS_PORTS_DIR}/llvm".to_owned(),
+                    base: String::new(), patch_origins: "${AROS_SOURCE_DIR}/tools/crosstools/llvm".to_owned(),
+                    patches: "llvm-11.0.0.src-aros.diff:llvm-11.0.0.src:-p1".to_owned(), dir: DIRECTORY.to_owned(),
+                };
+                (
+                    llvm11_manifest,
+                    if backend == "X86" { 44 } else { 45 },
+                    LLVM11_PREFIX,
+                    fetch,
+                    vec![format!("${{AROS_SOURCE_DIR}}/{patch}")],
+                    "LLVM_TABLEGEN=llvm-tblgen@11.0.0",
+                )
+            }
+            "23.1.0" => {
+                require_file_fingerprint_one_of(
+                    root,
+                    "workbench/libs/llvm/mmakefile.src",
+                    &[fingerprint("llvm-target-recipe-with-llvm23-default")?],
+                    "LLVM 23 static target MCJIT",
+                )?;
+                let patch = "tools/crosstools/llvm/llvm-23.1.0.src-aros.diff";
+                let fetch = FetchDecl {
+                    name: "workbench-libs-llvm-project-fetch".to_owned(),
+                    archive: "llvm-project-23.1.0.src".to_owned(),
+                    suffixes: "tar.xz".to_owned(),
+                    origins: "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.0".to_owned(),
+                    checksums: "llvm-project-23.1.0.src.tar.xz=sha256:ab1f0e3ec52448c33e8782eaf0422504b87c7b016b22514653ee0d8fcee479ff".to_owned(),
+                    normalization: String::new(), normalized_size: String::new(),
+                    location: "${AROS_PORTS_SOURCE_DIR}".to_owned(), destination: "${AROS_PORTS_DIR}/llvm/llvm-project".to_owned(),
+                    base: String::new(), patch_origins: "${AROS_SOURCE_DIR}/tools/crosstools/llvm".to_owned(),
+                    patches: "llvm-23.1.0.src-aros.diff:llvm-project-23.1.0.src/llvm:-p2".to_owned(), dir: DIRECTORY.to_owned(),
+                };
+                (
+                    llvm23_manifest,
+                    match backend { "X86" => 65, "ARM" => 63, _ => 66 },
+                    LLVM23_PREFIX,
+                    fetch,
+                    vec![format!("${{AROS_SOURCE_DIR}}/{patch}")],
+                    "LLVM_TABLEGEN=llvm-tblgen@23.1.0",
+                )
+            }
+            version => return Err(format!(
+                "native {backend} Target-LLVM capability supports 11.0.0 and 23.1.0, not {version}; review the requested source/component contract"
+            )),
+        };
+
+    for relative_patch in &local_patch_files {
+        let relative_patch = relative_patch
+            .strip_prefix("${AROS_SOURCE_DIR}/")
+            .expect("local patch paths are source-relative");
+        let metadata = std::fs::symlink_metadata(root.join(relative_patch))
+            .map_err(|error| format!("missing LLVM target patch: {error}"))?;
+        if !metadata.file_type().is_file() {
+            return Err("LLVM target patch must be a regular source file".to_owned());
+        }
     }
     let components = manifest
         .lines()
@@ -90,18 +158,10 @@ pub(crate) fn admit(
                 || !unique.insert(name)
         })
     {
-        return Err("invalid closed LLVM11 static component inventory".to_owned());
+        return Err(format!(
+            "invalid closed LLVM {requested_version} static component inventory"
+        ));
     }
-    let fetch = FetchDecl {
-        name: "workbench-libs-llvm-fetch".to_owned(),
-        archive: "llvm-11.0.0.src".to_owned(), suffixes: "tar.xz".to_owned(),
-        origins: "https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.0".to_owned(),
-        checksums: "llvm-11.0.0.src.tar.xz=sha256:913f68c898dfb4a03b397c5e11c6a2f39d0f22ed7665c9cefa87a34423a72469".to_owned(),
-        normalization: String::new(), normalized_size: String::new(),
-        location: "${AROS_PORTS_SOURCE_DIR}".to_owned(), destination: "${AROS_PORTS_DIR}/llvm".to_owned(),
-        base: String::new(), patch_origins: "${AROS_SOURCE_DIR}/tools/crosstools/llvm".to_owned(),
-        patches: "llvm-11.0.0.src-aros.diff:llvm-11.0.0.src:-p1".to_owned(), dir: DIRECTORY.to_owned(),
-    };
     let mut options = [
         "-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON",
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
@@ -138,7 +198,6 @@ pub(crate) fn admit(
     .map(str::to_owned)
     .to_vec();
     // LLVM_HOST_TRIPLE names where these libraries run, not the build machine.
-    // LLVM 11 uses it to select the native MCJIT initialization entry points.
     options.splice(
         3..3,
         [
@@ -149,18 +208,20 @@ pub(crate) fn admit(
     );
     let declaration = ExternalCMakeDecl {
         mmake_name: "workbench-libs-llvm".to_owned(),
-        source_dir: "${AROS_PORTS_DIR}/llvm/llvm-11.0.0.src".to_owned(),
+        source_dir: if requested_version == "23.1.0" {
+            "${AROS_PORTS_DIR}/llvm/llvm-project/llvm-project-23.1.0.src/llvm".to_owned()
+        } else {
+            "${AROS_PORTS_DIR}/llvm/llvm-11.0.0.src".to_owned()
+        },
         binary_dir: "${AROS_BUILD_DIR}/gen/external-cmake/workbench/libs/llvm/target".to_owned(),
-        install_prefix: PREFIX.to_owned(),
+        install_prefix: prefix.to_owned(),
         fetch_target: fetch.name.clone(),
-        local_patch_files: vec![
-            "${AROS_SOURCE_DIR}/tools/crosstools/llvm/llvm-11.0.0.src-aros.diff".to_owned(),
-        ],
+        local_patch_files,
         provided_library: "LLVM".to_owned(),
         provider_target: "workbench-libs-llvm-external-LLVM".to_owned(),
         library_products: components
             .iter()
-            .map(|name| format!("{PREFIX}/lib/lib{name}.a"))
+            .map(|name| format!("{prefix}/lib/lib{name}.a"))
             .collect(),
         header_products: [
             "llvm/Config/llvm-config.h",
@@ -172,15 +233,15 @@ pub(crate) fn admit(
             "llvm-c/Target.h",
             "llvm-c/Analysis.h",
         ]
-        .map(|header| format!("{PREFIX}/include/{header}"))
+        .map(|header| format!("{prefix}/include/{header}"))
         .to_vec(),
         auxiliary_products: Vec::new(),
-        public_include_dirs: vec![format!("{PREFIX}/include")],
+        public_include_dirs: vec![format!("{prefix}/include")],
         options,
         build_targets: components,
         install_components: vec!["llvm-headers".to_owned()],
         library_group: true,
-        host_tools: vec!["LLVM_TABLEGEN=llvm-tblgen@11.0.0".to_owned()],
+        host_tools: vec![host_tool.to_owned()],
         compile_defines: vec!["_GNU_SOURCE".to_owned()],
         dir_path: PathBuf::from(DIRECTORY),
     };

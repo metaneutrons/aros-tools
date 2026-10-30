@@ -408,7 +408,7 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
     ),
     (
         "crosstools-compiler-rt-release",
-        "mmake=crosstools-compiler-rt-release package=compiler-rt-release srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT_CMAKEOPTIONS)\" compiler=host usecppflags=no metadeps=\"setup sdk-includes-1\"",
+        "mmake=crosstools-compiler-rt-release package=compiler-rt-release srcdir=$(COMPILER_RT_LINKLIB_SRCDIR) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT_CMAKEOPTIONS)\" compiler=host usecppflags=no metadeps=\"setup sdk-includes-1\"",
     ),
     (
         "crosstools-compiler-rt32",
@@ -416,7 +416,7 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
     ),
     (
         "crosstools-compiler-rt32-release",
-        "mmake=crosstools-compiler-rt32-release package=compiler-rt32-release srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT32_CMAKEOPTIONS)\" compiler=host usecppflags=no metadeps=\"setup sdk-includes-1\"",
+        "mmake=crosstools-compiler-rt32-release package=compiler-rt32-release srcdir=$(COMPILER_RT_LINKLIB_SRCDIR) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT32_CMAKEOPTIONS)\" compiler=host usecppflags=no metadeps=\"setup sdk-includes-1\"",
     ),
     (
         "crosstools-llvm-toolchain",

@@ -13,4 +13,4 @@ workflow = ".github/workflows/toolchain-release.yml"
 # source identity of its independently qualified toolchain release.
 [integration]
 repository = "metaneutrons/AROS-NX"
-commit = "d8a37fffe56a3af968532229648d7cf8644255b4"
+commit = "60296c3135885a51194c67c5e82cb313e668e987"

@@ -35,6 +35,7 @@ pub(super) fn archive_sources(
                 &[
                     fingerprint("mesa26-gallivm-recipe")?,
                     fingerprint("mesa26-gallivm-recipe-without-libcxx-order")?,
+                    fingerprint("mesa26-gallivm-recipe-with-llvm23-default")?,
                 ],
                 "Mesa 26 Gallivm source closure",
             )?;
@@ -114,10 +115,13 @@ pub(super) fn archive_sources(
             return Ok(Some(sources));
         }
         Mesa26Target::LlvmPipeLibrary => {
-            require_file_fingerprint(
+            require_file_fingerprint_one_of(
                 root,
                 "workbench/libs/mesa/libllvmpipe/mmakefile.src",
-                fingerprint("mesa26-llvmpipe-recipe")?,
+                &[
+                    fingerprint("mesa26-llvmpipe-recipe")?,
+                    fingerprint("mesa26-llvmpipe-recipe-with-llvm23-default")?,
+                ],
                 "Mesa 26 llvmpipe source closure",
             )?;
             require_file_fingerprint(
