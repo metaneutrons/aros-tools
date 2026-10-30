@@ -18,6 +18,7 @@ fn context(cpu: &str, platform: &str, cpu32: &str, float_abi: &str) -> TargetCon
         use_mmu: Some("1".to_owned()),
         float_abi: Some(float_abi.to_owned()),
         mesa_version: Some("26.2.5".to_owned()),
+        target_llvm_ver: Some("11.0.0".to_owned()),
         ..TargetContext::default()
     }
 }
@@ -72,6 +73,78 @@ fn assert_llvm_compile_contract(target: &aros_transpiler::TargetDefinition, cont
         .compile_options
         .iter()
         .any(|option| option == "-fno-strict-aliasing"));
+}
+
+#[test]
+fn mesa26_galliumaux_and_llvm_consumers_use_the_selected_llvm_headers() {
+    let root = common::source_root();
+    for (version, include, rejected_include, have_define) in [
+        (
+            "11.0.0",
+            "${AROS_BUILD_DIR}/gen/external-install/llvm11/include",
+            "${AROS_BUILD_DIR}/gen/external-install/llvm23/include",
+            "HAVE_LLVM=0x0b00",
+        ),
+        (
+            "23.1.0",
+            "${AROS_BUILD_DIR}/gen/external-install/llvm23/include",
+            "${AROS_BUILD_DIR}/gen/external-install/llvm11/include",
+            "HAVE_LLVM=0x1701",
+        ),
+    ] {
+        let mut profile = context("x86_64", "pc", "i386", "");
+        profile.target_llvm_ver = Some(version.to_owned());
+        for (recipe, mmake) in [
+            (
+                "workbench/libs/mesa/libgalliumaux/mmakefile.src",
+                "mesa3d-linklib-galliumauxiliary",
+            ),
+            (
+                "workbench/libs/mesa/libgalliumvm/mmakefile.src",
+                "mesa3d-linklib-galliumvm",
+            ),
+        ] {
+            let parsed = parse_recipe(&root, recipe, &profile);
+            let target = parsed
+                .targets
+                .iter()
+                .find(|target| target.mmake_name == mmake)
+                .unwrap_or_else(|| panic!("{recipe}: missing {mmake}: {parsed:#?}"));
+            assert!(
+                target.include_dirs.iter().any(|actual| actual == include),
+                "{version}/{mmake}: selected LLVM headers are absent: {:?}",
+                target.include_dirs
+            );
+            assert!(
+                target
+                    .include_dirs
+                    .iter()
+                    .all(|actual| actual != rejected_include),
+                "{version}/{mmake}: headers from the other LLVM release leaked in"
+            );
+        }
+
+        let parsed = parse_recipe(
+            &root,
+            "workbench/libs/mesa/libgalliumvm/mmakefile.src",
+            &profile,
+        );
+        let galliumvm = parsed
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == "mesa3d-linklib-galliumvm")
+            .expect("selected Gallivm target");
+        assert!(
+            galliumvm.defines.iter().any(|actual| actual == have_define),
+            "{version}/Gallivm is missing {have_define}: {:?}",
+            galliumvm.defines
+        );
+        let version_define = format!("MESA_LLVM_VERSION_STRING=\"{version}\"");
+        assert!(galliumvm
+            .defines
+            .iter()
+            .any(|actual| actual == &version_define));
+    }
 }
 
 #[test]
