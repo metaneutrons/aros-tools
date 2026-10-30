@@ -56,7 +56,7 @@ mesa26-galliumaux-manifest = adac2a684f3773e07288b7ec60c0c25ed95c32fb574e04c2e10
 mesa26-util-recipe = ca9559255330524cf0d31bc9b7a3dc1ff7ca2b2d96d03a08641096248e0160fa
 # AROS-NX #90 moves the Chromium zlib include directory to 2b1b62fe; nothing else in the recipe changes.
 mesa26-util-recipe-chromium-2b1b62f = 48228fcadedf9c79b1647f5bf8eedafb769a6cc9dbd6120188955dfa4cdd5f01
-mesa26-util-manifest = 5ad479c6dc8a07dea24ee6312327b2f368f13952c6a95783b1e8703c888dfc49
+mesa26-util-manifest = 5d1f0fa06327e782cce721f9b51038f98bb2a6886dde877b4ccc8767526cc5ec
 mesa26-v3d-recipe = 9c352d4b1388c8f6e9d6faf2aae94b5870c21cfb51e5fa5fc55c68d1026fc4df
 # Upstream 13484a98 adds v3d_dt to the HIDD; the Mesa archive remains unchanged.
 mesa26-v3d-recipe-device-tree = f697e709cf9a4678225469939841dc7c1debf62248c136ce00b8a82dd7190075
@@ -77,13 +77,17 @@ mesa26-vc4-manifest = c6d8a4b861650bcabefa75bff26b1ba9e1949773c39dcd9a8ab1db4660
 # compile contract, not from the recipe, so the change does not apply here.
 mesa26-gallivm-recipe = 083cb94858027da8e5cf78581acfc1c9bd28b15473b15b48a3e0702e1fe4cb62
 mesa26-gallivm-recipe-without-libcxx-order = 3a6d383b548f0702783c181c2f8e7b999f48e8c2ff36db9e494073715bd2add4
+mesa26-gallivm-recipe-with-llvm23-default = 1a092caee8918144a23bf7b5a4510909c81478b4c15c98e89b4241cc0d1e20ee
 mesa26-gallivm-manifest = 7b4d7686b57b128fe2de662a223baf943e75a8ae2f434fe7c593cba631365f41
 mesa26-llvmpipe-recipe = 69e33ce5cd26222b774f8193b818f7a49034e959731ee45587f4d39239e14daf
+mesa26-llvmpipe-recipe-with-llvm23-default = b6447bd38f04ff275ae6ee52fc3472cb4e6755917cde0a5f3118377aa6e91414
 mesa26-llvmpipe-hidd-recipe = 7af9894c09343c3fe423467f8b64eb415cfeabcc8f69c21cf5432bc40a165d15
 
-# LLVM 11's target build recipe is expanded into a fixed external provider.
-# The recipe disables precompiled headers (LLVM 23 needs that); the fixed
-# provider passes the same option. The earlier revision stays admitted, since
-# precompiled headers only change build time.
+# LLVM target recipes are expanded into version-specific fixed external
+# providers. The earlier LLVM 11 revision stays admitted because disabling
+# precompiled headers only changes build time. The LLVM 23 default revision is
+# admitted only for either the explicit legacy selector or the closed LLVM 23
+# monorepo provider.
 llvm11-target-recipe = 4f95d02cdaca1e124abc4ada281390b702e9991f5932eb8bda5fd2c12ada7ef1
 llvm11-target-recipe-with-precompiled-headers = d5ea6a24e95c19997b841659ff4c943f6a3ed13f6e7e7569b662597f65ac4b80
+llvm-target-recipe-with-llvm23-default = d8ce81b9703733fec39c416caae77bf2ea65a1130bb534cd1725d0c7f226543d

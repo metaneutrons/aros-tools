@@ -59,6 +59,20 @@ endif()
 # The ABI hash input is the consumer's own target, ISA flags and defines, in
 # declared order. It has to be stable for equal input and move with any of it.
 include("${CMAKE_CURRENT_LIST_DIR}/../Mesa26GalliumCoreAPI.cmake")
+file(READ "${CMAKE_CURRENT_LIST_DIR}/../Mesa26GalliumCoreAPI.cmake" _gca_module)
+foreach(_required IN ITEMS
+    "mesa-26.2.5-aros.diff"
+    "3fdbd183fd103162bba084ff5d17c7a7931016f485d6285dc742d085593db16e"
+    "gen/workbench/libs/mesa/26.2.5/galliumcoreapi"
+    "gen/lib/mesa26.2.5"
+    "--mesa-version 26.2.5")
+    if(NOT _gca_module MATCHES "${_required}")
+        message(FATAL_ERROR "Mesa 26 GCA module lacks current 26.2.5 contract: ${_required}")
+    endif()
+endforeach()
+if(_gca_module MATCHES "mesa-26\\.0\\.0-aros\\.diff")
+    message(FATAL_ERROR "Mesa 26 GCA module still names the retired 26.0.0 patch")
+endif()
 set(_defines GALLIUM_VC4 HAVE_STRUCT_TIMESPEC GCA_CONSUMER_MODULE AROS_MESA_MAJOR=26)
 _aros_mesa26_gca_abi_flags(_aarch64 "aarch64-unknown-aros" "" "${_defines}")
 if(NOT _aarch64 STREQUAL "--target=aarch64-unknown-aros -DGALLIUM_VC4 -DHAVE_STRUCT_TIMESPEC -DGCA_CONSUMER_MODULE -DAROS_MESA_MAJOR=26")

@@ -638,12 +638,12 @@ fn llvm_provisioning_contract_mutations_fail_closed() {
             .unwrap();
         assert!(is_toolchain_provisioning_declaration(release, context));
         let mut mutated_release = release.clone();
-        let original = if target == "crosstools-llvm-runtimes" {
-            "$(MONOTREE_BUILDBASE)/runtimes"
+        let (original, replacement) = if target == "crosstools-llvm-runtimes" {
+            ("$(MONOTREE_BUILDBASE)/runtimes", selector)
         } else {
-            "$(COMPILER_RT_BUILDBASE)"
+            ("$(COMPILER_RT_LINKLIB_SRCDIR)", "$(COMPILER_RT_BUILDBASE)")
         };
-        mutated_release.arguments = mutated_release.arguments.replace(original, selector);
+        mutated_release.arguments = mutated_release.arguments.replace(original, replacement);
         assert!(!is_toolchain_provisioning_declaration(
             &mutated_release,
             context

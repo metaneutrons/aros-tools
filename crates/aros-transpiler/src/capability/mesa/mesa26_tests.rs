@@ -403,7 +403,7 @@ fn mesa26_archives_use_only_reviewed_inventories() {
         (
             "workbench/libs/mesa/libmesautil",
             "mesa3d-linklib-mesautil",
-            94,
+            93,
             4,
         ),
     ] {

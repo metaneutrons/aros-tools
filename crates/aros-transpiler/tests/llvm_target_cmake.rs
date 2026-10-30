@@ -14,6 +14,7 @@ fn context() -> TargetContext {
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
         mesa_version: Some("26.2.5".to_owned()),
+        target_llvm_ver: Some("23.1.0".to_owned()),
         ..TargetContext::default()
     }
 }
@@ -36,15 +37,15 @@ fn target_llvm_has_real_closed_fetch_host_tool_and_component_products() {
     let [declaration] = parsed.external_cmake.as_slice() else {
         panic!("missing real Target LLVM: {:#?}", parsed.skipped_programs);
     };
-    assert_eq!(declaration.library_products.len(), 44);
-    assert_eq!(declaration.build_targets.len(), 44);
+    assert_eq!(declaration.library_products.len(), 65);
+    assert_eq!(declaration.build_targets.len(), 65);
     assert_eq!(declaration.header_products.len(), 8);
     assert!(!declaration
         .header_products
         .iter()
         .any(|path| path.ends_with("/Config/config.h")));
     assert_eq!(declaration.install_components, ["llvm-headers"]);
-    assert_eq!(declaration.host_tools, ["LLVM_TABLEGEN=llvm-tblgen@11.0.0"]);
+    assert_eq!(declaration.host_tools, ["LLVM_TABLEGEN=llvm-tblgen@23.1.0"]);
     assert!(declaration.library_group);
     assert!(declaration
         .options
@@ -61,12 +62,16 @@ fn target_llvm_has_real_closed_fetch_host_tool_and_component_products() {
         ]
     );
     let [fetch] = parsed.fetches.as_slice() else {
-        panic!("must own only the selected LLVM11 source");
+        panic!("must own only the selected LLVM 23 source");
     };
-    assert_eq!(fetch.archive, "llvm-11.0.0.src");
+    assert_eq!(fetch.archive, "llvm-project-23.1.0.src");
     assert!(fetch
         .checksums
-        .contains("913f68c898dfb4a03b397c5e11c6a2f39d0f22ed7665c9cefa87a34423a72469"));
+        .contains("ab1f0e3ec52448c33e8782eaf0422504b87c7b016b22514653ee0d8fcee479ff"));
+    assert_eq!(
+        fetch.patches,
+        "llvm-23.1.0.src-aros.diff:llvm-project-23.1.0.src/llvm:-p2"
+    );
     assert!(!fetch.patches.contains("wildcard"));
     let mut graph = DependencyGraph::new();
     graph.add_external_cmake(declaration.clone());
@@ -98,7 +103,36 @@ fn target_llvm_rejects_an_explicit_unqualified_version_selector() {
         &target,
     )
     .unwrap_err();
-    assert!(error.to_string().contains("requires 11.0.0, not 21.1.0"));
+    assert!(error
+        .to_string()
+        .contains("supports 11.0.0 and 23.1.0, not 21.1.0"));
+}
+
+#[test]
+fn target_llvm_retains_the_explicit_llvm11_legacy_provider() {
+    let root = common::source_root();
+    let mut target = context();
+    target.target_llvm_ver = Some("11.0.0".to_owned());
+    let parsed = parse_mmakefile_with_dirs_and_context(
+        &root.join("workbench/libs/llvm/mmakefile.src"),
+        &root,
+        &DirVars::load(&root),
+        &target,
+    )
+    .unwrap();
+    let [declaration] = parsed.external_cmake.as_slice() else {
+        panic!("missing explicit LLVM 11 legacy provider");
+    };
+    assert_eq!(declaration.build_targets.len(), 44);
+    assert_eq!(
+        declaration.install_prefix,
+        "${AROS_BUILD_DIR}/gen/external-install/llvm11"
+    );
+    assert_eq!(declaration.host_tools, ["LLVM_TABLEGEN=llvm-tblgen@11.0.0"]);
+    let [fetch] = parsed.fetches.as_slice() else {
+        panic!("missing explicit LLVM 11 source");
+    };
+    assert_eq!(fetch.archive, "llvm-11.0.0.src");
 }
 
 #[test]
@@ -137,7 +171,7 @@ fn raspi_context(cpu: &str, float_abi: &str) -> TargetContext {
         cpu32: Some(String::new()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(float_abi.to_owned()),
-        target_llvm_ver: Some("11.0.0".to_owned()),
+        target_llvm_ver: Some("23.1.0".to_owned()),
         ..TargetContext::default()
     }
 }
@@ -164,13 +198,14 @@ fn raspi_target_llvm_owns_architecture_specific_complete_products() {
         let [declaration] = parsed.external_cmake.as_slice() else {
             panic!("missing {backend} target LLVM provider");
         };
-        assert_eq!(declaration.build_targets.len(), 45);
-        assert_eq!(declaration.library_products.len(), 45);
+        let expected_count = if cpu == "arm" { 63 } else { 66 };
+        assert_eq!(declaration.build_targets.len(), expected_count);
+        assert_eq!(declaration.library_products.len(), expected_count);
         assert_eq!(declaration.header_products.len(), 8);
         let manifest = if cpu == "arm" {
-            include_str!("../llvm11-arm-static.components")
+            include_str!("../llvm23-arm-static.components")
         } else {
-            include_str!("../llvm11-aarch64-static.components")
+            include_str!("../llvm23-aarch64-static.components")
         };
         let expected = manifest
             .lines()
@@ -183,7 +218,7 @@ fn raspi_target_llvm_owns_architecture_specific_complete_products() {
             expected
                 .iter()
                 .map(|name| {
-                    format!("${{AROS_BUILD_DIR}}/gen/external-install/llvm11/lib/lib{name}.a")
+                    format!("${{AROS_BUILD_DIR}}/gen/external-install/llvm23/lib/lib{name}.a")
                 })
                 .collect::<Vec<_>>()
         );
@@ -224,7 +259,7 @@ fn raspi_target_llvm_owns_architecture_specific_complete_products() {
                 .any(|path| path.ends_with(header)));
         }
         assert_eq!(declaration.install_components, ["llvm-headers"]);
-        assert_eq!(declaration.host_tools, ["LLVM_TABLEGEN=llvm-tblgen@11.0.0"]);
+        assert_eq!(declaration.host_tools, ["LLVM_TABLEGEN=llvm-tblgen@23.1.0"]);
         assert!(declaration.library_group);
     }
 }
@@ -239,7 +274,9 @@ fn raspi_target_llvm_rejects_unqualified_version_and_selector_substitutions() {
         let error =
             parse_mmakefile_with_dirs_and_context(&recipe, &root, &DirVars::load(&root), &target)
                 .unwrap_err();
-        assert!(error.to_string().contains("requires 11.0.0, not 21.1.0"));
+        assert!(error
+            .to_string()
+            .contains("supports 11.0.0 and 23.1.0, not 21.1.0"));
     }
     for mut target in [
         raspi_context("arm", "soft"),
@@ -247,7 +284,7 @@ fn raspi_target_llvm_rejects_unqualified_version_and_selector_substitutions() {
         raspi_context("riscv", ""),
     ] {
         // An unqualified tuple must not inherit either closed provider.
-        target.target_llvm_ver = Some("11.0.0".to_owned());
+        target.target_llvm_ver = Some("23.1.0".to_owned());
         let parsed =
             parse_mmakefile_with_dirs_and_context(&recipe, &root, &DirVars::load(&root), &target)
                 .unwrap();
