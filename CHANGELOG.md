@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.9](https://github.com/metaneutrons/aros-tools/compare/v0.6.8...v0.6.9) (2026-10-30)
+
+
+### Features
+
+* **transpiler:** support LLVM 23 target libraries ([db3b4e9](https://github.com/metaneutrons/aros-tools/commit/db3b4e952efb0ca04d16c64aaa3fec73abcd5101))
+
 ## [0.6.8](https://github.com/metaneutrons/aros-tools/compare/v0.6.7...v0.6.8) (2026-10-29)
 
 
