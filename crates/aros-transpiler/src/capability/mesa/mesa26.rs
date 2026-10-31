@@ -19,6 +19,37 @@ pub(crate) const GLAPI_DIR: &str = "workbench/libs/mesa/libglapi";
 pub(crate) const GLAPI_MMAKE: &str = "mesa3d-linklib-glapi";
 pub(crate) const PRIVATE_LIBDIR: &str = "${AROS_BUILD_DIR}/gen/lib/mesa26.2.5";
 const LLVM11_INCLUDE: &str = "${AROS_BUILD_DIR}/gen/external-install/llvm11/include";
+const LLVM23_INCLUDE: &str = "${AROS_BUILD_DIR}/gen/external-install/llvm23/include";
+
+#[derive(Clone, Copy)]
+struct LlvmCompileVersion {
+    version: &'static str,
+    have_define: &'static str,
+    include: &'static str,
+}
+
+fn llvm_compile_version(target: &TargetContext) -> Result<LlvmCompileVersion, String> {
+    match target
+        .target_llvm_ver
+        .as_deref()
+        .filter(|version| !version.is_empty())
+        .unwrap_or("11.0.0")
+    {
+        "11.0.0" => Ok(LlvmCompileVersion {
+            version: "11.0.0",
+            have_define: "HAVE_LLVM=0x0b00",
+            include: LLVM11_INCLUDE,
+        }),
+        "23.1.0" => Ok(LlvmCompileVersion {
+            version: "23.1.0",
+            have_define: "HAVE_LLVM=0x1701",
+            include: LLVM23_INCLUDE,
+        }),
+        version => Err(format!(
+            "Mesa 26 LLVM compile contract does not support TARGET_LLVM_VER={version}"
+        )),
+    }
+}
 
 const LLVMPPIPE_SOURCE_NAMES: &[&str] = &[
     "lp_bld_alpha",
@@ -219,14 +250,16 @@ fn common_includes() -> Vec<String> {
     .collect()
 }
 
-fn llvm_compile_contract(profile: &str, identity: Mesa26Target) -> CompileContract {
+fn llvm_compile_contract(
+    profile: &str,
+    identity: Mesa26Target,
+    llvm: LlvmCompileVersion,
+) -> CompileContract {
     let mut defines = common_defines(profile);
     defines.extend(
         [
             "DRAW_LLVM_AVAILABLE=1",
             "LLVM_AVAILABLE",
-            "HAVE_LLVM=0x0b00",
-            "MESA_LLVM_VERSION_STRING=\"11.0.0\"",
             "GALLIVM_USE_ORCJIT=0",
             "LLVM_IS_SHARED=0",
             "PACKAGE_VERSION=\"26.2.5\"",
@@ -234,6 +267,10 @@ fn llvm_compile_contract(profile: &str, identity: Mesa26Target) -> CompileContra
         ]
         .map(str::to_owned),
     );
+    defines.extend([
+        llvm.have_define.to_owned(),
+        format!("MESA_LLVM_VERSION_STRING=\"{}\"", llvm.version),
+    ]);
     if identity == Mesa26Target::LlvmPipeLibrary {
         defines.push("GALLIUM_LLVMPIPE".to_owned());
     }
@@ -248,10 +285,10 @@ fn llvm_compile_contract(profile: &str, identity: Mesa26Target) -> CompileContra
             "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src",
             "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler",
             "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/nir",
-            LLVM11_INCLUDE,
         ]
         .map(str::to_owned),
     );
+    includes.push(llvm.include.to_owned());
     match identity {
         Mesa26Target::GalliumVmLibrary => includes.extend(
             ["${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/gallium/auxiliary/gallivm"].map(str::to_owned),
@@ -498,6 +535,10 @@ pub(crate) fn compile_contract(
     let Some(profile) = profile(target)? else {
         return Ok(None);
     };
+    let llvm = target
+        .filter(|target| target.toolchain.as_deref() == Some("llvm"))
+        .map(llvm_compile_version)
+        .transpose()?;
     if matches!(
         identity,
         Mesa26Target::GalliumVmLibrary
@@ -506,7 +547,9 @@ pub(crate) fn compile_contract(
             | Mesa26Target::LlvmPipeLibrary
             | Mesa26Target::LlvmPipeHidd
     ) {
-        return Ok(Some(llvm_compile_contract(profile, identity)));
+        let llvm = llvm
+            .ok_or_else(|| format!("Mesa 26 target {mmake} requires the LLVM toolchain context"))?;
+        return Ok(Some(llvm_compile_contract(profile, identity, llvm)));
     }
     if matches!(
         identity,
@@ -719,6 +762,9 @@ pub(crate) fn compile_contract(
                 "${AROS_PORTS_DIR}/mesa/mesa-26.2.5/src/compiler/nir",
                 "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.2.5/src/compiler/nir",
             ].map(str::to_owned));
+            if let Some(llvm) = llvm {
+                includes.push(llvm.include.to_owned());
+            }
         }
         Mesa26Target::MesaCoreLibrary => {
             defines.extend([
