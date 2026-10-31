@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.11](https://github.com/metaneutrons/aros-tools/compare/v0.6.10...v0.6.11) (2026-10-31)
+
+
+### Bug Fixes
+
+* **engine:** reseal Mesa 26 GalliumCoreAPI map ([#518](https://github.com/metaneutrons/aros-tools/issues/518)) ([e65a5af](https://github.com/metaneutrons/aros-tools/commit/e65a5afc3d9aff3cda549eeb75acabb617e60282))
+
 ## [0.6.10](https://github.com/metaneutrons/aros-tools/compare/v0.6.9...v0.6.10) (2026-10-31)
 
 
