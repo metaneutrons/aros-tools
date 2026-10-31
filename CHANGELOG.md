@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.10](https://github.com/metaneutrons/aros-tools/compare/v0.6.9...v0.6.10) (2026-10-31)
+
+
+### Bug Fixes
+
+* **transpiler:** bind Mesa to selected LLVM headers ([#516](https://github.com/metaneutrons/aros-tools/issues/516)) ([cb49a82](https://github.com/metaneutrons/aros-tools/commit/cb49a8298ada51fc031fca55a2aa92aca48cdbde))
+
 ## [0.6.9](https://github.com/metaneutrons/aros-tools/compare/v0.6.8...v0.6.9) (2026-10-30)
 
 
