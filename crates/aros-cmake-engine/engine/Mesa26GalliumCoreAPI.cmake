@@ -205,7 +205,7 @@ function(aros_build_mesa26_gallium_core_api)
         list(APPEND _archive_outputs "${_v3d_output}")
         set(_v3d_archive "$<TARGET_FILE:linklibs-gallium_v3d>")
         set(_expected_map_sha
-            "67734c63c3f9ddcfade036eb14dbf981c0db0f158855f6f0b3b1ab3332c705c8")
+            "14e53322da6dcd184474a1b7377a8c1f6a5aecd1bcce3386594c2c2c1558fc05")
     else()
         # The ARM32 VC4-only import set is a separate target-ABI contract.
         set(_expected_map_sha

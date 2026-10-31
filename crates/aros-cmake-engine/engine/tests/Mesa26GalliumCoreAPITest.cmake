@@ -63,6 +63,7 @@ file(READ "${CMAKE_CURRENT_LIST_DIR}/../Mesa26GalliumCoreAPI.cmake" _gca_module)
 foreach(_required IN ITEMS
     "mesa-26.2.5-aros.diff"
     "3fdbd183fd103162bba084ff5d17c7a7931016f485d6285dc742d085593db16e"
+    "14e53322da6dcd184474a1b7377a8c1f6a5aecd1bcce3386594c2c2c1558fc05"
     "gen/workbench/libs/mesa/26.2.5/galliumcoreapi"
     "gen/lib/mesa26.2.5"
     "--mesa-version 26.2.5")
@@ -72,6 +73,9 @@ foreach(_required IN ITEMS
 endforeach()
 if(_gca_module MATCHES "mesa-26\\.0\\.0-aros\\.diff")
     message(FATAL_ERROR "Mesa 26 GCA module still names the retired 26.0.0 patch")
+endif()
+if(_gca_module MATCHES "67734c63c3f9ddcfade036eb14dbf981c0db0f158855f6f0b3b1ab3332c705c8")
+    message(FATAL_ERROR "Mesa 26 GCA module still accepts the pre-LLVM-header import map")
 endif()
 set(_defines GALLIUM_VC4 HAVE_STRUCT_TIMESPEC GCA_CONSUMER_MODULE AROS_MESA_MAJOR=26)
 _aros_mesa26_gca_abi_flags(_aarch64 "aarch64-unknown-aros" "" "${_defines}")
