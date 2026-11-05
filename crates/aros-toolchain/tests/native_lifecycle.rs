@@ -1306,6 +1306,28 @@ fn native_gnu_lifecycle_rejects_wrong_family_inputs_before_publication() {
 }
 
 #[test]
+fn failed_native_phase_reports_log_location_free_space_and_stderr_tail() {
+    let fixture = Fixture::new_gnu();
+    fixture.replace_source_configure(
+        "#!/bin/sh\nprintf 'first line\\nfixture root cause: no space left\\n' >&2\nexit 23\n",
+    );
+
+    let error = executor::run(&fixture.request(), &CancellationToken::default()).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("configure phase exited unsuccessfully"),
+        "{message}"
+    );
+    assert!(message.contains("configure.stdout.log"), "{message}");
+    assert!(message.contains("free space work: "), "{message}");
+    assert!(message.contains("free space output: "), "{message}");
+    assert!(
+        message.contains("stderr tail: ") && message.contains("fixture root cause: no space left"),
+        "{message}"
+    );
+}
+
+#[test]
 fn native_gnu_configure_failure_never_publishes_a_final_prefix() {
     let fixture = Fixture::new_gnu();
     fixture.replace_source_configure(

@@ -1201,7 +1201,10 @@ fn run_phase_with_log(
     if output.timed_out {
         return Err(phase_error(
             phase,
-            format!("native {phase} phase exceeded the explicit build deadline"),
+            format!(
+                "native {phase} phase exceeded the explicit build deadline; {}",
+                failure_evidence(lifecycle, log_name, &output)
+            ),
         )
         .context(DiagnosticContext {
             tool: Some(phase.into()),
@@ -1213,8 +1216,9 @@ fn run_phase_with_log(
         return Err(phase_error(
             phase,
             format!(
-                "native {phase} phase exited unsuccessfully (exit code {:?}); inspect retained phase logs",
-                output.status.code()
+                "native {phase} phase exited unsuccessfully (exit code {:?}); inspect retained phase logs; {}",
+                output.status.code(),
+                failure_evidence(lifecycle, log_name, &output)
             ),
         )
         .context(DiagnosticContext {
@@ -1225,6 +1229,56 @@ fn run_phase_with_log(
         }));
     }
     Ok(())
+}
+
+/// How many trailing stderr lines a failed phase quotes in its diagnostic.
+const FAILURE_TAIL_LINES: usize = 8;
+/// Longest quoted stderr line, so one runaway line cannot flood a CI log.
+const FAILURE_TAIL_LINE_CHARS: usize = 240;
+
+/// Facts that decide most build failures and disappear with the runner: where
+/// the full logs are, how much disk was left, and what the phase said last.
+///
+/// The retained logs stay the evidence of record. This only makes the first
+/// look at a failed job conclusive, because a wrapped cause (a full disk
+/// behind "failed to unpack") otherwise exists only in an artifact.
+fn failure_evidence(
+    lifecycle: &LifecyclePaths,
+    log_name: &str,
+    output: &aros_common::ProcessOutput,
+) -> String {
+    let mut parts = vec![format!(
+        "logs: {}/{log_name}.stdout.log and {log_name}.stderr.log",
+        lifecycle.logs.display()
+    )];
+    for (label, path) in [
+        ("work", &lifecycle.root),
+        ("output", &lifecycle.output),
+        ("tmp", &lifecycle.tmp),
+    ] {
+        match fs2::available_space(path) {
+            Ok(bytes) => parts.push(format!("free space {label}: {} MiB", bytes >> 20)),
+            Err(error) => parts.push(format!("free space {label}: unavailable ({error})")),
+        }
+    }
+    let rendered = output.stderr.rendered_lossy();
+    let tail = rendered
+        .lines()
+        .map(|line| {
+            line.chars()
+                .filter(|character| !character.is_control())
+                .take(FAILURE_TAIL_LINE_CHARS)
+                .collect::<String>()
+        })
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if tail.is_empty() {
+        parts.push("stderr was empty".to_owned());
+    } else {
+        let start = tail.len().saturating_sub(FAILURE_TAIL_LINES);
+        parts.push(format!("stderr tail: {}", tail[start..].join(" | ")));
+    }
+    parts.join("; ")
 }
 
 fn phase_error(phase: &str, message: String) -> ContractError {

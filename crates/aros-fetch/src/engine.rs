@@ -35,7 +35,7 @@ pub mod source_receipt;
 mod tar_links;
 mod zip_links;
 use diagnostics::{
-    cache_failure, context, contract_failure, extraction_failure, integrity_failure,
+    cache_failure, context, contract_failure, error_chain, extraction_failure, integrity_failure,
     network_failure, patch_failure, publication_failure, publication_failure_with_state,
     FailureHint,
 };
@@ -1640,7 +1640,11 @@ fn unpack_tar(reader: impl Read, name: &str, staging: &Path) -> FetchResult<()> 
         if !entry.unpack_in(staging).map_err(|error| {
             extraction_failure(
                 name,
-                format!("cannot extract '{}': {error}", path.display()),
+                format!(
+                    "cannot extract '{}': {}",
+                    path.display(),
+                    error_chain(&error)
+                ),
             )
         })? {
             return Err(extraction_failure(
@@ -1752,7 +1756,11 @@ fn unpack_zip(file: File, name: &str, staging: &Path) -> FetchResult<()> {
             let copied = io::copy(&mut limited, &mut target).map_err(|error| {
                 extraction_failure(
                     name,
-                    format!("cannot extract '{}': {error}", output.display()),
+                    format!(
+                        "cannot extract '{}': {}",
+                        output.display(),
+                        error_chain(&error)
+                    ),
                 )
             })?;
             if copied != declared {
