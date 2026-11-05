@@ -56,6 +56,25 @@ pub(super) fn extraction_failure(name: &str, message: impl Into<String>) -> Fetc
     )
 }
 
+/// Render an error with every wrapped cause.
+///
+/// `tar` reports a failed entry as "failed to unpack `<path>`" and keeps the
+/// operating-system error ("No space left on device", "Permission denied") as
+/// its source, which `Display` alone drops.
+pub(super) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let part = cause.to_string();
+        if !text.contains(&part) {
+            text.push_str(": ");
+            text.push_str(&part);
+        }
+        source = cause.source();
+    }
+    text
+}
+
 pub(super) fn patch_failure(name: &str, message: impl Into<String>) -> FetchFailure {
     failure_with_output(
         DiagnosticCode::FetchPatch,
@@ -122,5 +141,46 @@ pub(super) trait FailureHint {
 impl FailureHint for FetchFailure {
     fn with_hint(self, hint: impl Into<String>) -> Self {
         Self::new(self.into_diagnostic().with_hint(hint))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_chain;
+    use std::fmt;
+
+    /// Mimics `tar`: a short description whose cause is only reachable through
+    /// `source()`.
+    #[derive(Debug)]
+    struct Wrapped(std::io::Error);
+
+    impl fmt::Display for Wrapped {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("failed to unpack `tree/file.ll`")
+        }
+    }
+
+    impl std::error::Error for Wrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn error_chain_names_the_wrapped_cause() {
+        let error = Wrapped(std::io::Error::from_raw_os_error(28));
+        let rendered = error_chain(&error);
+        assert!(
+            rendered.starts_with("failed to unpack `tree/file.ll`: "),
+            "{rendered}"
+        );
+        assert!(rendered.contains("os error 28"), "{rendered}");
+    }
+
+    #[test]
+    fn error_chain_does_not_repeat_a_cause_already_in_the_text() {
+        let error = std::io::Error::from_raw_os_error(13);
+        let rendered = error_chain(&error);
+        assert_eq!(rendered, error.to_string());
     }
 }
