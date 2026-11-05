@@ -4,6 +4,18 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.12](https://github.com/metaneutrons/aros-tools/compare/v0.6.11...v0.6.12) (2026-11-05)
+
+
+### Features
+
+* **toolchain:** report log location, free space and stderr tail for failed phases ([#524](https://github.com/metaneutrons/aros-tools/issues/524)) ([6846172](https://github.com/metaneutrons/aros-tools/commit/684617258f32334aaf65475498afa782bb7c60c7))
+
+
+### Bug Fixes
+
+* **genmodule:** do not publish private libdefs shared by several declarations ([#523](https://github.com/metaneutrons/aros-tools/issues/523)) ([4d2ae86](https://github.com/metaneutrons/aros-tools/commit/4d2ae86f1fc4de5f47d4cb5d96c64ed85a6c4480))
+
 ## [0.6.11](https://github.com/metaneutrons/aros-tools/compare/v0.6.10...v0.6.11) (2026-10-31)
 
 
