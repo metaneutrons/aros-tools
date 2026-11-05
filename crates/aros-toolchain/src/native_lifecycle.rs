@@ -33,6 +33,7 @@ use crate::executor::{BuildRequest, BuildResult, Evidence, Output, ResumePhase, 
 use crate::metamake_fetch::SourceUseLedger;
 use crate::native_compiler_cache::{self, HostCompilerLaunchers};
 use crate::native_declaration::NativeExecutorDeclaration;
+use crate::phase_failure;
 use crate::plan::{self, Identity, PlanRequest};
 use crate::preflight::{self, HostPreflight};
 use crate::producer_environment::{ProducerEnvironment, ReproducibilityRoots};
@@ -1192,7 +1193,7 @@ fn run_phase_with_log(
             format!("cannot start or supervise native phase: {error}"),
         )
     })?;
-    persist_process_output(&lifecycle.logs, log_name, &output)?;
+    phase_failure::persist_process_output(&lifecycle.logs, log_name, &output)?;
     if output.cancelled || cancellation.is_cancelled() {
         return Err(ContractError::state(format!(
             "native {phase} phase cancelled; owned material and logs are retained"
@@ -1203,7 +1204,16 @@ fn run_phase_with_log(
             phase,
             format!(
                 "native {phase} phase exceeded the explicit build deadline; {}",
-                failure_evidence(lifecycle, log_name, &output)
+                phase_failure::evidence(
+                    &lifecycle.logs,
+                    log_name,
+                    &[
+                        ("work", &lifecycle.root),
+                        ("output", &lifecycle.output),
+                        ("tmp", &lifecycle.tmp),
+                    ],
+                    &output,
+                )
             ),
         )
         .context(DiagnosticContext {
@@ -1218,7 +1228,16 @@ fn run_phase_with_log(
             format!(
                 "native {phase} phase exited unsuccessfully (exit code {:?}); inspect retained phase logs; {}",
                 output.status.code(),
-                failure_evidence(lifecycle, log_name, &output)
+                phase_failure::evidence(
+                    &lifecycle.logs,
+                    log_name,
+                    &[
+                        ("work", &lifecycle.root),
+                        ("output", &lifecycle.output),
+                        ("tmp", &lifecycle.tmp),
+                    ],
+                    &output,
+                )
             ),
         )
         .context(DiagnosticContext {
@@ -1231,56 +1250,6 @@ fn run_phase_with_log(
     Ok(())
 }
 
-/// How many trailing stderr lines a failed phase quotes in its diagnostic.
-const FAILURE_TAIL_LINES: usize = 8;
-/// Longest quoted stderr line, so one runaway line cannot flood a CI log.
-const FAILURE_TAIL_LINE_CHARS: usize = 240;
-
-/// Facts that decide most build failures and disappear with the runner: where
-/// the full logs are, how much disk was left, and what the phase said last.
-///
-/// The retained logs stay the evidence of record. This only makes the first
-/// look at a failed job conclusive, because a wrapped cause (a full disk
-/// behind "failed to unpack") otherwise exists only in an artifact.
-fn failure_evidence(
-    lifecycle: &LifecyclePaths,
-    log_name: &str,
-    output: &aros_common::ProcessOutput,
-) -> String {
-    let mut parts = vec![format!(
-        "logs: {}/{log_name}.stdout.log and {log_name}.stderr.log",
-        lifecycle.logs.display()
-    )];
-    for (label, path) in [
-        ("work", &lifecycle.root),
-        ("output", &lifecycle.output),
-        ("tmp", &lifecycle.tmp),
-    ] {
-        match fs2::available_space(path) {
-            Ok(bytes) => parts.push(format!("free space {label}: {} MiB", bytes >> 20)),
-            Err(error) => parts.push(format!("free space {label}: unavailable ({error})")),
-        }
-    }
-    let rendered = output.stderr.rendered_lossy();
-    let tail = rendered
-        .lines()
-        .map(|line| {
-            line.chars()
-                .filter(|character| !character.is_control())
-                .take(FAILURE_TAIL_LINE_CHARS)
-                .collect::<String>()
-        })
-        .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>();
-    if tail.is_empty() {
-        parts.push("stderr was empty".to_owned());
-    } else {
-        let start = tail.len().saturating_sub(FAILURE_TAIL_LINES);
-        parts.push(format!("stderr tail: {}", tail[start..].join(" | ")));
-    }
-    parts.join("; ")
-}
-
 fn phase_error(phase: &str, message: String) -> ContractError {
     match phase {
         "configure" => ContractError::configure(message),
@@ -1288,36 +1257,6 @@ fn phase_error(phase: &str, message: String) -> ContractError {
         "collector" => ContractError::collector(message),
         _ => ContractError::state(message),
     }
-}
-
-fn persist_process_output(
-    logs: &Path,
-    log_name: &str,
-    output: &aros_common::ProcessOutput,
-) -> Result<(Sha256Digest, Sha256Digest), ContractError> {
-    let stdout_path = logs.join(format!("{log_name}.stdout.log"));
-    let stderr_path = logs.join(format!("{log_name}.stderr.log"));
-    let stdout = create_log(&stdout_path, &output.stdout)?;
-    let stderr = create_log(&stderr_path, &output.stderr)?;
-    Ok((stdout, stderr))
-}
-
-fn create_log(
-    path: &Path,
-    stream: &aros_common::CapturedStream,
-) -> Result<Sha256Digest, ContractError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| ContractError::state("cannot create native phase log"))?;
-    stream
-        .write_rendered(&mut file)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| ContractError::state("cannot durably persist native phase log"))?;
-    sha256_file(path)
-        .map(|measured| measured.digest)
-        .map_err(|_| ContractError::state("cannot hash native phase log"))
 }
 
 fn selected_rust_channel(producer: &Path) -> Result<Option<String>, ContractError> {

@@ -44,6 +44,7 @@ pub mod package_extract;
 mod package_identity;
 mod package_layout;
 pub mod package_verify;
+mod phase_failure;
 pub mod plan;
 pub mod preflight;
 pub mod producer_environment;
