@@ -944,6 +944,7 @@ fn generate_sdk_headers(
     out_inc: &Path,
     out_gen: Option<&Path>,
     publish_public_headers: bool,
+    publish_private_libdefs: bool,
     transaction: &mut FileTransaction,
 ) -> Result<Vec<String>, OutputFailure> {
     let include_name = public_include_name(module);
@@ -1138,11 +1139,19 @@ fn generate_sdk_headers(
     let _ = writeln!(libdefs, "\n#endif /* _{mod_upper}_LIBDEFS_H */");
     // Module-private: keep it out of the shared SDK so same-named .conf files
     // in different subsystems cannot overwrite each other.
-    let libdefs_dir = out_gen.map_or_else(|| out_inc.to_path_buf(), |g| g.join(&module.rel_dir));
-    let libdefs_path = libdefs_dir.join(format!("{}_libdefs.h", module.name));
-    transaction
-        .stage_write(&libdefs_path, libdefs.as_bytes())
-        .map_err(|error| OutputFailure::new(libdefs_path, error))?;
+    //
+    // Several declarations of one directory can share a module name (a resource
+    // and a device built from different .conf files). They would all claim the
+    // same path with different contents, so no directory-wide file is correct
+    // for them; `ambiguous_private_libdefs` names those and they are skipped.
+    if publish_private_libdefs {
+        let libdefs_dir =
+            out_gen.map_or_else(|| out_inc.to_path_buf(), |g| g.join(&module.rel_dir));
+        let libdefs_path = libdefs_dir.join(format!("{}_libdefs.h", module.name));
+        transaction
+            .stage_write(&libdefs_path, libdefs.as_bytes())
+            .map_err(|error| OutputFailure::new(libdefs_path, error))?;
+    }
 
     // 5. interface/<Name>.h for every declared OOP interface.
     for iface in &module.interfaces {
@@ -1167,6 +1176,34 @@ fn generate_sdk_headers(
 /// closure, so writing both owners would make the resulting headers depend on
 /// traversal and thread scheduling.  Keep those public paths absent until the
 /// concrete CMake producer materialises the selected declaration.
+/// Modules whose module-private `<name>_libdefs.h` would collide: several
+/// declarations of one directory with the same module name.
+///
+/// Returns each ambiguous `(directory, name)` with the module types involved,
+/// sorted so the report is deterministic.
+fn ambiguous_private_libdefs(modules: &[ConfModule]) -> Vec<(PathBuf, String, Vec<String>)> {
+    let mut groups: std::collections::BTreeMap<(PathBuf, String), Vec<String>> =
+        std::collections::BTreeMap::new();
+    for module in modules {
+        let types = groups
+            .entry((module.rel_dir.clone(), module.name.clone()))
+            .or_default();
+        types.push(if module.mod_type.is_empty() {
+            "?".to_owned()
+        } else {
+            module.mod_type.clone()
+        });
+    }
+    groups
+        .into_iter()
+        .filter(|(_, types)| types.len() > 1)
+        .map(|((directory, name), mut types)| {
+            types.sort_unstable();
+            (directory, name, types)
+        })
+        .collect()
+}
+
 fn colliding_public_include_names(modules: &[ConfModule]) -> std::collections::HashSet<String> {
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for module in modules {
@@ -1233,6 +1270,7 @@ fn private_libdefs_path(root: &Path, module: &ConfModule) -> PathBuf {
 fn prune_stale_private_libdefs(
     root: &Path,
     modules: &[ConfModule],
+    publishes_private_libdefs: &dyn Fn(&ConfModule) -> bool,
     transaction: &mut FileTransaction,
 ) -> std::io::Result<usize> {
     if !root.exists() {
@@ -1240,6 +1278,7 @@ fn prune_stale_private_libdefs(
     }
     let expected: std::collections::HashSet<PathBuf> = modules
         .iter()
+        .filter(|module| publishes_private_libdefs(module))
         .map(|module| private_libdefs_path(root, module))
         .collect();
     let mut stale = Vec::new();
@@ -1271,6 +1310,7 @@ struct GenerationSummary {
     collisions: usize,
     linklib_files: usize,
     libbases: Option<usize>,
+    ambiguous_libdefs: Vec<String>,
     recovery: RecoveryOutcome,
 }
 
@@ -1448,6 +1488,11 @@ fn execute(
     });
 
     let colliding_names = colliding_public_include_names(&modules);
+    let ambiguous_libdefs = ambiguous_private_libdefs(&modules);
+    let ambiguous_libdefs_keys: std::collections::HashSet<(&Path, &str)> = ambiguous_libdefs
+        .iter()
+        .map(|(directory, name, _)| (directory.as_path(), name.as_str()))
+        .collect();
 
     // Only modules that export public headers can collide there. Module-private
     // headers are written per module directory and cannot.
@@ -1492,6 +1537,7 @@ fn execute(
             &args.output_inc,
             args.output_gen.as_deref(),
             !conflicting,
+            !ambiguous_libdefs_keys.contains(&(module.rel_dir.as_path(), module.name.as_str())),
             &mut transaction,
         ) {
             Ok(mut unsupported) => unsupported_varargs.append(&mut unsupported),
@@ -1613,7 +1659,10 @@ fn execute(
     }
 
     let stale_libdefs = if let Some(root) = args.output_gen.as_deref() {
-        match prune_stale_private_libdefs(root, &modules, &mut transaction) {
+        let publishes = |module: &ConfModule| {
+            !ambiguous_libdefs_keys.contains(&(module.rel_dir.as_path(), module.name.as_str()))
+        };
+        match prune_stale_private_libdefs(root, &modules, &publishes, &mut transaction) {
             Ok(count) => count,
             Err(error) => {
                 return Err(DiagnosticSet::single(publication_diagnostic(
@@ -1646,6 +1695,12 @@ fn execute(
         collisions: clashes.len(),
         linklib_files,
         libbases: libbases_count,
+        ambiguous_libdefs: ambiguous_libdefs
+            .iter()
+            .map(|(directory, name, types)| {
+                format!("{}/{name} ({})", directory.display(), types.join("+"))
+            })
+            .collect(),
         recovery: receipt.recovery(),
     })
 }
@@ -1686,6 +1741,14 @@ fn print_summary(args: &Args, summary: &GenerationSummary) {
                 root.display()
             );
         }
+    }
+    if !summary.ambiguous_libdefs.is_empty() {
+        let _ = writeln!(
+            report,
+            "ℹ️  aros-genmodule: {} module-private libdefs header(s) are shared by several declarations of one directory and were not published (each declaration still has its exact header in the build): {}",
+            summary.ambiguous_libdefs.len(),
+            summary.ambiguous_libdefs.join(", ")
+        );
     }
     if summary.collisions > 0 {
         let _ = writeln!(

@@ -672,3 +672,63 @@ fn rollback_secondary_failure_is_distinct_and_other_cleanup_continues() {
         "best-effort rollback must still clean every independent staged file"
     );
 }
+
+#[test]
+fn declarations_sharing_a_module_name_publish_no_ambiguous_private_header() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    // A unique module keeps its private header as before.
+    write_library_fixture(&source, "rom/test", "test");
+    // A resource and a device built from different .conf files share one name.
+    let network = source.join("arch/test/network");
+    fs::create_dir_all(&network).unwrap();
+    fs::write(
+        network.join("wifi.conf"),
+        "##begin config\nversion 1.0\noptions noincludes\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        network.join("wifi-device.conf"),
+        "##begin config\nversion 1.3\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        network.join("mmakefile.src"),
+        "%build_module mmake=test-wifi-probe modname=wifi modtype=resource files=probe\n\
+         %build_module mmake=test-wifi-device modname=wifi modtype=device \\\n\
+         \x20   conffile=./wifi-device.conf files=device\n",
+    )
+    .unwrap();
+    let output_root = directory.path().join("build");
+    let output_inc = output_root.join("SYS/Developer/include");
+    let output_gen = output_root.join("gen");
+    // A header left by an earlier run must not survive as a wrong answer.
+    let leftover = output_gen.join("arch/test/network/wifi_libdefs.h");
+    fs::create_dir_all(leftover.parent().unwrap()).unwrap();
+    fs::write(&leftover, "stale\n").unwrap();
+
+    let result = run_json(&[
+        "--scan-dir",
+        source.to_str().unwrap(),
+        "--output-root",
+        output_root.to_str().unwrap(),
+        "--output-inc",
+        output_inc.to_str().unwrap(),
+        "--output-gen",
+        output_gen.to_str().unwrap(),
+    ]);
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(output_gen.join("rom/test/test_libdefs.h").is_file());
+    assert!(output_inc.join("proto/wifi.h").is_file());
+    assert!(!leftover.exists());
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        stdout.contains("arch/test/network/wifi (device+resource)"),
+        "{stdout}"
+    );
+}
