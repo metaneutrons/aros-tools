@@ -162,12 +162,29 @@ pub(super) fn verify_application_elf(
     if let Some(expected) = &facts.arm_attributes {
         let measured = elf::arm::read(bytes)
             .map_err(|_| error("LLVM SDK application ARM attributes are absent or invalid"))?;
-        for (tag, value) in expected {
-            if measured.integer(*tag).ok() != Some(*value) {
-                return Err(error(
-                    "LLVM SDK application ARM attributes differ from the source target",
-                ));
-            }
+        // Name every differing attribute with its expected and measured value:
+        // a bare "differ" forces a download of the whole lane artifact.
+        let differences = expected
+            .iter()
+            .filter_map(|(tag, value)| {
+                let found = measured.integer(*tag).ok();
+                (found != Some(*value)).then(|| {
+                    let found = found.map_or_else(
+                        || "absent or not an integer".to_owned(),
+                        |found| found.to_string(),
+                    );
+                    format!(
+                        "{} (tag {tag}) expected {value}, measured {found}",
+                        arm_attribute_name(*tag)
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if !differences.is_empty() {
+            return Err(error(format!(
+                "LLVM SDK application ARM attributes differ from the source target: {}",
+                differences.join("; ")
+            )));
         }
     }
     if !object.symbols.iter().any(|symbol| {
@@ -185,6 +202,20 @@ pub(super) fn verify_application_elf(
         ));
     }
     Ok(())
+}
+
+/// Name of an ARM build attribute tag that an SDK target can declare.
+const fn arm_attribute_name(tag: u64) -> &'static str {
+    match tag {
+        6 => "arm_cpu_arch",
+        7 => "arm_cpu_profile",
+        8 => "arm_arm_isa",
+        9 => "arm_thumb_isa",
+        10 => "arm_fp_arch",
+        12 => "arm_simd_arch",
+        28 => "arm_vfp_args",
+        _ => "arm_attribute",
+    }
 }
 
 #[derive(Clone)]
