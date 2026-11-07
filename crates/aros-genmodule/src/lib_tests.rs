@@ -591,7 +591,7 @@ mod tests {
 
         let mut transaction = FileTransaction::for_output_root(&root).unwrap();
         assert_eq!(
-            prune_stale_private_libdefs(&root, &[module], &mut transaction)
+            prune_stale_private_libdefs(&root, &[module], &|_| true, &mut transaction)
                 .expect("stage prune outputs"),
             1
         );
@@ -631,6 +631,7 @@ mod tests {
             &module,
             &dir,
             Some(&dir.join("gen")),
+            true,
             true,
             &mut transaction,
         )

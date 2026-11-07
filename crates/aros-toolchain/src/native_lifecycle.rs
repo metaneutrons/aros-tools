@@ -33,6 +33,7 @@ use crate::executor::{BuildRequest, BuildResult, Evidence, Output, ResumePhase, 
 use crate::metamake_fetch::SourceUseLedger;
 use crate::native_compiler_cache::{self, HostCompilerLaunchers};
 use crate::native_declaration::NativeExecutorDeclaration;
+use crate::phase_failure;
 use crate::plan::{self, Identity, PlanRequest};
 use crate::preflight::{self, HostPreflight};
 use crate::producer_environment::{ProducerEnvironment, ReproducibilityRoots};
@@ -1192,7 +1193,7 @@ fn run_phase_with_log(
             format!("cannot start or supervise native phase: {error}"),
         )
     })?;
-    persist_process_output(&lifecycle.logs, log_name, &output)?;
+    phase_failure::persist_process_output(&lifecycle.logs, log_name, &output)?;
     if output.cancelled || cancellation.is_cancelled() {
         return Err(ContractError::state(format!(
             "native {phase} phase cancelled; owned material and logs are retained"
@@ -1201,7 +1202,19 @@ fn run_phase_with_log(
     if output.timed_out {
         return Err(phase_error(
             phase,
-            format!("native {phase} phase exceeded the explicit build deadline"),
+            format!(
+                "native {phase} phase exceeded the explicit build deadline; {}",
+                phase_failure::evidence(
+                    &lifecycle.logs,
+                    log_name,
+                    &[
+                        ("work", &lifecycle.root),
+                        ("output", &lifecycle.output),
+                        ("tmp", &lifecycle.tmp),
+                    ],
+                    &output,
+                )
+            ),
         )
         .context(DiagnosticContext {
             tool: Some(phase.into()),
@@ -1213,8 +1226,18 @@ fn run_phase_with_log(
         return Err(phase_error(
             phase,
             format!(
-                "native {phase} phase exited unsuccessfully (exit code {:?}); inspect retained phase logs",
-                output.status.code()
+                "native {phase} phase exited unsuccessfully (exit code {:?}); inspect retained phase logs; {}",
+                output.status.code(),
+                phase_failure::evidence(
+                    &lifecycle.logs,
+                    log_name,
+                    &[
+                        ("work", &lifecycle.root),
+                        ("output", &lifecycle.output),
+                        ("tmp", &lifecycle.tmp),
+                    ],
+                    &output,
+                )
             ),
         )
         .context(DiagnosticContext {
@@ -1234,36 +1257,6 @@ fn phase_error(phase: &str, message: String) -> ContractError {
         "collector" => ContractError::collector(message),
         _ => ContractError::state(message),
     }
-}
-
-fn persist_process_output(
-    logs: &Path,
-    log_name: &str,
-    output: &aros_common::ProcessOutput,
-) -> Result<(Sha256Digest, Sha256Digest), ContractError> {
-    let stdout_path = logs.join(format!("{log_name}.stdout.log"));
-    let stderr_path = logs.join(format!("{log_name}.stderr.log"));
-    let stdout = create_log(&stdout_path, &output.stdout)?;
-    let stderr = create_log(&stderr_path, &output.stderr)?;
-    Ok((stdout, stderr))
-}
-
-fn create_log(
-    path: &Path,
-    stream: &aros_common::CapturedStream,
-) -> Result<Sha256Digest, ContractError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| ContractError::state("cannot create native phase log"))?;
-    stream
-        .write_rendered(&mut file)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| ContractError::state("cannot durably persist native phase log"))?;
-    sha256_file(path)
-        .map(|measured| measured.digest)
-        .map_err(|_| ContractError::state("cannot hash native phase log"))
 }
 
 fn selected_rust_channel(producer: &Path) -> Result<Option<String>, ContractError> {
