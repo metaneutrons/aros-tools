@@ -83,6 +83,11 @@ fn main() -> ExitCode {
         Err(error) => return render_failure(error, cli.diagnostic_format),
     };
     let context = match &cli.command {
+        Command::Dispatcher(command) => DiagnosticContext {
+            mode: Some("dispatcher".into()),
+            target: Some(aros_release::dispatcher::cli::command_name(command).into()),
+            ..DiagnosticContext::default()
+        },
         Command::Package(args) => DiagnosticContext {
             mode: Some("package".into()),
             target: Some(args.target.clone()),
@@ -135,6 +140,7 @@ fn main() -> ExitCode {
         Command::Verify(args) => archive::verify(args).map(|_| ()),
         Command::Generate(args) => ecosystem::generate(args),
         Command::Install(args) => install::install(args).map(|_| ()),
+        Command::Dispatcher(command) => aros_release::dispatcher::cli::run(command),
     };
     if let Err(error) = operation {
         return render_logged_failure(error, &mut logger, cli.diagnostic_format);
