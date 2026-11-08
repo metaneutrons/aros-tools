@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.13](https://github.com/metaneutrons/aros-tools/compare/v0.6.12...v0.6.13) (2026-11-08)
+
+
+### Bug Fixes
+
+* **toolchain:** accept clang's resource-dir spelling in LLVM SDK link traces ([#529](https://github.com/metaneutrons/aros-tools/issues/529)) ([e4be889](https://github.com/metaneutrons/aros-tools/commit/e4be8894ff43badda3e750172034a3b390d764bf))
+
 ## [0.6.12](https://github.com/metaneutrons/aros-tools/compare/v0.6.11...v0.6.12) (2026-11-05)
 
 
