@@ -899,7 +899,8 @@ fn validate_trace_and_map(
     let mut saw_sdk_archive = false;
     let mut sdk_archives = BTreeSet::new();
     for line in trace.lines().filter(|line| !line.is_empty()) {
-        let input = llvm_sdk_link_paths::parse_trace_input(line)?;
+        let line = llvm_sdk_link_paths::collapse_driver_resource_prefix(line, compiler_root);
+        let input = llvm_sdk_link_paths::parse_trace_input(&line)?;
         let raw_path = input.path;
         llvm_sdk_link_paths::validate_absolute_raw_path(raw_path)?;
         let Some(relative) = path_below(raw_path, &temporary_text) else {
