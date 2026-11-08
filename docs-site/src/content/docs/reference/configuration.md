@@ -183,6 +183,12 @@ isolated local toolchain-producer collector build; its Cargo configuration and
 registry remain private and lock-verified. These ambient variables do not
 replace checkout locks, source identities, or artifact digests.
 
+The internal `aros-release dispatcher` controller reads the GitHub Actions
+runner context (`GITHUB_REPOSITORY`, `GITHUB_SHA`, `GITHUB_REF`) and the job
+token pair `GH_HOST` and `GH_TOKEN`. It accepts only `GH_HOST=github.com`,
+never falls back to another credential, and is not part of the public command
+surface.
+
 `aros cache compiler status` passively observes these existing backend
 configuration variables without reading their values or invoking a backend:
 `CCACHE_CONFIGPATH`, `CCACHE_DIR`, `CCACHE_REMOTE_STORAGE`,
@@ -214,6 +220,7 @@ configuration, and may be compiled out or inert in release builds:
 - `AROS_RV32_COMPILER_PREFIX`, `AROS_RV3_COMPILER_EVIDENCE_PARENT`, `AROS_RV3_LOCAL_RV32_COMPILER`, `AROS_RV3_SOURCE_IDENTITY_OUTPUT`, `AROS_RV3_TARGET_CONTRACT` (local rv3 compiler and source-identity probes)
 - `AROS_TEST_ESP_IMAGE`, `AROS_TEST_ESP_PARTITION`, `AROS_TEST_ESP_PARTITION_EVIDENCE_PARENT`, `AROS_TEST_ESP_PARTITION_SOURCE`, `AROS_TEST_NATIVE_CONTRACT_SHA256`, `AROS_TEST_NATIVE_MEDIA_BOOTLOADER_SHA256`, `AROS_TEST_NATIVE_MEDIA_CONTRACT_SHA256`, `AROS_TEST_NATIVE_MEDIA_INPUTS`, `AROS_TEST_NATIVE_MEDIA_INPUTS_SHA256`, `AROS_TEST_NATIVE_MEDIA_WORK_PARENT`, `AROS_TEST_NATIVE_PARTITION_EVIDENCE_PARENT`, `AROS_TEST_VENDOR_ARCHIVE_CACHE`, `AROS_TEST_VENDOR_PYTHON`, `AROS_TEST_VENDOR_PYTHON_PREFIX`, `AROS_TEST_VENDOR_PYTHON_VERSION`, `AROS_TEST_VENDOR_SOURCE_PARENT`, `AROS_TEST_VENDOR_WHEEL_ROOT`, `AROS_TEST_VENDOR_WORK_PARENT` (native media, partition and vendor-input probes)
 - `AROS_TEST_NOFOLLOW_FIFO`, `AROS_TEST_NOFOLLOW_FIFO_READER`, `AROS_TEST_PREPARED_TREE_FIFO_SWAP` (no-follow publication probes)
+- `AROS_TOOLCHAINS_CHECKOUT` (optional aros-toolchains checkout for the differential tests of the dispatcher controller; skipped when unset)
 
 The guard, process-escape, Cargo-vendor credential-isolation and
 final-log-failure names are used only by
