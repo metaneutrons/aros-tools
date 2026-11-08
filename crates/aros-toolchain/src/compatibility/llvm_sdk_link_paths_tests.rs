@@ -295,3 +295,38 @@ fn invalid_utf8_truncation_and_empty_maps_are_rejected() {
         .to_string()
         .contains("map is empty"));
 }
+
+#[test]
+fn clang_relative_resource_dir_spelling_is_accepted_only_for_the_compiler_root() {
+    let roots = Roots::new();
+    let resource = roots.compiler.join("lib/clang/23.1.0/lib/aros");
+    fs::create_dir_all(&resource).unwrap();
+    fs::write(resource.join("libclang_rt.builtins-armhf.a"), b"builtins").unwrap();
+    let driver_spelling = format!(
+        "{}/bin/../lib/clang/23.1.0/lib/aros/libclang_rt.builtins-armhf.a(divsi3.S.obj)",
+        roots.compiler.display()
+    );
+    let trace = format!("{}{}\n", roots.good_trace(), driver_spelling);
+    roots
+        .validate(trace.as_bytes(), MAP, &["client".to_owned()])
+        .expect("the driver's bin/../lib/clang spelling inside the compiler root is unambiguous");
+
+    for refused in [
+        // Another compiler-relative spelling.
+        format!("{}/bin/../share/libclang_rt.a", roots.compiler.display()),
+        // Escape after the accepted prefix.
+        format!(
+            "{}/bin/../lib/clang/../../../foreign.a",
+            roots.compiler.display()
+        ),
+        // The same spelling below the SDK root is not the driver's resource directory.
+        format!("{}/bin/../lib/clang/libclient.a", roots.sdk.display()),
+    ] {
+        let trace = format!("{}{}\n", roots.good_trace(), refused);
+        let error = roots
+            .validate(trace.as_bytes(), MAP, &["client".to_owned()])
+            .expect_err("other parent-directory spellings stay ambiguous")
+            .to_string();
+        assert!(error.contains("non-absolute or ambiguous input path"));
+    }
+}

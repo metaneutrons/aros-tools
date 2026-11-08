@@ -6,6 +6,7 @@
 //! not parsed as another input list. This does not prove ABI facts, full header
 //! closure, archive contents, or SDK completeness.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -85,8 +86,12 @@ pub(super) fn validate_link_paths(
     let mut saw_sdk_archive = false;
     let mut linked_inputs = 0usize;
 
+    let compiler_text = compiler
+        .to_str()
+        .ok_or_else(|| error("LLVM compiler root is not UTF-8"))?;
     for line in trace.lines().filter(|line| !line.is_empty()) {
-        let input = parse_trace_input(line)?;
+        let line = collapse_driver_resource_prefix(line, compiler_text);
+        let input = parse_trace_input(&line)?;
         let path = Path::new(input.path);
 
         // Clang deletes the temporary before exiting, so a missing direct child
@@ -142,6 +147,22 @@ pub(super) fn validate_link_paths(
         ));
     }
     Ok(())
+}
+
+/// Clang joins a relative `CLANG_RESOURCE_DIR` to its own `bin` directory, so
+/// its builtins are traced as `<compiler>/bin/../lib/clang/<version>/...`.
+/// Collapse exactly that spelling of the compiler root's resource directory
+/// before the raw-path checks; every other `..` stays an ambiguous path, and a
+/// remaining `..` after the prefix is still refused by those checks.
+pub(super) fn collapse_driver_resource_prefix<'a>(
+    line: &'a str,
+    compiler_text: &str,
+) -> Cow<'a, str> {
+    let driver_prefix = format!("{compiler_text}/bin/../lib/clang/");
+    line.strip_prefix(&driver_prefix)
+        .map_or(Cow::Borrowed(line), |rest| {
+            Cow::Owned(format!("{compiler_text}/lib/clang/{rest}"))
+        })
 }
 
 pub(super) struct TraceInput<'a> {
