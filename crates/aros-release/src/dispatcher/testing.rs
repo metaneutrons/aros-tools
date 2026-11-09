@@ -49,6 +49,10 @@ pub struct Fake {
     pub attested: RefCell<Vec<(String, Vec<u8>, Vec<u8>)>>,
     pub dispatches: RefCell<Vec<(String, String, Vec<(String, String)>)>>,
     pub dispatch_answer: RefCell<Option<(u16, Vec<u8>)>>,
+    pub refs: RefCell<Vec<(String, String)>>,
+    pub ref_answers: RefCell<Vec<Option<(u16, Vec<u8>)>>>,
+    pub uploads: RefCell<Vec<(u64, String, Vec<u8>)>>,
+    pub upload_answer: RefCell<Option<(u16, Vec<u8>)>>,
 }
 
 impl Fake {
@@ -143,6 +147,29 @@ impl Provider for Fake {
             .borrow()
             .clone()
             .map_or_else(|| integrity("no scripted dispatch answer"), Ok)
+    }
+
+    fn create_ref(&self, git_ref: &str, sha: &str) -> Result<(u16, Vec<u8>)> {
+        self.refs
+            .borrow_mut()
+            .push((git_ref.to_owned(), sha.to_owned()));
+        let mut answers = self.ref_answers.borrow_mut();
+        let answer = if answers.is_empty() {
+            None
+        } else {
+            answers.remove(0)
+        };
+        answer.map_or_else(|| integrity("no scripted ref answer"), Ok)
+    }
+
+    fn upload_claim(&self, release_id: u64, name: &str, bytes: &[u8]) -> Result<(u16, Vec<u8>)> {
+        self.uploads
+            .borrow_mut()
+            .push((release_id, name.to_owned(), bytes.to_vec()));
+        self.upload_answer
+            .borrow()
+            .clone()
+            .map_or_else(|| integrity("no scripted upload answer"), Ok)
     }
 
     fn oidc_check_id(&self, _: &Value, _: &str) -> Result<u64> {

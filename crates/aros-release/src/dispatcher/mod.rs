@@ -18,6 +18,7 @@
 
 pub mod binding;
 pub mod claim;
+pub mod claim_upload;
 pub mod cli;
 pub mod context;
 pub mod dispatch;
@@ -32,6 +33,8 @@ pub mod verify_binding;
 pub mod verify_claim;
 pub mod zip_reader;
 
+#[cfg(test)]
+mod claim_upload_tests;
 #[cfg(test)]
 mod command_tests;
 #[cfg(test)]

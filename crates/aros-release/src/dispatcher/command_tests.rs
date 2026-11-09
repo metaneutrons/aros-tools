@@ -467,6 +467,12 @@ fn select_transport_counterprobes() {
         ) -> super::Result<(u16, Vec<u8>)> {
             self.inner.dispatch_workflow(f, r, i)
         }
+        fn create_ref(&self, r: &str, s: &str) -> super::Result<(u16, Vec<u8>)> {
+            self.inner.create_ref(r, s)
+        }
+        fn upload_claim(&self, i: u64, n: &str, b: &[u8]) -> super::Result<(u16, Vec<u8>)> {
+            self.inner.upload_claim(i, n, b)
+        }
         fn oidc_check_id(&self, c: &Value, e: &str) -> super::Result<u64> {
             self.inner.oidc_check_id(c, e)
         }
@@ -1000,6 +1006,24 @@ fn dispatch_world() -> World {
     world.fake.set(&runs(NATIVE_RUN), native_run_row());
     *world.fake.dispatch_answer.borrow_mut() = Some(confirmed_answer());
     world
+        .fake
+        .ref_answers
+        .borrow_mut()
+        .push(Some(marker_created()));
+    world.fake.set(&marker_path(), marker_ref());
+    world
+}
+
+fn marker_path() -> String {
+    format!("{API_PATH}/git/ref/aros-release/consumed/v2.0.0")
+}
+
+fn marker_ref() -> Value {
+    json!({"ref": "refs/aros-release/consumed/v2.0.0", "object": {"sha": COMMIT, "type": "commit"}})
+}
+
+fn marker_created() -> (u16, Vec<u8>) {
+    (201, serde_json::to_vec(&marker_ref()).unwrap())
 }
 
 struct Fixture {
@@ -1096,6 +1120,94 @@ fn dispatch_contract_violations_never_reach_the_provider() {
             "{label}"
         );
     }
+}
+
+#[test]
+fn dispatch_consumes_the_start_with_an_exclusive_marker_before_the_mutation() {
+    let world = dispatch_world();
+    let f = fixture(&world);
+    dispatch::dispatch(&world.fake, &request(&world, &f, &world.source)).unwrap();
+    assert_eq!(
+        *world.fake.refs.borrow(),
+        vec![(
+            "refs/aros-release/consumed/v2.0.0".to_owned(),
+            COMMIT.to_owned()
+        )]
+    );
+    assert_eq!(world.fake.dispatches.borrow().len(), 1);
+
+    // A second dispatcher for the same candidate stops at the marker: the
+    // provider refuses the second creation and nothing more is dispatched.
+    world.fake.ref_answers.borrow_mut().push(Some((
+        422,
+        br#"{"message":"Reference already exists"}"#.to_vec(),
+    )));
+    let error = dispatch::dispatch(&world.fake, &request(&world, &f, &world.source)).unwrap_err();
+    assert_eq!(error.kind, Kind::Integrity);
+    assert_eq!(
+        world.fake.refs.borrow().len(),
+        2,
+        "the second attempt tried once"
+    );
+    assert_eq!(
+        world.fake.dispatches.borrow().len(),
+        1,
+        "no second dispatch"
+    );
+}
+
+#[test]
+fn dispatch_marker_counterprobes_stop_before_any_dispatch() {
+    let other_sha = "f".repeat(40);
+    let bad_ref = serde_json::to_vec(
+        &json!({"ref": "refs/aros-release/consumed/other", "object": {"sha": COMMIT}}),
+    )
+    .unwrap();
+    let bad_sha = serde_json::to_vec(
+        &json!({"ref": "refs/aros-release/consumed/v2.0.0", "object": {"sha": other_sha}}),
+    )
+    .unwrap();
+    let answers: Vec<(&str, Option<(u16, Vec<u8>)>)> = vec![
+        ("exists", Some((422, b"{}".to_vec()))),
+        ("conflict", Some((409, b"{}".to_vec()))),
+        ("server error", Some((500, b"{}".to_vec()))),
+        ("no content", Some((204, Vec::new()))),
+        (
+            "ok instead of created",
+            Some((200, serde_json::to_vec(&marker_ref()).unwrap())),
+        ),
+        ("not json", Some((201, b"nope".to_vec()))),
+        ("other ref", Some((201, bad_ref))),
+        ("other commit", Some((201, bad_sha))),
+        ("transport failure", None),
+    ];
+    for (label, answer) in answers {
+        let world = dispatch_world();
+        *world.fake.ref_answers.borrow_mut() = vec![answer];
+        let f = fixture(&world);
+        assert!(
+            dispatch::dispatch(&world.fake, &request(&world, &f, &world.source)).is_err(),
+            "{label}"
+        );
+        assert_eq!(
+            world.fake.refs.borrow().len(),
+            1,
+            "{label}: one marker attempt"
+        );
+        assert!(
+            world.fake.dispatches.borrow().is_empty(),
+            "{label}: nothing dispatched"
+        );
+    }
+    // A marker that reads back differently stops before the dispatch.
+    let world = dispatch_world();
+    world.fake.set(
+        &marker_path(),
+        json!({"ref": "refs/aros-release/consumed/v2.0.0", "object": {"sha": other_sha}}),
+    );
+    let f = fixture(&world);
+    assert!(dispatch::dispatch(&world.fake, &request(&world, &f, &world.source)).is_err());
+    assert!(world.fake.dispatches.borrow().is_empty());
 }
 
 #[test]

@@ -223,7 +223,7 @@ fn runtime_evidence(record: &Value, request: &Request<'_>) -> Result<()> {
 }
 
 /// Full signed-start verification with a caller-supplied candidate phase.
-fn verify_start(
+pub(super) fn verify_start(
     provider: &dyn Provider,
     request: &Request<'_>,
     candidate: &dyn Fn(&Value) -> Result<()>,
@@ -296,7 +296,7 @@ fn verify_start(
     Ok(record)
 }
 
-fn selected_asset(
+pub(super) fn selected_asset(
     provider: &dyn Provider,
     record: &Value,
     asset_id: u64,

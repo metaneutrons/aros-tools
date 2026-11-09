@@ -12,9 +12,13 @@
 //! recent run, and a native run that differs from the claim stops after the
 //! mutation with the outcome left for diagnosis.
 //!
-//! Durable once-only consumption of the start (START-A7) is not decided here:
-//! the read-based guard below is point-in-time and cannot exclude two racing
-//! dispatchers. The marker mechanism is an open design decision.
+//! Once-only consumption of the start (START-A7): before the dispatch the
+//! command creates the exclusive marker ref `refs/aros-release/consumed/<tag>`
+//! at the tag commit. The provider refuses a second creation, so a second
+//! dispatcher for the same candidate stops before its mutation. The marker is
+//! never deleted or reused: an unknown dispatch outcome leaves the start
+//! consumed for diagnosis (no blind retry or retargeting). The read-based
+//! guard for earlier native runs stays as an additional point-in-time check.
 
 use serde_json::Value;
 
@@ -23,7 +27,9 @@ use super::claim::{sha256_hex, validate_claim, Dispatcher, CLAIM_NAME, NATIVE_WO
 use super::context;
 use super::json::{digest, exact, positive};
 use super::provider::Provider;
-use super::{require, require_integrity, Result, MAX_BUNDLE, MAX_RECORD, REPOSITORY};
+use super::{
+    require, require_integrity, Kind, Rejection, Result, MAX_BUNDLE, MAX_RECORD, REPOSITORY,
+};
 
 /// Native workflow file name inside the fixed repository.
 pub const NATIVE_FILE: &str = "toolchain-release.yml";
@@ -75,6 +81,47 @@ fn require_no_previous_dispatch(provider: &dyn Provider, tag: &str) -> Result<()
     require_integrity(
         total == Some(0) && runs.is_some_and(Vec::is_empty),
         "a native dispatch already exists for this tag ref, or the listing is uncertain; nothing was dispatched",
+    )
+}
+
+/// Marker ref of one consumed candidate (exclusive creation).
+#[must_use]
+pub fn consumption_ref(tag: &str) -> String {
+    format!("refs/aros-release/consumed/{tag}")
+}
+
+/// Consume the start exactly once: create the exclusive marker and read it
+/// back. Any answer other than a confirmed HTTP 201 for the exact ref and
+/// commit, including "already exists", stops before the dispatch.
+fn consume_start(provider: &dyn Provider, tag: &str, commit: &str) -> Result<()> {
+    require(
+        !tag.is_empty()
+            && tag
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_'),
+        "dispatch tag name is outside the marker contract",
+    )?;
+    let marker = consumption_ref(tag);
+    let (status, body) = provider.create_ref(&marker, commit)?;
+    require_integrity(
+        status == 201,
+        "consumption marker is not confirmed HTTP 201: the start is consumed or the outcome is unknown; nothing was dispatched",
+    )?;
+    let created: Value = serde_json::from_slice(&body).map_err(|_| Rejection {
+        kind: Kind::Integrity,
+        message: "consumption marker answer is not JSON".to_owned(),
+    })?;
+    require_integrity(
+        created["ref"] == marker.as_str() && created["object"]["sha"] == commit,
+        "consumption marker answer differs from the exact ref and commit",
+    )?;
+    let readback = provider.get(&format!(
+        "repos/{REPOSITORY}/git/ref/{}",
+        marker.trim_start_matches("refs/")
+    ))?;
+    require_integrity(
+        readback["ref"] == marker.as_str() && readback["object"]["sha"] == commit,
+        "consumption marker readback differs; nothing was dispatched",
     )
 }
 
@@ -154,6 +201,8 @@ pub fn dispatch(provider: &dyn Provider, request: &Request<'_>) -> Result<Vec<u8
     let (tag, commit) = tag_of(&claim)?;
 
     require_no_previous_dispatch(provider, &tag)?;
+    // Consume the start before the mutation; a second dispatcher stops here.
+    consume_start(provider, &tag, &commit)?;
     // The single mutation. No retry follows, whatever the answer.
     let (status, body) =
         provider.dispatch_workflow(NATIVE_FILE, &format!("refs/tags/{tag}"), &NATIVE_INPUTS)?;
