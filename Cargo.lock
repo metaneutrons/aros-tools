@@ -84,7 +84,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "aros-ahi-runner"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "aros-common",
  "clap",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "aros-board"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "aros-common",
  "aros-macos-disk-claim",
@@ -116,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "aros-cache"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "aros-common",
  "rustix",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "aros-cli"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "aros-board",
  "aros-cache",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "aros-cmake-engine"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "aros-common",
  "serde_json",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "aros-collect"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "anyhow",
  "aros-common",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "aros-common"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "anyhow",
  "clap",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "aros-fetch"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "aros-common",
  "bzip2",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "aros-genmodule"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "aros-common",
  "clap",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "aros-macos-disk-claim"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "objc2-core-foundation",
  "objc2-disk-arbitration",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "aros-release"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "aros-common",
  "clap",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "aros-romtool"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "anyhow",
  "aros-common",
@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "aros-toolchain"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "aros-cache",
  "aros-cmake-engine",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "aros-transpiler"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "aros-cmake-engine",
  "aros-common",
@@ -318,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "aros-verify"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "anyhow",
  "aros-cache",

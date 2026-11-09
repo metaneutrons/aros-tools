@@ -4,6 +4,18 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.14](https://github.com/metaneutrons/aros-tools/compare/v0.6.13...v0.6.14) (2026-11-09)
+
+
+### Features
+
+* **cli:** expose the dispatcher claim command through the aros runtime ([#541](https://github.com/metaneutrons/aros-tools/issues/541)) ([22ce51b](https://github.com/metaneutrons/aros-tools/commit/22ce51b0bc4e3d90c72c4a41467ba558d6bcf8eb))
+* **cli:** expose the protected dispatcher commands through the aros runtime ([#539](https://github.com/metaneutrons/aros-tools/issues/539)) ([58e9956](https://github.com/metaneutrons/aros-tools/commit/58e99568d6c944bdaa078221584b47649cc3ac2c))
+* **release:** add dispatcher controller commands for the protected V2 start ([#532](https://github.com/metaneutrons/aros-tools/issues/532)) ([c55c9ec](https://github.com/metaneutrons/aros-tools/commit/c55c9ec259886c32548fc305408354a0e784943d))
+* **release:** consume the start with an exclusive marker and add the claim upload ([#540](https://github.com/metaneutrons/aros-tools/issues/540)) ([6859d64](https://github.com/metaneutrons/aros-tools/commit/6859d640dd7203befe4f6ff250e05905dd739d63))
+* **release:** re-derive the runtime closure in the dispatcher verify-claim ([#534](https://github.com/metaneutrons/aros-tools/issues/534)) ([94f16bf](https://github.com/metaneutrons/aros-tools/commit/94f16bfab9a28df20aa4b80f0cc514d8bcaa8b80))
+* **release:** send the single native dispatch and emit the binding subject ([#535](https://github.com/metaneutrons/aros-tools/issues/535)) ([2a3636f](https://github.com/metaneutrons/aros-tools/commit/2a3636f30c8d7d748137587861e4fe4f45a5d810))
+
 ## [0.6.13](https://github.com/metaneutrons/aros-tools/compare/v0.6.12...v0.6.13) (2026-11-08)
 
 
