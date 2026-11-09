@@ -92,6 +92,19 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer compatibility` | evidence_dir | `--evidence-dir` | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | format | `--format` | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer compatibility-host-tools` | host | `--host` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | record | `--record` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | bundle | `--bundle` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | source_context | `--source-context` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | dispatcher_context | `--dispatcher-context` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | dispatcher_job | `--dispatcher-job` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | expected_record_sha256 | `--expected-record-sha256` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | expected_bundle_sha256 | `--expected-bundle-sha256` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | runtime_lock | `--runtime-lock` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | runtime_directory | `--runtime-directory` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | runtime_interface | `--runtime-interface` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | runtime_host | `--runtime-host` | — | required | 1 |  | linux-x86_64 | — |  |
+| `aros toolchain producer dispatcher-claim` | claim_output | `--claim-output` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-claim` | asset_output | `--asset-output` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer dispatcher-dispatch` | record | `--record` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer dispatcher-dispatch` | bundle | `--bundle` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer dispatcher-dispatch` | claim | `--claim` | — | required | 1 |  |  | — |  |
