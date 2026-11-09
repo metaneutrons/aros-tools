@@ -920,6 +920,24 @@ fn verify_claim_provider_and_signature_counterprobes() {
             "executable missing",
             Box::new(|w| std::fs::remove_file(w.path("runtime/bin/aros")).unwrap()),
         ),
+        (
+            "unlisted runtime file",
+            Box::new(|w| std::fs::write(w.path("runtime/extra"), b"x").unwrap()),
+        ),
+        (
+            "runtime data file changed",
+            Box::new(|w| std::fs::write(w.path("runtime/README.md"), b"changed").unwrap()),
+        ),
+        (
+            "receipt of another host",
+            Box::new(|w| {
+                let path = w.path("runtime/.aros-tools-runtime-receipt-v1.json");
+                let mut receipt: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                receipt["host"] = "linux-aarch64".into();
+                std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+            }),
+        ),
     ];
     for (label, probe) in probes {
         let world = World::new();

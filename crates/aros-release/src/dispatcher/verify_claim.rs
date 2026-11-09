@@ -9,11 +9,12 @@
 //! authority: the claim signature, the executing native run and the actual
 //! native identity are separate mandatory gates.
 //!
-//! Deviation from the oracle (documented in `docs`): the runtime evidence is
-//! joined to the signed start by byte pins (lock, receipt, interface and the
-//! `bin/aros` executable digest). Re-deriving the materialization itself
-//! (`RUNTIME.verify_extracted_frozen`) and the interface re-execution belong
-//! to aros-toolchains#114 and are reported as an explicit limitation.
+//! Runtime evidence: the lock, receipt, interface and `bin/aros` digest are
+//! joined to the signed start by byte pins, and the held runtime closure is
+//! re-derived from the lock and the signed manifest ([`super::runtime`], the
+//! port of `RUNTIME.verify_extracted_frozen`). Deviation from the oracle: the
+//! interface `checks` list is joined by its byte pin and not re-derived, and
+//! the interface is not re-executed.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ use super::observe::{
     select_source_job,
 };
 use super::provider::{Attestation, Provider};
+use super::runtime;
 use super::start::{self, JOB, WORKFLOW};
 use super::{integrity, require, require_integrity, Result, MAX_BUNDLE, MAX_RECORD, REPOSITORY};
 
@@ -38,7 +40,7 @@ pub const RUNTIME_RECEIPT: &str = ".aros-tools-runtime-receipt-v1.json";
 pub const HOSTS: [&str; 1] = ["linux-x86_64"];
 pub const LIMITATIONS: [&str; 4] = [
     "the claim signature, the executing native run and its actual identity remain separate gates",
-    "runtime materialization is joined by byte pins only; re-derivation belongs to aros-toolchains#114",
+    "the runtime closure is re-derived from the lock and manifest; the interface checks list is joined by byte pins only",
     "no upload, dispatch, publication or fan-out authority is granted",
     "provider observations are point-in-time, not an atomic snapshot",
 ];
@@ -166,13 +168,57 @@ fn runtime_evidence(record: &Value, request: &Request<'_>) -> Result<()> {
             && interface["runtime"]["sha256"] == selected["executable_sha256"],
         "start runtime interface schema, assurance or executable differs",
     )?;
-    let executable = request.runtime_directory.join("bin/aros");
-    let measured = aros_common::measure_regular_file_digest_bounded(&executable, 512 * 1024 * 1024);
+    // Re-derive the runtime evidence from the lock and the held closure: the
+    // lock, the signed manifest, the exact file set, every byte and mode and
+    // the materialization receipt (Python `verify_extracted_frozen`).
+    let lock = parse(&raw[0], "start runtime lock", MAX_RECORD)?;
+    runtime::validate_lock(&lock)?;
+    require(
+        lock["repository"] == runtime::RUNTIME_REPOSITORY,
+        "start runtime repository differs from the selected runtime",
+    )?;
+    let lock_sha256 = selected["lock_sha256"].as_str().unwrap_or_default();
+    let manifest = runtime::verify_extracted_frozen(
+        &lock,
+        lock_sha256,
+        request.runtime_host,
+        request.runtime_directory,
+    )?;
+    let materialization = parse(&raw[1], "start materialization receipt", MAX_RECORD)?;
+    let manifest_sha256 = lock["hosts"][request.runtime_host]["manifest"]["sha256"]
+        .as_str()
+        .unwrap_or_default();
     require_integrity(
-        measured.is_ok_and(|(_, result)| {
-            Some(result.digest.as_str()) == selected["executable_sha256"].as_str()
-        }),
-        "start executable digest differs from the selected runtime",
+        materialization
+            == runtime::receipt(
+                &lock,
+                request.runtime_host,
+                &manifest,
+                manifest_sha256,
+                lock_sha256,
+            ),
+        "start materialization receipt differs from the selected locked host",
+    )?;
+    let executable = manifest["files"]
+        .as_array()
+        .and_then(|files| files.iter().find(|file| file["path"] == "bin/aros"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    require_integrity(
+        executable["sha256"] == selected["executable_sha256"],
+        "start executable digest differs from the locked manifest",
+    )?;
+    let observed = &interface["runtime"];
+    require_integrity(
+        observed["version"] == lock["version"]
+            && observed["file_identity"]["size"] == executable["size"]
+            && observed["file_identity"]["mode"]
+                .as_u64()
+                .zip(executable["mode"].as_str())
+                .is_some_and(|(mode, locked)| {
+                    u64::from_str_radix(locked, 8).is_ok_and(|expected| mode & 0o777 == expected)
+                }),
+        "start runtime interface version or executable identity differs from the locked manifest",
     )
 }
 

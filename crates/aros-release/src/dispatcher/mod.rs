@@ -25,6 +25,7 @@ pub mod files;
 pub mod json;
 pub mod observe;
 pub mod provider;
+pub mod runtime;
 pub mod select;
 pub mod start;
 pub mod verify_binding;
@@ -35,6 +36,8 @@ pub mod zip_reader;
 mod command_tests;
 #[cfg(test)]
 mod oracle_tests;
+#[cfg(test)]
+mod runtime_tests;
 #[cfg(test)]
 pub(crate) mod testing;
 
