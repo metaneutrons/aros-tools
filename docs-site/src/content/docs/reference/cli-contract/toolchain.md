@@ -100,6 +100,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer dispatcher-dispatch` | source_context | `--source-context` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer dispatcher-dispatch` | dispatcher_context | `--dispatcher-context` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer dispatcher-dispatch` | dispatcher_job | `--dispatcher-job` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-dispatch` | output | `--output` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer dispatcher-select` | output_dir | `--output-dir` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer dispatcher-verify-binding` | binding | `--binding` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer dispatcher-verify-binding` | signature | `--signature` | — | required | 1 |  |  | — |  |
