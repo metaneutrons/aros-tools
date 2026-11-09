@@ -69,6 +69,18 @@ pub trait Provider {
     ///
     /// Rejects on any failure or a status other than 200; never retried.
     fn download_asset(&self, asset_id: u64, limit: usize) -> Result<Vec<u8>>;
+    /// The single native `workflow_dispatch` of the fixed repository with
+    /// `return_run_details`. Returns the HTTP status and the bounded body.
+    ///
+    /// # Errors
+    ///
+    /// Rejects on any transport failure or unknown result; never retried.
+    fn dispatch_workflow(
+        &self,
+        workflow_file: &str,
+        git_ref: &str,
+        inputs: &[(&str, &str)],
+    ) -> Result<(u16, Vec<u8>)>;
     /// Check ID of the executing job, read from the authenticated runner OIDC
     /// issuer (never from a caller-supplied token).
     ///
@@ -323,6 +335,48 @@ impl Provider for GhProvider {
             return integrity("selected claim readback is not bounded HTTP 200; no retry");
         }
         Ok(body)
+    }
+
+    fn dispatch_workflow(
+        &self,
+        workflow_file: &str,
+        git_ref: &str,
+        inputs: &[(&str, &str)],
+    ) -> Result<(u16, Vec<u8>)> {
+        require(
+            !workflow_file.is_empty()
+                && !workflow_file.contains('/')
+                && git_ref.starts_with("refs/tags/")
+                && !git_ref.contains(".."),
+            "native dispatch selection is outside the closed contract",
+        )?;
+        let endpoint = format!("repos/{REPOSITORY}/actions/workflows/{workflow_file}/dispatches");
+        require_fixed_path(&endpoint)?;
+        let mut arguments: Vec<String> = [
+            "api",
+            "--hostname",
+            "github.com",
+            "--method",
+            "POST",
+            "--include",
+            endpoint.as_str(),
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28",
+            "-f",
+        ]
+        .iter()
+        .map(|part| (*part).to_owned())
+        .collect();
+        arguments.push(format!("ref={git_ref}"));
+        for (name, value) in inputs {
+            arguments.push("-f".to_owned());
+            arguments.push(format!("inputs[{name}]={value}"));
+        }
+        arguments.push("-F".to_owned());
+        arguments.push("return_run_details=true".to_owned());
+        let argv: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let raw = Self::run(&argv, 16 * 1024 + MAX_HEADERS, "native workflow dispatch")?;
+        included_response(&raw)
     }
 
     fn oidc_check_id(&self, _context: &Value, _expected_event: &str) -> Result<u64> {
