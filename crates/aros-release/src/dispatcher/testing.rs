@@ -13,7 +13,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -178,6 +178,94 @@ pub fn zip_of(members: &[(&str, &[u8], bool)]) -> Vec<u8> {
     buffer.into_inner()
 }
 
+pub const RUNTIME_VERSION: &str = "0.9.9";
+
+/// Everything one locked runtime closure consists of.
+pub struct RuntimeFixture {
+    pub lock: Vec<u8>,
+    pub receipt: Vec<u8>,
+    pub executable: Vec<u8>,
+    pub manifest: Vec<u8>,
+}
+
+/// Write a complete, consistent runtime closure (lock bytes returned, the
+/// directory `runtime/` with every file, the manifest and the receipt).
+pub fn write_runtime(base: &Path) -> RuntimeFixture {
+    use std::os::unix::fs::PermissionsExt;
+    let root = base.join("runtime");
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    let executable = b"aros-executable".to_vec();
+    let target = "x86_64-unknown-linux-gnu";
+    let archive = format!("aros-tools-v{RUNTIME_VERSION}-{target}.tar.gz");
+    let mut files = Vec::new();
+    for (path, mode, _) in super::runtime::EXPECTED_FILES {
+        let content = if path == "bin/aros" {
+            executable.clone()
+        } else {
+            format!("content of {path}\n").into_bytes()
+        };
+        std::fs::write(root.join(path), &content).unwrap();
+        std::fs::set_permissions(
+            root.join(path),
+            std::fs::Permissions::from_mode(u32::from_str_radix(mode, 8).unwrap()),
+        )
+        .unwrap();
+        files.push(
+            json!({"path": path, "mode": mode, "sha256": sha256_hex(&content),
+                          "size": content.len()}),
+        );
+    }
+    let manifest = canonical_line(&json!({
+        "schema": 1, "package": "aros-tools", "version": RUNTIME_VERSION, "target": target,
+        "source_commit": "b".repeat(40), "source_date_epoch": 1_700_000_000,
+        "archive": archive, "archive_sha256": sha256_hex(b"archive"), "archive_size": 7,
+        "files": files}));
+    std::fs::write(root.join(super::runtime::MANIFEST_NAME), &manifest).unwrap();
+    let mut hosts = serde_json::Map::new();
+    for (host, target) in super::runtime::HOST_TARGETS {
+        let archive = format!("aros-tools-v{RUNTIME_VERSION}-{target}.tar.gz");
+        let asset = |name: String, bytes: &[u8]| json!({"sha256": sha256_hex(bytes), "size": bytes.len().max(1), "name": name});
+        let manifest_asset = if host == "linux-x86_64" {
+            asset(format!("{archive}.manifest.json"), &manifest)
+        } else {
+            asset(format!("{archive}.manifest.json"), host.as_bytes())
+        };
+        hosts.insert(host.to_owned(), json!({
+            "target": target,
+            "archive": {"name": archive, "sha256": sha256_hex(b"archive"), "size": 7},
+            "manifest": manifest_asset,
+            "archive_bundle": asset(format!("{archive}.sigstore.json"), format!("a{host}").as_bytes()),
+            "manifest_bundle": asset(format!("{archive}.manifest.json.sigstore.json"),
+                                     format!("m{host}").as_bytes())}));
+    }
+    let lock_value = json!({
+        "schema": "aros-tools-runtime-v1", "repository": "metaneutrons/aros-tools",
+        "release_id": 1, "version": RUNTIME_VERSION, "tag": format!("v{RUNTIME_VERSION}"),
+        "tag_object": "c".repeat(40), "source_commit": "b".repeat(40),
+        "source_tree": "d".repeat(40), "source_date_epoch": 1_700_000_000,
+        "signer_workflow": "metaneutrons/aros-tools/.github/workflows/release.yml",
+        "certificate_identity": format!(
+            "https://github.com/metaneutrons/aros-tools/.github/workflows/release.yml@refs/tags/v{RUNTIME_VERSION}"),
+        "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+        "hosts": hosts});
+    let lock = canonical_line(&lock_value);
+    let manifest_value: Value = serde_json::from_slice(&manifest).unwrap();
+    let receipt = canonical_line(&super::runtime::receipt(
+        &lock_value,
+        "linux-x86_64",
+        &manifest_value,
+        &sha256_hex(&manifest),
+        &sha256_hex(&lock),
+    ));
+    std::fs::write(root.join(super::runtime::RECEIPT_NAME), &receipt).unwrap();
+    RuntimeFixture {
+        lock,
+        receipt,
+        executable,
+        manifest,
+    }
+}
+
 /// One consistent world: start run, dispatcher run, candidate and runtime.
 pub struct World {
     pub fake: Fake,
@@ -222,23 +310,21 @@ impl World {
             "source_ref": "refs/heads/main", "workflow": DISPATCH_WORKFLOW, "run_id": 2000, "run_attempt": 1});
         let job = json!({"id": 21, "check_run_id": 22, "name": DISPATCH_JOB});
 
-        // Runtime evidence: real files whose digests the signed start pins.
-        std::fs::create_dir_all(base.join("runtime/bin")).unwrap();
-        let lock = b"{\"lock\":1}\n".to_vec();
-        let receipt = b"{\"receipt\":1}\n".to_vec();
-        let executable = b"aros-executable".to_vec();
+        // Runtime evidence: a real locked closure whose digests the signed start pins.
+        let runtime = write_runtime(&base);
+        let lock = runtime.lock.clone();
+        let receipt = runtime.receipt.clone();
+        let executable = runtime.executable;
         let interface = canonical_line(&json!({
             "schema": "aros-tools-runtime-interface-preflight-v1",
             "assurance": "interface-only-exact-selected-binary",
-            "runtime": {"sha256": sha256_hex(&executable)}}));
+            "runtime": {"path": base.join("runtime/bin/aros").display().to_string(),
+                        "sha256": sha256_hex(&executable), "version": RUNTIME_VERSION,
+                        "execution_binding": "held-file-descriptor",
+                        "file_identity": {"device": 1, "inode": 1, "mode": 0o755,
+                                          "size": executable.len(), "mtime_ns": 1, "ctime_ns": 1}}}));
         std::fs::write(base.join("lock.json"), &lock).unwrap();
-        std::fs::write(
-            base.join("runtime/.aros-tools-runtime-receipt-v1.json"),
-            &receipt,
-        )
-        .unwrap();
         std::fs::write(base.join("interface.json"), &interface).unwrap();
-        std::fs::write(base.join("runtime/bin/aros"), &executable).unwrap();
 
         let mut inputs = serde_json::Map::new();
         let fake = Fake::default();
