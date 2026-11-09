@@ -459,6 +459,14 @@ fn select_transport_counterprobes() {
         fn download_asset(&self, i: u64, l: usize) -> super::Result<Vec<u8>> {
             self.inner.download_asset(i, l)
         }
+        fn dispatch_workflow(
+            &self,
+            f: &str,
+            r: &str,
+            i: &[(&str, &str)],
+        ) -> super::Result<(u16, Vec<u8>)> {
+            self.inner.dispatch_workflow(f, r, i)
+        }
         fn oidc_check_id(&self, c: &Value, e: &str) -> super::Result<u64> {
             self.inner.oidc_check_id(c, e)
         }
@@ -957,59 +965,298 @@ fn verify_claim_provider_and_signature_counterprobes() {
 
 // -------------------------------------------------------------- dispatch ---
 
-#[test]
-fn dispatch_validates_its_contract_then_refuses_without_a_provider() {
-    let world = World::new();
-    let request = |claim: &'static [u8],
-                   asset: &'static Value,
-                   pin: &'static str,
-                   ctx: &'static Value| dispatch::Request {
-        claim_raw: claim,
-        record_bytes: Box::leak(world.record_bytes.clone().into_boxed_slice()),
-        start_bundle_bytes: Box::leak(world.bundle.clone().into_boxed_slice()),
-        source_context: ctx,
-        dispatcher_context: Box::leak(Box::new(world.dispatcher.clone())),
-        dispatcher_job: Box::leak(Box::new(world.job.clone())),
-        claim_asset: asset,
-        claim_bundle_sha256: pin,
-    };
-    let claim: &'static [u8] = Box::leak(world.claim.clone().into_boxed_slice());
-    let asset: &'static Value = Box::leak(Box::new(
-        json!({"id": 41, "name": CLAIM_NAME, "size": world.claim.len(), "sha256": sha256_hex(&world.claim)}),
-    ));
-    let pin: &'static str = Box::leak(sha256_hex(b"sig").into_boxed_str());
-    let source: &'static Value = Box::leak(Box::new(world.source.clone()));
+const NATIVE_RUN: u64 = 3000;
 
-    // A valid contract ends in the documented refusal, never in a result.
-    let refused = dispatch::dispatch(&request(claim, asset, pin, source)).unwrap_err();
-    assert_eq!(refused.message, dispatch::NOT_IMPLEMENTED);
-    assert_eq!(refused.kind, Kind::Contract);
-    // Contract violations are told apart from the not-implemented refusal.
-    let bad_claim: &'static [u8] = Box::leak(b"{}\n".to_vec().into_boxed_slice());
-    let bad_asset: &'static Value = Box::leak(Box::new(
-        json!({"id": 41, "name": CLAIM_NAME, "size": 1, "sha256": sha256_hex(&world.claim)}),
-    ));
-    let foreign: &'static Value = Box::leak(Box::new({
-        let mut c = world.source.clone();
-        c["run_id"] = 1001.into();
-        c
-    }));
-    for (label, request) in [
-        ("claim bytes", request(bad_claim, asset, pin, source)),
-        ("asset size", request(claim, bad_asset, pin, source)),
-        (
-            "signature pin",
-            request(claim, asset, "NOT-A-DIGEST", source),
-        ),
-        ("source context", request(claim, asset, pin, foreign)),
-    ] {
-        let error = dispatch::dispatch(&request_ref(request)).unwrap_err();
-        assert_ne!(error.message, dispatch::NOT_IMPLEMENTED, "{label}");
+fn native_list() -> String {
+    format!(
+        "{API_PATH}/actions/workflows/toolchain-release.yml/runs?event=workflow_dispatch&branch=v2.0.0&per_page=100"
+    )
+}
+
+fn native_run_row() -> Value {
+    json!({"id": NATIVE_RUN, "run_attempt": 1, "event": "workflow_dispatch",
+           "head_sha": COMMIT, "head_branch": "v2.0.0",
+           "path": ".github/workflows/toolchain-release.yml@refs/tags/v2.0.0",
+           "repository": {"id": 4242, "full_name": REPO},
+           "head_repository": {"id": 4242, "full_name": REPO}})
+}
+
+fn confirmed_answer() -> (u16, Vec<u8>) {
+    let body = json!({
+        "workflow_run_id": NATIVE_RUN,
+        "run_url": format!("https://api.github.com/{API_PATH}/actions/runs/{NATIVE_RUN}"),
+        "html_url": format!("https://github.com/{REPO}/actions/runs/{NATIVE_RUN}"),
+    });
+    (200, serde_json::to_vec(&body).unwrap())
+}
+
+/// A world whose provider answers every observation of one clean dispatch.
+fn dispatch_world() -> World {
+    let world = World::new();
+    world.fake.set(
+        &native_list(),
+        json!({"total_count": 0, "workflow_runs": []}),
+    );
+    world.fake.set(&runs(NATIVE_RUN), native_run_row());
+    *world.fake.dispatch_answer.borrow_mut() = Some(confirmed_answer());
+    world
+}
+
+struct Fixture {
+    claim: Vec<u8>,
+    record: Vec<u8>,
+    bundle: Vec<u8>,
+    asset: Value,
+    pin: String,
+}
+
+fn fixture(world: &World) -> Fixture {
+    Fixture {
+        claim: world.claim.clone(),
+        record: world.record_bytes.clone(),
+        bundle: world.bundle.clone(),
+        asset: json!({"id": 41, "name": CLAIM_NAME, "size": world.claim.len(),
+                      "sha256": sha256_hex(&world.claim)}),
+        pin: sha256_hex(b"sig"),
     }
 }
 
-fn request_ref(request: dispatch::Request<'_>) -> dispatch::Request<'_> {
-    request
+fn request<'a>(world: &'a World, f: &'a Fixture, source: &'a Value) -> dispatch::Request<'a> {
+    dispatch::Request {
+        claim_raw: &f.claim,
+        record_bytes: &f.record,
+        start_bundle_bytes: &f.bundle,
+        source_context: source,
+        dispatcher_context: &world.dispatcher,
+        dispatcher_job: &world.job,
+        claim_asset: &f.asset,
+        claim_bundle_sha256: &f.pin,
+    }
+}
+
+#[test]
+fn dispatch_sends_exactly_one_native_dispatch_and_returns_the_binding_subject() {
+    let world = dispatch_world();
+    let f = fixture(&world);
+    let subject = dispatch::dispatch(&world.fake, &request(&world, &f, &world.source)).unwrap();
+    let dispatches = world.fake.dispatches.borrow();
+    assert_eq!(dispatches.len(), 1, "one single mutation");
+    assert_eq!(dispatches[0].0, "toolchain-release.yml");
+    assert_eq!(dispatches[0].1, "refs/tags/v2.0.0");
+    assert_eq!(
+        dispatches[0].2,
+        vec![
+            ("mode".to_owned(), "release-v2".to_owned()),
+            ("scope".to_owned(), "full".to_owned()),
+            ("diagnostic_group".to_owned(), String::new()),
+        ]
+    );
+    // The subject is the canonical binding of the observed native run.
+    let value: Value = serde_json::from_slice(&subject).unwrap();
+    assert_eq!(value["name"], BINDING_NAME);
+    assert_eq!(value["native"]["context"]["run_id"], NATIVE_RUN);
+    assert_eq!(value["native"]["event"], "workflow_dispatch");
+    assert_eq!(value["native"]["context"]["source_ref"], "refs/tags/v2.0.0");
+}
+
+#[test]
+fn dispatch_contract_violations_never_reach_the_provider() {
+    let world = dispatch_world();
+    let good = fixture(&world);
+    let mut bad_claim = fixture(&world);
+    bad_claim.claim = b"{}\n".to_vec();
+    let mut bad_asset = fixture(&world);
+    bad_asset.asset["size"] = 1.into();
+    let mut renamed_asset = fixture(&world);
+    renamed_asset.asset["name"] = "other.json".into();
+    let mut bad_pin = fixture(&world);
+    bad_pin.pin = "NOT-A-DIGEST".to_owned();
+    let mut foreign = world.source.clone();
+    foreign["run_id"] = 1001.into();
+    for (label, f, source) in [
+        ("claim bytes", &bad_claim, &world.source),
+        ("asset size", &bad_asset, &world.source),
+        ("asset name", &renamed_asset, &world.source),
+        ("signature pin", &bad_pin, &world.source),
+        ("source context", &good, &foreign),
+    ] {
+        let error = dispatch::dispatch(&world.fake, &request(&world, f, source)).unwrap_err();
+        assert!(!error.message.is_empty(), "{label}");
+        assert!(
+            world.fake.dispatches.borrow().is_empty(),
+            "{label}: no mutation"
+        );
+        assert!(
+            !world
+                .fake
+                .log
+                .borrow()
+                .iter()
+                .any(|path| path.contains("dispatches")),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn dispatch_refuses_a_second_dispatch_before_any_mutation() {
+    for (label, listing) in [
+        (
+            "existing run",
+            json!({"total_count": 1, "workflow_runs": [native_run_row()]}),
+        ),
+        (
+            "uncertain total",
+            json!({"total_count": null, "workflow_runs": []}),
+        ),
+        ("missing runs", json!({"total_count": 0})),
+        (
+            "count without runs",
+            json!({"total_count": 2, "workflow_runs": []}),
+        ),
+    ] {
+        let world = dispatch_world();
+        world.fake.set(&native_list(), listing);
+        let f = fixture(&world);
+        let error =
+            dispatch::dispatch(&world.fake, &request(&world, &f, &world.source)).unwrap_err();
+        assert_eq!(error.kind, Kind::Integrity, "{label}");
+        assert!(
+            world.fake.dispatches.borrow().is_empty(),
+            "{label}: nothing dispatched"
+        );
+    }
+    // An unscripted listing is not absence.
+    let world = dispatch_world();
+    world.fake.gets.borrow_mut().remove(&native_list());
+    let f = fixture(&world);
+    assert!(dispatch::dispatch(&world.fake, &request(&world, &f, &world.source)).is_err());
+    assert!(world.fake.dispatches.borrow().is_empty());
+}
+
+#[test]
+fn dispatch_answers_other_than_a_confirmed_run_stop_after_one_attempt() {
+    let url = format!("https://api.github.com/{API_PATH}/actions/runs/{NATIVE_RUN}");
+    let html = format!("https://github.com/{REPO}/actions/runs/{NATIVE_RUN}");
+    let answers: Vec<(&str, Option<(u16, Vec<u8>)>)> = vec![
+        ("no content", Some((204, Vec::new()))),
+        ("unprocessable", Some((422, b"{}".to_vec()))),
+        ("server error", Some((500, b"{}".to_vec()))),
+        ("redirect", Some((302, Vec::new()))),
+        ("empty 200", Some((200, Vec::new()))),
+        ("not json", Some((200, b"not json".to_vec()))),
+        (
+            "extra field",
+            Some((
+                200,
+                serde_json::to_vec(&json!({"workflow_run_id": NATIVE_RUN,
+                "run_url": url, "html_url": html, "extra": 1}))
+                .unwrap(),
+            )),
+        ),
+        (
+            "other run url",
+            Some((
+                200,
+                serde_json::to_vec(&json!({"workflow_run_id": NATIVE_RUN,
+                "run_url": url.replace("3000", "3001"), "html_url": html}))
+                .unwrap(),
+            )),
+        ),
+        (
+            "boolean id",
+            Some((
+                200,
+                serde_json::to_vec(&json!({"workflow_run_id": true,
+                "run_url": url, "html_url": html}))
+                .unwrap(),
+            )),
+        ),
+        ("unbounded", Some((200, vec![b' '; 5000]))),
+        ("transport failure", None),
+    ];
+    for (label, answer) in answers {
+        let world = dispatch_world();
+        *world.fake.dispatch_answer.borrow_mut() = answer;
+        let f = fixture(&world);
+        assert!(
+            dispatch::dispatch(&world.fake, &request(&world, &f, &world.source)).is_err(),
+            "{label}"
+        );
+        assert_eq!(
+            world.fake.dispatches.borrow().len(),
+            1,
+            "{label}: exactly one attempt"
+        );
+        let reads = world
+            .fake
+            .log
+            .borrow()
+            .iter()
+            .filter(|p| p.ends_with(&format!("runs/{NATIVE_RUN}")))
+            .count();
+        assert_eq!(reads, 0, "{label}: no search for a convenient run");
+    }
+}
+
+#[test]
+fn dispatch_requires_the_named_run_to_be_the_claims_native_run() {
+    let probes: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        ("other run id", Box::new(|r| r["id"] = 3001.into())),
+        ("rerun", Box::new(|r| r["run_attempt"] = 2.into())),
+        ("push event", Box::new(|r| r["event"] = "push".into())),
+        (
+            "other commit",
+            Box::new(|r| r["head_sha"] = "f".repeat(40).into()),
+        ),
+        ("branch run", Box::new(|r| r["head_branch"] = "main".into())),
+        (
+            "other workflow",
+            Box::new(|r| r["path"] = ".github/workflows/other.yml".into()),
+        ),
+        (
+            "other ref in path",
+            Box::new(|r| {
+                r["path"] = ".github/workflows/toolchain-release.yml@refs/heads/main".into();
+            }),
+        ),
+        (
+            "other repository",
+            Box::new(|r| r["repository"]["full_name"] = "a/b".into()),
+        ),
+        (
+            "other repository id",
+            Box::new(|r| r["repository"]["id"] = 1.into()),
+        ),
+        (
+            "fork head",
+            Box::new(|r| r["head_repository"]["id"] = 2.into()),
+        ),
+    ];
+    for (label, mutate) in probes {
+        let world = dispatch_world();
+        let mut row = native_run_row();
+        mutate(&mut row);
+        world.fake.set(&runs(NATIVE_RUN), row);
+        let f = fixture(&world);
+        assert!(
+            dispatch::dispatch(&world.fake, &request(&world, &f, &world.source)).is_err(),
+            "{label}"
+        );
+        assert_eq!(
+            world.fake.dispatches.borrow().len(),
+            1,
+            "{label}: never retried"
+        );
+    }
+    // The run changing between the readback and the returned subject is refused.
+    let world = dispatch_world();
+    let mut changed = native_run_row();
+    changed["head_sha"] = "e".repeat(40).into();
+    world.fake.change_after(&runs(NATIVE_RUN), 1, changed);
+    let f = fixture(&world);
+    assert!(dispatch::dispatch(&world.fake, &request(&world, &f, &world.source)).is_err());
+    assert_eq!(world.fake.dispatches.borrow().len(), 1);
 }
 
 // -------------------------------------------------------- verify-binding ---
