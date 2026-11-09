@@ -90,6 +90,7 @@ impl ProducerArgs {
             ProducerCommand::VerifyQualification(_) => "toolchain.producer.verify-qualification",
             ProducerCommand::VerifyRecovery(_) => "toolchain.producer.verify-recovery",
             ProducerCommand::DispatcherSelect(_) => "toolchain.producer.dispatcher-select",
+            ProducerCommand::DispatcherClaim(_) => "toolchain.producer.dispatcher-claim",
             ProducerCommand::DispatcherVerifyClaim(_) => {
                 "toolchain.producer.dispatcher-verify-claim"
             }
@@ -147,6 +148,8 @@ enum ProducerCommand {
     VerifyRecovery(Box<recovery_family::RecoveryArgs>),
     /// Select the sealed start transport for the protected dispatcher; read-only, no authority
     DispatcherSelect(aros_release::dispatcher::cli::SelectArgs),
+    /// Upload the canonical claim once to the exact empty private draft; one attempt, never retried
+    DispatcherClaim(Box<aros_release::dispatcher::cli::ClaimArgs>),
     /// Verify the signed start in the claim phase after the sole claim asset exists; read-only
     DispatcherVerifyClaim(Box<aros_release::dispatcher::cli::VerifyClaimArgs>),
     /// Send the single native dispatch at the immutable tag ref and write its binding subject
@@ -734,6 +737,9 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::VerifyRecovery(args) => recovery_family::run(&args),
         ProducerCommand::DispatcherSelect(args) => run_dispatcher(
             &aros_release::dispatcher::cli::DispatcherCommand::Select(args),
+        ),
+        ProducerCommand::DispatcherClaim(args) => run_dispatcher(
+            &aros_release::dispatcher::cli::DispatcherCommand::Claim(*args),
         ),
         ProducerCommand::DispatcherVerifyClaim(args) => {
             run_dispatcher(&aros_release::dispatcher::cli::DispatcherCommand::VerifyClaim(*args))

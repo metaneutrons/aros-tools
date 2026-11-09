@@ -224,6 +224,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros toolchain producer verify-qualification` | Bind complete family-v2 qualification claims to all measured release evidence; byte consistency only, not signature or execution authentication |
 | `aros toolchain producer verify-recovery` | Reacquire complete family-v2 qualification and check recovery observations; read-only, no authentication or recovery execution |
 | `aros toolchain producer dispatcher-select` | Select the sealed start transport for the protected dispatcher from independently observed provider state; read-only, no authority |
+| `aros toolchain producer dispatcher-claim` | Authenticate the signed start, then upload the canonical claim once as the sole asset of the exact empty private draft; one attempt, never retried or replaced |
 | `aros toolchain producer dispatcher-verify-claim` | Verify the signed start while exactly one selected claim asset exists on the private draft; read-only, not native or dispatch authority |
 | `aros toolchain producer dispatcher-dispatch` | Send the one native dispatch at the immutable tag ref and write its binding subject; never retried, one attempt only |
 | `aros toolchain producer dispatcher-verify-binding` | Authenticate the dispatcher's signature of a native-run binding; read-only, not consumption or qualification |
@@ -312,11 +313,12 @@ and comparison failures are ineligible. The protected workflow must authenticate
 these observations. The command executes no recovery; historical
 `prepare-recovery` and `validate-recovery` remain V1-only.
 
-The four `producer dispatcher-*` commands belong to the protected release
+The five `producer dispatcher-*` commands belong to the protected release
 dispatcher of the V2 chain and run against the live GitHub provider with the job
 token. `dispatcher-select`, `dispatcher-verify-claim` and
-`dispatcher-verify-binding` only read. `dispatcher-dispatch` makes the single
-native `workflow_dispatch` and is attempted once; an unconfirmed or unknown
+`dispatcher-verify-binding` only read. `dispatcher-claim` uploads the claim once.
+`dispatcher-dispatch` first creates the exclusive consumption marker and then
+makes the single native `workflow_dispatch`; each is attempted once; an unconfirmed or unknown
 answer stops without a retry. Each command writes only to an exclusive file
 below a mode-0700 directory and states what it does not authenticate.
 

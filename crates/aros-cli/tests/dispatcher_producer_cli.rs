@@ -14,8 +14,9 @@ fn aros() -> Command {
     command
 }
 
-const LEAVES: [&str; 4] = [
+const LEAVES: [&str; 5] = [
     "dispatcher-select",
+    "dispatcher-claim",
     "dispatcher-verify-claim",
     "dispatcher-dispatch",
     "dispatcher-verify-binding",
