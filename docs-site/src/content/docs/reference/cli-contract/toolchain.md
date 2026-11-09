@@ -92,6 +92,45 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer compatibility` | evidence_dir | `--evidence-dir` | — | optional | 1 |  |  | — |  |
 | `aros toolchain producer compatibility` | format | `--format` | — | optional | 1 | human | human, json | — |  |
 | `aros toolchain producer compatibility-host-tools` | host | `--host` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-dispatch` | record | `--record` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-dispatch` | bundle | `--bundle` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-dispatch` | claim | `--claim` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-dispatch` | claim_asset | `--claim-asset` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-dispatch` | claim_bundle_sha256 | `--claim-bundle-sha256` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-dispatch` | source_context | `--source-context` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-dispatch` | dispatcher_context | `--dispatcher-context` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-dispatch` | dispatcher_job | `--dispatcher-job` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-select` | output_dir | `--output-dir` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | binding | `--binding` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | signature | `--signature` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | expected_binding_sha256 | `--expected-binding-sha256` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | expected_signature_sha256 | `--expected-signature-sha256` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | record | `--record` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | bundle | `--bundle` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | claim | `--claim` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | claim_asset | `--claim-asset` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | claim_bundle_sha256 | `--claim-bundle-sha256` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | source_context | `--source-context` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | dispatcher_context | `--dispatcher-context` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | dispatcher_job | `--dispatcher-job` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | native_context | `--native-context` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | native_event | `--native-event` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-binding` | output | `--output` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | record | `--record` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | bundle | `--bundle` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | claim | `--claim` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | claim_asset_id | `--claim-asset-id` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | source_context | `--source-context` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | dispatcher_context | `--dispatcher-context` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | dispatcher_job | `--dispatcher-job` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | expected_record_sha256 | `--expected-record-sha256` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | expected_bundle_sha256 | `--expected-bundle-sha256` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | expected_claim_sha256 | `--expected-claim-sha256` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | runtime_lock | `--runtime-lock` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | runtime_directory | `--runtime-directory` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | runtime_interface | `--runtime-interface` | — | required | 1 |  |  | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | runtime_host | `--runtime-host` | — | required | 1 |  | linux-x86_64 | — |  |
+| `aros toolchain producer dispatcher-verify-claim` | output | `--output` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer environment` | host | `--host` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer environment` | output | `--output` | — | required | 1 |  |  | — |  |
 | `aros toolchain producer environment` | format | `--format` | — | optional | 1 | human | human, json | — |  |
