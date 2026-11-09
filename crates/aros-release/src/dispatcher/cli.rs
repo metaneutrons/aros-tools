@@ -28,11 +28,13 @@ pub enum DispatcherCommand {
     /// Authenticates the signed start and the exact numeric claim readback in
     /// the claim phase. It is not native or dispatch authority.
     VerifyClaim(VerifyClaimArgs),
-    /// The single native dispatch (not implemented here, see aros-toolchains#115)
+    /// The single native dispatch at the immutable tag ref (aros-toolchains#115)
     ///
-    /// Validates its closed input contract and then refuses without contacting
-    /// any provider. The HTTP dispatch, binding and once-only consumption
-    /// follow in aros-toolchains#115.
+    /// Validates the closed input contract, refuses when a native dispatch
+    /// already exists for the tag, sends exactly one `workflow_dispatch`, reads
+    /// the named run back and writes the canonical binding subject for the
+    /// dispatcher to attest. Never retries. Durable once-only consumption is
+    /// not established by this command.
     Dispatch(DispatchArgs),
     /// Authenticate the original dispatcher's signature of a native-run binding
     ///
@@ -124,6 +126,9 @@ pub struct DispatchArgs {
     pub claim_bundle_sha256: String,
     #[command(flatten)]
     pub contexts: ContextFiles,
+    /// Exclusive canonical binding subject output (parent must be mode 0700)
+    #[arg(long)]
+    pub output: PathBuf,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -198,7 +203,7 @@ pub fn run_with(command: &DispatcherCommand, provider: &dyn Provider) -> Release
     match command {
         DispatcherCommand::Select(args) => run_select(args, provider),
         DispatcherCommand::VerifyClaim(args) => run_verify_claim(args, provider),
-        DispatcherCommand::Dispatch(args) => run_dispatch(args),
+        DispatcherCommand::Dispatch(args) => run_dispatch(args, provider),
         DispatcherCommand::VerifyBinding(args) => run_verify_binding(args, provider),
     }
     .map_err(Into::into)
@@ -253,7 +258,11 @@ fn run_verify_claim(args: &VerifyClaimArgs, provider: &dyn Provider) -> super::R
     )
 }
 
-fn run_dispatch(args: &DispatchArgs) -> super::Result<()> {
+fn run_dispatch(args: &DispatchArgs, provider: &dyn Provider) -> super::Result<()> {
+    // Output path checks come before the mutation.
+    let output = files::absolute(&args.output)?;
+    files::require_absent(&output)?;
+    files::require_private_parent(&output)?;
     let source = json_file(
         &args.contexts.source_context,
         "independently selected source context",
@@ -264,17 +273,20 @@ fn run_dispatch(args: &DispatchArgs) -> super::Result<()> {
     let claim = bytes(&args.claim, "selected claim", MAX_RECORD)?;
     let record = bytes(&args.record, "selected start record", MAX_RECORD)?;
     let bundle = bytes(&args.bundle, "selected start bundle", MAX_BUNDLE)?;
-    dispatch::dispatch(&dispatch::Request {
-        claim_raw: &claim,
-        record_bytes: &record,
-        start_bundle_bytes: &bundle,
-        source_context: &source,
-        dispatcher_context: &dispatcher,
-        dispatcher_job: &job,
-        claim_asset: &asset,
-        claim_bundle_sha256: &args.claim_bundle_sha256,
-    })
-    .map(|never| match never {})
+    let subject = dispatch::dispatch(
+        provider,
+        &dispatch::Request {
+            claim_raw: &claim,
+            record_bytes: &record,
+            start_bundle_bytes: &bundle,
+            source_context: &source,
+            dispatcher_context: &dispatcher,
+            dispatcher_job: &job,
+            claim_asset: &asset,
+            claim_bundle_sha256: &args.claim_bundle_sha256,
+        },
+    )?;
+    files::write_exclusive(&output, &subject, "dispatch binding subject")
 }
 
 fn run_verify_binding(args: &VerifyBindingArgs, provider: &dyn Provider) -> super::Result<()> {

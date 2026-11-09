@@ -47,6 +47,8 @@ pub struct Fake {
     pub check_id_queue: RefCell<Vec<u64>>,
     pub attestation: RefCell<Option<Value>>,
     pub attested: RefCell<Vec<(String, Vec<u8>, Vec<u8>)>>,
+    pub dispatches: RefCell<Vec<(String, String, Vec<(String, String)>)>>,
+    pub dispatch_answer: RefCell<Option<(u16, Vec<u8>)>>,
 }
 
 impl Fake {
@@ -121,6 +123,26 @@ impl Provider for Fake {
             return integrity("asset exceeds its bound");
         }
         Ok(bytes)
+    }
+
+    fn dispatch_workflow(
+        &self,
+        workflow_file: &str,
+        git_ref: &str,
+        inputs: &[(&str, &str)],
+    ) -> Result<(u16, Vec<u8>)> {
+        self.dispatches.borrow_mut().push((
+            workflow_file.to_owned(),
+            git_ref.to_owned(),
+            inputs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+        ));
+        self.dispatch_answer
+            .borrow()
+            .clone()
+            .map_or_else(|| integrity("no scripted dispatch answer"), Ok)
     }
 
     fn oidc_check_id(&self, _: &Value, _: &str) -> Result<u64> {

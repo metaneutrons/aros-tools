@@ -32,7 +32,7 @@ fn every_dispatcher_command_has_help_text() {
         .args(["dispatcher", "dispatch", "--help"])
         .output()
         .unwrap();
-    assert!(String::from_utf8_lossy(&dispatch.stdout).contains("aros-toolchains#115"));
+    assert!(String::from_utf8_lossy(&dispatch.stdout).contains("exactly one"));
 }
 
 #[test]
@@ -66,6 +66,9 @@ fn select_refuses_a_non_private_output_directory_before_any_provider_call() {
 fn dispatch_refuses_missing_inputs_and_unknown_arguments() {
     let output = release().args(["dispatcher", "dispatch"]).output().unwrap();
     assert!(!output.status.success());
+    let private = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output_path = private.path().join("binding.json");
     let missing = release()
         .args([
             "dispatcher",
@@ -86,6 +89,8 @@ fn dispatch_refuses_missing_inputs_and_unknown_arguments() {
             "/nonexistent/f",
             "--dispatcher-job",
             "/nonexistent/g",
+            "--output",
+            output_path.to_str().unwrap(),
         ])
         .output()
         .unwrap();
