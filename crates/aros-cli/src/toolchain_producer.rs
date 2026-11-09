@@ -89,6 +89,14 @@ impl ProducerArgs {
             ProducerCommand::ReleasePlan(_) => "toolchain.producer.release-plan",
             ProducerCommand::VerifyQualification(_) => "toolchain.producer.verify-qualification",
             ProducerCommand::VerifyRecovery(_) => "toolchain.producer.verify-recovery",
+            ProducerCommand::DispatcherSelect(_) => "toolchain.producer.dispatcher-select",
+            ProducerCommand::DispatcherVerifyClaim(_) => {
+                "toolchain.producer.dispatcher-verify-claim"
+            }
+            ProducerCommand::DispatcherDispatch(_) => "toolchain.producer.dispatcher-dispatch",
+            ProducerCommand::DispatcherVerifyBinding(_) => {
+                "toolchain.producer.dispatcher-verify-binding"
+            }
         }
     }
 }
@@ -137,6 +145,14 @@ enum ProducerCommand {
     VerifyQualification(Box<qualification_bytes::QualificationArgs>),
     /// Reacquire complete family-v2 recovery bytes and check external observations; no authentication or mutation
     VerifyRecovery(Box<recovery_family::RecoveryArgs>),
+    /// Select the sealed start transport for the protected dispatcher; read-only, no authority
+    DispatcherSelect(aros_release::dispatcher::cli::SelectArgs),
+    /// Verify the signed start in the claim phase after the sole claim asset exists; read-only
+    DispatcherVerifyClaim(Box<aros_release::dispatcher::cli::VerifyClaimArgs>),
+    /// Send the single native dispatch at the immutable tag ref and write its binding subject
+    DispatcherDispatch(aros_release::dispatcher::cli::DispatchArgs),
+    /// Authenticate the dispatcher's signature of a native-run binding; read-only
+    DispatcherVerifyBinding(Box<aros_release::dispatcher::cli::VerifyBindingArgs>),
 }
 
 /// Machine- or human-readable local stage result.
@@ -716,7 +732,26 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::ReleasePlan(args) => release_plan::run(&args),
         ProducerCommand::VerifyQualification(args) => qualification_bytes::run(&args),
         ProducerCommand::VerifyRecovery(args) => recovery_family::run(&args),
+        ProducerCommand::DispatcherSelect(args) => run_dispatcher(
+            &aros_release::dispatcher::cli::DispatcherCommand::Select(args),
+        ),
+        ProducerCommand::DispatcherVerifyClaim(args) => {
+            run_dispatcher(&aros_release::dispatcher::cli::DispatcherCommand::VerifyClaim(*args))
+        }
+        ProducerCommand::DispatcherDispatch(args) => run_dispatcher(
+            &aros_release::dispatcher::cli::DispatcherCommand::Dispatch(args),
+        ),
+        ProducerCommand::DispatcherVerifyBinding(args) => {
+            run_dispatcher(&aros_release::dispatcher::cli::DispatcherCommand::VerifyBinding(*args))
+        }
     }
+}
+
+/// Run one protected-dispatcher command against the live provider.
+fn run_dispatcher(
+    command: &aros_release::dispatcher::cli::DispatcherCommand,
+) -> miette::Result<()> {
+    aros_release::dispatcher::cli::run(command).map_err(|error| miette::miette!("{error}"))
 }
 
 fn compatibility_host_tools(host: &str) -> miette::Result<()> {
