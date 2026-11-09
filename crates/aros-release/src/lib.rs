@@ -2,6 +2,7 @@
 
 pub mod archive;
 pub mod contract;
+pub mod dispatcher;
 pub mod ecosystem;
 pub mod install;
 pub mod observability;

@@ -36,6 +36,9 @@ pub enum Command {
     Generate(GenerateArgs),
     /// Install one verified native suite without replacing existing programs
     Install(InstallArgs),
+    /// Inactive dispatcher controller of the protected V2 release start
+    #[command(subcommand)]
+    Dispatcher(Box<crate::dispatcher::cli::DispatcherCommand>),
 }
 
 #[derive(Debug, Clone, Args)]
