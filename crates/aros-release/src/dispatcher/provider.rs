@@ -81,6 +81,21 @@ pub trait Provider {
         git_ref: &str,
         inputs: &[(&str, &str)],
     ) -> Result<(u16, Vec<u8>)>;
+    /// Create one new Git ref of the fixed repository (`POST git/refs`).
+    /// Used only for the exclusive consumption marker: a second creation of
+    /// the same ref is refused by the provider.
+    ///
+    /// # Errors
+    ///
+    /// Rejects on any transport failure or unknown result; never retried.
+    fn create_ref(&self, git_ref: &str, sha: &str) -> Result<(u16, Vec<u8>)>;
+    /// Upload the claim as one release asset of the selected draft. One
+    /// attempt; returns the HTTP status and the bounded body.
+    ///
+    /// # Errors
+    ///
+    /// Rejects on any transport failure or unknown result; never retried.
+    fn upload_claim(&self, release_id: u64, name: &str, bytes: &[u8]) -> Result<(u16, Vec<u8>)>;
     /// Check ID of the executing job, read from the authenticated runner OIDC
     /// issuer (never from a caller-supplied token).
     ///
@@ -376,6 +391,84 @@ impl Provider for GhProvider {
         arguments.push("return_run_details=true".to_owned());
         let argv: Vec<&str> = arguments.iter().map(String::as_str).collect();
         let raw = Self::run(&argv, 16 * 1024 + MAX_HEADERS, "native workflow dispatch")?;
+        included_response(&raw)
+    }
+
+    fn create_ref(&self, git_ref: &str, sha: &str) -> Result<(u16, Vec<u8>)> {
+        require(
+            git_ref.starts_with("refs/aros-release/consumed/")
+                && !git_ref.contains("..")
+                && super::json::is_hex(sha, 40),
+            "consumption marker is outside the closed contract",
+        )?;
+        let endpoint = format!("repos/{REPOSITORY}/git/refs");
+        require_fixed_path(&endpoint)?;
+        let ref_field = format!("ref={git_ref}");
+        let sha_field = format!("sha={sha}");
+        let raw = Self::run(
+            &[
+                "api",
+                "--hostname",
+                "github.com",
+                "--method",
+                "POST",
+                "--include",
+                &endpoint,
+                "-H",
+                "X-GitHub-Api-Version: 2022-11-28",
+                "-f",
+                &ref_field,
+                "-f",
+                &sha_field,
+            ],
+            16 * 1024 + MAX_HEADERS,
+            "consumption marker creation",
+        )?;
+        included_response(&raw)
+    }
+
+    fn upload_claim(&self, release_id: u64, name: &str, bytes: &[u8]) -> Result<(u16, Vec<u8>)> {
+        use std::io::Write as _;
+        require(
+            release_id > 0 && !name.is_empty() && !name.contains(['/', '?', '&']),
+            "claim upload selection is outside the closed contract",
+        )?;
+        let directory = tempfile::Builder::new()
+            .prefix("aros-dispatch-claim-")
+            .tempdir()
+            .or_else(|_| integrity("claim staging directory is unavailable"))?;
+        let payload = directory.path().join(name);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&payload)
+            .or_else(|_| integrity("claim staging file is unavailable"))?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .or_else(|_| integrity("claim staging file cannot be written"))?;
+        let endpoint = format!(
+            "https://uploads.github.com/repos/{REPOSITORY}/releases/{release_id}/assets?name={name}"
+        );
+        let payload_text = payload.to_string_lossy().into_owned();
+        let raw = Self::run(
+            &[
+                "api",
+                "--hostname",
+                "github.com",
+                "--method",
+                "POST",
+                "--include",
+                &endpoint,
+                "-H",
+                "X-GitHub-Api-Version: 2022-11-28",
+                "-H",
+                "Content-Type: application/json",
+                "--input",
+                &payload_text,
+            ],
+            16 * 1024 + MAX_HEADERS,
+            "claim upload",
+        )?;
         included_response(&raw)
     }
 

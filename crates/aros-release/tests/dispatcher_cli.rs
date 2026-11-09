@@ -16,7 +16,13 @@ fn every_dispatcher_command_has_help_text() {
     let group = release().args(["dispatcher", "--help"]).output().unwrap();
     assert!(group.status.success());
     let text = String::from_utf8_lossy(&group.stdout);
-    for name in ["select", "verify-claim", "dispatch", "verify-binding"] {
+    for name in [
+        "select",
+        "claim",
+        "verify-claim",
+        "dispatch",
+        "verify-binding",
+    ] {
         assert!(text.contains(name), "{name} missing from the group help");
         let help = release()
             .args(["dispatcher", name, "--help"])
