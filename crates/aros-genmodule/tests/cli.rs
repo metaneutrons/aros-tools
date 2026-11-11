@@ -684,7 +684,7 @@ fn declarations_sharing_a_module_name_publish_no_ambiguous_private_header() {
     fs::create_dir_all(&network).unwrap();
     fs::write(
         network.join("wifi.conf"),
-        "##begin config\nversion 1.0\noptions noincludes\n##end config\n",
+        "##begin config\nversion 1.0\n##end config\n",
     )
     .unwrap();
     fs::write(
@@ -1195,4 +1195,33 @@ fn unaffected_modules_stay_byte_identical_when_a_stub_is_renamed() {
             "{relative}"
         );
     }
+}
+
+#[test]
+fn noincludes_module_publishes_no_public_headers_but_keeps_libdefs_and_linklib() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture_with(
+        &source,
+        "rom/quiet",
+        "quiet",
+        "library",
+        "",
+        "options noincludes\n",
+    );
+    write_module_fixture(&source, "rom/loud", "loud", "library", "");
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let include = build.join("SDK/include");
+    assert_eq!(names_in(&include.join("proto")), ["loud.h"]);
+    assert_eq!(names_in(&include.join("clib")), ["loud_protos.h"]);
+    assert!(build.join("gen/rom/quiet/quiet_libdefs.h").is_file());
+    assert!(build.join("linklib/rom/quiet").is_dir());
 }
