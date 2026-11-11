@@ -1,11 +1,6 @@
 //! Parse AROS module configurations and generate deterministic sources.
 
-mod collisions;
 mod interfaces;
-use collisions::{
-    colliding_public_include_names, group_owner, public_include_groups,
-    remove_colliding_public_headers, rename_yielding_stubs, yielded_public_modules,
-};
 mod linklib;
 mod transaction;
 mod varargs;
@@ -202,8 +197,6 @@ struct ConfModule {
     /// here produced `kernel_FuncTable`, which was self-consistent only as long
     /// as nothing else generated the definition.
     base_name: String,
-    /// Whether the config stated `basename` (rather than the derived default).
-    explicit_base_name: bool,
     lib_base: String,
     lib_base_type: String,
     /// `libbasetypeextern` if the config states one; the type is otherwise
@@ -230,8 +223,6 @@ struct ConfModule {
     /// Module type (`library`, `device`, `resource`, `hidd`, `handler`, ...).
     /// Not part of the .conf; taken from the sibling mmakefile.src.
     mod_type: String,
-    /// `modsuffix=` of the sibling mmakefile.src (empty when absent).
-    mod_suffix: String,
     /// Fields the module init code needs to reach through the library base.
     sysbase_field: Option<String>,
     oopbase_field: Option<String>,
@@ -353,8 +344,6 @@ fn conf_key_value(line: &str) -> Option<(&str, &str)> {
 struct ModuleDeclaration {
     name: String,
     mod_type: String,
-    /// `modsuffix=` of the build description (empty when absent).
-    mod_suffix: String,
     /// A `confoverride=` declaration reads its API from another config and
     /// applies this file afterwards. The broad scanner has to model the same
     /// pair or it emits a source-local libdefs header with no function list.
@@ -427,7 +416,6 @@ fn read_module_declarations(
         let head = block.split('%').next().unwrap_or(block);
         let name = module_macro_value(head, "modname=");
         let mod_type = module_macro_value(head, "modtype=");
-        let mod_suffix = module_macro_value(head, "modsuffix=").unwrap_or_default();
         let conffile = module_macro_value(head, "conffile=");
         let confoverride = module_macro_value(head, "confoverride=");
         if fallback_type.is_none() {
@@ -456,7 +444,6 @@ fn read_module_declarations(
                 declarations.push(ModuleDeclaration {
                     name,
                     mod_type,
-                    mod_suffix,
                     base_config,
                 });
             }
@@ -467,7 +454,6 @@ fn read_module_declarations(
             declarations.push(ModuleDeclaration {
                 name: stem.to_owned(),
                 mod_type,
-                mod_suffix: String::new(),
                 base_config: None,
             });
         }
@@ -636,8 +622,6 @@ fn parse_conf_variant(
         // which may be read later in the config section. Resolved below.
         lib_base_type: String::new(),
         mod_type: declaration.map_or_else(String::new, |declaration| declaration.mod_type.clone()),
-        mod_suffix: declaration
-            .map_or_else(String::new, |declaration| declaration.mod_suffix.clone()),
         rel_dir: path
             .parent()
             .and_then(|d| d.strip_prefix(root).ok())
@@ -721,7 +705,6 @@ fn parse_conf_variant(
                 // (tools/genmodule/config.c:1336).
                 "basename" => {
                     module.base_name = val.to_string();
-                    module.explicit_base_name = true;
                     if !module
                         .options
                         .contains(ConfModuleOptions::EXPLICIT_LIB_BASE)
@@ -1228,6 +1211,58 @@ fn ambiguous_private_libdefs(modules: &[ConfModule]) -> Vec<(PathBuf, String, Ve
         .collect()
 }
 
+fn colliding_public_include_names(modules: &[ConfModule]) -> std::collections::HashSet<String> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for module in modules {
+        if publishes_include_files(module) {
+            // Treat the output namespace as case-insensitive here. The
+            // bootstrap can run on case-insensitive APFS, while the project
+            // still supports case-sensitive hosts where `Icon` and `icon`
+            // are distinct. Withholding both is safer than a host-dependent
+            // race; a concrete includes target later owns the exact spelling.
+            *counts
+                .entry(public_include_name(module).to_ascii_lowercase())
+                .or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(name, count)| (count > 1).then_some(name))
+        .collect()
+}
+
+/// Removes bootstrap products whose shared name is ambiguous.
+///
+/// `BootstrapSDK.cmake` reruns this scanner during every configuration.  A
+/// stale header from a previous non-conflicting configuration would otherwise
+/// look usable to Ninja even though there is no longer an unambiguous owner.
+fn remove_colliding_public_headers(
+    module: &ConfModule,
+    out_inc: &Path,
+    transaction: &mut FileTransaction,
+) -> std::io::Result<()> {
+    let include_name = public_include_name(module);
+    for path in [
+        out_inc.join("proto").join(format!("{include_name}.h")),
+        out_inc
+            .join("clib")
+            .join(format!("{include_name}_protos.h")),
+    ] {
+        transaction.stage_remove(&path)?;
+    }
+
+    for path in [
+        out_inc.join("defines").join(format!("{include_name}.h")),
+        out_inc
+            .join("defines")
+            .join(format!("{include_name}_LVO.h")),
+    ] {
+        transaction.stage_remove(&path)?;
+    }
+
+    Ok(())
+}
+
 fn private_libdefs_path(root: &Path, module: &ConfModule) -> PathBuf {
     root.join(&module.rel_dir)
         .join(format!("{}_libdefs.h", module.name))
@@ -1459,9 +1494,7 @@ fn execute(
             .then_with(|| left.name.cmp(&right.name))
     });
 
-    rename_yielding_stubs(&mut modules);
     let colliding_names = colliding_public_include_names(&modules);
-    let yielded = yielded_public_modules(&modules);
     let ambiguous_libdefs = ambiguous_private_libdefs(&modules);
     let ambiguous_libdefs_keys: std::collections::HashSet<(&Path, &str)> = ambiguous_libdefs
         .iter()
@@ -1470,10 +1503,19 @@ fn execute(
 
     // Only modules that export public headers can collide there. Module-private
     // headers are written per module directory and cannot.
-    let by_name = public_include_groups(&modules);
+    let mut by_name: std::collections::HashMap<String, Vec<&ConfModule>> =
+        std::collections::HashMap::new();
+    for m in &modules {
+        if publishes_include_files(m) {
+            by_name
+                .entry(public_include_name(m).to_ascii_lowercase())
+                .or_default()
+                .push(m);
+        }
+    }
     let mut clashes: Vec<String> = by_name
         .into_iter()
-        .filter(|(_, v)| v.len() > 1 && group_owner(v).is_none())
+        .filter(|(_, v)| v.len() > 1)
         .map(|(name, v)| {
             let where_: Vec<String> = v
                 .iter()
@@ -1501,7 +1543,7 @@ fn execute(
             module,
             &args.output_inc,
             args.output_gen.as_deref(),
-            !conflicting && !yielded.contains(&(module.rel_dir.clone(), module.name.clone())),
+            !conflicting,
             !ambiguous_libdefs_keys.contains(&(module.rel_dir.as_path(), module.name.as_str())),
             &mut transaction,
         ) {
