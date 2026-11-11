@@ -475,7 +475,13 @@ See the [release evidence selection contract](compiler-family-release-evidence-v
 On Unix, `sdk_generation_matrix::readback_sdk_generation_matrix` joins the
 complete indexed compiler A/B and compatibility closure to every SDK generation.
 Coverage comes from release inputs: each SDK/compiler-profile association on
-every active host. Each generation must reference its measured indexed compiler;
+every active host, except that the `llvm` compiler group requires a generation
+on the two Linux hosts only (`sdk_generation_lanes::sdk_generation_required_on_host`).
+The LLVM SDK generation does not finish within the six hour limit of a
+GitHub-hosted macOS runner, and release evidence must come from GitHub-hosted
+runners. The macOS host still qualifies the LLVM compilers. SDK packages are
+host-independent, so no package is lost; the proof that the macOS-hosted LLVM
+compiler generates the same SDK bytes is the part that is given up. Each generation must reference its measured indexed compiler;
 all hosts must produce the same canonical indexed SDK package bytes. Records
 and compatibility receipts remain host-bound. Canonical, disjoint roots and
 repeated readbacks reject aliases and observed changes.

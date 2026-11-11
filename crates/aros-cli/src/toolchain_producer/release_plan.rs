@@ -88,6 +88,18 @@ pub(super) fn run(args: &ReleasePlanArgs) -> miette::Result<()> {
             })
         })
         .collect::<Vec<_>>();
+    let sdk_generation_lanes = inputs
+        .expected_sdk_generation_lanes()
+        .iter()
+        .map(|lane| {
+            serde_json::json!({
+                "sdk_id": lane.sdk_id(),
+                "group_id": lane.group_id(),
+                "profile": lane.profile(),
+                "host": lane.host(),
+            })
+        })
+        .collect::<Vec<_>>();
     let document = serde_json::json!({
         "schema": "aros-toolchain-producer-stage-v2",
         "operation": "release-plan",
@@ -102,6 +114,8 @@ pub(super) fn run(args: &ReleasePlanArgs) -> miette::Result<()> {
         "sdks": sdks,
         "lane_count": lanes.len(),
         "lanes": lanes,
+        "sdk_generation_count": sdk_generation_lanes.len(),
+        "sdk_generation_lanes": sdk_generation_lanes,
     });
     // Reacquire the closed document set before exposing any matrix. This is
     // not a lock or an atomic snapshot against concurrent owner writes.

@@ -245,6 +245,11 @@ fn run_unix(args: &VerifyGenerationArgs) -> Result<()> {
         lane.group_id() == group.id()
             && lane.profile() == profile.name()
             && lane.host() == args.host.as_str()
+    }) || !inputs.expected_sdk_generation_lanes().iter().any(|lane| {
+        lane.sdk_id() == sdk.id()
+            && lane.group_id() == group.id()
+            && lane.profile() == profile.name()
+            && lane.host() == args.host.as_str()
     }) {
         miette::bail!("selected SDK has no compiler reference for this group, profile and host");
     }
