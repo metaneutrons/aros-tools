@@ -282,6 +282,13 @@ fn arch_dir_applies(rel: &Path, arch_dirs: &[String]) -> bool {
 /// Mirrors `tools/genmodule/config.c:711`. Modules without a public API do not
 /// export headers, which is also what keeps same-named `.conf` files in
 /// different subsystems from overwriting each other's SDK headers.
+/// Whether the module writes `proto/`, `clib/` and `defines/` files. An explicit
+/// `options noincludes` suppresses them, as in `tools/genmodule/genmodule.c`
+/// (`INCLUDES` command); libdefs and link-library sources are still produced.
+fn publishes_include_files(module: &ConfModule) -> bool {
+    exports_public_headers(module) && !module.options.contains(ConfModuleOptions::NO_INCLUDES)
+}
+
 fn exports_public_headers(module: &ConfModule) -> bool {
     let has_funcs = !module.functions.is_empty();
     let has_cdef = !module.cdef.trim().is_empty();
@@ -967,7 +974,7 @@ fn generate_sdk_headers(
     let include_name = public_include_name(module);
     let include_upper = header_guard_name(include_name);
     let mod_upper = header_guard_name(&module.name);
-    let public = publish_public_headers && exports_public_headers(module);
+    let public = publish_public_headers && publishes_include_files(module);
 
     let proto_dir = out_inc.join("proto");
     let clib_dir = out_inc.join("clib");

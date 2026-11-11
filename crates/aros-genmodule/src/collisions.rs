@@ -1,7 +1,7 @@
 //! Case-folded public include names that more than one module claims.
 
 use super::{
-    exports_public_headers, public_include_name, ConfModule, FileTransaction, Path, PathBuf,
+    public_include_name, publishes_include_files, ConfModule, FileTransaction, Path, PathBuf,
 };
 use aros_common::PortableOutputName;
 
@@ -18,7 +18,7 @@ pub fn public_include_groups(
     let mut groups: std::collections::HashMap<String, Vec<&ConfModule>> =
         std::collections::HashMap::new();
     for module in modules {
-        if exports_public_headers(module) {
+        if publishes_include_files(module) {
             groups
                 .entry(public_include_name(module).to_ascii_lowercase())
                 .or_default()
@@ -97,7 +97,7 @@ pub fn rename_yielding_stubs(modules: &mut [ConfModule]) -> usize {
     }
     let mut taken: std::collections::HashSet<String> = modules
         .iter()
-        .filter(|module| exports_public_headers(module))
+        .filter(|module| publishes_include_files(module))
         .map(|module| public_include_name(module).to_ascii_lowercase())
         .collect();
     let mut renames = Vec::new();
