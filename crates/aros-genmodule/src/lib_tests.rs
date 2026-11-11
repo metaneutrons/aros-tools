@@ -673,44 +673,46 @@ mod tests {
     }
 
     #[test]
-    fn declared_non_owner_yields_a_shared_name_to_exactly_one_owner() {
-        let named = |name: &str, dir: &str, mod_type: &str, no_includes: bool| {
+    fn service_stub_yields_a_shared_name_to_exactly_one_owner() {
+        let named = |name: &str, dir: &str, mod_type: &str, suffix: &str| {
             let mut value = module(mod_type, 0, "");
             value.name = name.to_owned();
             value.include_name = name.to_owned();
             value.rel_dir = dir.into();
-            if no_includes {
-                value.options.insert(ConfModuleOptions::NO_INCLUDES);
-            }
+            value.mod_suffix = suffix.to_owned();
             value
         };
 
-        // One owner, one declared non-owner: resolved, nothing withheld.
+        // One owner, one service stub: resolved, nothing withheld.
         let resolved = [
-            named("FileSystem", "rom/filesystem", "resource", true),
-            named("filesystem", "net/efsservice", "library", false),
+            named("FileSystem", "rom/filesystem", "resource", ""),
+            named("filesystem", "net/efsservice", "library", "service"),
         ];
         assert!(colliding_public_include_names(&resolved).is_empty());
         let yielded = yielded_public_modules(&resolved);
         assert_eq!(yielded.len(), 1);
-        assert!(yielded.contains(&("rom/filesystem".into(), "FileSystem".to_owned())));
+        assert!(yielded.contains(&("net/efsservice".into(), "filesystem".to_owned())));
 
         // Two owners: still ambiguous, and nobody yields.
         let two_owners = [
-            named("dup", "a", "library", false),
-            named("dup", "b", "library", false),
-            named("dup", "c", "resource", true),
+            named("dup", "a", "library", ""),
+            named("dup", "b", "library", ""),
+            named("dup", "c", "library", "service"),
         ];
         assert!(colliding_public_include_names(&two_owners).contains("dup"));
         assert!(yielded_public_modules(&two_owners).is_empty());
 
-        // No owner at all: ambiguous.
+        // No owner at all, or another suffix: ambiguous.
         let no_owner = [
-            named("Dup", "a", "library", true),
-            named("dup", "b", "library", true),
+            named("Dup", "a", "library", "service"),
+            named("dup", "b", "library", "service"),
         ];
         assert!(colliding_public_include_names(&no_owner).contains("dup"));
-        assert!(yielded_public_modules(&no_owner).is_empty());
+        let other_suffix = [
+            named("Dup", "a", "library", ""),
+            named("dup", "b", "library", "sysexp"),
+        ];
+        assert!(colliding_public_include_names(&other_suffix).contains("dup"));
     }
 
     #[test]

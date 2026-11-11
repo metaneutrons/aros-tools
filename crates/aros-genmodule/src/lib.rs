@@ -223,6 +223,8 @@ struct ConfModule {
     /// Module type (`library`, `device`, `resource`, `hidd`, `handler`, ...).
     /// Not part of the .conf; taken from the sibling mmakefile.src.
     mod_type: String,
+    /// `modsuffix=` of the sibling mmakefile.src (empty when absent).
+    mod_suffix: String,
     /// Fields the module init code needs to reach through the library base.
     sysbase_field: Option<String>,
     oopbase_field: Option<String>,
@@ -337,6 +339,8 @@ fn conf_key_value(line: &str) -> Option<(&str, &str)> {
 struct ModuleDeclaration {
     name: String,
     mod_type: String,
+    /// `modsuffix=` of the build description (empty when absent).
+    mod_suffix: String,
     /// A `confoverride=` declaration reads its API from another config and
     /// applies this file afterwards. The broad scanner has to model the same
     /// pair or it emits a source-local libdefs header with no function list.
@@ -409,6 +413,7 @@ fn read_module_declarations(
         let head = block.split('%').next().unwrap_or(block);
         let name = module_macro_value(head, "modname=");
         let mod_type = module_macro_value(head, "modtype=");
+        let mod_suffix = module_macro_value(head, "modsuffix=").unwrap_or_default();
         let conffile = module_macro_value(head, "conffile=");
         let confoverride = module_macro_value(head, "confoverride=");
         if fallback_type.is_none() {
@@ -437,6 +442,7 @@ fn read_module_declarations(
                 declarations.push(ModuleDeclaration {
                     name,
                     mod_type,
+                    mod_suffix,
                     base_config,
                 });
             }
@@ -447,6 +453,7 @@ fn read_module_declarations(
             declarations.push(ModuleDeclaration {
                 name: stem.to_owned(),
                 mod_type,
+                mod_suffix: String::new(),
                 base_config: None,
             });
         }
@@ -615,6 +622,8 @@ fn parse_conf_variant(
         // which may be read later in the config section. Resolved below.
         lib_base_type: String::new(),
         mod_type: declaration.map_or_else(String::new, |declaration| declaration.mod_type.clone()),
+        mod_suffix: declaration
+            .map_or_else(String::new, |declaration| declaration.mod_suffix.clone()),
         rel_dir: path
             .parent()
             .and_then(|d| d.strip_prefix(root).ok())
@@ -1227,17 +1236,23 @@ fn public_include_groups(
     groups
 }
 
-/// A module that declares `options noincludes` has told the generator that it
-/// owns no public header. Such a module is only a nominal claimant of a shared
-/// name: when it collides with exactly one module that does not declare
-/// `noincludes`, that module is the single owner of the spelling and the
-/// declared non-owners yield. Every other group (no owner, or two or more
-/// owners) stays ambiguous and is withheld as before.
+/// A `modsuffix=service` module is Envoy's "xxx.service" stub: Envoy loads it
+/// by path and name, and applications never open it through `proto/`. It is
+/// therefore only a nominal claimant of a shared include name. When it collides
+/// with exactly one module that is not such a stub, that module is the single
+/// owner of the spelling and the stubs yield. Every other group (no owner, or
+/// two or more owners) stays ambiguous and is withheld as before. The rule
+/// applies only inside a collision: a service module without a competitor keeps
+/// publishing its headers.
+fn is_service_stub(module: &ConfModule) -> bool {
+    module.mod_suffix == "service"
+}
+
 fn group_owner<'a>(members: &[&'a ConfModule]) -> Option<&'a ConfModule> {
     let mut owners = members
         .iter()
         .copied()
-        .filter(|module| !module.options.contains(ConfModuleOptions::NO_INCLUDES));
+        .filter(|module| !is_service_stub(module));
     match (owners.next(), owners.next()) {
         (Some(owner), None) => Some(owner),
         _ => None,
