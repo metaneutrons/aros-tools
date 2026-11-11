@@ -611,7 +611,7 @@ fn downloaded_llvm_generation_readback_is_rootless_and_rejects_closed_record_and
 }
 
 #[test]
-fn complete_llvm_sdk_generation_matrix_joins_three_synthetic_host_rows() {
+fn complete_llvm_sdk_generation_matrix_joins_the_required_synthetic_host_rows() {
     const SDK_RELEASE_ID: &str = "v1.2.3";
     const COMPILER_GROUP: &str = "llvm";
 
@@ -749,7 +749,11 @@ fn complete_llvm_sdk_generation_matrix_joins_three_synthetic_host_rows() {
 
         let (inputs, collection, documents) =
             release_input_material_for_matrix_generation(&fixture.request, &source_lock, &profiles);
-        assert_eq!(inputs.expected_sdk_generation_lanes().len(), 3);
+        assert_eq!(
+            inputs.expected_sdk_generation_lanes().len(),
+            2,
+            "llvm SDK generation is required on the two Linux hosts only"
+        );
         if let Some(expected) = &canonical_collection {
             assert_eq!(
                 &collection, expected,
@@ -888,7 +892,7 @@ fn complete_llvm_sdk_generation_matrix_joins_three_synthetic_host_rows() {
         };
         let matrix = readback_sdk_generation_matrix(&matrix_request)
             .expect("complete three-host LLVM generation rows should join the indexed release");
-        assert_eq!(matrix.generations().len(), 3);
+        assert_eq!(matrix.generations().len(), 2);
         crate::compatibility::sdk_qualification_tests::probe(&matrix_request);
         for indexed in matrix.generations() {
             assert_eq!(

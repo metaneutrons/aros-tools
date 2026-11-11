@@ -1133,6 +1133,8 @@ fn release_plan_cli_projects_the_exact_mixed_matrix_deterministically() {
     assert_eq!(first["groups"], json!(release_plan_group_records(&fixture)));
     assert_eq!(first["sdk_count"], 0);
     assert_eq!(first["sdks"], json!([]));
+    assert_eq!(first["sdk_generation_count"], 0);
+    assert_eq!(first["sdk_generation_lanes"], json!([]));
 
     let fields = first
         .as_object()
@@ -1152,6 +1154,8 @@ fn release_plan_cli_projects_the_exact_mixed_matrix_deterministically() {
         "groups",
         "sdk_count",
         "sdks",
+        "sdk_generation_count",
+        "sdk_generation_lanes",
         "lane_count",
         "lanes",
     ]
@@ -1216,6 +1220,20 @@ fn release_plan_cli_projects_validated_sdk_selections() {
             ]
         }])
     );
+    // Groups without a host restriction are generated on every active host.
+    let mut expected_generations = Vec::new();
+    for (group, profile) in [("gnu-riscv", "rv32-esp32p4"), ("llvm-pc", "pc-x86_64")] {
+        for host in ACTIVE_HOSTS {
+            expected_generations.push(json!({
+                "sdk_id": "core-sdk",
+                "group_id": group,
+                "profile": profile,
+                "host": host,
+            }));
+        }
+    }
+    assert_eq!(plan["sdk_generation_count"], 6);
+    assert_eq!(plan["sdk_generation_lanes"], json!(expected_generations));
 }
 
 #[test]

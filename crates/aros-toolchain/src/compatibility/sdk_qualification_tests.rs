@@ -35,12 +35,22 @@ use crate::sdk_generation_matrix::{
 /// Exercise qualification and recovery against an already-owned complete
 /// three-host fixture matrix. No opaque read-back is constructed by the test.
 pub(super) fn probe(matrix: &SdkGenerationMatrixReadbackRequest<'_, '_>) {
+    let complete = matrix.complete;
+    let expected_generations = complete
+        .builds
+        .packages
+        .inputs
+        .expected_sdk_generation_lanes()
+        .len();
+    assert!(
+        expected_generations >= 2,
+        "fixture must cover at least two SDK hosts"
+    );
     assert_eq!(
         matrix.generations.len(),
-        3,
-        "fixture must contain three SDK hosts"
+        expected_generations,
+        "fixture must contain exactly the required SDK generations"
     );
-    let complete = matrix.complete;
     let packages = &complete.builds.packages;
     let index_bytes = fs::read(packages.directory.join(INDEX_NAME))
         .expect("selected release index should remain readable");
@@ -72,17 +82,24 @@ fn record_and_roundtrip(
     selection: &Selection<'_, '_>,
     source_run: &SourceRunIdentityV2,
 ) -> QualificationEvidenceV2 {
+    let expected_generations = selection
+        .complete
+        .builds
+        .packages
+        .inputs
+        .expected_sdk_generation_lanes()
+        .len();
     let recording = recording_request(selection, Some(selection.matrix), source_run.clone());
     let recorded = record_qualification_bytes_v2(&recording)
         .expect("complete SDK matrix should produce SDK qualification claims");
-    assert_eq!(recorded.sdk_generations().len(), 3);
+    assert_eq!(recorded.sdk_generations().len(), expected_generations);
     let (evidence, _, retained_sdk) = recorded.into_parts();
     assert_eq!(
         retained_sdk.len(),
-        3,
+        expected_generations,
         "recording should retain all SDK tuples"
     );
-    assert_eq!(evidence.sdk_generations.len(), 3);
+    assert_eq!(evidence.sdk_generations.len(), expected_generations);
     let evidence_bytes = serde_json::to_vec(&evidence).unwrap();
     let joined = readback_qualification_bytes_v2(&QualificationByteReadbackRequestV2 {
         evidence_bytes: &evidence_bytes,
@@ -93,8 +110,8 @@ fn record_and_roundtrip(
     })
     .expect("serialized SDK claims should join to the complete selected matrix");
     assert_eq!(joined.evidence(), &evidence);
-    assert_eq!(joined.sdk_generations().len(), 3);
-    assert_eq!(joined.into_parts().1.len(), 3);
+    assert_eq!(joined.sdk_generations().len(), expected_generations);
+    assert_eq!(joined.into_parts().1.len(), expected_generations);
     evidence
 }
 
@@ -257,7 +274,16 @@ fn recovery_roundtrip_and_rejections(
         qualification: &qualification,
     })
     .expect("recovery should reacquire the original complete SDK matrix");
-    assert_eq!(recovered.qualification().sdk_generations().len(), 3);
+    assert_eq!(
+        recovered.qualification().sdk_generations().len(),
+        selection
+            .complete
+            .builds
+            .packages
+            .inputs
+            .expected_sdk_generation_lanes()
+            .len()
+    );
 
     let missing_sdk = qualification_request(selection, evidence_bytes, None);
     assert!(
