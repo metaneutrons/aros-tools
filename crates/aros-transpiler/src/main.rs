@@ -724,6 +724,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     let mut unresolved: Vec<String> = Vec::new();
     let mut skipped_headers: Vec<String> = Vec::new();
     let mut skipped_copy_directories: Vec<String> = Vec::new();
+    let mut skipped_file_copies: Vec<String> = Vec::new();
     let mut skipped_flags: Vec<String> = Vec::new();
     let mut ambiguous_flags = 0usize;
     let mut skipped_arch_sources: Vec<String> = Vec::new();
@@ -917,6 +918,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         unresolved.extend(parsed.unresolved_includes);
         skipped_headers.extend(parsed.skipped_copy_includes);
         skipped_copy_directories.extend(parsed.skipped_copy_directories);
+        skipped_file_copies.extend(parsed.skipped_file_copies);
         skipped_flags.extend(parsed.flags.skipped);
         if parsed.flags.ambiguous {
             ambiguous_flags += 1;
@@ -1697,6 +1699,13 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         "skipped-directory-staging.txt",
         skipped_copy_directories,
         "%copy_dir_recursive declaration(s) skipped (unsafe, unresolved, or ambiguous)",
+    );
+    write_report(
+        &mut publication,
+        &args.output,
+        "skipped-file-copies.txt",
+        skipped_file_copies,
+        "%copy_files_q declaration(s) with an unmodelled destination (files not staged)",
     );
 
     write_report(

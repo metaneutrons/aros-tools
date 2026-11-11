@@ -136,7 +136,7 @@ pub fn collect(
     (declarations, rejected)
 }
 
-fn include_destination(path: &str) -> bool {
+pub fn include_destination(path: &str) -> bool {
     ["${AROS_SDK_INCLUDE_DIR}", "${AROS_GENINC_DIR}"]
         .iter()
         .any(|root| {

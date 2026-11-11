@@ -141,6 +141,7 @@ fn report_metadata(extension: &str) -> (&'static str, DiagnosticSeverity) {
         "skipped-conditions.txt" => ("AT1030", Warning),
         "unresolved-includes.txt" => ("AT1031", Warning),
         "skipped-ilbm-sources.txt" => ("AT1033", Warning),
+        "skipped-file-copies.txt" => ("AT1034", Warning),
         // Adding a report without assigning a stable code is an internal
         // contract error. Publication rejects Error-severity coverage entries.
         _ => ("AT1099", Error),
