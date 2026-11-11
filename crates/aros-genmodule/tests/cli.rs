@@ -732,3 +732,236 @@ fn declarations_sharing_a_module_name_publish_no_ambiguous_private_header() {
         "{stdout}"
     );
 }
+
+/// A module whose conf and build description are given explicitly, so a test
+/// can choose the module type and `options` line.
+fn write_module_fixture(
+    root: &Path,
+    relative: &str,
+    stem: &str,
+    modtype: &str,
+    options: Option<&str>,
+) {
+    let directory = root.join(relative);
+    fs::create_dir_all(&directory).unwrap();
+    let options = options.map_or_else(String::new, |value| format!("options {value}\n"));
+    fs::write(
+        directory.join(format!("{stem}.conf")),
+        format!("##begin config\nversion 1.0\n{options}##end config\n"),
+    )
+    .unwrap();
+    fs::write(
+        directory.join("mmakefile.src"),
+        format!("%build_module mmake=test-{stem} modname={stem} modtype={modtype} files=test.c\n"),
+    )
+    .unwrap();
+}
+
+fn run_sdk(source: &Path, build: &Path) -> Output {
+    let include = build.join("SDK/include");
+    let generated = build.join("gen");
+    run_json(&[
+        "--scan-dir",
+        source.to_str().unwrap(),
+        "--output-root",
+        build.to_str().unwrap(),
+        "--output-inc",
+        include.to_str().unwrap(),
+        "--output-gen",
+        generated.to_str().unwrap(),
+    ])
+}
+
+fn names_in(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort_unstable();
+    names
+}
+
+#[test]
+fn noincludes_module_yields_a_case_only_collision_to_its_single_owner() {
+    // rom/filesystem declares `options noincludes`; the Envoy service of the
+    // same name in another case publishes the headers.
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture(
+        &source,
+        "rom/filesystem",
+        "FileSystem",
+        "resource",
+        Some("noincludes"),
+    );
+    write_module_fixture(&source, "net/efsservice", "filesystem", "library", None);
+    write_module_fixture(&source, "rom/other", "other", "library", None);
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let include = build.join("SDK/include");
+    // Exactly one spelling is published, the owner's.
+    assert_eq!(
+        names_in(&include.join("proto")),
+        ["filesystem.h", "other.h"]
+    );
+    assert_eq!(
+        names_in(&include.join("clib")),
+        ["filesystem_protos.h", "other_protos.h"]
+    );
+    assert_eq!(
+        names_in(&include.join("defines")),
+        ["filesystem.h", "filesystem_LVO.h", "other.h", "other_LVO.h"]
+    );
+    // No collision is reported: the conf files named the owner.
+    assert!(!include.join("conf-name-collisions.txt").exists());
+    // Module-private libdefs stay per module directory in both spellings.
+    assert!(build
+        .join("gen/rom/filesystem/FileSystem_libdefs.h")
+        .is_file());
+    assert!(build
+        .join("gen/net/efsservice/filesystem_libdefs.h")
+        .is_file());
+}
+
+#[test]
+fn unaffected_modules_publish_the_same_bytes_with_and_without_the_collision() {
+    let directory = tempfile::tempdir().unwrap();
+    let with = directory.path().join("with");
+    write_module_fixture(
+        &with,
+        "rom/filesystem",
+        "FileSystem",
+        "resource",
+        Some("noincludes"),
+    );
+    write_module_fixture(&with, "net/efsservice", "filesystem", "library", None);
+    write_module_fixture(&with, "rom/other", "other", "library", None);
+    let alone = directory.path().join("alone");
+    write_module_fixture(&alone, "rom/other", "other", "library", None);
+
+    assert!(run_sdk(&with, &directory.path().join("b-with"))
+        .status
+        .success());
+    assert!(run_sdk(&alone, &directory.path().join("b-alone"))
+        .status
+        .success());
+
+    for relative in [
+        "SDK/include/proto/other.h",
+        "SDK/include/clib/other_protos.h",
+        "SDK/include/defines/other.h",
+        "SDK/include/defines/other_LVO.h",
+        "gen/rom/other/other_libdefs.h",
+    ] {
+        assert_eq!(
+            fs::read(directory.path().join("b-with").join(relative)).unwrap(),
+            fs::read(directory.path().join("b-alone").join(relative)).unwrap(),
+            "{relative}"
+        );
+    }
+}
+
+#[test]
+fn case_only_collision_without_a_declaration_is_still_rejected() {
+    // Same layout, but nobody declared `noincludes`: nothing resolves the
+    // spelling, so the generator keeps refusing the case-folding collision.
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture(&source, "rom/filesystem", "FileSystem", "resource", None);
+    write_module_fixture(&source, "net/efsservice", "filesystem", "library", None);
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(!result.status.success());
+    assert_eq!(diagnostic_code(&result), "AG0201");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("portable output collision"));
+    assert!(!build
+        .join("SDK/include/proto")
+        .join("filesystem.h")
+        .exists());
+}
+
+#[test]
+fn case_only_collision_with_declarations_on_both_modules_is_still_rejected() {
+    // Two declared non-owners leave no owner: ambiguous, so rejected as before.
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture(
+        &source,
+        "rom/filesystem",
+        "FileSystem",
+        "resource",
+        Some("noincludes"),
+    );
+    write_module_fixture(
+        &source,
+        "net/efsservice",
+        "filesystem",
+        "library",
+        Some("noincludes"),
+    );
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(!result.status.success());
+    assert_eq!(diagnostic_code(&result), "AG0201");
+}
+
+#[test]
+fn the_owner_is_the_module_without_the_declaration_not_the_other_one() {
+    // The declaration sits on the service this time, so the resource owns the
+    // name. The rule follows the conf files and does not prefer a module.
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture(&source, "rom/filesystem", "FileSystem", "resource", None);
+    write_module_fixture(
+        &source,
+        "net/efsservice",
+        "filesystem",
+        "library",
+        Some("noincludes"),
+    );
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(result.status.success());
+    assert_eq!(names_in(&build.join("SDK/include/proto")), ["FileSystem.h"]);
+}
+
+#[test]
+fn two_owners_and_a_declared_non_owner_stay_withheld() {
+    // Three modules, one spelling: two of them publish headers, so there is no
+    // single owner and the shared name stays withheld and reported.
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture(&source, "a/dup", "dup", "library", None);
+    write_module_fixture(&source, "b/dup", "dup", "library", None);
+    write_module_fixture(&source, "c/dup", "dup", "resource", Some("noincludes"));
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let include = build.join("SDK/include");
+    assert!(!include.join("proto/dup.h").exists());
+    assert!(fs::read_to_string(include.join("conf-name-collisions.txt"))
+        .unwrap()
+        .contains("dup"));
+}

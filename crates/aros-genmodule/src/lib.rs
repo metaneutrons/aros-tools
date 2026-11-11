@@ -1204,24 +1204,74 @@ fn ambiguous_private_libdefs(modules: &[ConfModule]) -> Vec<(PathBuf, String, Ve
         .collect()
 }
 
-fn colliding_public_include_names(modules: &[ConfModule]) -> std::collections::HashSet<String> {
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+/// Modules that export public headers, grouped by the case-folded include name.
+///
+/// The output namespace is treated as case-insensitive here. The bootstrap can
+/// run on case-insensitive APFS, while the project still supports
+/// case-sensitive hosts where `Icon` and `icon` are distinct. Withholding every
+/// claimant of a shared name is safer than a host-dependent race, unless the
+/// conf files themselves name exactly one owner (see [`yielded_public_modules`]).
+fn public_include_groups(
+    modules: &[ConfModule],
+) -> std::collections::HashMap<String, Vec<&ConfModule>> {
+    let mut groups: std::collections::HashMap<String, Vec<&ConfModule>> =
+        std::collections::HashMap::new();
     for module in modules {
         if exports_public_headers(module) {
-            // Treat the output namespace as case-insensitive here. The
-            // bootstrap can run on case-insensitive APFS, while the project
-            // still supports case-sensitive hosts where `Icon` and `icon`
-            // are distinct. Withholding both is safer than a host-dependent
-            // race; a concrete includes target later owns the exact spelling.
-            *counts
+            groups
                 .entry(public_include_name(module).to_ascii_lowercase())
-                .or_default() += 1;
+                .or_default()
+                .push(module);
         }
     }
-    counts
+    groups
+}
+
+/// A module that declares `options noincludes` has told the generator that it
+/// owns no public header. Such a module is only a nominal claimant of a shared
+/// name: when it collides with exactly one module that does not declare
+/// `noincludes`, that module is the single owner of the spelling and the
+/// declared non-owners yield. Every other group (no owner, or two or more
+/// owners) stays ambiguous and is withheld as before.
+fn group_owner<'a>(members: &[&'a ConfModule]) -> Option<&'a ConfModule> {
+    let mut owners = members
+        .iter()
+        .copied()
+        .filter(|module| !module.options.contains(ConfModuleOptions::NO_INCLUDES));
+    match (owners.next(), owners.next()) {
+        (Some(owner), None) => Some(owner),
+        _ => None,
+    }
+}
+
+fn colliding_public_include_names(modules: &[ConfModule]) -> std::collections::HashSet<String> {
+    public_include_groups(modules)
         .into_iter()
-        .filter_map(|(name, count)| (count > 1).then_some(name))
+        .filter(|(_, members)| members.len() > 1 && group_owner(members).is_none())
+        .map(|(name, _)| name)
         .collect()
+}
+
+/// Modules that give up the public headers of a resolved case collision, keyed
+/// by module directory and name. They publish nothing, and nothing is staged
+/// for removal for them: their spelling may differ from the owner's only in
+/// case, and removing it would be a second mutation of the owner's output
+/// path.
+fn yielded_public_modules(modules: &[ConfModule]) -> std::collections::HashSet<(PathBuf, String)> {
+    let mut yielded = std::collections::HashSet::new();
+    for members in public_include_groups(modules).values() {
+        if members.len() < 2 {
+            continue;
+        }
+        if let Some(owner) = group_owner(members) {
+            for member in members {
+                if !std::ptr::eq(*member, owner) {
+                    yielded.insert((member.rel_dir.clone(), member.name.clone()));
+                }
+            }
+        }
+    }
+    yielded
 }
 
 /// Removes bootstrap products whose shared name is ambiguous.
@@ -1488,6 +1538,7 @@ fn execute(
     });
 
     let colliding_names = colliding_public_include_names(&modules);
+    let yielded = yielded_public_modules(&modules);
     let ambiguous_libdefs = ambiguous_private_libdefs(&modules);
     let ambiguous_libdefs_keys: std::collections::HashSet<(&Path, &str)> = ambiguous_libdefs
         .iter()
@@ -1496,19 +1547,10 @@ fn execute(
 
     // Only modules that export public headers can collide there. Module-private
     // headers are written per module directory and cannot.
-    let mut by_name: std::collections::HashMap<String, Vec<&ConfModule>> =
-        std::collections::HashMap::new();
-    for m in &modules {
-        if exports_public_headers(m) {
-            by_name
-                .entry(public_include_name(m).to_ascii_lowercase())
-                .or_default()
-                .push(m);
-        }
-    }
+    let by_name = public_include_groups(&modules);
     let mut clashes: Vec<String> = by_name
         .into_iter()
-        .filter(|(_, v)| v.len() > 1)
+        .filter(|(_, v)| v.len() > 1 && group_owner(v).is_none())
         .map(|(name, v)| {
             let where_: Vec<String> = v
                 .iter()
@@ -1536,7 +1578,7 @@ fn execute(
             module,
             &args.output_inc,
             args.output_gen.as_deref(),
-            !conflicting,
+            !conflicting && !yielded.contains(&(module.rel_dir.clone(), module.name.clone())),
             !ambiguous_libdefs_keys.contains(&(module.rel_dir.as_path(), module.name.as_str())),
             &mut transaction,
         ) {

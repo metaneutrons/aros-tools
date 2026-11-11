@@ -673,6 +673,47 @@ mod tests {
     }
 
     #[test]
+    fn declared_non_owner_yields_a_shared_name_to_exactly_one_owner() {
+        let named = |name: &str, dir: &str, mod_type: &str, no_includes: bool| {
+            let mut value = module(mod_type, 0, "");
+            value.name = name.to_owned();
+            value.include_name = name.to_owned();
+            value.rel_dir = dir.into();
+            if no_includes {
+                value.options.insert(ConfModuleOptions::NO_INCLUDES);
+            }
+            value
+        };
+
+        // One owner, one declared non-owner: resolved, nothing withheld.
+        let resolved = [
+            named("FileSystem", "rom/filesystem", "resource", true),
+            named("filesystem", "net/efsservice", "library", false),
+        ];
+        assert!(colliding_public_include_names(&resolved).is_empty());
+        let yielded = yielded_public_modules(&resolved);
+        assert_eq!(yielded.len(), 1);
+        assert!(yielded.contains(&("rom/filesystem".into(), "FileSystem".to_owned())));
+
+        // Two owners: still ambiguous, and nobody yields.
+        let two_owners = [
+            named("dup", "a", "library", false),
+            named("dup", "b", "library", false),
+            named("dup", "c", "resource", true),
+        ];
+        assert!(colliding_public_include_names(&two_owners).contains("dup"));
+        assert!(yielded_public_modules(&two_owners).is_empty());
+
+        // No owner at all: ambiguous.
+        let no_owner = [
+            named("Dup", "a", "library", true),
+            named("dup", "b", "library", true),
+        ];
+        assert!(colliding_public_include_names(&no_owner).contains("dup"));
+        assert!(yielded_public_modules(&no_owner).is_empty());
+    }
+
+    #[test]
     fn gm_uniquename_is_the_basename_not_the_module_name() {
         let root =
             std::env::temp_dir().join(format!("aros-genmodule-basename-{}", std::process::id()));
