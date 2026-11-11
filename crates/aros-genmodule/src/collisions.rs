@@ -3,6 +3,7 @@
 use super::{
     exports_public_headers, public_include_name, ConfModule, FileTransaction, Path, PathBuf,
 };
+use aros_common::PortableOutputName;
 
 /// Modules that export public headers, grouped by the case-folded include name.
 ///
@@ -80,6 +81,43 @@ pub fn yielded_public_modules(
         }
     }
     yielded
+}
+
+/// Gives a service stub that has lost a case-folded name its `basename` as
+/// the public include name, so its API stays visible in the SDK.
+///
+/// Only a yielding stub with an explicit `basename` is renamed, and only when
+/// the new name is portable and, case-folded, equals no other exporter's public
+/// name and no other replacement. Otherwise the stub stays withheld, as before.
+/// Returns the number of renamed stubs.
+pub fn rename_yielding_stubs(modules: &mut [ConfModule]) -> usize {
+    let yielded = yielded_public_modules(modules);
+    if yielded.is_empty() {
+        return 0;
+    }
+    let mut taken: std::collections::HashSet<String> = modules
+        .iter()
+        .filter(|module| exports_public_headers(module))
+        .map(|module| public_include_name(module).to_ascii_lowercase())
+        .collect();
+    let mut renames = Vec::new();
+    for (index, module) in modules.iter().enumerate() {
+        if !yielded.contains(&(module.rel_dir.clone(), module.name.clone()))
+            || !module.explicit_base_name
+            || PortableOutputName::new(&format!("{}.h", module.base_name)).is_err()
+        {
+            continue;
+        }
+        let folded = module.base_name.to_ascii_lowercase();
+        if taken.insert(folded) {
+            renames.push((index, module.base_name.clone()));
+        }
+    }
+    let count = renames.len();
+    for (index, name) in renames {
+        modules[index].include_name = name;
+    }
+    count
 }
 
 /// Removes bootstrap products whose shared name is ambiguous.

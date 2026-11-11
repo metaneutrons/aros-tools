@@ -716,6 +716,48 @@ mod tests {
     }
 
     #[test]
+    fn losing_stub_is_renamed_to_an_explicit_free_basename_only() {
+        let named = |name: &str, dir: &str, suffix: &str, basename: Option<&str>| {
+            let mut value = module("library", 0, "");
+            value.name = name.to_owned();
+            value.include_name = name.to_owned();
+            value.rel_dir = dir.into();
+            value.mod_suffix = suffix.to_owned();
+            if let Some(base) = basename {
+                value.base_name = base.to_owned();
+                value.explicit_base_name = true;
+            }
+            value
+        };
+
+        let mut renamed = [
+            named("FileSystem", "rom/filesystem", "", None),
+            named("filesystem", "net/efs", "service", Some("FSService")),
+        ];
+        assert_eq!(rename_yielding_stubs(&mut renamed), 1);
+        assert_eq!(public_include_name(&renamed[1]), "FSService");
+        assert!(colliding_public_include_names(&renamed).is_empty());
+        assert!(yielded_public_modules(&renamed).is_empty());
+
+        // No explicit basename: nothing to rename, the stub stays yielded.
+        let mut no_basename = [
+            named("FileSystem", "rom/filesystem", "", None),
+            named("filesystem", "net/efs", "service", None),
+        ];
+        assert_eq!(rename_yielding_stubs(&mut no_basename), 0);
+        assert_eq!(yielded_public_modules(&no_basename).len(), 1);
+
+        // The replacement collides with another exporter: not used.
+        let mut taken = [
+            named("FileSystem", "rom/filesystem", "", None),
+            named("filesystem", "net/efs", "service", Some("FSService")),
+            named("fsservice", "rom/fs", "", None),
+        ];
+        assert_eq!(rename_yielding_stubs(&mut taken), 0);
+        assert_eq!(public_include_name(&taken[1]), "filesystem");
+    }
+
+    #[test]
     fn gm_uniquename_is_the_basename_not_the_module_name() {
         let root =
             std::env::temp_dir().join(format!("aros-genmodule-basename-{}", std::process::id()));

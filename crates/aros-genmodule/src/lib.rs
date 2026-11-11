@@ -4,7 +4,7 @@ mod collisions;
 mod interfaces;
 use collisions::{
     colliding_public_include_names, group_owner, public_include_groups,
-    remove_colliding_public_headers, yielded_public_modules,
+    remove_colliding_public_headers, rename_yielding_stubs, yielded_public_modules,
 };
 mod linklib;
 mod transaction;
@@ -202,6 +202,8 @@ struct ConfModule {
     /// here produced `kernel_FuncTable`, which was self-consistent only as long
     /// as nothing else generated the definition.
     base_name: String,
+    /// Whether the config stated `basename` (rather than the derived default).
+    explicit_base_name: bool,
     lib_base: String,
     lib_base_type: String,
     /// `libbasetypeextern` if the config states one; the type is otherwise
@@ -712,6 +714,7 @@ fn parse_conf_variant(
                 // (tools/genmodule/config.c:1336).
                 "basename" => {
                     module.base_name = val.to_string();
+                    module.explicit_base_name = true;
                     if !module
                         .options
                         .contains(ConfModuleOptions::EXPLICIT_LIB_BASE)
@@ -1449,6 +1452,7 @@ fn execute(
             .then_with(|| left.name.cmp(&right.name))
     });
 
+    rename_yielding_stubs(&mut modules);
     let colliding_names = colliding_public_include_names(&modules);
     let yielded = yielded_public_modules(&modules);
     let ambiguous_libdefs = ambiguous_private_libdefs(&modules);
