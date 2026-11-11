@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.15](https://github.com/metaneutrons/aros-tools/compare/v0.6.14...v0.6.15) (2026-11-11)
+
+
+### Features
+
+* **toolchain:** do not require LLVM SDK generations on macOS ([#543](https://github.com/metaneutrons/aros-tools/issues/543)) ([e1dee28](https://github.com/metaneutrons/aros-tools/commit/e1dee286c11016da79211bc7a857a97af3e2baf6))
+
 ## [0.6.14](https://github.com/metaneutrons/aros-tools/compare/v0.6.13...v0.6.14) (2026-11-09)
 
 
