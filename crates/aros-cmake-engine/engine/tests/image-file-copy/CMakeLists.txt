@@ -6,6 +6,11 @@ if(NOT DEFINED AROS_ENGINE_DIR OR "${AROS_ENGINE_DIR}" STREQUAL "")
 endif()
 
 set(AROS_SOURCE_DIR "${CMAKE_BINARY_DIR}/source tree")
+if(AROS_IMAGE_COPY_PROBE STREQUAL "tree-root-source" OR
+   AROS_IMAGE_COPY_PROBE STREQUAL "source-inside-destination")
+    # The build directory lives inside the checkout, as in a real build.
+    set(AROS_SOURCE_DIR "${CMAKE_BINARY_DIR}")
+endif()
 set(AROS_SYS_DIR "${CMAKE_BINARY_DIR}/SYS")
 set(AROS_DEVELOPER_DIR "${AROS_SYS_DIR}/Developer")
 set(AROS_DEVELOPER_FD_DIR "${AROS_DEVELOPER_DIR}/SDK/fd")
@@ -29,6 +34,16 @@ elseif(_probe STREQUAL "outside-image")
 elseif(_probe STREQUAL "image-root")
     aros_stage_sdk_files(NAME stage-db KIND image SOURCE "${_source_root}"
         DESTINATION "${AROS_SYS_DIR}" FILES netdb)
+elseif(_probe STREQUAL "tree-root-source")
+    file(WRITE "${AROS_SOURCE_DIR}/LICENSE" "licence text\r\n")
+    aros_stage_sdk_files(NAME stage-db KIND image SOURCE "${AROS_SOURCE_DIR}"
+        DESTINATION "${AROS_SYS_DIR}/Locale/Help/English" FILES LICENSE)
+elseif(_probe STREQUAL "source-inside-destination")
+    file(MAKE_DIRECTORY "${AROS_SYS_DIR}/System/inner")
+    file(WRITE "${AROS_SYS_DIR}/System/inner/netdb" "staged output\r\n")
+    aros_stage_sdk_files(NAME stage-db KIND image
+        SOURCE "${AROS_SYS_DIR}/System/inner"
+        DESTINATION "${AROS_SYS_DIR}/System" FILES netdb)
 elseif(_probe STREQUAL "unknown-kind")
     aros_stage_sdk_files(NAME stage-db KIND other SOURCE "${_source_root}"
         DESTINATION "${_destination}" FILES netdb)

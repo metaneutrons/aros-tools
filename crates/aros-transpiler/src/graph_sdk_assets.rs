@@ -152,6 +152,36 @@ fn sdk_alias_rejects_file_dependency_cycles_before_generation() {
 }
 
 impl DependencyGraph {
+    /// Removes image file copies whose owner no `#MM` edge names as a
+    /// prerequisite. MetaMake builds such a target only when it is requested
+    /// by name, so it is not part of the image, and two such skins may stage
+    /// the same output (kalamatee window gadgets). Each removal is returned as
+    /// a report line, so nothing disappears silently.
+    pub fn drop_unattached_image_copies(&mut self) -> Vec<String> {
+        let attached: std::collections::HashSet<&str> = self
+            .meta_targets
+            .values()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        let mut dropped = Vec::new();
+        let mut kept = Vec::new();
+        for copy in std::mem::take(&mut self.sdk_file_copies) {
+            if copy.destination.starts_with("${AROS_SYS_DIR}")
+                && !attached.contains(copy.owner.as_str())
+            {
+                dropped.push(format!(
+                    "{}:{}: %copy_files_q mmake={} dst={} has no `#MM` consumer, so MetaMake never builds it by default and its files are not staged",
+                    copy.file, copy.line, copy.owner, copy.destination
+                ));
+            } else {
+                kept.push(copy);
+            }
+        }
+        self.sdk_file_copies = kept;
+        dropped
+    }
+
     /// Source-declared file identity -> every concrete producer. Keeping all
     /// owners makes ambiguity an error rather than choosing by iteration order.
     pub(crate) fn sdk_asset_producers(
@@ -278,4 +308,44 @@ impl DependencyGraph {
         }
         Ok(dependencies)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn image_copies_without_a_consumer_are_dropped_and_reported() {
+    use crate::sdk_file_copies::SdkFileCopyDecl;
+    let copy = |owner: &str, destination: &str| SdkFileCopyDecl {
+        owner: owner.into(),
+        file: "images/mmakefile.src".into(),
+        line: 3,
+        source_dir: "${AROS_SOURCE_DIR}/images".into(),
+        destination: destination.into(),
+        files: vec!["a".into()],
+        fetch_owner: None,
+    };
+    let mut graph = DependencyGraph::new();
+    graph
+        .sdk_file_copies
+        .push(copy("attached", "${AROS_SYS_DIR}/System/Images"));
+    graph
+        .sdk_file_copies
+        .push(copy("orphan", "${AROS_SYS_DIR}/System/Images"));
+    // Developer copies keep their own consumer proof and are never touched.
+    graph
+        .sdk_file_copies
+        .push(copy("developer", "${AROS_DEVELOPER_BIN_DIR}"));
+    graph
+        .meta_targets
+        .entry("images".into())
+        .or_default()
+        .insert("attached".into());
+    let dropped = graph.drop_unattached_image_copies();
+    let owners: Vec<_> = graph
+        .sdk_file_copies
+        .iter()
+        .map(|c| c.owner.as_str())
+        .collect();
+    assert_eq!(owners, ["attached", "developer"]);
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert!(dropped[0].contains("mmake=orphan"));
 }

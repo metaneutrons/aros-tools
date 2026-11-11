@@ -1153,6 +1153,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         graph.discharge_bound_header_provider_failures(&mut capability_errors);
     }
     skipped_copy_directories.extend(graph.resolve_copy_directories());
+    skipped_file_copies.extend(graph.drop_unattached_image_copies());
     // GNU Make drops a circular phony prerequisite during traversal; CMake
     // rejects utility-target cycles outright. Collapse each meta-only SCC to
     // its shared external prerequisite closure and make that visible.

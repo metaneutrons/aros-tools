@@ -233,6 +233,11 @@ function(aros_stage_sdk_files)
 
     cmake_path(IS_PREFIX _source_root "${_destination}" NORMALIZE _destination_below_source)
     cmake_path(IS_PREFIX _destination "${_source_root}" NORMALIZE _source_below_destination)
+    # An image destination may sit below the source root: the build directory
+    # is normally inside the checkout, and only the listed files are read.
+    if(_destination_kind STREQUAL "image")
+        set(_destination_below_source FALSE)
+    endif()
     if(_destination_below_source OR _source_below_destination)
         message(FATAL_ERROR "${SF_NAME}: SDK file-copy source and destination roots overlap")
     endif()

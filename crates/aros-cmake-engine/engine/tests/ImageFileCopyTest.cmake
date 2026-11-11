@@ -53,11 +53,33 @@ if(NOT "${_staged_files}" STREQUAL "general.config;netdb")
     message(FATAL_ERROR "unexpected staged image files: ${_staged_files}")
 endif()
 
+# The build directory inside the checkout: a source root above the image
+# destination is allowed, and the listed file is staged.
+set(_build_tree "${_root}/build-tree-root")
+_configure("${_build_tree}" "tree-root-source" _result _log)
+if(NOT _result EQUAL 0)
+    message(FATAL_ERROR "tree-root source fixture configure failed\n${_log}")
+endif()
+execute_process(
+    COMMAND "${_cmake}" --build "${_build_tree}" --target stage-db
+    RESULT_VARIABLE _result OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr)
+if(NOT _result EQUAL 0)
+    message(FATAL_ERROR "tree-root source build failed\n${_stdout}\n${_stderr}")
+endif()
+execute_process(
+    COMMAND "${_cmake}" -E compare_files "${_build_tree}/LICENSE"
+        "${_build_tree}/SYS/Locale/Help/English/LICENSE"
+    RESULT_VARIABLE _compare)
+if(NOT _compare EQUAL 0)
+    message(FATAL_ERROR "tree-root staged file differs from its source")
+endif()
+
 # Counter cases: every one must be refused at configure time.
 foreach(_probe_entry IN ITEMS
         "developer-destination|inside the Developer tree"
         "outside-image|escapes its declared root"
         "image-root|is the image root itself"
+        "source-inside-destination|source and destination roots overlap"
         "unknown-kind|unknown SDK file-copy KIND"
         "duplicate-kind|requires exactly one"
         "traversal|unsafe SDK file basename"
