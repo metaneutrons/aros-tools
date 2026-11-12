@@ -923,6 +923,100 @@ fn image_copy_rejects_a_listing_without_any_match() {
     );
 }
 
+const IMAGE_FLAGS_COPY: &str = "FLAGS := $(notdir $(call WILDCARD, flags/*))\n%copy_files_q mmake=image-db files=$(FLAGS) src=flags \\\n    dst=$(AROS_SYSTEM)/Flags\n";
+
+#[test]
+fn image_copy_and_its_nested_directory_copy_stage_disjoint_files() {
+    // Shape of the AROSTCP `db` directory: the parent lists its own regular
+    // files, and `services.d/` has a second copy of its own with the same
+    // filter. The directory itself never appears in the parent's list.
+    let db = "#MM- parent : image-db\n%copy_files_q mmake=image-db files=\"$(filter-out mmakefile.src mmakefile services.d, $(call WILDCARD, *))\" \\\n    dst=$(AROS_SYSTEM)/Network/AROSTCP/db\n";
+    let services = "#MM- image-db : image-db-servicesd\n%copy_files_q mmake=image-db-servicesd files=\"$(filter-out mmakefile.src mmakefile, $(call WILDCARD, *))\" \\\n    dst=$(AROS_SYSTEM)/Network/AROSTCP/db/services.d\n";
+    let (temp, invocations, scope, dirs, fetches, states) = fixture(db, false);
+    let root = temp.path();
+    fs::create_dir_all(root.join("module/services.d")).unwrap();
+    fs::write(root.join("module/hosts"), b"data").unwrap();
+    fs::write(root.join("module/services.d/dhcp"), b"data").unwrap();
+    fs::write(root.join("module/services.d/mmakefile.src"), services).unwrap();
+    let (parent, rejected) = collect(
+        &invocations,
+        &scope,
+        &dirs,
+        root,
+        Path::new("module"),
+        Some(&states),
+        &fetches,
+    );
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert_eq!(parent.len(), 1);
+    assert_eq!(parent[0].files, ["hosts"]);
+
+    let joined = join_continuations(services);
+    let (scope, states) = collect_vars_impl(&joined, None);
+    let invocations = macro_invocations(&joined);
+    let rel = Path::new("module/services.d");
+    let (fetches, _) = collect_fetches_with_scope(services, rel, &scope);
+    let (child, rejected) = collect(
+        &invocations,
+        &scope,
+        &dirs,
+        root,
+        rel,
+        Some(&states),
+        &fetches,
+    );
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert_eq!(child.len(), 1);
+    assert_eq!(child[0].files, ["dhcp"]);
+    assert_eq!(
+        child[0].destination,
+        "${AROS_SYS_DIR}/System/Network/AROSTCP/db/services.d"
+    );
+    assert!(child[0].destination.starts_with(&parent[0].destination));
+}
+
+#[test]
+fn image_copy_lists_a_subdirectory_with_notdir() {
+    let source = image_source(IMAGE_FLAGS_COPY);
+    let (temp, invocations, scope, dirs, fetches, states) = fixture(&source, false);
+    fs::create_dir(temp.path().join("module/flags")).unwrap();
+    fs::write(temp.path().join("module/flags/de"), b"data").unwrap();
+    fs::write(temp.path().join("module/flags/fr"), b"data").unwrap();
+    let (declarations, rejected) = collect(
+        &invocations,
+        &scope,
+        &dirs,
+        temp.path(),
+        Path::new("module"),
+        Some(&states),
+        &fetches,
+    );
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert_eq!(declarations.len(), 1);
+    assert_eq!(
+        declarations[0].source_dir,
+        "${AROS_SOURCE_DIR}/module/flags"
+    );
+    let mut files = declarations[0].files.clone();
+    files.sort();
+    assert_eq!(files, ["de", "fr"]);
+}
+
+#[test]
+fn image_copy_refuses_a_listing_that_leaves_the_declaring_directory() {
+    for pattern in ["../flags/*", "/etc/*", "flags//*"] {
+        let source = image_source(&format!(
+            "%copy_files_q mmake=image-db files=\"$(notdir $(call WILDCARD, {pattern}))\" src=flags dst=$(AROS_SYSTEM)/Flags\n"
+        ));
+        let (_temp, declarations, rejected, _) = image_collect(&source, &[]);
+        assert!(declarations.is_empty(), "{pattern}");
+        assert!(
+            rejected.iter().any(|item| item.reason.contains("glob")),
+            "{pattern}: {rejected:?}"
+        );
+    }
+}
+
 #[test]
 fn image_copy_listing_contains_regular_files_only() {
     let source = image_source(IMAGE_DB_COPY);

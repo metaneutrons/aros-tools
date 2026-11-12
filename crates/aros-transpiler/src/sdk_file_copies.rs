@@ -1447,6 +1447,7 @@ fn validate_source_list_expression(
                 name.strip_prefix("call WILDCARD,")
                     .map(|rest| ("WILDCARD", rest))
             })
+            .or_else(|| name.strip_prefix("notdir ").map(|rest| ("notdir", rest)))
         {
             validate_list_function(function, scope, line, label, visiting, depth)?;
             at = end + 1;
@@ -1508,7 +1509,8 @@ fn balanced_reference_end(bytes: &[u8], start: usize, open: u8, close: u8) -> Op
     None
 }
 
-/// Admits the two list functions that enumerate a source directory. Both are
+/// Admits the list functions that enumerate a source directory (`call WILDCARD`,
+/// `filter-out`) or reduce its names (`notdir`). Both are
 /// evaluated at transpile time against the selected source tree, so the
 /// resulting list is finite and fixed in the generated CMake. The glob is a
 /// single literal pattern in the declaring directory.
@@ -1529,11 +1531,16 @@ fn validate_list_function(
                     || extra.contains(&c)
             })
     };
+    if function == "notdir" {
+        return validate_source_list_expression(body, scope, line, label, visiting, depth - 1);
+    }
     if function == "WILDCARD" {
         let pattern = body.trim();
-        if !literal(pattern, &['*', '?'])
+        if !literal(pattern, &['*', '?', '/'])
             || pattern.contains(char::is_whitespace)
             || pattern.contains("..")
+            || pattern.starts_with('/')
+            || pattern.contains("//")
         {
             return Err(format!(
                 "{label} file list glob `{pattern}` is not one plain pattern in the declaring directory"
