@@ -853,3 +853,88 @@ USER_CPPFLAGS += -DSTDC_LIB32
         ["_GNU_SOURCE", "__ISO_C_VISIBLE=2011", "lint"]
     );
 }
+
+/// The shape `workbench/libs/z/mmakefile.src` uses since upstream 84e8b2c80f: a
+/// list variable replaced inside two nested conditionals, the outer one on a
+/// value `configure` leaves empty everywhere except on m68k.
+const NOGZIP_SHAPE: &str = "\
+FILES := adler32 inflate
+NOGZIP := $(FILES)
+ifneq ($(ROM_OPTIMIZATION_CFLAGS),)
+ifneq ($(filter inflate,$(FILES)),)
+NOGZIP := $(filter-out inflate,$(FILES)) inflate_nogzip
+endif
+endif
+";
+
+fn context_for(cpu: &str) -> TargetContext {
+    TargetContext {
+        cpu: Some(cpu.into()),
+        ..TargetContext::default()
+    }
+}
+
+#[test]
+fn rom_optimization_flags_are_empty_off_m68k_and_decide_the_nested_replacement() {
+    for cpu in ["x86_64", "arm", "aarch64", "riscv64"] {
+        let context = context_for(cpu);
+        assert_eq!(
+            context.value_of("ROM_OPTIMIZATION_CFLAGS").as_deref(),
+            Some("")
+        );
+        let scope = collect_vars_with_context(NOGZIP_SHAPE, &context);
+        assert!(!scope.path_is_conditional_at("NOGZIP", usize::MAX), "{cpu}");
+        assert_eq!(
+            scope.raw_at("NOGZIP", usize::MAX).as_deref(),
+            Some("adler32 inflate"),
+            "{cpu}: the replacement in the false branch must not apply"
+        );
+    }
+}
+
+#[test]
+fn rom_optimization_flags_stay_undecided_for_m68k_and_an_unknown_cpu() {
+    for context in [context_for("m68k"), TargetContext::default()] {
+        assert_eq!(context.value_of("ROM_OPTIMIZATION_CFLAGS"), None);
+        let scope = collect_vars_with_context(NOGZIP_SHAPE, &context);
+        assert!(scope.path_is_conditional_at("NOGZIP", usize::MAX));
+    }
+}
+
+#[test]
+fn a_declared_rom_optimization_value_wins_over_the_configure_default() {
+    let mut context = context_for("arm");
+    context
+        .make_variables
+        .insert("ROM_OPTIMIZATION_CFLAGS".into(), "-Os".into());
+    assert_eq!(
+        context.value_of("ROM_OPTIMIZATION_CFLAGS").as_deref(),
+        Some("-Os")
+    );
+    let scope = collect_vars_with_context(NOGZIP_SHAPE, &context);
+    // The outer condition is now true and the inner one is decidable, so the
+    // replacement applies and the value stays decided.
+    assert!(!scope.path_is_conditional_at("NOGZIP", usize::MAX));
+    assert_eq!(
+        scope.raw_at("NOGZIP", usize::MAX).as_deref(),
+        Some("$(filter-out inflate,adler32 inflate) inflate_nogzip")
+    );
+}
+
+#[test]
+fn only_the_named_configure_variable_is_decided() {
+    // Any other variable keeps its conditional undecided, whatever the CPU.
+    for source in [
+        // Not modelled.
+        "V := a\nifneq ($(UNMODELLED_FLAGS),)\nV := b\nendif\n",
+        // Known outer condition, undecidable inner one.
+        "V := a\nifneq ($(ROM_OPTIMIZATION_CFLAGS),x)\nifneq ($(UNMODELLED_FLAGS),)\nV := b\nendif\nendif\n",
+        // A shell call is never evaluated at transpile time.
+        "V := a\nifneq ($(shell echo x),)\nV := b\nendif\n",
+        // The negated test of a configure value that is not in the table.
+        "V := a\nifeq ($(KERNEL_OPTIMIZATION_CFLAGS),)\nV := b\nendif\n",
+    ] {
+        let scope = collect_vars_with_context(source, &context_for("arm"));
+        assert!(scope.path_is_conditional_at("V", usize::MAX), "{source}");
+    }
+}
