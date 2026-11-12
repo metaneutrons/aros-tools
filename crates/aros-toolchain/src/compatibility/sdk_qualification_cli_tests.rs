@@ -48,7 +48,18 @@ pub(super) fn probe(
     selection: &Value,
     inspect_arguments: &[String],
 ) {
-    assert_eq!(request.generations.len(), 3);
+    let expected_generations = request
+        .complete
+        .builds
+        .packages
+        .inputs
+        .expected_sdk_generation_lanes()
+        .len();
+    assert!(
+        expected_generations >= 2,
+        "fixture must cover at least two SDK hosts"
+    );
+    assert_eq!(request.generations.len(), expected_generations);
     let context = CliProbe {
         binary,
         request,
