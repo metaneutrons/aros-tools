@@ -684,7 +684,7 @@ fn declarations_sharing_a_module_name_publish_no_ambiguous_private_header() {
     fs::create_dir_all(&network).unwrap();
     fs::write(
         network.join("wifi.conf"),
-        "##begin config\nversion 1.0\noptions noincludes\n##end config\n",
+        "##begin config\nversion 1.0\n##end config\n",
     )
     .unwrap();
     fs::write(
@@ -731,4 +731,171 @@ fn declarations_sharing_a_module_name_publish_no_ambiguous_private_header() {
         stdout.contains("arch/test/network/wifi (device+resource)"),
         "{stdout}"
     );
+}
+
+/// A module whose build description is given explicitly, with extra lines in
+/// the `config` section of its conf.
+fn write_module_fixture(root: &Path, relative: &str, stem: &str, modtype: &str, config: &str) {
+    let directory = root.join(relative);
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join(format!("{stem}.conf")),
+        format!("##begin config\nversion 1.0\n{config}##end config\n"),
+    )
+    .unwrap();
+    fs::write(
+        directory.join("mmakefile.src"),
+        format!("%build_module mmake=test-{stem} modname={stem} modtype={modtype} files=test.c\n"),
+    )
+    .unwrap();
+}
+
+fn run_sdk(source: &Path, build: &Path) -> Output {
+    let include = build.join("SDK/include");
+    let generated = build.join("gen");
+    run_json(&[
+        "--scan-dir",
+        source.to_str().unwrap(),
+        "--output-root",
+        build.to_str().unwrap(),
+        "--output-inc",
+        include.to_str().unwrap(),
+        "--output-gen",
+        generated.to_str().unwrap(),
+        "--output-linklib",
+        build.join("linklib").to_str().unwrap(),
+    ])
+}
+
+fn names_in(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort_unstable();
+    names
+}
+
+#[test]
+fn noincludes_module_publishes_no_public_headers_but_keeps_libdefs_and_linklib() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture(
+        &source,
+        "rom/quiet",
+        "quiet",
+        "library",
+        "options noincludes\n",
+    );
+    write_module_fixture(&source, "rom/loud", "loud", "library", "");
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let include = build.join("SDK/include");
+    assert_eq!(names_in(&include.join("proto")), ["loud.h"]);
+    assert_eq!(names_in(&include.join("clib")), ["loud_protos.h"]);
+    assert_eq!(names_in(&include.join("defines")), ["loud.h", "loud_LVO.h"]);
+    assert!(build.join("gen/rom/quiet/quiet_libdefs.h").is_file());
+    assert!(build.join("linklib/rom/quiet").is_dir());
+}
+
+#[test]
+fn noincludes_resource_no_longer_collides_with_a_case_variant_service() {
+    // rom/filesystem declares noincludes; the Envoy service of the same name in
+    // another case is then the only publisher, so there is no collision.
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture(
+        &source,
+        "rom/filesystem",
+        "FileSystem",
+        "resource",
+        "options noincludes, noautolib\n",
+    );
+    write_module_fixture(&source, "net/efsservice", "filesystem", "library", "");
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let include = build.join("SDK/include");
+    assert_eq!(names_in(&include.join("proto")), ["filesystem.h"]);
+    assert_eq!(names_in(&include.join("clib")), ["filesystem_protos.h"]);
+    assert!(!include.join("conf-name-collisions.txt").exists());
+    assert!(build
+        .join("gen/rom/filesystem/FileSystem_libdefs.h")
+        .is_file());
+    assert!(build
+        .join("gen/net/efsservice/filesystem_libdefs.h")
+        .is_file());
+}
+
+#[test]
+fn case_only_collision_without_noincludes_is_still_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture(&source, "rom/filesystem", "FileSystem", "resource", "");
+    write_module_fixture(&source, "net/efsservice", "filesystem", "library", "");
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(!result.status.success());
+    assert_eq!(diagnostic_code(&result), "AG0201");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("portable output collision"));
+}
+
+#[test]
+fn same_spelling_collision_stays_withheld_and_reported() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture(&source, "a/dup", "dup", "library", "");
+    write_module_fixture(&source, "b/dup", "dup", "library", "");
+    write_module_fixture(&source, "c/other", "other", "library", "");
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let include = build.join("SDK/include");
+    assert_eq!(names_in(&include.join("proto")), ["other.h"]);
+    assert!(fs::read_to_string(include.join("conf-name-collisions.txt"))
+        .unwrap()
+        .contains("dup"));
+}
+
+#[test]
+fn two_declared_noincludes_modules_do_not_count_as_a_collision() {
+    // Neither publishes headers, so a shared name in two spellings is no clash.
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    write_module_fixture(&source, "a/x", "Quiet", "library", "options noincludes\n");
+    write_module_fixture(&source, "b/x", "quiet", "library", "options noincludes\n");
+    let build = directory.path().join("build");
+
+    let result = run_sdk(&source, &build);
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(names_in(&build.join("SDK/include/proto")).is_empty());
 }
