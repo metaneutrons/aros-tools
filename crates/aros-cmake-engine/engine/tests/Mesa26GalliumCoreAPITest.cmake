@@ -63,6 +63,7 @@ file(READ "${CMAKE_CURRENT_LIST_DIR}/../Mesa26GalliumCoreAPI.cmake" _gca_module)
 foreach(_required IN ITEMS
     "mesa-26.2.5-aros.diff"
     "3fdbd183fd103162bba084ff5d17c7a7931016f485d6285dc742d085593db16e"
+    "bbfb69aad61d3b134459e2e510fc58c43cef0abbe95d32ddaacd10cecc9c6581"
     "14e53322da6dcd184474a1b7377a8c1f6a5aecd1bcce3386594c2c2c1558fc05"
     "gen/workbench/libs/mesa/26.2.5/galliumcoreapi"
     "gen/lib/mesa26.2.5"
@@ -106,5 +107,51 @@ execute_process(COMMAND "${CMAKE_COMMAND}"
 if("${_empty_status}" STREQUAL "0" OR
    NOT _empty_error MATCHES "ABI flags need[ \n]+the consumer defines")
     message(FATAL_ERROR "Mesa 26 GCA ABI flags accepted a consumer without defines")
+endif()
+# The reviewed ABI patch revisions: each listed digest is admitted, an unlisted
+# patch and a listed one with one changed line are refused.
+function(_gca_patch_probe expected file)
+    execute_process(COMMAND "${CMAKE_COMMAND}"
+        "-DGCA_MODULE=${CMAKE_CURRENT_LIST_DIR}/../Mesa26GalliumCoreAPI.cmake"
+        "-DGCA_PATCH=${file}" ${ARGN}
+        -P "${_root}/patch-probe.cmake"
+        RESULT_VARIABLE _status ERROR_VARIABLE _error)
+    if(expected STREQUAL "accepted" AND NOT "${_status}" STREQUAL "0")
+        message(FATAL_ERROR "Mesa 26 GCA refused a reviewed patch: ${_error}")
+    elseif(expected STREQUAL "refused" AND
+           ("${_status}" STREQUAL "0" OR
+            NOT _error MATCHES "ABI patch changed without[ \n]+review"))
+        message(FATAL_ERROR "Mesa 26 GCA accepted an unreviewed patch: ${_error}")
+    endif()
+endfunction()
+file(WRITE "${_root}/patch-probe.cmake"
+    "include(\"\${GCA_MODULE}\")\n"
+    "string(REPLACE \",\" \";\" _admitted \"\${GCA_ADMITTED}\")\n"
+    "_aros_mesa26_gca_require_patch_in(\"\${GCA_PATCH}\" \${_admitted})\n")
+file(WRITE "${_root}/first.diff" "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+first\n")
+file(WRITE "${_root}/second.diff" "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+second\n")
+file(WRITE "${_root}/second-edited.diff" "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+seconds\n")
+file(SHA256 "${_root}/first.diff" _first_sha)
+file(SHA256 "${_root}/second.diff" _second_sha)
+set(_admitted "-DGCA_ADMITTED=${_first_sha},${_second_sha}")
+_gca_patch_probe(accepted "${_root}/first.diff" "${_admitted}")
+_gca_patch_probe(accepted "${_root}/second.diff" "${_admitted}")
+_gca_patch_probe(refused "${_root}/second-edited.diff" "${_admitted}")
+_gca_patch_probe(refused "${_root}/second.diff" "-DGCA_ADMITTED=${_first_sha}")
+# With the AROS-NX checkout the real patch is admitted by the engine itself.
+if(DEFINED ENV{AROS_TEST_SOURCE_ROOT} AND
+   EXISTS "$ENV{AROS_TEST_SOURCE_ROOT}/workbench/libs/mesa/mesa-26.2.5-aros.diff")
+    _gca_patch_probe(accepted
+        "$ENV{AROS_TEST_SOURCE_ROOT}/workbench/libs/mesa/mesa-26.2.5-aros.diff"
+        "-DGCA_ADMITTED=3fdbd183fd103162bba084ff5d17c7a7931016f485d6285dc742d085593db16e,bbfb69aad61d3b134459e2e510fc58c43cef0abbe95d32ddaacd10cecc9c6581")
+    # One changed line inside a hunk of the real patch is refused.
+    file(READ "$ENV{AROS_TEST_SOURCE_ROOT}/workbench/libs/mesa/mesa-26.2.5-aros.diff" _real_patch)
+    string(REPLACE "defined(__AROS__)" "defined(__AROS_X__)" _edited_patch "${_real_patch}")
+    if(_edited_patch STREQUAL _real_patch)
+        message(FATAL_ERROR "Mesa 26 GCA probe could not edit the real patch")
+    endif()
+    file(WRITE "${_root}/edited-real.diff" "${_edited_patch}")
+    _gca_patch_probe(refused "${_root}/edited-real.diff"
+        "-DGCA_ADMITTED=3fdbd183fd103162bba084ff5d17c7a7931016f485d6285dc742d085593db16e,bbfb69aad61d3b134459e2e510fc58c43cef0abbe95d32ddaacd10cecc9c6581")
 endif()
 message(STATUS "Mesa 26 GalliumCoreAPI positive and mutated-input probes passed")
