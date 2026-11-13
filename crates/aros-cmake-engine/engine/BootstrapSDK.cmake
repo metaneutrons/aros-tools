@@ -113,6 +113,76 @@ function(aros_generate_asm_header sdk_inc geninc)
     message(STATUS "🔧 AROS-NX: generated aros/${AROS_TARGET_CPU}/asm.h (${_n} lines)")
 endfunction()
 
+# Build metadata that lives beside headers in the AROS source tree. None of it
+# is SDK content, and several directories that feed the SDK root carry a file
+# of the same name with different content (compiler/include versus
+# compiler/crt/*/include), so letting it through made the published SDK depend
+# on which copy happened to win.
+set(_AROS_SDK_HEADER_TREE_EXCLUDED_NAMES
+    mmakefile.src mmakefile geninc.cfg.in .gitignore .cvsignore)
+
+# _aros_bootstrap_stage_headers(<run> <source-dir> <dest-subdir>
+#                               [KEEP_FIRST] [OPTIONAL])
+#
+# Stages one source include tree into the SDK include root. file(COPY) decides
+# between two files of the same destination by comparing timestamps: equal
+# timestamps keep the first copy, different ones take the last. That outcome
+# comes from how the source tree was extracted, so it differs between hosts.
+# This stages by content instead and records every destination within <run>:
+#
+#   * identical content from several trees is fine;
+#   * different content from several trees is a configure error, unless this
+#     tree is declared KEEP_FIRST, which names the earlier tree authoritative
+#     for exactly these destinations.
+function(_aros_bootstrap_stage_headers run source destination)
+    cmake_parse_arguments(PARSE_ARGV 3 _stage "KEEP_FIRST;OPTIONAL" "" "")
+    if(NOT IS_DIRECTORY "${source}")
+        if(_stage_OPTIONAL)
+            return()
+        endif()
+        message(FATAL_ERROR "SDK header source directory is missing: ${source}")
+    endif()
+    file(GLOB_RECURSE _files LIST_DIRECTORIES FALSE
+        RELATIVE "${source}" "${source}/*")
+    list(SORT _files)
+    foreach(_relative IN LISTS _files)
+        get_filename_component(_name "${_relative}" NAME)
+        if(_name IN_LIST _AROS_SDK_HEADER_TREE_EXCLUDED_NAMES OR
+           _relative MATCHES "(^|/)(CVS|\\.svn|\\.git[^/]*)(/|$)")
+            continue()
+        endif()
+        if(destination STREQUAL "")
+            set(_published "${_relative}")
+        else()
+            set(_published "${destination}/${_relative}")
+        endif()
+        file(SHA256 "${source}/${_relative}" _hash)
+        set(_property "AROS_SDK_STAGED:${run}:${_published}")
+        get_property(_claim GLOBAL PROPERTY "${_property}")
+        if(NOT "${_claim}" STREQUAL "")
+            string(REGEX MATCH "^([0-9a-f]+) (.*)$" _unused "${_claim}")
+            if(CMAKE_MATCH_1 STREQUAL _hash)
+                continue()
+            endif()
+            if(_stage_KEEP_FIRST)
+                continue()
+            endif()
+            message(FATAL_ERROR
+                "SDK include path '${_published}' is produced by two source "
+                "files with different content:\n  ${CMAKE_MATCH_2}\n  "
+                "${source}/${_relative}\n"
+                "Which one wins must not depend on the host. Exclude one or "
+                "declare an explicit precedence.")
+        endif()
+        set_property(GLOBAL PROPERTY "${_property}"
+            "${_hash} ${source}/${_relative}")
+        get_filename_component(_parent "${AROS_SDK_INCLUDE_DIR}/${_published}" DIRECTORY)
+        file(MAKE_DIRECTORY "${_parent}")
+        file(COPY_FILE "${source}/${_relative}"
+            "${AROS_SDK_INCLUDE_DIR}/${_published}" ONLY_IF_DIFFERENT)
+    endforeach()
+endfunction()
+
 function(aros_bootstrap_sdk_includes)
     if(NOT DEFINED AROS_SDK_INCLUDE_DIR OR "${AROS_SDK_INCLUDE_DIR}" STREQUAL "")
         message(FATAL_ERROR "SDK bootstrap requires the resolved SDK include root")
@@ -120,11 +190,18 @@ function(aros_bootstrap_sdk_includes)
     set(SDK_INC "${AROS_SDK_INCLUDE_DIR}")
     set(GEN_INC "${AROS_GENINC_DIR}")
     file(MAKE_DIRECTORY "${SDK_INC}/aros")
+    # One run id per call: a destination claimed in an earlier call of the
+    # same CMake process must not make this call's trees look conflicting.
+    get_property(_run GLOBAL PROPERTY AROS_SDK_STAGE_RUN)
+    if("${_run}" STREQUAL "")
+        set(_run 0)
+    endif()
+    math(EXPR _run "${_run} + 1")
+    set_property(GLOBAL PROPERTY AROS_SDK_STAGE_RUN "${_run}")
 
     # 1. Copy core system headers from compiler/include/
-    file(COPY "${AROS_SOURCE_DIR}/compiler/include/"
-         DESTINATION "${SDK_INC}"
-    )
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/compiler/include" "")
     # The historic compiler-includes target publishes this architecture
     # dispatcher to both include roots.  Keep the generated root in sync too:
     # an existing build tree may still contain a same-named header staged by a
@@ -160,78 +237,52 @@ function(aros_bootstrap_sdk_includes)
     endif()
 
     # 2. Copy AROS support headers into aros/
-    file(COPY "${AROS_SOURCE_DIR}/compiler/arossupport/include/"
-         DESTINATION "${SDK_INC}/aros"
-    )
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/compiler/arossupport/include" "aros")
     if(EXISTS "${AROS_SOURCE_DIR}/compiler/autoinit/autoinit.h")
         file(COPY_FILE "${AROS_SOURCE_DIR}/compiler/autoinit/autoinit.h"
             "${SDK_INC}/aros/autoinit.h" ONLY_IF_DIFFERENT)
     endif()
 
     # 3. Copy CRT and POSIX headers (stdio.h, stdlib.h, string.h, alloca.h, unistd.h, etc.)
-    if(EXISTS "${AROS_SOURCE_DIR}/compiler/crt/stdc/include/aros/stdc/")
-        file(COPY "${AROS_SOURCE_DIR}/compiler/crt/stdc/include/aros/stdc/"
-             DESTINATION "${SDK_INC}"
-        )
-    endif()
-    if(EXISTS "${AROS_SOURCE_DIR}/compiler/crt/posixc/include/aros/posixc/")
-        file(COPY "${AROS_SOURCE_DIR}/compiler/crt/posixc/include/aros/posixc/"
-             DESTINATION "${SDK_INC}"
-        )
-    endif()
-    if(EXISTS "${AROS_SOURCE_DIR}/compiler/crt/posixc/include/")
-        file(COPY "${AROS_SOURCE_DIR}/compiler/crt/posixc/include/"
-             DESTINATION "${SDK_INC}"
-        )
-    endif()
-    if(EXISTS "${AROS_SOURCE_DIR}/compiler/crt/stdc/include/")
-        file(COPY "${AROS_SOURCE_DIR}/compiler/crt/stdc/include/"
-             DESTINATION "${SDK_INC}"
-        )
-    endif()
+    # stdc and posixc both ship root-level stdio.h, time.h and eleven more
+    # headers with different content. The stdc copy is the one the published
+    # SDK has always carried, so posixc's is explicitly the later, losing one.
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/compiler/crt/stdc/include/aros/stdc" "" OPTIONAL)
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/compiler/crt/posixc/include/aros/posixc" ""
+        KEEP_FIRST OPTIONAL)
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/compiler/crt/posixc/include" "" OPTIONAL)
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/compiler/crt/stdc/include" "" OPTIONAL)
 
     # 4. Copy Architecture-specific headers into their expected subdirectories
-    if(EXISTS "${AROS_SOURCE_DIR}/arch/x86_64-all/include/aros/")
-        file(COPY "${AROS_SOURCE_DIR}/arch/x86_64-all/include/aros/"
-             DESTINATION "${SDK_INC}/aros/x86_64"
-        )
-    endif()
-    if(EXISTS "${AROS_SOURCE_DIR}/arch/i386-all/include/aros/")
-        file(COPY "${AROS_SOURCE_DIR}/arch/i386-all/include/aros/"
-             DESTINATION "${SDK_INC}/aros/i386"
-        )
-    endif()
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/arch/x86_64-all/include/aros" "aros/x86_64" OPTIONAL)
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/arch/i386-all/include/aros" "aros/i386" OPTIONAL)
 
-    if(EXISTS "${AROS_SOURCE_DIR}/arch/aarch64-all/include/aros/")
-        file(COPY "${AROS_SOURCE_DIR}/arch/aarch64-all/include/aros/"
-             DESTINATION "${SDK_INC}/aros/aarch64"
-        )
-    endif()
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/arch/aarch64-all/include/aros" "aros/aarch64" OPTIONAL)
 
-    if(EXISTS "${AROS_SOURCE_DIR}/arch/arm-all/include/aros/")
-        file(COPY "${AROS_SOURCE_DIR}/arch/arm-all/include/aros/"
-             DESTINATION "${SDK_INC}/aros/arm"
-        )
-    endif()
-    if(EXISTS "${AROS_SOURCE_DIR}/arch/arm-all/include/aros-armel/")
-        file(COPY "${AROS_SOURCE_DIR}/arch/arm-all/include/aros-armel/"
-             DESTINATION "${SDK_INC}/aros/arm"
-        )
-    endif()
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/arch/arm-all/include/aros" "aros/arm" OPTIONAL)
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/arch/arm-all/include/aros-armel" "aros/arm" OPTIONAL)
 
-    if(EXISTS "${AROS_SOURCE_DIR}/arch/riscv64-all/include/aros/")
-        file(COPY "${AROS_SOURCE_DIR}/arch/riscv64-all/include/aros/"
-             DESTINATION "${SDK_INC}/aros/riscv64"
-        )
-    endif()
+    _aros_bootstrap_stage_headers("${_run}"
+        "${AROS_SOURCE_DIR}/arch/riscv64-all/include/aros" "aros/riscv64" OPTIONAL)
 
     # A source-owned CPU namespace may extend the profiles without extending
     # a Rust board enum. Preserve the established staging above, and stage a
     # declared shared CPU's headers when that namespace is new (e.g. riscv-all).
     if(NOT AROS_TARGET_CPU MATCHES "^(x86_64|i386|aarch64|arm|riscv64)$" AND
        IS_DIRECTORY "${AROS_SOURCE_DIR}/arch/${AROS_TARGET_CPU}-all/include/aros")
-        file(COPY "${AROS_SOURCE_DIR}/arch/${AROS_TARGET_CPU}-all/include/aros/"
-            DESTINATION "${SDK_INC}/aros/${AROS_TARGET_CPU}")
+        _aros_bootstrap_stage_headers("${_run}"
+            "${AROS_SOURCE_DIR}/arch/${AROS_TARGET_CPU}-all/include/aros"
+            "aros/${AROS_TARGET_CPU}")
     endif()
 
     # IRQ types header
