@@ -46,6 +46,9 @@ fn engine_archives_carry_no_owner_or_date() {
         .args(["-G", "Ninja"])
         .arg(format!("-DCMAKE_C_COMPILER={}", compiler.display()))
         .arg(format!("-DCMAKE_AR={}", archiver.display()))
+        // The engine targets ELF. Generic keeps CMake from adding Darwin-only
+        // options such as -arch that an ELF target rejects.
+        .arg("-DCMAKE_SYSTEM_NAME=Generic")
         .output()
         .expect("configure archive fixture");
     assert!(
@@ -81,7 +84,9 @@ fn engine_archives_carry_no_owner_or_date() {
     let archive = build.join("libdetlib.a");
     let members = read_members(&archive);
     assert!(
-        members.iter().any(|member| member.name.ends_with(".o/")),
+        members
+            .iter()
+            .any(|member| member.name.ends_with(".o/") || member.name.ends_with(".obj/")),
         "fixture archive has no object member: {:?}",
         members.iter().map(|m| m.name.as_str()).collect::<Vec<_>>()
     );
@@ -105,7 +110,10 @@ fn engine_archives_carry_no_owner_or_date() {
             .expect("list object directory")
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .find(|path| path.extension().is_some_and(|ext| ext == "o"))
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext == "o" || ext == "obj")
+            })
             .expect("fixture object file");
         let control = root.join("control.a");
         let made = Command::new(&archiver)
@@ -227,9 +235,6 @@ fn deterministic_archiver() -> Option<PathBuf> {
 
 fn host_compiler() -> PathBuf {
     let mut names = Vec::<OsString>::new();
-    if let Some(configured) = env::var_os("CC") {
-        names.push(configured);
-    }
     names.extend(["clang", "cc", "gcc"].map(OsString::from));
     let search_path = env::var_os("PATH").unwrap_or_default();
     for name in names {
