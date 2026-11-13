@@ -323,11 +323,31 @@ endif()
 # language, which happens in project() before this file runs. Without this the
 # rules keep whichever ar was current then, and the override above never
 # reaches them.
+#
+# An archive member header records the uid, gid and mtime of whoever ran ar.
+# Without the deterministic modifier two hosts (or two users) build different
+# bytes from identical objects, and the SDK package then differs across hosts
+# (qualify-v2-full 43312235510: uid 1001/1001 on the Linux runners, 501/20 on
+# macOS). GNU ar and llvm-ar both accept D. Apple's ar does not, so it is left
+# alone and the SDK producer's cross-host comparison remains the guard there.
+set(AROS_AR_DETERMINISTIC "")
+if(CMAKE_AR)
+    execute_process(
+        COMMAND "${CMAKE_AR}" --version
+        RESULT_VARIABLE _aros_ar_version_result
+        OUTPUT_VARIABLE _aros_ar_version
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_aros_ar_version_result EQUAL 0 AND
+       _aros_ar_version MATCHES "GNU|LLVM")
+        set(AROS_AR_DETERMINISTIC "D")
+    endif()
+endif()
 foreach(_aros_archive_lang C CXX ASM)
     set(CMAKE_${_aros_archive_lang}_ARCHIVE_CREATE
-        "<CMAKE_AR> qc <TARGET> <LINK_FLAGS> <OBJECTS>")
+        "<CMAKE_AR> qc${AROS_AR_DETERMINISTIC} <TARGET> <LINK_FLAGS> <OBJECTS>")
     set(CMAKE_${_aros_archive_lang}_ARCHIVE_APPEND
-        "<CMAKE_AR> q <TARGET> <OBJECTS>")
+        "<CMAKE_AR> q${AROS_AR_DETERMINISTIC} <TARGET> <OBJECTS>")
     set(CMAKE_${_aros_archive_lang}_ARCHIVE_FINISH
         "<CMAKE_RANLIB> <TARGET>")
 endforeach()
@@ -5498,7 +5518,7 @@ function(aros_add_library)
                 set_property(SOURCE "${_linklib_dependency_anchor}" APPEND
                     PROPERTY OBJECT_DEPENDS "${_linklib_object_stamp}")
                 add_custom_command(TARGET "${_client_target}" POST_BUILD
-                    COMMAND "${CMAKE_AR}" q
+                    COMMAND "${CMAKE_AR}" "q${AROS_AR_DETERMINISTIC}"
                         "$<TARGET_FILE:${_client_target}>"
                         "$<TARGET_OBJECTS:${_linklib_object_target}>"
                     COMMAND "${CMAKE_RANLIB}"
