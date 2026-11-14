@@ -4,6 +4,16 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.16](https://github.com/metaneutrons/aros-tools/compare/v0.6.15...v0.6.16) (2026-11-14)
+
+
+### Bug Fixes
+
+* **cmake-engine:** build static archives in deterministic mode ([#551](https://github.com/metaneutrons/aros-tools/issues/551)) ([171b2d8](https://github.com/metaneutrons/aros-tools/commit/171b2d884e5a758c7ae7d777c0f639e879185a5e))
+* **cmake-engine:** stage SDK header trees by content, not by timestamp ([#552](https://github.com/metaneutrons/aros-tools/issues/552)) ([a360863](https://github.com/metaneutrons/aros-tools/commit/a3608632d727e5759565d58497dbc6e3dd85571f))
+* **deps:** update quinn for RUSTSEC-2026-0523, -0524 and -0538 ([#553](https://github.com/metaneutrons/aros-tools/issues/553)) ([12db3e9](https://github.com/metaneutrons/aros-tools/commit/12db3e9b97ae59d44c2719bd5741b2526d535bf9))
+* **genmodule:** honour options noincludes when publishing SDK headers ([#545](https://github.com/metaneutrons/aros-tools/issues/545)) ([b359812](https://github.com/metaneutrons/aros-tools/commit/b3598127ac651e61db1f89bcfdf56e4bd0374148))
+
 ## [0.6.15](https://github.com/metaneutrons/aros-tools/compare/v0.6.14...v0.6.15) (2026-11-11)
 
 
