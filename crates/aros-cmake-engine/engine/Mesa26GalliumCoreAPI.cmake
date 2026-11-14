@@ -1,5 +1,31 @@
 include_guard(GLOBAL)
 
+# The patch is an input of the GalliumCoreAPI ABI hash (galliumglue.py digests
+# it, so modules built from different patches refuse to bind), and the engine
+# admits only reviewed revisions of it. Each revision is a separate entry; an
+# unlisted patch, or a listed one with a single changed line, is refused.
+#
+# 3fdbd183...  the qualified AROS-NX reference (a073d5a967): 42 files, 91 hunks.
+# bbfb69aa...  upstream AROS after the nvgfx/NVK/zink/lavapipe work: the same
+#              91 hunks byte for byte plus 77 more. Of the 19 added files only
+#              src/util/log.c is part of a GalliumCoreAPI provider archive
+#              (mesautil); its hunk adds a file-local serial logger and leaves
+#              the exported symbols of the object unchanged. The remaining
+#              files and one more hunk of nouveau_screen.c belong to the NVK,
+#              zink, lavapipe, Vulkan runtime and nouveau modules.
+function(_aros_mesa26_gca_require_patch_in patch)
+    file(SHA256 "${patch}" _patch_sha)
+    if(NOT _patch_sha IN_LIST ARGN)
+        message(FATAL_ERROR "Mesa 26 GalliumCoreAPI ABI patch changed without review")
+    endif()
+endfunction()
+
+function(_aros_mesa26_gca_require_reviewed_patch patch)
+    _aros_mesa26_gca_require_patch_in("${patch}"
+        "3fdbd183fd103162bba084ff5d17c7a7931016f485d6285dc742d085593db16e"
+        "bbfb69aad61d3b134459e2e510fc58c43cef0abbe95d32ddaacd10cecc9c6581")
+endfunction()
+
 # Make hashes GCA_ABI_FLAGS := $(TARGET_ISA_CFLAGS) $(USER_CPPFLAGS) of the
 # VC4 consumer into the table, so gca_bind refuses a module built with other
 # layout-relevant flags. This build compiles the consumer with its own target,
@@ -72,11 +98,7 @@ function(aros_build_mesa26_gallium_core_api)
        "02ff4dcc8c3395fa3e7ab3a2f005ef0b2e6c3b777b316bb7d0a8bff5a0a26e19")
         message(FATAL_ERROR "Mesa 26 GalliumCoreAPI generator changed without review")
     endif()
-    file(SHA256 "${_source_patch}" _patch_sha)
-    if(NOT _patch_sha STREQUAL
-       "3fdbd183fd103162bba084ff5d17c7a7931016f485d6285dc742d085593db16e")
-        message(FATAL_ERROR "Mesa 26 GalliumCoreAPI ABI patch changed without review")
-    endif()
+    _aros_mesa26_gca_require_reviewed_patch("${_source_patch}")
 
     _aros_mesa26_gca_abi_flags(_abi_flags "${CMAKE_C_COMPILER_TARGET}"
         "${CMAKE_C_FLAGS}" "${_vc4_defines}")
