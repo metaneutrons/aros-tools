@@ -29,6 +29,10 @@ mesautil-generator-capability = 9ff6ca66c503c1671c6bbd2a2d0b8a9a449a3368a8fcbed2
 mesa26-glapi-recipe = 0c7e7651effa1715778aa6372481f60149b1de1fb5ffd58f6e9079d8cef3fec4 # gitleaks:allow -- public SHA-256 of the audited source recipe, not a credential
 mesa26-egl-recipe = 7b508e09f4b908528ae4cbe336449440e52f0e043ea0a219b9e6a7f000a59bc4 # gitleaks:allow -- public SHA-256 of the audited Mesa 26 EGL recipe
 mesa26-config = 98ff8a696038f5b3ecd5734d2a36f5113de997a096f0b29a83e4f16c2b51bbaa
+# The upstream Mesa 26.2.5 port has no 20.0.8 patch selection in this file
+# (the -nx patch branch is a separate AROS-NX change). Nothing in the Mesa 26
+# capabilities reads that branch.
+mesa26-config-without-mesa20-nx-patch = 76a2eb2730d9f5496789cd7cfc1cade60320ea15a3a8b706023772badf8155fd
 
 # Remaining Mesa generator lanes. Each recipe fingerprint is paired with the
 # versioned inventory from which its hard-coded generator output closure was
@@ -52,7 +56,12 @@ mesa26-core-manifest = bb8b618e4a56efed656f72a340522910bf739630725949f969a8aa98d
 mesa26-galliumaux-recipe = 56a50e703f8945ef536d83252cf0bd2c036c1bae337836be13719d21ff453c91
 # Keeps galliumdrawllvm out of mesa3dgl-linklibs; sources and libraries are unchanged.
 mesa26-galliumaux-recipe-llvmpipe-only = 406b9e7483ef36ace8a3ee354f66e67ae514a221bc293f0b9d9add1985548e79
+# Upstream moves gallivm's no-integer NIR pass from the recipe into the inventory
+# variable MESA26_GALLIUMAUX_GENERATED_LLVM_C_SOURCES. Same single source, same
+# LLVM-toolchain-only condition; the capability names that source itself.
+mesa26-galliumaux-recipe-llvm-generated-sources = 411deef5ee4b0ae66b95b2670cc3cb3c90933f738676b8b8323fb2bcc30ceb98
 mesa26-galliumaux-manifest = adac2a684f3773e07288b7ec60c0c25ed95c32fb574e04c2e10940d26097c560
+mesa26-galliumaux-manifest-llvm-generated-sources = 9cdeb80dc9e598fe39f6a8c63c02f0eff35cf0323bf5343afb7517901fd5f540
 mesa26-util-recipe = ca9559255330524cf0d31bc9b7a3dc1ff7ca2b2d96d03a08641096248e0160fa
 # AROS-NX #90 moves the Chromium zlib include directory to 2b1b62fe; nothing else in the recipe changes.
 mesa26-util-recipe-chromium-2b1b62f = 48228fcadedf9c79b1647f5bf8eedafb769a6cc9dbd6120188955dfa4cdd5f01
@@ -82,6 +91,8 @@ mesa26-gallivm-manifest = 7b4d7686b57b128fe2de662a223baf943e75a8ae2f434fe7c593cb
 mesa26-llvmpipe-recipe = 69e33ce5cd26222b774f8193b818f7a49034e959731ee45587f4d39239e14daf
 mesa26-llvmpipe-recipe-with-llvm23-default = b6447bd38f04ff275ae6ee52fc3472cb4e6755917cde0a5f3118377aa6e91414
 mesa26-llvmpipe-hidd-recipe = 7af9894c09343c3fe423467f8b64eb415cfeabcc8f69c21cf5432bc40a165d15
+# Comment-only rewording of the LLVM_LIBS note.
+mesa26-llvmpipe-hidd-recipe-llvm-lib-comment = 3911538977651b38054134ff982cc6ec87e339a818945d61420ada50ed6f2678
 
 # LLVM target recipes are expanded into version-specific fixed external
 # providers. The earlier LLVM 11 revision stays admitted because disabling
@@ -91,3 +102,10 @@ mesa26-llvmpipe-hidd-recipe = 7af9894c09343c3fe423467f8b64eb415cfeabcc8f69c21cf5
 llvm11-target-recipe = 4f95d02cdaca1e124abc4ada281390b702e9991f5932eb8bda5fd2c12ada7ef1
 llvm11-target-recipe-with-precompiled-headers = d5ea6a24e95c19997b841659ff4c943f6a3ed13f6e7e7569b662597f65ac4b80
 llvm-target-recipe-with-llvm23-default = d8ce81b9703733fec39c416caae77bf2ea65a1130bb534cd1725d0c7f226543d
+# Upstream adds LLVM_HOST_TRIPLE and LLVM_TARGET_ARCH to the target and tool
+# options (the LLVM 11 default of this recipe is unchanged). The closed lanes
+# already pass the same LLVM_HOST_TRIPLE for x86_64, arm and aarch64 and leave
+# LLVM_TARGET_ARCH at its default "host", which LLVM derives from that triple;
+# configuring LLVM 11.0.0 and 23.1.0 with and without the explicit value gives
+# byte-identical llvm-config.h and Targets.def. Admitted for both versions.
+llvm-target-recipe-with-aros-target-options = b6404cd1c6710f85ac3de3dd86d24599cc3bb636f37201f7ea6830ff5ee3f2f7
