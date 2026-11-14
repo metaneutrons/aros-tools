@@ -7,6 +7,6 @@ set -eu
 tool=@AROS_AHI_WRAPPER_AR_QUOTED@
 if [ "${1-}" = "-ru" ]; then
     shift
-    exec "$tool" ru "$@"
+    exec "$tool" @AROS_AHI_WRAPPER_AR_OP@ "$@"
 fi
 exec "$tool" "$@"

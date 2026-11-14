@@ -613,6 +613,13 @@ function(aros_build_ahi)
         message(FATAL_ERROR "AHI: archiver-wrapper template is unavailable")
     endif()
     _aros_ahi_shell_quote("${_CMAKE_AR}" AROS_AHI_WRAPPER_AR_QUOTED)
+    # Keep the AHI archives host independent like every other static library
+    # (see AROS_AR_DETERMINISTIC in AROS.cmake). D replaces u: the two are
+    # mutually exclusive in GNU ar, and a fresh build has nothing to compare.
+    set(AROS_AHI_WRAPPER_AR_OP "ru")
+    if(AROS_AR_DETERMINISTIC)
+        set(AROS_AHI_WRAPPER_AR_OP "r${AROS_AR_DETERMINISTIC}")
+    endif()
     configure_file("${_ar_wrapper_template}" "${_ar_wrapper}" @ONLY)
     file(CHMOD "${_ar_wrapper}" PERMISSIONS
         OWNER_READ OWNER_WRITE OWNER_EXECUTE
