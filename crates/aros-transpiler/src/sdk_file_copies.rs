@@ -67,11 +67,15 @@ enum CopyDestination {
     DeveloperLib,
     DeveloperBin,
     DeveloperMan1,
+    /// Any directory below the image root `$(AROSDIR)` outside the Developer
+    /// tree, such as `$(AROS_SYSTEM)/Network/AROSTCP/db`.
+    SystemImage,
 }
 
 impl CopyDestination {
     const fn alias(self) -> &'static str {
         match self {
+            Self::SystemImage => "",
             Self::DeveloperSdkFd => FD_DIRECTORY_ALIAS,
             Self::DeveloperLib => DEVELOPER_LIB_DIRECTORY_ALIAS,
             Self::DeveloperBin => DEVELOPER_BIN_DIRECTORY_ALIAS,
@@ -85,14 +89,20 @@ impl CopyDestination {
             Self::DeveloperLib => "Developer lib copy",
             Self::DeveloperBin => "Developer bin copy",
             Self::DeveloperMan1 => "Developer man copy",
+            Self::SystemImage => "system image copy",
         }
     }
 
     const fn uses_evaluated_file_list(self) -> bool {
         matches!(
             self,
-            Self::DeveloperLib | Self::DeveloperBin | Self::DeveloperMan1
+            Self::DeveloperLib | Self::DeveloperBin | Self::DeveloperMan1 | Self::SystemImage
         )
+    }
+
+    /// `files=` and `src=` default to `$(FILES)` and `.` for these kinds.
+    const fn has_macro_defaults(self) -> bool {
+        matches!(self, Self::DeveloperLib | Self::SystemImage)
     }
 
     const fn file_list_label(self) -> &'static str {
@@ -101,6 +111,7 @@ impl CopyDestination {
             Self::DeveloperLib => "Developer lib",
             Self::DeveloperBin => "Developer bin",
             Self::DeveloperMan1 => "Developer man",
+            Self::SystemImage => "system image",
         }
     }
 }
@@ -236,7 +247,7 @@ pub(crate) fn collect_from_snapshot(
                 CopyDestination::DeveloperSdkFd
                 | CopyDestination::DeveloperBin
                 | CopyDestination::DeveloperMan1 => names.len() == 4,
-                CopyDestination::DeveloperLib => {
+                CopyDestination::DeveloperLib | CopyDestination::SystemImage => {
                     (2..=4).contains(&names.len())
                         && unique.contains(&"mmake".to_owned())
                         && unique.contains(&"dst".to_owned())
@@ -279,7 +290,13 @@ pub(crate) fn collect_from_snapshot(
                         destination_kind.label()
                     )
                 })?;
+            let mut image_destination = None;
             let (configured_expression, configured_description) = match destination_kind {
+                CopyDestination::SystemImage => {
+                    image_destination =
+                        Some(system_image_destination(&destination_value, &context)?);
+                    ("", "")
+                }
                 CopyDestination::DeveloperSdkFd => (
                     "$(AROS_DEVELOPER)/$(AROS_DIR_SDK)/$(AROS_DIR_FD)",
                     "configured Developer SDK fd path",
@@ -296,8 +313,12 @@ pub(crate) fn collect_from_snapshot(
                     "configured Developer man/man1 path",
                 ),
             };
-            let configured_destination = evaluate_make_expr(configured_expression, &context)
-                .map_err(|error| format!("cannot resolve {configured_description}: {error}"))?;
+            let configured_destination = if image_destination.is_some() {
+                destination_value.clone()
+            } else {
+                evaluate_make_expr(configured_expression, &context)
+                    .map_err(|error| format!("cannot resolve {configured_description}: {error}"))?
+            };
             if destination_value != configured_destination {
                 return Err(format!(
                     "{} destination is not the {configured_description}",
@@ -306,7 +327,7 @@ pub(crate) fn collect_from_snapshot(
             }
 
             let raw_source = macro_arg(&invocation.args, "src").unwrap_or_else(|| {
-                if destination_kind == CopyDestination::DeveloperLib {
+                if destination_kind.has_macro_defaults() {
                     ".".into()
                 } else {
                     String::new()
@@ -336,7 +357,7 @@ pub(crate) fn collect_from_snapshot(
 
             let files_argument = macro_arg(&invocation.args, "files");
             let raw_files = files_argument.clone().unwrap_or_else(|| {
-                if destination_kind == CopyDestination::DeveloperLib {
+                if destination_kind.has_macro_defaults() {
                     "$(FILES)".into()
                 } else {
                     String::new()
@@ -352,7 +373,8 @@ pub(crate) fn collect_from_snapshot(
                 CopyDestination::DeveloperSdkFd => parse_literal_file_list(&raw_files)?,
                 CopyDestination::DeveloperLib
                 | CopyDestination::DeveloperBin
-                | CopyDestination::DeveloperMan1 => evaluate_source_file_list(
+                | CopyDestination::DeveloperMan1
+                | CopyDestination::SystemImage => evaluate_source_file_list(
                     &raw_files,
                     &context,
                     scope,
@@ -360,6 +382,48 @@ pub(crate) fn collect_from_snapshot(
                     destination_kind.file_list_label(),
                 )?,
             };
+
+            if let Some(destination) = image_destination {
+                // Image data is local to the selected source tree. The owner
+                // may carry its own `#MM` prerequisites, and reachability from
+                // the default image is decided by the graph, so a local
+                // consumer edge is not required here.
+                if source_root_kind != SourceRoot::SelectedSource {
+                    return Err(
+                        "system image copy source must be local to the selected source tree".into(),
+                    );
+                }
+                let meta_edges = parse_meta_edges_from_snapshot(
+                    root,
+                    rel_dir,
+                    line_states,
+                    source_snapshot,
+                    true,
+                )?;
+                require_exclusive_copy_owner(
+                    invocation,
+                    scope,
+                    dirs,
+                    root,
+                    rel_dir,
+                    line_states,
+                    source_snapshot,
+                    &meta_edges,
+                    &owner,
+                    destination_kind,
+                    true,
+                )?;
+                validate_local_sources(root, &source_dir, &files, destination_kind)?;
+                return Ok(SdkFileCopyDecl {
+                    owner,
+                    file: file.clone(),
+                    line: invocation.line + 1,
+                    source_dir,
+                    destination,
+                    files,
+                    fetch_owner: None,
+                });
+            }
 
             if destination_kind == CopyDestination::DeveloperLib {
                 if source_root_kind != SourceRoot::SelectedSource {
@@ -1193,7 +1257,94 @@ fn classify_destination(raw: &str, context: &MakeExprContext<'_>) -> Option<Copy
     {
         return Some(CopyDestination::DeveloperMan1);
     }
+    let image_root = evaluate_make_expr("$(AROSDIR)", context).ok()?;
+    let developer_root = evaluate_make_expr("$(AROS_DEVELOPER)", context).ok()?;
+    if resolved
+        .as_deref()
+        .is_some_and(|v| at_or_below(v, &image_root) && !at_or_below(v, &developer_root))
+    {
+        return Some(CopyDestination::SystemImage);
+    }
     None
+}
+
+/// Reports every active `%copy_files_q` whose destination no capability
+/// models, so such a declaration never disappears without a trace.
+#[must_use]
+pub(crate) fn unmodelled_destinations(
+    invocations: &[Invocation],
+    scope: &VarScope,
+    dirs: &DirVars,
+    root: &Path,
+    rel_dir: &Path,
+    line_states: Option<&[ConditionalTruth]>,
+) -> Vec<String> {
+    let Ok(file) = source_relative_file(rel_dir) else {
+        return Vec::new();
+    };
+    let mut reports = Vec::new();
+    for invocation in invocations
+        .iter()
+        .filter(|invocation| invocation.name == "copy_files_q")
+    {
+        if state_at(line_states, invocation.line) == ConditionalTruth::False {
+            continue;
+        }
+        let context = MakeExprContext::new(scope, dirs, invocation.line, root, rel_dir);
+        let raw = macro_arg(&invocation.args, "dst").unwrap_or_default();
+        if classify_destination(&raw, &context).is_some() {
+            continue;
+        }
+        // Header staging is modelled by `literal_header_copies`.
+        let header = crate::copy_directories::render_copy_directory_path(&raw, &context, rel_dir)
+            .is_ok_and(|path| crate::literal_header_copies::include_destination(&path))
+            || raw.contains("$(AROS_INCLUDES)")
+            || raw.contains("$(GENINCDIR)");
+        if header {
+            continue;
+        }
+        let owner = macro_arg(&invocation.args, "mmake").unwrap_or_else(|| "<unknown>".into());
+        reports.push(format!(
+            "{file}:{}: %copy_files_q mmake={owner} dst={raw} is not a modelled image or Developer destination, so its files are not staged",
+            invocation.line + 1
+        ));
+    }
+    reports
+}
+
+/// Renders a destination below the image root as a CMake expression rooted in
+/// `${AROS_SYS_DIR}`. Only ordinary path components are admitted.
+fn system_image_destination(
+    resolved: &str,
+    context: &MakeExprContext<'_>,
+) -> Result<String, String> {
+    let image_root = evaluate_make_expr("$(AROSDIR)", context)
+        .map_err(|error| format!("cannot resolve the image root: {error}"))?;
+    if resolved == image_root {
+        return Err("system image copy cannot target the image root itself".into());
+    }
+    let tail = resolved
+        .strip_prefix(image_root.as_str())
+        .filter(|tail| tail.starts_with('/'))
+        .ok_or("system image copy destination is outside the image root")?;
+    let mut rendered = String::from("${AROS_SYS_DIR}");
+    for component in tail.split('/').filter(|component| !component.is_empty()) {
+        if !component
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | ' '))
+            || matches!(component, "." | "..")
+        {
+            return Err(format!(
+                "system image copy destination component `{component}` is not a plain name"
+            ));
+        }
+        rendered.push('/');
+        rendered.push_str(component);
+    }
+    if rendered == "${AROS_SYS_DIR}" {
+        return Err("system image copy cannot target the image root itself".into());
+    }
+    Ok(rendered)
 }
 
 fn at_or_below(value: &str, root: &str) -> bool {
@@ -1283,16 +1434,25 @@ fn validate_source_list_expression(
         }
         let close = if bytes[at + 1] == b'(' { b')' } else { b'}' };
         let start = at + 2;
-        let Some(end_offset) = bytes[start..]
-            .iter()
-            .position(|candidate| *candidate == close)
-        else {
+        let Some(end) = balanced_reference_end(bytes, start, bytes[at + 1], close) else {
             return Err(format!(
                 "{label} file list has an unterminated variable reference"
             ));
         };
-        let end = start + end_offset;
         let name = &raw[start..end];
+        if let Some(function) = name
+            .strip_prefix("filter-out ")
+            .map(|rest| ("filter-out", rest))
+            .or_else(|| {
+                name.strip_prefix("call WILDCARD,")
+                    .map(|rest| ("WILDCARD", rest))
+            })
+            .or_else(|| name.strip_prefix("notdir ").map(|rest| ("notdir", rest)))
+        {
+            validate_list_function(function, scope, line, label, visiting, depth)?;
+            at = end + 1;
+            continue;
+        }
         if name.is_empty()
             || !name.as_bytes()[0].is_ascii_alphabetic() && name.as_bytes()[0] != b'_'
             || !name
@@ -1330,6 +1490,73 @@ fn validate_source_list_expression(
         at = end + 1;
     }
     Ok(())
+}
+
+/// Index of the delimiter closing a reference whose body starts at `start`,
+/// counting nested references of the same bracket kind.
+fn balanced_reference_end(bytes: &[u8], start: usize, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 1usize;
+    for (offset, byte) in bytes[start..].iter().enumerate() {
+        if *byte == open {
+            depth += 1;
+        } else if *byte == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(start + offset);
+            }
+        }
+    }
+    None
+}
+
+/// Admits the list functions that enumerate a source directory (`call WILDCARD`,
+/// `filter-out`) or reduce its names (`notdir`). Both are
+/// evaluated at transpile time against the selected source tree, so the
+/// resulting list is finite and fixed in the generated CMake. The glob is a
+/// single literal pattern in the declaring directory.
+fn validate_list_function(
+    (function, body): (&str, &str),
+    scope: &VarScope,
+    line: usize,
+    label: &str,
+    visiting: &mut BTreeSet<String>,
+    depth: usize,
+) -> Result<(), String> {
+    let literal = |text: &str, extra: &[char]| {
+        !text.trim().is_empty()
+            && text.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || c.is_ascii_whitespace()
+                    || matches!(c, '_' | '-' | '.' | '+')
+                    || extra.contains(&c)
+            })
+    };
+    if function == "notdir" {
+        return validate_source_list_expression(body, scope, line, label, visiting, depth - 1);
+    }
+    if function == "WILDCARD" {
+        let pattern = body.trim();
+        if !literal(pattern, &['*', '?', '/'])
+            || pattern.contains(char::is_whitespace)
+            || pattern.contains("..")
+            || pattern.starts_with('/')
+            || pattern.contains("//")
+        {
+            return Err(format!(
+                "{label} file list glob `{pattern}` is not one plain pattern in the declaring directory"
+            ));
+        }
+        return Ok(());
+    }
+    let (patterns, list) = body
+        .split_once(',')
+        .ok_or_else(|| format!("{label} file list `filter-out` needs a pattern list and a list"))?;
+    if !literal(patterns, &['%']) {
+        return Err(format!(
+            "{label} file list `filter-out` patterns must be literal words"
+        ));
+    }
+    validate_source_list_expression(list, scope, line, label, visiting, depth - 1)
 }
 
 fn require_source_local_consumer(

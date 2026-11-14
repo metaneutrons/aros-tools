@@ -5,7 +5,7 @@ use crate::parser::{join_continuations, macro_invocations};
 use std::fs;
 use tempfile::tempdir;
 
-const CONFIG: &str = "AROSDIR := $(TARGETDIR)/SYS\nAROS_DIR_DEVELOPER := Developer\nAROS_DEVELOPER := $(AROSDIR)/$(AROS_DIR_DEVELOPER)\nAROS_DIR_SDK := SDK\nAROS_SDK := $(AROS_DEVELOPER)/$(AROS_DIR_SDK)\nAROS_DIR_FD := fd\nAROS_SDK_FD := $(AROS_SDK)/$(AROS_DIR_FD)\nAROS_DIR_LIB := lib\nAROS_LIB := $(AROS_DEVELOPER)/$(AROS_DIR_LIB)\nPORTSDIR := $(TARGETDIR)/Ports\n";
+const CONFIG: &str = "AROSDIR := $(TARGETDIR)/SYS\nAROS_DIR_DEVELOPER := Developer\nAROS_DEVELOPER := $(AROSDIR)/$(AROS_DIR_DEVELOPER)\nAROS_DIR_SDK := SDK\nAROS_SDK := $(AROS_DEVELOPER)/$(AROS_DIR_SDK)\nAROS_DIR_FD := fd\nAROS_SDK_FD := $(AROS_SDK)/$(AROS_DIR_FD)\nAROS_DIR_LIB := lib\nAROS_LIB := $(AROS_DEVELOPER)/$(AROS_DIR_LIB)\nPORTSDIR := $(TARGETDIR)/Ports\nAROS_DIR_SYSTEM := System\nAROS_SYSTEM := $(AROSDIR)/$(AROS_DIR_SYSTEM)\n";
 
 fn fixture(
     source: &str,
@@ -848,4 +848,288 @@ fn developer_lib_refuses_symlinked_local_inputs() {
     );
     assert!(declarations.is_empty());
     assert!(rejected.iter().any(|item| item.reason.contains("symlink")));
+}
+
+const IMAGE_DB_COPY: &str = "%copy_files_q mmake=image-db files=\"$(filter-out mmakefile.src mmakefile, $(call WILDCARD, *))\" \\\n    dst=$(AROS_SYSTEM)/Network/db\n";
+
+fn image_source(copy: &str) -> String {
+    format!("#MM- parent : image-db\n{copy}")
+}
+
+fn image_collect(
+    source: &str,
+    files: &[&str],
+) -> (
+    tempfile::TempDir,
+    Vec<SdkFileCopyDecl>,
+    Vec<SdkFileCopyRejection>,
+    Vec<String>,
+) {
+    let (temp, invocations, scope, dirs, fetches, states) = fixture(source, false);
+    for file in files {
+        fs::write(temp.path().join("module").join(file), b"data").unwrap();
+    }
+    let (declarations, rejected) = collect(
+        &invocations,
+        &scope,
+        &dirs,
+        temp.path(),
+        Path::new("module"),
+        Some(&states),
+        &fetches,
+    );
+    let unmodelled = unmodelled_destinations(
+        &invocations,
+        &scope,
+        &dirs,
+        temp.path(),
+        Path::new("module"),
+        Some(&states),
+    );
+    (temp, declarations, rejected, unmodelled)
+}
+
+#[test]
+fn image_copy_expands_the_source_tree_listing_without_the_makefile() {
+    let (_temp, declarations, rejected, unmodelled) = image_collect(
+        &image_source(IMAGE_DB_COPY),
+        &["general.config", "netdb", "mmakefile"],
+    );
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert!(unmodelled.is_empty(), "{unmodelled:?}");
+    assert_eq!(declarations.len(), 1);
+    let declaration = &declarations[0];
+    assert_eq!(declaration.owner, "image-db");
+    assert_eq!(declaration.destination, "${AROS_SYS_DIR}/System/Network/db");
+    assert_eq!(declaration.source_dir, "${AROS_SOURCE_DIR}/module");
+    assert_eq!(declaration.fetch_owner, None);
+    let mut files = declaration.files.clone();
+    files.sort();
+    assert_eq!(files, ["general.config", "netdb"]);
+}
+
+#[test]
+fn image_copy_rejects_a_listing_without_any_match() {
+    let (_temp, declarations, rejected, _) = image_collect(
+        &image_source(
+            "%copy_files_q mmake=image-db files=\"$(call WILDCARD, *.none)\" dst=$(AROS_SYSTEM)/Network/db\n",
+        ),
+        &["general.config"],
+    );
+    assert!(declarations.is_empty());
+    assert!(
+        rejected.iter().any(|item| item.reason.contains("is empty")),
+        "{rejected:?}"
+    );
+}
+
+const IMAGE_FLAGS_COPY: &str = "FLAGS := $(notdir $(call WILDCARD, flags/*))\n%copy_files_q mmake=image-db files=$(FLAGS) src=flags \\\n    dst=$(AROS_SYSTEM)/Flags\n";
+
+#[test]
+fn image_copy_and_its_nested_directory_copy_stage_disjoint_files() {
+    // Shape of the AROSTCP `db` directory: the parent lists its own regular
+    // files, and `services.d/` has a second copy of its own with the same
+    // filter. The directory itself never appears in the parent's list.
+    let db = "#MM- parent : image-db\n%copy_files_q mmake=image-db files=\"$(filter-out mmakefile.src mmakefile services.d, $(call WILDCARD, *))\" \\\n    dst=$(AROS_SYSTEM)/Network/AROSTCP/db\n";
+    let services = "#MM- image-db : image-db-servicesd\n%copy_files_q mmake=image-db-servicesd files=\"$(filter-out mmakefile.src mmakefile, $(call WILDCARD, *))\" \\\n    dst=$(AROS_SYSTEM)/Network/AROSTCP/db/services.d\n";
+    let (temp, invocations, scope, dirs, fetches, states) = fixture(db, false);
+    let root = temp.path();
+    fs::create_dir_all(root.join("module/services.d")).unwrap();
+    fs::write(root.join("module/hosts"), b"data").unwrap();
+    fs::write(root.join("module/services.d/dhcp"), b"data").unwrap();
+    fs::write(root.join("module/services.d/mmakefile.src"), services).unwrap();
+    let (parent, rejected) = collect(
+        &invocations,
+        &scope,
+        &dirs,
+        root,
+        Path::new("module"),
+        Some(&states),
+        &fetches,
+    );
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert_eq!(parent.len(), 1);
+    assert_eq!(parent[0].files, ["hosts"]);
+
+    let joined = join_continuations(services);
+    let (scope, states) = collect_vars_impl(&joined, None);
+    let invocations = macro_invocations(&joined);
+    let rel = Path::new("module/services.d");
+    let (fetches, _) = collect_fetches_with_scope(services, rel, &scope);
+    let (child, rejected) = collect(
+        &invocations,
+        &scope,
+        &dirs,
+        root,
+        rel,
+        Some(&states),
+        &fetches,
+    );
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert_eq!(child.len(), 1);
+    assert_eq!(child[0].files, ["dhcp"]);
+    assert_eq!(
+        child[0].destination,
+        "${AROS_SYS_DIR}/System/Network/AROSTCP/db/services.d"
+    );
+    assert!(child[0].destination.starts_with(&parent[0].destination));
+}
+
+#[test]
+fn image_copy_lists_a_subdirectory_with_notdir() {
+    let source = image_source(IMAGE_FLAGS_COPY);
+    let (temp, invocations, scope, dirs, fetches, states) = fixture(&source, false);
+    fs::create_dir(temp.path().join("module/flags")).unwrap();
+    fs::write(temp.path().join("module/flags/de"), b"data").unwrap();
+    fs::write(temp.path().join("module/flags/fr"), b"data").unwrap();
+    let (declarations, rejected) = collect(
+        &invocations,
+        &scope,
+        &dirs,
+        temp.path(),
+        Path::new("module"),
+        Some(&states),
+        &fetches,
+    );
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert_eq!(declarations.len(), 1);
+    assert_eq!(
+        declarations[0].source_dir,
+        "${AROS_SOURCE_DIR}/module/flags"
+    );
+    let mut files = declarations[0].files.clone();
+    files.sort();
+    assert_eq!(files, ["de", "fr"]);
+}
+
+#[test]
+fn image_copy_refuses_a_listing_that_leaves_the_declaring_directory() {
+    for pattern in ["../flags/*", "/etc/*", "flags//*"] {
+        let source = image_source(&format!(
+            "%copy_files_q mmake=image-db files=\"$(notdir $(call WILDCARD, {pattern}))\" src=flags dst=$(AROS_SYSTEM)/Flags\n"
+        ));
+        let (_temp, declarations, rejected, _) = image_collect(&source, &[]);
+        assert!(declarations.is_empty(), "{pattern}");
+        assert!(
+            rejected.iter().any(|item| item.reason.contains("glob")),
+            "{pattern}: {rejected:?}"
+        );
+    }
+}
+
+#[test]
+fn image_copy_listing_contains_regular_files_only() {
+    let source = image_source(IMAGE_DB_COPY);
+    let (temp, invocations, scope, dirs, fetches, states) = fixture(&source, false);
+    fs::create_dir(temp.path().join("module/nested")).unwrap();
+    fs::write(temp.path().join("module/netdb"), b"data").unwrap();
+    let (declarations, rejected) = collect(
+        &invocations,
+        &scope,
+        &dirs,
+        temp.path(),
+        Path::new("module"),
+        Some(&states),
+        &fetches,
+    );
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert_eq!(declarations.len(), 1);
+    assert_eq!(declarations[0].files, ["netdb"]);
+}
+
+#[test]
+fn image_copy_refuses_the_image_root_and_reports_destinations_outside_it() {
+    let (_temp, declarations, rejected, _) = image_collect(
+        &image_source("%copy_files_q mmake=image-db files=netdb dst=$(AROSDIR)\n"),
+        &["netdb"],
+    );
+    assert!(declarations.is_empty());
+    assert!(
+        rejected
+            .iter()
+            .any(|item| item.reason.contains("image root itself")),
+        "{rejected:?}"
+    );
+
+    let (_temp, declarations, rejected, unmodelled) = image_collect(
+        &image_source("%copy_files_q mmake=image-db files=netdb dst=$(TARGETDIR)/elsewhere\n"),
+        &["netdb"],
+    );
+    assert!(declarations.is_empty());
+    assert!(rejected.is_empty());
+    assert_eq!(unmodelled.len(), 1, "{unmodelled:?}");
+    assert!(unmodelled[0].contains("mmake=image-db"));
+}
+
+#[test]
+fn image_copy_leaves_the_developer_tree_to_its_own_capabilities_and_reports_it() {
+    let (_temp, declarations, rejected, unmodelled) = image_collect(
+        &image_source("%copy_files_q mmake=image-db files=netdb dst=$(AROS_DEVELOPER)/S\n"),
+        &["netdb"],
+    );
+    assert!(declarations.is_empty());
+    assert!(rejected.is_empty());
+    assert_eq!(unmodelled.len(), 1, "{unmodelled:?}");
+}
+
+#[test]
+fn image_copy_rejects_duplicate_owners_and_foreign_sources() {
+    let (_temp, declarations, rejected, _) = image_collect(
+        &image_source(&format!("{IMAGE_DB_COPY}{IMAGE_DB_COPY}")),
+        &["netdb"],
+    );
+    assert!(declarations.is_empty(), "{declarations:?}");
+    assert!(
+        rejected
+            .iter()
+            .any(|item| item.reason.contains("duplicate producer")),
+        "{rejected:?}"
+    );
+
+    let (_temp, declarations, rejected, _) = image_collect(
+        &image_source(
+            "%copy_files_q mmake=image-db files=netdb src=$(PORTSDIR)/x dst=$(AROS_SYSTEM)/db\n",
+        ),
+        &["netdb"],
+    );
+    assert!(declarations.is_empty());
+    assert!(
+        rejected
+            .iter()
+            .any(|item| item.reason.contains("local to the selected source tree")),
+        "{rejected:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn image_copy_rejects_a_symlinked_listing_entry() {
+    let source = image_source(IMAGE_DB_COPY);
+    let (temp, invocations, scope, dirs, fetches, states) = fixture(&source, false);
+    fs::write(temp.path().join("outside"), b"data").unwrap();
+    std::os::unix::fs::symlink(
+        temp.path().join("outside"),
+        temp.path().join("module/netdb"),
+    )
+    .unwrap();
+    let (declarations, rejected) = collect(
+        &invocations,
+        &scope,
+        &dirs,
+        temp.path(),
+        Path::new("module"),
+        Some(&states),
+        &fetches,
+    );
+    assert!(declarations.is_empty());
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+}
+
+#[test]
+fn header_destinations_are_not_reported_as_unmodelled() {
+    let (_temp, _, _, unmodelled) = image_collect(
+        "%copy_files_q mmake=hdr files=a.h dst=$(AROS_INCLUDES)/devices\n",
+        &["a.h"],
+    );
+    assert!(unmodelled.is_empty(), "{unmodelled:?}");
 }
