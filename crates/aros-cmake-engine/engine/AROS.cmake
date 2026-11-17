@@ -2260,8 +2260,26 @@ function(_aros_source_object_stem out_var source)
 endfunction()
 
 function(_aros_port_source_proxy out_var source_stem language explicit_suffix)
+    # The hash becomes the physical proxy name and, for linklib members, the
+    # archived object name. Key it on the stem relative to the build roots, so
+    # the same source gets the same name under every work directory
+    # (libcodesets.a carried <hash>.c.obj, a different one per runner path).
+    set(_hash_stem "${source_stem}")
+    foreach(_root_pair IN ITEMS
+            "AROS_PORTS_SOURCE_DIR|@ports-source@"
+            "AROS_PORTS_DIR|@ports@"
+            "CMAKE_BINARY_DIR|@build@"
+            "CMAKE_SOURCE_DIR|@source@")
+        string(REPLACE "|" ";" _root_fields "${_root_pair}")
+        list(GET _root_fields 0 _root_variable)
+        list(GET _root_fields 1 _root_token)
+        if(${_root_variable})
+            string(REPLACE "${${_root_variable}}" "${_root_token}"
+                _hash_stem "${_hash_stem}")
+        endif()
+    endforeach()
     string(SHA256 _source_hash
-        "${language}|${explicit_suffix}|${source_stem}")
+        "${language}|${explicit_suffix}|${_hash_stem}")
     set(_proxy_dir "${CMAKE_BINARY_DIR}/CMakeFiles/aros-port-sources")
     if(language STREQUAL "CXX")
         set(_proxy_suffix ".cpp")

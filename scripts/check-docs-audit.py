@@ -29,64 +29,100 @@ AUDIT_TIMEOUT_SECONDS = 90
 MAX_OUTPUT_BYTES = 1_048_576
 
 UTC = dt.timezone.utc
-APPROVAL_START = dt.datetime(2026, 10, 3, 0, 0, 0, tzinfo=UTC)
-EXCEPTION_EXPIRY = dt.datetime(2026, 10, 10, 22, 0, 0, tzinfo=UTC)
-ADVISORY_URL = "https://github.com/advisories/GHSA-ch52-4w7c-c8xp"
-LEAF_PACKAGE = "http-cache-semantics"
-LEAF_VERSION = "4.2.0"
-LEAF_RANGE = "<=4.2.0"
-LEAF_INTEGRITY = (
-    "sha512-dTxcvPXqPvXBQpq5dUr6mEMJX4oIEFv6bwom3FDwKRDsuIjjJGANqhBuoAn9c1RQJIdAKav33ED65E2ys+87QQ=="
-)
-APPROVAL_ID = "approval2026-10-03"
-APPROVED_ON = "2026-10-03"
-EXPIRY_TEXT = "2026-10-10T22:00:00Z"
+APPROVAL_START = dt.datetime(2026, 11, 17, 0, 0, 0, tzinfo=UTC)
+EXCEPTION_EXPIRY = dt.datetime(2026, 12, 1, 22, 0, 0, tzinfo=UTC)
+ADVISORY_ID = "GHSA-fc5q-39xc-vjpf"
+ADVISORY_URL = f"https://github.com/advisories/{ADVISORY_ID}"
+LEAF_PACKAGE = "picomatch"
+LEAF_RANGE = "<=4.0.7"
+APPROVAL_ID = "approval2026-11-17"
+APPROVED_ON = "2026-11-17"
+EXPIRY_TEXT = "2026-12-01T22:00:00Z"
 RATIONALE = (
-    "The affected package is confined to the locked documentation build graph, and the existing Worker contract limits publication to static assets. This temporary exception allows the documentation build to continue while the dependency is updated."
+    "The affected package is confined to the locked documentation build graph, and the existing Worker contract limits publication to static assets. No fixed picomatch release exists (4.0.7 is the latest and is affected). This temporary exception allows the documentation build to continue until one is published."
 )
 SCOPE = (
     "Static documentation build and publication only, under the existing static-assets-only Worker contract."
 )
 
+# Every package maps to the (version, integrity) pairs that may appear in the
+# lock, because the graph carries nested copies of some packages.
 LOCKED_PACKAGES = {
-    LEAF_PACKAGE: {"version": LEAF_VERSION, "integrity": LEAF_INTEGRITY},
-    "astro": {
-        "version": "7.3.3",
-        "integrity": "sha512-NF08hk3edFkVmr9avf9HW/rQyf6NrpbVDyYj2cVN3JfijDhfJYh1ivWVTY5PUd5+rRZn/Vtu4iaeyNlP0Iv6mg==",
-    },
-    "@astrojs/mdx": {
-        "version": "8.0.1",
-        "integrity": "sha512-VKodp/f3+XE6L0950K+ZOAolY47vdt0R78Ao+L2RdJ1hfAdYffL7IEjc/MsoyuS7CPVvCsd5/I3RP0ZyAIewdQ==",
-    },
-    "@astrojs/starlight": {
-        "version": "0.42.1",
-        "integrity": "sha512-ABS/A0IfbJeMbuhCKVkrAcO3EWxhpeLveFuL28+7+BQje7ZHa9OXZbUoiLXdYUhH7XFaiAQjAg44RiF2uuZPJw==",
-    },
-    "astro-expressive-code": {
-        "version": "0.44.2",
-        "integrity": "sha512-avop7nZcRwC7quvIxVguhwEZ9Tp6IoTzKUCLwP30Fb7+er+pWQgcysP01dcuzRIJo81kLGg30q/YAI2Yb1Sdzg==",
-    },
+    "picomatch": [
+        {"version": "2.3.2", "integrity": "sha512-V7+vQEJ06Z+c5tSye8S+nHUfI51xoXIXjHQ99cQtKUkQqqO1kO/KCJUfZXuB47h/YBlDhah2H3hdUGXn8ie0oA=="},
+        {"version": "4.0.7", "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA=="},
+    ],
+    "@astrojs/check": [
+        {"version": "0.9.12", "integrity": "sha512-hazpqxIfZWj2VhyPyR0pOEQ/IhFDM/2nIApL96zMXABdD8NrUKYDmhxTy7h+drTDl9MQG/Sd1ET/4amadVJUUA=="},
+    ],
+    "@astrojs/internal-helpers": [
+        {"version": "0.11.0", "integrity": "sha512-3rzxJ+xbo0+8YyqOzLziIN32wmsHdCjEVz2sGOpRxJ+Ben/KiLph4ItxBy1abEL+E8fkRzqjg0rfXmaHJGw9JA=="},
+        {"version": "0.13.2", "integrity": "sha512-SWiNS+OMrhwWYzJENTekHUyUCMKB+tdU6D4v1ZNIU1ZHh2mScQ8WIs0J6AJ8KPXkIrs9+EZU7Rm2CstfThyVnw=="},
+    ],
+    "@astrojs/language-server": [
+        {"version": "2.17.3", "integrity": "sha512-QIAFu1e/4quJMTPdmBOm+ZPXc5NDGZE4/YQjgR3EgjhGLl/tdidaWJDr5WmO2lesVc+BW1qN/xNBURmuePDG2A=="},
+    ],
+    "@astrojs/markdown-satteri": [
+        {"version": "0.4.1", "integrity": "sha512-EniHbFNa6SQHDih7JnpPos3NWXO6hdt4raBcOosfGmlfc3gP9CI/sESA3VOf1PgJZ7SFfewlZW9Livn0JugEZg=="},
+        {"version": "0.4.10", "integrity": "sha512-3h/wheVjZIcP/m295nkiUjOvCsCs6QpvZ3l4BfDU4ghNQcrcFrNVu1+K+I+YT61hH9tuCDQiGdF8QDzfDoG42w=="},
+    ],
+    "@astrojs/mdx": [
+        {"version": "8.0.1", "integrity": "sha512-VKodp/f3+XE6L0950K+ZOAolY47vdt0R78Ao+L2RdJ1hfAdYffL7IEjc/MsoyuS7CPVvCsd5/I3RP0ZyAIewdQ=="},
+    ],
+    "@astrojs/starlight": [
+        {"version": "0.42.8", "integrity": "sha512-BGP8bmTbdky4OFCV9BNWZedLuzONyUtz754q+hie+li/2TQ5XJ6nvfO8fhRhIMcCpUEsA5Ynf4qTTFf/ft/3Pg=="},
+    ],
+    "@astrojs/vite-plugin-astro": [
+        {"version": "0.1.3", "integrity": "sha512-yj+xGnr3HeHUtIdra/tWizJuisBoxAuWlBTElMlf22FpSxinrTwTl/dqftG0D2BsQTcn4/shgCCUwcnkcZ8buA=="},
+    ],
+    "anymatch": [
+        {"version": "3.1.3", "integrity": "sha512-KMReFUr0B4t+D+OBkjR3KYqvocp2XaSzO55UcB6mgQMd3KbcE+mWTyvVV7D/zsdEbNnV6acZUutkiHQXvTr1Rw=="},
+    ],
+    "astro": [
+        {"version": "7.4.12", "integrity": "sha512-DKX+Ds0rqV49HrLwEB9JFrCyfvQeC16FCe1HrPK8S3osiJH/e2vQ22CHIDOpI48UaeiPbxPT26peXgGTy6w0ig=="},
+    ],
+    "fdir": [
+        {"version": "6.5.0", "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg=="},
+    ],
+    "tinyglobby": [
+        {"version": "0.2.17", "integrity": "sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g=="},
+    ],
+    "unstorage": [
+        {"version": "1.17.6", "integrity": "sha512-gjKtcmn/KwZuJZO9o2sc0esAQnhmTw0LviDHwevTXbJMYs0dRTp8ZEEWXHU0vTpzbN3cA0yxlTeyXssMp3zDqw=="},
+    ],
+    "vite": [
+        {"version": "8.3.8", "integrity": "sha512-LzOn3h9rG/0vhLdXrV4yJ4QFA9eEoqCl+Yx+kGJd7aB9w6nfNgVHKSYwLPZUHrz4ZGa+t+kXjV9itvcHDLQouA=="},
+    ],
 }
 CONFIGURATION_SHA256 = {
-    "docs-site/astro.config.mjs": "4ef636acb86944efe5e3b29e1fb45f8440cdeca311367bdd0f91fb6f3b5ab650",
+    "docs-site/astro.config.mjs": "61b0aca873b6dc9d18a69f7e4e8ef3a28f99ac27af7e2daaf28395139e26efda",
     "docs-site/wrangler.jsonc": "b594f73a59533f2765b95a8d286bafb8609d21f5d93b17c8aa5e8de5580d00ad",
-    "docs-site/package.json": "3e78de364e1c5451ce82db990893b85798ec5950753bd2c0d7247d973659b821",
-    "docs-site/package-lock.json": "da23aec91746d3220dd7816ee507fb8672632a39c46ea8d12eca7febfc7dde2f",
+    "docs-site/package.json": "4e1f4452f864930a73344b3c0038fe4c7d9b3f660cbd3b5691972549d03956c3",
+    "docs-site/package-lock.json": "bf13e7728b714a300256b0b94c3e2a74f4c7f5fa151fcd8ada357ffbdadd9fc5",
 }
 LOCKED_ROOT = {
     "name": "aros-tools-docs",
     "dependencies": {
-        "@astrojs/starlight": "0.42.1", "astro": "7.3.3", "sharp": "0.35.4",
+        "@astrojs/starlight": "0.42.8", "astro": "7.4.12", "sharp": "0.35.5",
     },
     "devDependencies": {
-        "@astrojs/check": "0.9.10", "typescript": "6.0.3", "wrangler": "4.134.0",
+        "@astrojs/check": "0.9.12", "typescript": "6.0.3", "wrangler": "4.156.0",
     },
 }
 ALLOWED_VIA = {
-    "astro": [LEAF_PACKAGE],
-    "@astrojs/mdx": ["astro"],
-    "@astrojs/starlight": ["astro", "@astrojs/mdx", "astro-expressive-code"],
-    "astro-expressive-code": ["astro"],
+    "@astrojs/check": ["@astrojs/language-server"],
+    "@astrojs/internal-helpers": ["picomatch"],
+    "@astrojs/language-server": ["tinyglobby"],
+    "@astrojs/markdown-satteri": ["@astrojs/internal-helpers"],
+    "@astrojs/mdx": ["@astrojs/internal-helpers", "@astrojs/markdown-satteri", "astro"],
+    "@astrojs/starlight": ["@astrojs/markdown-satteri", "@astrojs/mdx", "astro"],
+    "@astrojs/vite-plugin-astro": ["@astrojs/internal-helpers", "vite"],
+    "anymatch": ["picomatch"],
+    "astro": ["@astrojs/internal-helpers", "@astrojs/markdown-satteri", "@astrojs/vite-plugin-astro", "picomatch", "tinyglobby", "unstorage", "vite"],
+    "fdir": ["picomatch"],
+    "tinyglobby": ["fdir", "picomatch"],
+    "unstorage": ["anymatch"],
+    "vite": ["picomatch", "tinyglobby"],
 }
 EXPECTED_POLICY = {
     "schema_version": 1,
@@ -100,10 +136,9 @@ EXPECTED_POLICY = {
     "exception": {
         "advisory_url": ADVISORY_URL,
         "package": LEAF_PACKAGE,
-        "version": LEAF_VERSION,
         "severity": "high",
         "affected_range": LEAF_RANGE,
-        "integrity": LEAF_INTEGRITY,
+        "locked": list(LOCKED_PACKAGES[LEAF_PACKAGE]),
     },
     "allowed_ancestors": {
         name: values for name, values in LOCKED_PACKAGES.items() if name != LEAF_PACKAGE
@@ -339,8 +374,7 @@ def _validate_lock(lock: Any) -> dict[str, Any]:
             if path == f"node_modules/{package}" or path.endswith(f"/node_modules/{package}"):
                 seen = True
                 _require(
-                    record.get("version") == expected["version"]
-                    and record.get("integrity") == expected["integrity"],
+                    _matches_locked(record, expected),
                     "locked exception package or ancestor changed",
                 )
                 edges: set[str] = set()
@@ -355,16 +389,24 @@ def _validate_lock(lock: Any) -> dict[str, Any]:
     return packages
 
 
+def _matches_locked(record: dict[str, Any], expected: list[dict[str, str]]) -> bool:
+    return any(
+        record.get("version") == variant["version"]
+        and record.get("integrity") == variant["integrity"]
+        for variant in expected
+    )
+
+
 def _verify_record_nodes(record: dict[str, Any], package: str, packages: dict[str, Any]) -> None:
     expected = LOCKED_PACKAGES[package]
-    _require(record["isDirect"] == (package in LOCKED_ROOT["dependencies"]),
+    declared = set(LOCKED_ROOT["dependencies"]) | set(LOCKED_ROOT["devDependencies"])
+    _require(record["isDirect"] == (package in declared),
              "audit direct-dependency status differs from the approved root")
     for node in record["nodes"]:
         lock_record = packages.get(node)
         _require(isinstance(lock_record, dict), "audit node is absent from the documentation lockfile")
         _require(
-            lock_record.get("version") == expected["version"]
-            and lock_record.get("integrity") == expected["integrity"],
+            _matches_locked(lock_record, expected),
             "audit node does not match the approved locked package",
         )
 
@@ -600,8 +642,8 @@ def main() -> int:
         return 1
     if exception_used:
         print(
-            "documentation npm audit passed with approved "
-            "GHSA-ch52-4w7c-c8xp exception through 2026-10-10T22:00:00Z"
+            f"documentation npm audit passed with approved "
+            f"{ADVISORY_ID} exception through {EXPIRY_TEXT}"
         )
     elif report["vulnerabilities"]:
         print("documentation npm audit passed below the high severity threshold")

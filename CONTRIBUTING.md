@@ -194,15 +194,18 @@ npm run build
 
 The documentation audit still rejects high and critical vulnerabilities. The
 only temporary exception is the public advisory
-[GHSA-ch52-4w7c-c8xp](https://github.com/advisories/GHSA-ch52-4w7c-c8xp),
-approved by the maintainer for the pinned, static documentation build through
-10 October 2026 (22:00 UTC). Its exact dependency chain, lockfile identities,
-configuration hashes and expiry are recorded in
-`contracts/docs-audit-exception-v1.json`. The gate runs a fresh npm audit and
-rejects additional advisories, changed dependencies or configuration, malformed
-reports and use after expiry. This is not an exemption for SSR, an application
-runtime or another repository. Replace the affected dependency when a verified
-fix is available, then remove the exception; do not extend it implicitly.
+[GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)
+(`picomatch`, ReDoS, affected `<=4.0.7`), approved by the maintainer on
+17 November 2026 for the pinned, static documentation build through
+1 December 2026 (22:00 UTC). No fixed `picomatch` release exists, and the
+vulnerability propagates to every package that depends on it. Its exact
+dependency chain, lockfile identities, configuration hashes and expiry are
+recorded in `contracts/docs-audit-exception-v1.json`. The gate runs a fresh npm
+audit and rejects additional advisories, changed dependencies or configuration,
+malformed reports and use after expiry. This is not an exemption for SSR, an
+application runtime or another repository. Replace the affected dependency when
+a verified fix is available, then remove the exception; do not extend it
+implicitly.
 
 ## Design rules
 
