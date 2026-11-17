@@ -50,7 +50,15 @@ if(NOT result STREQUAL "0" OR NOT members STREQUAL "two.o\none.o\n")
     message(FATAL_ERROR "source archive lost source member order: ${members}")
 endif()
 set(reference "${root}/reference.a")
-execute_process(COMMAND "${AR}" cr "${reference}" "${build}/gen/objects/two.o"
+# The runner adds D for GNU and LLVM archivers, so the independent reference
+# must too; Apple's ar rejects it and keeps plain cr.
+set(reference_operation cr)
+execute_process(COMMAND "${AR}" --version RESULT_VARIABLE version_result
+    OUTPUT_VARIABLE version_text ERROR_QUIET)
+if(version_result EQUAL 0 AND version_text MATCHES "GNU|LLVM")
+    set(reference_operation crD)
+endif()
+execute_process(COMMAND "${AR}" "${reference_operation}" "${reference}" "${build}/gen/objects/two.o"
     "${build}/gen/objects/one.o" RESULT_VARIABLE result)
 if(NOT result STREQUAL "0")
     message(FATAL_ERROR "reference AR failed")
