@@ -1361,17 +1361,17 @@ fn llvm_sdk_build_binding_with_actual_transpiler_and_sealed_config() {
     let _guard = source_audit_test_guard();
     let fixture = create_generic_fixture_with_elf("x86_64", "llvm", None, Some(62));
     let (mut request, _, _) = llvm_generated_selection(&fixture, |_| {});
+    // The test executable sits in target/<profile>/deps up to Cargo 1.99 and in
+    // target/<profile>/build/<package>/<hash>/out from 1.100; the nearest
+    // ancestor holding the tool is the profile directory in both layouts.
     let executable = std::env::current_exe().unwrap();
+    let tool = format!("aros-transpiler{}", std::env::consts::EXE_SUFFIX);
     let actual = executable
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("aros-transpiler");
-    assert!(
-        actual.is_file(),
-        "build aros-transpiler in the selected Cargo target first"
-    );
+        .ancestors()
+        .skip(1)
+        .map(|directory| directory.join(&tool))
+        .find(|candidate| candidate.is_file())
+        .expect("build aros-transpiler in the selected Cargo target first");
     let helpers = fixture.temporary.path().join("helpers");
     fs::copy(&actual, helpers.join("aros-transpiler")).unwrap();
     let work = fixture
