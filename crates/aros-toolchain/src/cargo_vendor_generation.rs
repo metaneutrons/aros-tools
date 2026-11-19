@@ -654,7 +654,12 @@ fn populate_vendor_generation(
         CARGO_VENDOR_TIMEOUT,
         cancellation,
     )
-    .map_err(|_| ContractError::state("cannot execute selected Cargo vendor command"))?;
+    .map_err(|error| {
+        ContractError::state(format!(
+            "cannot execute selected Cargo vendor command ({})",
+            process_failure_cause(&error)
+        ))
+    })?;
     if output.cancelled {
         return Err(ContractError::state("Cargo vendor generation cancelled"));
     }
@@ -923,7 +928,12 @@ fn git_output(directory: &Path, arguments: &[&str]) -> Result<String, ContractEr
         Duration::from_secs(10),
         &cancellation,
     )
-    .map_err(|_| ContractError::environment("cannot execute Git for selected tools checkout"))?;
+    .map_err(|error| {
+        ContractError::environment(format!(
+            "cannot execute Git for selected tools checkout ({})",
+            process_failure_cause(&error)
+        ))
+    })?;
     if output.timed_out || output.cancelled || !output.status.success() {
         return Err(ContractError::environment(format!(
             "selected tools checkout cannot provide a clean committed Git tree: {}",
@@ -1094,7 +1104,12 @@ fn probe_cargo_version(invocation: &Path, rust_channel: &str) -> Result<String, 
         Duration::from_secs(10),
         &cancellation,
     )
-    .map_err(|_| ContractError::environment("cannot execute selected Cargo executable"))?;
+    .map_err(|error| {
+        ContractError::environment(format!(
+            "cannot execute selected Cargo executable ({})",
+            process_failure_cause(&error)
+        ))
+    })?;
     if output.timed_out || output.cancelled || !output.status.success() {
         return Err(ContractError::environment(
             "selected Cargo executable cannot report its pinned toolchain version",
@@ -1245,5 +1260,36 @@ fn bounded_process_summary(output: &aros_common::ProcessOutput) -> String {
         "no diagnostic output".to_owned()
     } else {
         summary
+    }
+}
+
+/// Name why a child process could not be run without echoing host paths.
+///
+/// The process helper's error text may carry the program path; diagnostics
+/// keep only the error kind and the operating system's error number, which is
+/// enough to tell e.g. a busy executable (ETXTBSY) from a missing one.
+fn process_failure_cause(error: &std::io::Error) -> String {
+    error.raw_os_error().map_or_else(
+        || format!("{:?}", error.kind()),
+        |code| format!("{:?}, os error {code}", error.kind()),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::process_failure_cause;
+    use std::io;
+
+    #[test]
+    fn process_failure_cause_names_kind_and_errno_but_no_text() {
+        let busy = io::Error::from_raw_os_error(26);
+        assert_eq!(
+            process_failure_cause(&busy),
+            "ExecutableFileBusy, os error 26"
+        );
+        let missing = io::Error::from_raw_os_error(2);
+        assert_eq!(process_failure_cause(&missing), "NotFound, os error 2");
+        let wrapped = io::Error::other("/private/host/path/cargo: busy");
+        assert_eq!(process_failure_cause(&wrapped), "Other");
     }
 }
