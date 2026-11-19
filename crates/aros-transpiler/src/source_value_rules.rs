@@ -290,10 +290,7 @@ pub(crate) fn collect_source_value_rules_with_context(
             ));
             continue;
         }
-        let output_parent = output
-            .rsplit_once('/')
-            .map(|(parent, _)| parent)
-            .unwrap_or_default();
+        let output_parent = output.rsplit_once('/').map_or_default(|(parent, _)| parent);
         let mkdir = match evaluate_make_expr(raw_mkdir, &expression_context) {
             Ok(path) => path,
             Err(error) => {

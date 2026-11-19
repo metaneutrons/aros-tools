@@ -942,7 +942,7 @@ fn safe_group_id(value: &str) -> bool {
 }
 
 fn safe_document_filename(value: &str) -> bool {
-    if value.is_empty()
+    !(value.is_empty()
         || value.len() > MAX_FILE_NAME_BYTES
         || value.starts_with('.')
         || value
@@ -952,11 +952,7 @@ fn safe_document_filename(value: &str) -> bool {
         || !value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_.".contains(&byte)
         })
-        || value.split('.').any(str::is_empty)
-    {
-        return false;
-    }
-    true
+        || value.split('.').any(str::is_empty))
 }
 
 fn digest<'de, D>(deserializer: D) -> Result<Sha256Digest, D::Error>

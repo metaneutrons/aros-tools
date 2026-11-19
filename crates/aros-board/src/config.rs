@@ -1312,7 +1312,7 @@ mod tests {
 
         for (model, transport) in cases {
             let path = temporary.path().join(format!("{}.toml", model.as_str()));
-            let template = prepare_template(Some(&path), "local", model.clone(), None)
+            let template = prepare_template(Some(&path), "local", model, None)
                 .expect("model default template");
             assert_eq!(template.transport(), transport);
         }

@@ -1665,37 +1665,32 @@ pub(super) fn parse_mmakefile_impl(
         &python_outputs,
     );
 
-    let sdk_program_outputs = dirs
-        .expand("$(AROS_DEVELOPER)/bin")
-        .map(|bin| {
-            let mut outputs = Vec::new();
-            for target in &targets {
-                if target.module_type == ModuleType::Program
-                    && target.target_dir.as_ref() == Some(&bin)
-                {
-                    outputs.push(crate::graph::SdkProgramOutput {
-                        owner: target.mmake_name.clone(),
-                        output: format!("${{AROS_DEVELOPER_BIN_DIR}}/{}", target.target_name),
-                        directory: target.dir_path.clone(),
-                    });
-                }
+    let sdk_program_outputs = dirs.expand("$(AROS_DEVELOPER)/bin").map_or_default(|bin| {
+        let mut outputs = Vec::new();
+        for target in &targets {
+            if target.module_type == ModuleType::Program && target.target_dir.as_ref() == Some(&bin)
+            {
+                outputs.push(crate::graph::SdkProgramOutput {
+                    owner: target.mmake_name.clone(),
+                    output: format!("${{AROS_DEVELOPER_BIN_DIR}}/{}", target.target_name),
+                    directory: target.dir_path.clone(),
+                });
             }
-            for target in &source_inventory_targets {
-                if target.module_type == ModuleType::Program
-                    && target.target_dir.as_ref() == Some(&bin)
-                {
-                    outputs.push(crate::graph::SdkProgramOutput {
-                        owner: target.mmake_name.clone(),
-                        output: format!("${{AROS_DEVELOPER_BIN_DIR}}/{}", target.target_name),
-                        directory: target.dir_path.clone(),
-                    });
-                }
+        }
+        for target in &source_inventory_targets {
+            if target.module_type == ModuleType::Program && target.target_dir.as_ref() == Some(&bin)
+            {
+                outputs.push(crate::graph::SdkProgramOutput {
+                    owner: target.mmake_name.clone(),
+                    output: format!("${{AROS_DEVELOPER_BIN_DIR}}/{}", target.target_name),
+                    directory: target.dir_path.clone(),
+                });
             }
-            outputs.sort_by(|a, b| (&a.owner, &a.output).cmp(&(&b.owner, &b.output)));
-            outputs.dedup();
-            outputs
-        })
-        .unwrap_or_default();
+        }
+        outputs.sort_by(|a, b| (&a.owner, &a.output).cmp(&(&b.owner, &b.output)));
+        outputs.dedup();
+        outputs
+    });
     // The scope joins logical values but retains physical source line ids.
     // Neither inlined input positions nor ambient values qualify an effect.
     let effect_scan = crate::arch_endpoint_effects::collect_source_arch_endpoint_effects(
@@ -1713,10 +1708,9 @@ pub(super) fn parse_mmakefile_impl(
             !context.make_include_bindings.is_empty()
                 || !context.generated_make_templates.is_empty()
         })
-        .map(|context| {
+        .map_or_default(|context| {
             crate::assembly_headers::collect_from_snapshot(&content, context, dirs, root, &rel_dir)
-        })
-        .unwrap_or_default();
+        });
     let mut parsed = ParsedMmakefile {
         assembly_headers,
         assembly_header_rejections,

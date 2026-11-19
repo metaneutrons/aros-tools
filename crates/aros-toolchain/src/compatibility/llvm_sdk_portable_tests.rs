@@ -461,7 +461,7 @@ fn gather_proof_files(
                 bytes
             }
         };
-        assert!(members.insert(flat_name.clone(), bytes).is_none());
+        assert!(members.insert(flat_name, bytes).is_none());
     }
     members
 }

@@ -190,14 +190,13 @@ pub fn collect_binary_objects(
             .map_or_else(|| "0".to_owned(), |value| value.trim().to_owned());
         let ldflags: Vec<String> = arg(&body, "ldflags")
             .and_then(|raw| resolve(&raw).ok())
-            .map(|value| {
+            .map_or_default(|value| {
                 value
                     .split_whitespace()
                     .filter(|token| !token.contains(['$', ';', '"']))
                     .map(str::to_owned)
                     .collect()
-            })
-            .unwrap_or_default();
+            });
 
         // The consumer, in the two ways the reference states it: an explicit
         // mmake= naming a target in this file, or the output landing in a
@@ -215,8 +214,7 @@ pub fn collect_binary_objects(
         if consumer.is_empty() {
             let output_dir = Path::new(&output)
                 .parent()
-                .map(|dir| dir.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
+                .map_or_default(|dir| dir.to_string_lossy().replace('\\', "/"));
             if let Some((_, mainmmake, tag)) = arch_roots
                 .iter()
                 .find(|(arch_root, _, _)| *arch_root == output_dir)

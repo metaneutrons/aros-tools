@@ -768,13 +768,11 @@ fn run_sdk(source: &Path, build: &Path) -> Output {
 }
 
 fn names_in(directory: &Path) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(directory)
-        .map(|entries| {
-            entries
-                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut names: Vec<String> = fs::read_dir(directory).map_or_default(|entries| {
+        entries
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    });
     names.sort_unstable();
     names
 }

@@ -335,7 +335,7 @@ impl DependencyGraph {
                         .zip(context.platform.as_ref())
                         .map(|(cpu, platform)| (cpu.clone(), platform.clone()))
                 });
-                let pool = providers.get(&name).map(Vec::as_slice).unwrap_or_default();
+                let pool = providers.get(&name).map_or_default(Vec::as_slice);
                 let applicable: Vec<_> = pool
                     .iter()
                     .filter(|provider| {

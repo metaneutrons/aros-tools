@@ -528,7 +528,7 @@ impl TemplateLoader {
                     }
                     self.budget.definitions = definition_count;
                     self.templates.insert(
-                        name.clone(),
+                        name,
                         Template {
                             arguments,
                             multi_argument,
@@ -993,7 +993,7 @@ fn substitute_arguments(
                     .get(&reference.name)
                     .and_then(|argument| argument.default.as_deref())
             });
-        let words = value.map(split_python_whitespace).unwrap_or_default();
+        let words = value.map_or_default(split_python_whitespace);
         if words.is_empty() {
             append_temporary(&mut output, &reference.prefix, limits)?;
             append_temporary(&mut output, &reference.suffix, limits)?;

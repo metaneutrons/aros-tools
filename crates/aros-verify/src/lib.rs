@@ -675,7 +675,6 @@ struct RefShape {
 }
 
 /// Parse, execute, log, and render one verifier invocation.
-#[must_use]
 pub fn entry(arguments: Vec<OsString>) -> ExitCode {
     if arguments
         .get(1)
