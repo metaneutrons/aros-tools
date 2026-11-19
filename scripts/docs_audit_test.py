@@ -24,16 +24,12 @@ sys.modules[SPEC.name] = AUDIT
 SPEC.loader.exec_module(AUDIT)
 
 UTC = dt.timezone.utc
-APPROVAL_START = dt.datetime(2026, 10, 3, 0, 0, tzinfo=UTC)
-APPROVAL_ACTIVE = dt.datetime(2026, 10, 3, 6, 0, tzinfo=UTC)
-EXPIRES = dt.datetime(2026, 10, 10, 22, 0, tzinfo=UTC)
-LEAF = "http-cache-semantics"
-ANCESTORS = (
-    "astro",
-    "@astrojs/mdx",
-    "@astrojs/starlight",
-    "astro-expressive-code",
-)
+APPROVAL_START = dt.datetime(2026, 11, 17, 0, 0, tzinfo=UTC)
+APPROVAL_ACTIVE = dt.datetime(2026, 11, 17, 6, 0, tzinfo=UTC)
+EXPIRES = dt.datetime(2026, 12, 1, 22, 0, tzinfo=UTC)
+LEAF = AUDIT.LEAF_PACKAGE
+ANCESTORS = tuple(name for name in AUDIT.LOCKED_PACKAGES if name != LEAF)
+DIRECT = set(AUDIT.LOCKED_ROOT["dependencies"]) | set(AUDIT.LOCKED_ROOT["devDependencies"])
 
 
 def node_path(package: str) -> str:
@@ -69,7 +65,7 @@ def add_vulnerability(report: dict, name: str, via, *, severity="high") -> None:
     report["vulnerabilities"][name] = {
         "name": name,
         "severity": severity,
-        "isDirect": name in {"astro", "@astrojs/starlight"},
+        "isDirect": name in DIRECT,
         "via": copy.deepcopy(via),
         "effects": [],
         "range": "*",
@@ -117,7 +113,7 @@ def single_advisory_report(severity: str) -> dict:
 def lock_fixture() -> dict:
     packages = {"": copy.deepcopy(AUDIT.LOCKED_ROOT)}
     for name, expected in AUDIT.LOCKED_PACKAGES.items():
-        packages[node_path(name)] = dict(expected)
+        packages[node_path(name)] = dict(expected[0])
         packages[node_path(name)]["dependencies"] = {
             child: "*" for child in AUDIT.ALLOWED_VIA.get(name, [])
         }
@@ -153,7 +149,8 @@ class DocsAuditValidationTests(unittest.TestCase):
         self.validate(exception_report())
 
     def test_false_duplicate_or_missing_propagation_edges_fail(self):
-        for edges in ([LEAF], ["astro", "astro"], ["astro"]):
+        approved = list(AUDIT.ALLOWED_VIA["@astrojs/starlight"])
+        for edges in ([LEAF], approved + approved[:1], approved[:-1]):
             with self.subTest(edges=edges):
                 report = exception_report()
                 report["vulnerabilities"]["@astrojs/starlight"]["via"] = edges
@@ -172,13 +169,14 @@ class DocsAuditValidationTests(unittest.TestCase):
                     self.validate(exception_report(), lock=lock)
         report = exception_report()
         del report["vulnerabilities"]["@astrojs/starlight"]
-        report["metadata"]["vulnerabilities"].update({"high": 4, "total": 4})
+        remaining = len(report["vulnerabilities"])
+        report["metadata"]["vulnerabilities"].update({"high": remaining, "total": remaining})
         with self.assertRaises(AUDIT.AuditValidationError):
             self.validate(report)
 
     def test_new_direct_dependency_or_forged_direct_status_fails(self):
         lock = lock_fixture()
-        lock["packages"][""]["dependencies"][LEAF] = AUDIT.LEAF_VERSION
+        lock["packages"][""]["dependencies"][LEAF] = AUDIT.LOCKED_PACKAGES[LEAF][0]["version"]
         with self.assertRaises(AUDIT.AuditValidationError):
             self.validate(exception_report(), lock=lock)
         for package in AUDIT.LOCKED_PACKAGES:
@@ -188,6 +186,25 @@ class DocsAuditValidationTests(unittest.TestCase):
                 record["isDirect"] = not record["isDirect"]
                 with self.assertRaises(AUDIT.AuditValidationError):
                     self.validate(report)
+
+    def test_nested_copies_pass_only_with_an_approved_version_and_integrity(self):
+        first, second = AUDIT.LOCKED_PACKAGES[LEAF][:2]
+        nested = "node_modules/anymatch/node_modules/" + LEAF
+
+        def with_nested(record):
+            report = exception_report()
+            report["vulnerabilities"][LEAF]["nodes"].append(nested)
+            lock = lock_fixture()
+            lock["packages"][nested] = dict(record, dependencies={})
+            return report, lock
+
+        report, lock = with_nested(second)
+        self.validate(report, lock=lock)
+        for changed in (dict(second, version="0.0.0"), dict(second, integrity="sha512-changed")):
+            with self.subTest(changed=changed):
+                report, lock = with_nested(changed)
+                with self.assertRaises(AUDIT.AuditValidationError):
+                    self.validate(report, lock=lock)
 
     def test_other_advisory_on_leaf_fails(self):
         report = exception_report()
@@ -319,7 +336,7 @@ class DocsAuditValidationTests(unittest.TestCase):
             self.validate(cyclic, code=0)
 
     def test_clean_report_after_expiry_does_not_need_exception_bindings(self):
-        changed_lock = {"packages": {"node_modules/http-cache-semantics": {"version": "4.2.1"}}}
+        changed_lock = {"packages": {node_path(LEAF): {"version": "0.0.0"}}}
         changed_configs = {"docs-site/astro.config.mjs": "changed"}
         self.validate(
             empty_report(),
@@ -423,17 +440,28 @@ class DocsAuditCliTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(b"passed below the high severity threshold", result.stdout)
-        self.assertNotIn(b"GHSA-ch52-4w7c-c8xp", result.stdout)
+        self.assertNotIn(AUDIT.ADVISORY_ID.encode(), result.stdout)
         self.assert_audit_ran()
 
-    def test_real_cli_rejects_exception_report_once_the_locked_package_is_patched(self):
-        # The lockfile no longer carries the excepted http-cache-semantics
-        # version, so a report that relies on the exception must fail closed
+    def test_real_cli_rejects_exception_report_with_an_unapproved_finding(self):
+        # An extra high finding next to the approved graph must fail closed
         # whatever the current time is.
-        result = self.run_checker(json.dumps(exception_report()).encode(), status=1)
+        report = exception_report()
+        add_vulnerability(report, "new-high-package", [{
+            "source": 1,
+            "name": "new-high-package",
+            "dependency": "new-high-package",
+            "title": "Other finding",
+            "url": "https://github.com/advisories/GHSA-aaaa-bbbb-cccc",
+            "severity": "high",
+            "range": "<1.0.0",
+        }])
+        report["metadata"]["vulnerabilities"]["high"] += 1
+        report["metadata"]["vulnerabilities"]["total"] += 1
+        result = self.run_checker(json.dumps(report).encode(), status=1)
         self.assert_audit_ran()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertNotIn(b"GHSA-ch52-4w7c-c8xp", result.stdout)
+        self.assertNotIn(AUDIT.ADVISORY_ID.encode(), result.stdout)
 
     def test_real_cli_rejects_npm_error_malformed_json_and_duplicate_fields(self):
         cases = (
