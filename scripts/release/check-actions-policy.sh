@@ -498,7 +498,7 @@ if rp_path.exists():
         'node scripts/release-please/published-baseline.mjs',
         'pnpm --dir scripts/release-please install --frozen-lockfile --ignore-scripts',
         'pnpm --dir scripts/release-please test',
-        'pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413',
+        'pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115',
         'scripts/validate-version-contract.py',
     )
     for marker in required_rp:
