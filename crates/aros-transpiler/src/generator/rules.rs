@@ -237,6 +237,9 @@ pub(super) fn emit_source_text_and_copy_rules(out: &mut String, graph: &Dependen
         if let Some(fetch) = &declaration.fetch_owner {
             writeln!(out, "    FETCH {}", cmake_arg(fetch)).unwrap();
         }
+        if declaration.destination.starts_with("${AROS_SYS_DIR}") {
+            writeln!(out, "    KIND image").unwrap();
+        }
         writeln!(out, "    FILES").unwrap();
         for file in &declaration.files {
             writeln!(out, "        {}", cmake_literal_arg(file)).unwrap();

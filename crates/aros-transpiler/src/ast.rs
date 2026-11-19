@@ -767,6 +767,8 @@ pub struct ParsedMmakefile {
     pub copy_directories: Vec<CopyDirectoryDecl>,
     /// `%copy_dir_recursive` declarations that were not safe to model.
     pub skipped_copy_directories: Vec<String>,
+    /// `%copy_files_q` declarations whose destination no capability models.
+    pub skipped_file_copies: Vec<String>,
     /// Hand-written Make rules that stage headers; these need a static CMake
     /// counterpart and are reported so new ones do not go unnoticed.
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,

@@ -818,6 +818,11 @@ fn developer_library_file_copies_preserve_bytes_and_refuse_changed_contracts() {
 }
 
 #[test]
+fn image_file_copies_stage_listed_files_below_the_image_root_only() {
+    run_embedded_kobj_contract_test("ImageFileCopyTest.cmake");
+}
+
+#[test]
 fn sdk_fd_file_copies_keep_the_existing_local_and_fetch_contracts() {
     run_embedded_kobj_contract_test("SdkFileCopiesTest.cmake");
 }
