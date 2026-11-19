@@ -394,10 +394,10 @@ pub(crate) fn glapi_sources(
         fingerprint("mesa26-glapi-recipe")?,
         "Mesa 26.2.5 glapi",
     )?;
-    require_file_fingerprint(
+    require_file_fingerprint_one_of(
         root,
         "workbench/libs/mesa/mesa.cfg",
-        fingerprint("mesa26-config")?,
+        &config_fingerprints()?,
         "Mesa 26.2.5 common flags",
     )?;
     Ok(Some(EvaluatedSources {
@@ -408,6 +408,16 @@ pub(crate) fn glapi_sources(
         declared: true,
         ..EvaluatedSources::default()
     }))
+}
+
+/// Reviewed revisions of `mesa.cfg`. They differ only in the 20.0.8 patch
+/// selection, which no Mesa 26 capability reads: the 26.2.5 branch and every
+/// compile flag the capabilities rely on are the same.
+fn config_fingerprints() -> Result<[&'static str; 2], String> {
+    Ok([
+        fingerprint("mesa26-config")?,
+        fingerprint("mesa26-config-without-mesa20-nx-patch")?,
+    ])
 }
 
 pub(crate) fn runtime_module_name(
@@ -423,10 +433,10 @@ pub(crate) fn runtime_module_name(
     {
         return Ok(None);
     }
-    require_file_fingerprint(
+    require_file_fingerprint_one_of(
         root,
         "workbench/libs/mesa/mesa.cfg",
-        fingerprint("mesa26-config")?,
+        &config_fingerprints()?,
         "Mesa 26 runtime module identity",
     )?;
     if raw_name != "mesa3dgl$(MESAGLBUILD)" {
@@ -447,16 +457,19 @@ pub(crate) fn module_sources(
         if profile(target)?.is_none() {
             return Ok(None);
         }
-        require_file_fingerprint(
+        require_file_fingerprint_one_of(
             root,
             "workbench/hidds/llvmpipe/mmakefile.src",
-            fingerprint("mesa26-llvmpipe-hidd-recipe")?,
+            &[
+                fingerprint("mesa26-llvmpipe-hidd-recipe")?,
+                fingerprint("mesa26-llvmpipe-hidd-recipe-llvm-lib-comment")?,
+            ],
             "Mesa 26 llvmpipe HIDD source closure",
         )?;
-        require_file_fingerprint(
+        require_file_fingerprint_one_of(
             root,
             "workbench/libs/mesa/mesa.cfg",
-            fingerprint("mesa26-config")?,
+            &config_fingerprints()?,
             "Mesa 26 llvmpipe HIDD configuration",
         )?;
         return Ok(Some(EvaluatedSources {

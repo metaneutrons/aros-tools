@@ -495,6 +495,14 @@ fn galliumaux_admits_only_the_reviewed_llvmpipe_only_recipe() {
     let recipe = temporary
         .path()
         .join("workbench/libs/mesa/libgalliumaux/mmakefile.src");
+    // The upstream-synchronised recipe is a third reviewed state; start from
+    // the reference state it was derived from.
+    let current = fs::read_to_string(&recipe).unwrap();
+    if aros_common::sha256_bytes(current.as_bytes()).to_string()
+        == crate::fingerprints::fingerprint(GALLIUMAUX_RECIPE_REVISION.synchronised).unwrap()
+    {
+        write_other_reviewed_state(&root, &recipe, &GALLIUMAUX_RECIPE_REVISION);
+    }
     let original = fs::read_to_string(&recipe).unwrap();
     let original_digest = aros_common::sha256_bytes(original.as_bytes()).to_string();
     let old_pin = crate::fingerprints::fingerprint("mesa26-galliumaux-recipe").unwrap();
@@ -537,4 +545,199 @@ fn galliumaux_admits_only_the_reviewed_llvmpipe_only_recipe() {
             "{mmake}: {error}"
         );
     }
+}
+
+/// One reviewed rewrite of a recipe or inventory: `(before, after)` text pairs
+/// taking the qualified AROS-NX reference to the state after the upstream
+/// synchronisation, with the fingerprint names of both states.
+struct ReviewedRevision {
+    path: &'static str,
+    edits: &'static [(&'static str, &'static str)],
+    reference: &'static str,
+    synchronised: &'static str,
+}
+
+const MESA_CONFIG_REVISION: ReviewedRevision = ReviewedRevision {
+    path: "workbench/libs/mesa/mesa.cfg",
+    edits: &[(
+        "PATCHSPEC := mesa-26.2.5-aros.diff:mesa-26.2.5:-p1\nelse ifeq ($(OPT_MESAGL),20.0.8)\nPATCHSPEC := mesa-20.0.8-aros-nx.diff:mesa-20.0.8:-p1\nelse\n",
+        "PATCHSPEC := mesa-26.2.5-aros.diff:mesa-26.2.5:-p1\nelse\n",
+    )],
+    reference: "mesa26-config",
+    synchronised: "mesa26-config-without-mesa20-nx-patch",
+};
+
+const GALLIUMAUX_RECIPE_REVISION: ReviewedRevision = ReviewedRevision {
+    path: "workbench/libs/mesa/libgalliumaux/mmakefile.src",
+    edits: &[
+        (
+            "ifeq ($(AROS_TOOLCHAIN),llvm)\nGALLIUM_AUXILIARY_GENERATED_SOURCES += \\\n            gallivm/lp_bld_nir_no_integer_algebraic.c\nendif\n",
+            "# gallivm's no-integer NIR pass includes lp_bld_nir.h, which needs the LLVM\n# headers: generated for the LLVM toolchain only.\nifeq ($(AROS_TOOLCHAIN),llvm)\nGALLIUM_AUXILIARY_GENERATED_SOURCES += $(MESA26_GALLIUMAUX_GENERATED_LLVM_C_SOURCES)\nendif\n",
+        ),
+        (
+            "# gallivm's pass for LLVM without native integers; it needs LLVM headers and\n# is therefore added only to the LLVM toolchain's generated objects above.\n",
+            "# and gallivm's for LLVM without native integers (LLVM toolchain only, see\n# GALLIUM_AUXILIARY_GENERATED_SOURCES); it joins the generated objects here\n# rather than libgalliumvm\n",
+        ),
+    ],
+    reference: "mesa26-galliumaux-recipe",
+    synchronised: "mesa26-galliumaux-recipe-llvm-generated-sources",
+};
+
+const GALLIUMAUX_MANIFEST_REVISION: ReviewedRevision = ReviewedRevision {
+    path: "workbench/libs/mesa/libgalliumaux/galliumaux-26.2.5.sources",
+    edits: &[(
+        "\tdraw/draw_nir_lower_opcodes.c\n\nMESA26_GALLIUMAUX_GENERATED_HEADERS",
+        "\tdraw/draw_nir_lower_opcodes.c\n\n# Generated for the LLVM toolchain only: gallivm's no-integer NIR pass includes\n# lp_bld_nir.h, which needs the LLVM headers. It joins the generated objects of\n# this archive rather than libgalliumvm (Mesa 26.2 recipe in upstream AROS).\nMESA26_GALLIUMAUX_GENERATED_LLVM_C_SOURCES := \\\n\tgallivm/lp_bld_nir_no_integer_algebraic.c\n\nMESA26_GALLIUMAUX_GENERATED_HEADERS",
+    )],
+    reference: "mesa26-galliumaux-manifest",
+    synchronised: "mesa26-galliumaux-manifest-llvm-generated-sources",
+};
+
+const LLVMPIPE_HIDD_RECIPE_REVISION: ReviewedRevision = ReviewedRevision {
+    path: "workbench/hidds/llvmpipe/mmakefile.src",
+    edits: &[(
+        "# Link target-side LLVM archives by path. A -l lookup can pick host archives\n# from the crosstools directory before the AROS developer directory.\n",
+        "# The target-side LLVM archives, by path: as -l names they would be looked\n# up through every -L in order, and TARGET_CXX_LDFLAGS puts the crosstools\n# lib directory first, which holds the host's own libLLVM*.a when the AROS\n# toolchain was built with LLVM.\n",
+    )],
+    reference: "mesa26-llvmpipe-hidd-recipe",
+    synchronised: "mesa26-llvmpipe-hidd-recipe-llvm-lib-comment",
+};
+
+/// Writes the other reviewed state of `revision` into `destination` and checks
+/// that its digest is exactly the named fingerprint. The checkout may be in
+/// either state; the result is the opposite one.
+fn write_other_reviewed_state(root: &Path, destination: &Path, revision: &ReviewedRevision) {
+    let original = fs::read_to_string(root.join(revision.path)).unwrap();
+    let digest = aros_common::sha256_bytes(original.as_bytes()).to_string();
+    let reference = crate::fingerprints::fingerprint(revision.reference).unwrap();
+    let synchronised = crate::fingerprints::fingerprint(revision.synchronised).unwrap();
+    let (mut text, expected) = if digest == reference {
+        (original, synchronised)
+    } else {
+        assert_eq!(
+            digest, synchronised,
+            "{} is in no reviewed state",
+            revision.path
+        );
+        (original, reference)
+    };
+    for (before, after) in revision.edits {
+        let (from, to) = if expected == synchronised {
+            (before, after)
+        } else {
+            (after, before)
+        };
+        assert_eq!(text.matches(from).count(), 1, "{}: {from:?}", revision.path);
+        text = text.replacen(from, to, 1);
+    }
+    assert_eq!(
+        aros_common::sha256_bytes(text.as_bytes()).to_string(),
+        expected,
+        "{}",
+        revision.path
+    );
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    fs::write(destination, text).unwrap();
+}
+
+fn x86_64_mesa26_profile() -> TargetContext {
+    TargetContext {
+        cpu: Some("x86_64".to_owned()),
+        platform: Some("pc".to_owned()),
+        toolchain: Some("llvm".to_owned()),
+        cpu32: Some("i386".to_owned()),
+        use_mmu: Some("1".to_owned()),
+        float_abi: Some(String::new()),
+        mesa_version: Some("26.2.5".to_owned()),
+        ..TargetContext::default()
+    }
+}
+
+#[test]
+fn upstream_synchronised_gallium_recipes_are_admitted_with_unchanged_sources() {
+    let root = mesa26_source_root();
+    let profile = x86_64_mesa26_profile();
+    let relative = Path::new("workbench/libs/mesa/libgalliumaux");
+    let targets = [
+        "mesa3d-linklib-galliumauxiliary",
+        "mesa3d-linklib-galliumdrawllvm",
+        "mesa3d-linklib-galliumtess",
+    ];
+    let baseline: Vec<_> = targets
+        .iter()
+        .map(|target| {
+            archive_sources(&root, relative, target, Some(&profile))
+                .unwrap()
+                .expect("reviewed Mesa 26 archive")
+        })
+        .collect();
+
+    let temporary = tempfile::tempdir().unwrap();
+    for revision in [
+        &MESA_CONFIG_REVISION,
+        &GALLIUMAUX_RECIPE_REVISION,
+        &GALLIUMAUX_MANIFEST_REVISION,
+    ] {
+        write_other_reviewed_state(&root, &temporary.path().join(revision.path), revision);
+    }
+    for (target, expected) in targets.iter().zip(&baseline) {
+        let admitted = archive_sources(temporary.path(), relative, target, Some(&profile))
+            .unwrap_or_else(|error| panic!("{target}: {error}"))
+            .expect("reviewed synchronised archive");
+        assert_eq!(admitted.c, expected.c, "{target}");
+        assert_eq!(admitted.cxx, expected.cxx, "{target}");
+    }
+
+    let recipe = temporary.path().join(GALLIUMAUX_RECIPE_REVISION.path);
+    let text = fs::read_to_string(&recipe).unwrap();
+    fs::write(&recipe, format!("{text}\n# unreviewed drift\n")).unwrap();
+    let error = archive_sources(
+        temporary.path(),
+        relative,
+        "mesa3d-linklib-galliumdrawllvm",
+        Some(&profile),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("unsupported upstream recipe drift"),
+        "{error}"
+    );
+}
+
+#[test]
+fn upstream_synchronised_mesa_config_and_llvmpipe_hidd_are_admitted() {
+    let root = mesa26_source_root();
+    let profile = x86_64_mesa26_profile();
+    let hidd = Path::new("workbench/hidds/llvmpipe");
+    let baseline = super::module_sources(&root, hidd, "hidd-llvmpipe", Some(&profile))
+        .unwrap()
+        .expect("reviewed llvmpipe HIDD");
+    let identity = |root: &Path| {
+        super::runtime_module_name(
+            root,
+            Path::new("workbench/libs/mesa"),
+            "mesa3dgl-library",
+            "mesa3dgl$(MESAGLBUILD)",
+            Some(&profile),
+        )
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    for revision in [&MESA_CONFIG_REVISION, &LLVMPIPE_HIDD_RECIPE_REVISION] {
+        write_other_reviewed_state(&root, &temporary.path().join(revision.path), revision);
+    }
+    let admitted = super::module_sources(temporary.path(), hidd, "hidd-llvmpipe", Some(&profile))
+        .unwrap()
+        .expect("reviewed synchronised llvmpipe HIDD");
+    assert_eq!(admitted.c, baseline.c);
+    assert_eq!(
+        identity(temporary.path()).unwrap(),
+        identity(&root).unwrap()
+    );
+
+    let config = temporary.path().join(MESA_CONFIG_REVISION.path);
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(&config, format!("{text}\n# unreviewed drift\n")).unwrap();
+    assert!(identity(temporary.path())
+        .unwrap_err()
+        .contains("unsupported upstream recipe drift"));
 }

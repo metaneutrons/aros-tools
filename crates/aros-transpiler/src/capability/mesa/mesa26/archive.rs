@@ -1,7 +1,7 @@
 //! Audited Mesa 26 archive source inventories.
 
 use super::{
-    fingerprint, glapi_sources, has_archive_sources, inventory_stems, profile,
+    config_fingerprints, fingerprint, glapi_sources, has_archive_sources, inventory_stems, profile,
     require_file_fingerprint, require_file_fingerprint_one_of, target_identity, Mesa26Target,
     BUILD_ROOT, LLVMPPIPE_SOURCE_NAMES, SOURCE_ROOT,
 };
@@ -45,10 +45,10 @@ pub(super) fn archive_sources(
                 fingerprint("mesa26-gallivm-manifest")?,
                 "Mesa 26 Gallivm source inventory",
             )?;
-            require_file_fingerprint(
+            require_file_fingerprint_one_of(
                 root,
                 "workbench/libs/mesa/mesa.cfg",
-                fingerprint("mesa26-config")?,
+                &config_fingerprints()?,
                 "Mesa 26 Gallivm configuration",
             )?;
             let manifest = "workbench/libs/mesa/libgalliumvm/gallivm-26.2.5.sources";
@@ -73,16 +73,16 @@ pub(super) fn archive_sources(
                 &galliumaux_recipes()?,
                 "Mesa 26 Gallium LLVM source closure",
             )?;
-            require_file_fingerprint(
+            require_file_fingerprint_one_of(
                 root,
                 "workbench/libs/mesa/libgalliumaux/galliumaux-26.2.5.sources",
-                fingerprint("mesa26-galliumaux-manifest")?,
+                &galliumaux_manifests()?,
                 "Mesa 26 Gallium LLVM source inventory",
             )?;
-            require_file_fingerprint(
+            require_file_fingerprint_one_of(
                 root,
                 "workbench/libs/mesa/mesa.cfg",
-                fingerprint("mesa26-config")?,
+                &config_fingerprints()?,
                 "Mesa 26 Gallium LLVM configuration",
             )?;
             let manifest = "workbench/libs/mesa/libgalliumaux/galliumaux-26.2.5.sources";
@@ -124,10 +124,10 @@ pub(super) fn archive_sources(
                 ],
                 "Mesa 26 llvmpipe source closure",
             )?;
-            require_file_fingerprint(
+            require_file_fingerprint_one_of(
                 root,
                 "workbench/libs/mesa/mesa.cfg",
-                fingerprint("mesa26-config")?,
+                &config_fingerprints()?,
                 "Mesa 26 llvmpipe configuration",
             )?;
             return Ok(Some(EvaluatedSources {
@@ -148,10 +148,10 @@ pub(super) fn archive_sources(
             fingerprint("mesa26-egl-recipe")?,
             "Mesa 26 EGL source closure",
         )?;
-        require_file_fingerprint(
+        require_file_fingerprint_one_of(
             root,
             "workbench/libs/mesa/mesa.cfg",
-            fingerprint("mesa26-config")?,
+            &config_fingerprints()?,
             "Mesa 26 EGL configuration",
         )?;
         let mut sources = [
@@ -194,10 +194,10 @@ pub(super) fn archive_sources(
             fingerprint("mesa26-core-recipe")?,
             "Mesa 26 empty SSE4.1 compatibility archive",
         )?;
-        require_file_fingerprint(
+        require_file_fingerprint_one_of(
             root,
             "workbench/libs/mesa/mesa.cfg",
-            fingerprint("mesa26-config")?,
+            &config_fingerprints()?,
             "Mesa 26 empty SSE4.1 compatibility archive",
         )?;
         return Ok(Some(EvaluatedSources {
@@ -294,11 +294,15 @@ pub(super) fn archive_sources(
     } else {
         require_file_fingerprint(root, recipe, fingerprint(recipe_pin)?, family)?;
     }
-    require_file_fingerprint(root, manifest, fingerprint(manifest_pin)?, family)?;
-    require_file_fingerprint(
+    if family == "galliumaux" {
+        require_file_fingerprint_one_of(root, manifest, &galliumaux_manifests()?, family)?;
+    } else {
+        require_file_fingerprint(root, manifest, fingerprint(manifest_pin)?, family)?;
+    }
+    require_file_fingerprint_one_of(
         root,
         "workbench/libs/mesa/mesa.cfg",
-        fingerprint("mesa26-config")?,
+        &config_fingerprints()?,
         family,
     )?;
     let mut sources = EvaluatedSources {
@@ -501,9 +505,19 @@ pub(super) fn archive_sources(
 /// Upstream later kept galliumdrawllvm out of mesa3dgl-linklibs. Only MetaMake
 /// aggregation changed, so both reviewed recipes expand to the same sources
 /// and libraries.
-fn galliumaux_recipes() -> Result<[&'static str; 2], String> {
+fn galliumaux_recipes() -> Result<[&'static str; 3], String> {
     Ok([
         fingerprint("mesa26-galliumaux-recipe")?,
         fingerprint("mesa26-galliumaux-recipe-llvmpipe-only")?,
+        fingerprint("mesa26-galliumaux-recipe-llvm-generated-sources")?,
+    ])
+}
+
+/// The second inventory only adds `MESA26_GALLIUMAUX_GENERATED_LLVM_C_SOURCES`,
+/// which the recipe consumes; the closed lane names that source itself.
+fn galliumaux_manifests() -> Result<[&'static str; 2], String> {
+    Ok([
+        fingerprint("mesa26-galliumaux-manifest")?,
+        fingerprint("mesa26-galliumaux-manifest-llvm-generated-sources")?,
     ])
 }

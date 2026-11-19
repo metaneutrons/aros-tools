@@ -294,3 +294,100 @@ fn raspi_target_llvm_rejects_unqualified_version_and_selector_substitutions() {
             .any(|item| item.provided_library == "LLVM"));
     }
 }
+
+const LLVM_RECIPE: &str = "workbench/libs/llvm/mmakefile.src";
+
+const AROS_OPTIONS_BLOCK: &str = "# Target-side libraries and tools run on AROS. Keep host TableGen separate.\n# LLVM_TARGET_ARCH takes a CPU name, not the LLVM backend name (e.g. RISCV).\nLLVM_AROS_CMAKEOPTIONS := \\\n    -DLLVM_HOST_TRIPLE=$(AROS_TARGET_CPU)-unknown-aros \\\n    -DLLVM_TARGET_ARCH=$(subst ppc,powerpc,$(AROS_TARGET_CPU))\n\n";
+
+/// Reviewed rewrite between the qualified AROS-NX reference (LLVM 23 default,
+/// no AROS target options) and the synchronised recipe (LLVM 11 default and
+/// `LLVM_AROS_CMAKEOPTIONS` for the target libraries and the tools).
+fn llvm_recipe_edits() -> Vec<(String, String)> {
+    let target = "LLVM_TARGET_CMAKEOPTIONS := \\\n    $(LLVM_COMMON_CMAKEOPTIONS) \\\n";
+    let tools = "LLVM_TOOLS_CMAKEOPTIONS := \\\n    $(LLVM_COMMON_CMAKEOPTIONS) \\\n";
+    let gallivm = "# Gallivm's C++ memory manager and object cache derive from LLVM classes.\n";
+    vec![
+        (
+            "OPT_LLVM := 23.1.0\n".to_owned(),
+            "OPT_LLVM := 11.0.0\n".to_owned(),
+        ),
+        (gallivm.to_owned(), format!("{AROS_OPTIONS_BLOCK}{gallivm}")),
+        (
+            target.to_owned(),
+            format!("{target}    $(LLVM_AROS_CMAKEOPTIONS) \\\n"),
+        ),
+        (
+            tools.to_owned(),
+            format!("{tools}    $(LLVM_AROS_CMAKEOPTIONS) \\\n"),
+        ),
+    ]
+}
+
+#[test]
+fn target_llvm_admits_the_upstream_synchronised_recipe_with_unchanged_jobs() {
+    let root = common::source_root();
+    let original = std::fs::read_to_string(root.join(LLVM_RECIPE)).unwrap();
+    let digest = aros_common::sha256_bytes(original.as_bytes()).to_string();
+    let reference =
+        aros_transpiler::fingerprints::fingerprint("llvm-target-recipe-with-llvm23-default")
+            .unwrap();
+    let synchronised =
+        aros_transpiler::fingerprints::fingerprint("llvm-target-recipe-with-aros-target-options")
+            .unwrap();
+    let forward = digest == reference;
+    assert!(
+        forward || digest == synchronised,
+        "recipe is in no reviewed state"
+    );
+    let mut text = original;
+    for (before, after) in llvm_recipe_edits() {
+        let (from, to) = if forward {
+            (before, after)
+        } else {
+            (after, before)
+        };
+        assert_eq!(text.matches(&from).count(), 1, "{from:?}");
+        text = text.replacen(&from, &to, 1);
+    }
+    assert_eq!(
+        aros_common::sha256_bytes(text.as_bytes()).to_string(),
+        if forward { synchronised } else { reference }
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let destination = temp.path().join(LLVM_RECIPE);
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    for patch in [
+        "tools/crosstools/llvm/llvm-11.0.0.src-aros.diff",
+        "tools/crosstools/llvm/llvm-23.1.0.src-aros.diff",
+    ] {
+        let copy = temp.path().join(patch);
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::copy(root.join(patch), copy).unwrap();
+    }
+    for version in ["11.0.0", "23.1.0"] {
+        let mut target = context();
+        target.target_llvm_ver = Some(version.to_owned());
+        let parse = |recipe: &std::path::Path, base: &std::path::Path| {
+            parse_mmakefile_with_dirs_and_context(recipe, base, &DirVars::load(base), &target)
+                .unwrap()
+        };
+        let baseline = parse(&root.join(LLVM_RECIPE), &root);
+        std::fs::write(&destination, &text).unwrap();
+        let admitted = parse(&destination, temp.path());
+        assert!(
+            admitted.capability_errors.is_empty(),
+            "{version}: {:#?}",
+            admitted.capability_errors
+        );
+        let ([expected], [actual]) = (
+            baseline.external_cmake.as_slice(),
+            admitted.external_cmake.as_slice(),
+        ) else {
+            panic!("{version}: missing Target LLVM declaration");
+        };
+        assert_eq!(actual.options, expected.options, "{version}");
+        assert_eq!(actual.build_targets, expected.build_targets, "{version}");
+        assert_eq!(actual.install_prefix, expected.install_prefix, "{version}");
+    }
+}

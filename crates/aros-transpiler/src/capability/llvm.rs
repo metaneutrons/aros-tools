@@ -77,6 +77,7 @@ pub(crate) fn admit(
                         fingerprint("llvm11-target-recipe")?,
                         fingerprint("llvm11-target-recipe-with-precompiled-headers")?,
                         fingerprint("llvm-target-recipe-with-llvm23-default")?,
+                        fingerprint("llvm-target-recipe-with-aros-target-options")?,
                     ],
                     "LLVM 11 static target MCJIT",
                 )?;
@@ -105,7 +106,10 @@ pub(crate) fn admit(
                 require_file_fingerprint_one_of(
                     root,
                     "workbench/libs/llvm/mmakefile.src",
-                    &[fingerprint("llvm-target-recipe-with-llvm23-default")?],
+                    &[
+                        fingerprint("llvm-target-recipe-with-llvm23-default")?,
+                        fingerprint("llvm-target-recipe-with-aros-target-options")?,
+                    ],
                     "LLVM 23 static target MCJIT",
                 )?;
                 let patch = "tools/crosstools/llvm/llvm-23.1.0.src-aros.diff";
