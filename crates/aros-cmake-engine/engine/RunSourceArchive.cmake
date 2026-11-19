@@ -54,7 +54,19 @@ _aros_literal_check_optional_regular("${staging}" "archive staging")
 # Starting a fresh archive prevents removed members surviving an incremental
 # rule change. Publication is atomic and never exposes a failed AR/RANLIB run.
 file(REMOVE "${staging}")
-execute_process(COMMAND "${AR}" "${AR_FLAGS}" "${staging}" ${OBJECTS}
+# An archive member header records the uid, gid and mtime of whoever ran ar, so
+# the same objects archive to different bytes on two hosts. GNU ar and llvm-ar
+# accept D to zero them; Apple's ar rejects it and is left alone. The sealed
+# command file keeps AR_FLAGS at cr: the modifier follows from the measured ar,
+# the same rule AROS.cmake applies to the ordinary archive rules.
+set(ar_operation "${AR_FLAGS}")
+execute_process(COMMAND "${AR}" --version
+    RESULT_VARIABLE ar_version_result OUTPUT_VARIABLE ar_version ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(ar_version_result EQUAL 0 AND ar_version MATCHES "GNU|LLVM")
+    string(APPEND ar_operation "D")
+endif()
+execute_process(COMMAND "${AR}" "${ar_operation}" "${staging}" ${OBJECTS}
     RESULT_VARIABLE ar_result OUTPUT_VARIABLE ar_stdout ERROR_VARIABLE ar_stderr)
 if(NOT ar_result STREQUAL "0")
     message(FATAL_ERROR "Source archive runner: AR failed (${ar_result})\n${ar_stdout}\n${ar_stderr}")

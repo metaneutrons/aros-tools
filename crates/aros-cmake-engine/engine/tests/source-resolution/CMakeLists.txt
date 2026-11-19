@@ -58,6 +58,29 @@ if(_resolved_c STREQUAL "${_source_root}/port.c" OR
         "fetched source did not retain its stable proxy: ${_resolved_c}")
 endif()
 
+# The proxy name is also the archived object name of a linklib member, so it
+# must not depend on the work directory. The same source under a relocated
+# build root has to resolve to the same file name.
+get_filename_component(_original_proxy_name "${_resolved_c}" NAME)
+set(_saved_binary_dir "${CMAKE_BINARY_DIR}")
+set(_saved_ports_dir "${AROS_PORTS_DIR}")
+set(_saved_ports_source_dir "${AROS_PORTS_SOURCE_DIR}")
+set(_relocated_root "${CMAKE_BINARY_DIR}/relocated")
+set(CMAKE_BINARY_DIR "${_relocated_root}")
+set(AROS_PORTS_DIR "${_relocated_root}/Ports")
+set(AROS_PORTS_SOURCE_DIR "${_relocated_root}/portssources")
+aros_resolve_sources(_relocated_c ""
+    LANGUAGE C SOURCES "${AROS_PORTS_DIR}/fixture/package/port")
+get_filename_component(_relocated_proxy_name "${_relocated_c}" NAME)
+set(CMAKE_BINARY_DIR "${_saved_binary_dir}")
+set(AROS_PORTS_DIR "${_saved_ports_dir}")
+set(AROS_PORTS_SOURCE_DIR "${_saved_ports_source_dir}")
+if(NOT _relocated_proxy_name STREQUAL _original_proxy_name)
+    message(FATAL_ERROR
+        "port source proxy name depends on the work directory: "
+        "${_original_proxy_name} versus ${_relocated_proxy_name}")
+endif()
+
 # Build-tree include paths are retained before their generators run, but the
 # fetched Ports namespace is owned exclusively by aros-fetch. Merely applying
 # an include path must not create the archive extraction root and make the
