@@ -249,11 +249,34 @@ fn arm_attributes_are_measured_instead_of_inferred_from_identical_elf_flags() {
         wrong[index].1 = 0;
         let changed = arm_elf(&wrong);
         assert_eq!(&changed[36..40], &valid[36..40]);
+        let names = [
+            "arm_cpu_arch",
+            "arm_cpu_profile",
+            "arm_arm_isa",
+            "arm_thumb_isa",
+            "arm_fp_arch",
+            "arm_simd_arch",
+            "arm_vfp_args",
+        ];
+        let (tag, expected) = values[index];
         assert_rejection(
             verify_application_elf(&changed, &target),
-            "LLVM SDK application ARM attributes differ from the source target",
+            &format!(
+                "LLVM SDK application ARM attributes differ from the source target: \
+                 {} (tag {tag}) expected {expected}, measured 0",
+                names[index]
+            ),
         );
     }
+    // Several differing attributes are all named, in the declared order.
+    let mut two = values;
+    two[4].1 = 3;
+    two[5].1 = 1;
+    assert_rejection(
+        verify_application_elf(&arm_elf(&two), &target),
+        "LLVM SDK application ARM attributes differ from the source target: \
+         arm_fp_arch (tag 10) expected 5, measured 3; arm_simd_arch (tag 12) expected 2, measured 1",
+    );
     assert_rejection(
         verify_application_elf(
             &elf_fixture(32, 40, 0x0500_0000, REQUIRED_STARTUP_SYMBOL),
