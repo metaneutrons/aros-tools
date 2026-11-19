@@ -70,14 +70,12 @@ endif()
 # The runner asks GNU and LLVM tools for deterministic members (D) and leaves
 # Apple's ar alone; the independent reference makes the same choice.
 set(reference_flags cr)
-set(reference_ranlib_arguments)
 set(deterministic FALSE)
 execute_process(COMMAND "${AR}" --version RESULT_VARIABLE version_result
     OUTPUT_VARIABLE version_text ERROR_QUIET)
 if(version_result EQUAL 0 AND version_text MATCHES "GNU|LLVM")
     set(deterministic TRUE)
     set(reference_flags crD)
-    set(reference_ranlib_arguments -D)
 endif()
 if(deterministic)
     # The runner itself must ask for deterministic members, whatever the host
@@ -94,7 +92,7 @@ execute_process(COMMAND "${AR}" "${reference_flags}" "${reference}" "${build}/ge
 if(NOT result STREQUAL "0")
     message(FATAL_ERROR "reference AR failed")
 endif()
-execute_process(COMMAND "${RANLIB}" ${reference_ranlib_arguments} "${reference}" RESULT_VARIABLE result)
+execute_process(COMMAND "${RANLIB}" "${reference}" RESULT_VARIABLE result)
 execute_process(COMMAND "${CMAKE_COMMAND}" -E compare_files "${archive}" "${reference}"
     RESULT_VARIABLE comparison)
 if(NOT result STREQUAL "0" OR NOT comparison STREQUAL "0")
