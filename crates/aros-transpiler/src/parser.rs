@@ -658,8 +658,27 @@ impl TargetContext {
             "TARGET_LLVM_RUNTIMES_STYLE" => self.target_llvm_runtimes_style.clone(),
             "TARGET_RUST" => self.target_rust.clone(),
             "TARGET_RUST_VER" => self.target_rust_ver.clone(),
-            _ => self.make_variables.get(name).cloned(),
+            _ => self
+                .make_variables
+                .get(name)
+                .cloned()
+                .or_else(|| self.configured_empty_value(name)),
         }
+    }
+
+    /// The value of a variable that `configure` substitutes as the empty string
+    /// on every target but one, so a source `ifneq` on it is decidable.
+    ///
+    /// `rom_optimization_cflags` is set only in the `amiga`/`m68k` case of
+    /// `configure.in` (the ROM image must fit two 512 KB banks) and is "left
+    /// empty on targets whose ROM-resident code has no size limit". A value
+    /// declared in the target's `make_variables` always wins. For an unknown or
+    /// m68k CPU the value stays undecided, so the conditional is still reported
+    /// instead of being resolved in one direction.
+    fn configured_empty_value(&self, name: &str) -> Option<String> {
+        const EMPTY_EXCEPT_M68K: &[&str] = &["ROM_OPTIMIZATION_CFLAGS"];
+        let cpu = self.cpu.as_deref()?;
+        (cpu != "m68k" && EMPTY_EXCEPT_M68K.contains(&name)).then(String::new)
     }
 }
 
