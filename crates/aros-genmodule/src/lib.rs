@@ -1788,7 +1788,6 @@ fn render(diagnostics: &DiagnosticSet, format: DiagnosticFormat) {
 }
 
 /// Run the generator command using the process arguments.
-#[must_use]
 pub fn run() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     let requested_format =

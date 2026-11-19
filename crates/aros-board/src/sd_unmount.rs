@@ -420,16 +420,12 @@ fn safe_absolute_mount_path(path: &Path) -> bool {
     let Some(text) = path.to_str() else {
         return false;
     };
-    if text.chars().any(char::is_control)
+    !(text.chars().any(char::is_control)
         || (text != "/"
             && text
                 .split('/')
                 .skip(1)
-                .any(|segment| segment.is_empty() || matches!(segment, "." | "..")))
-    {
-        return false;
-    }
-    true
+                .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))))
 }
 
 fn safe_removable_mount_point(path: &Path) -> bool {

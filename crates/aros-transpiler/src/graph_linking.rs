@@ -551,7 +551,7 @@ impl DependencyGraph {
             {
                 format!("{mmake}-linklib")
             } else {
-                mmake.clone()
+                mmake
             };
             resolved.push(ResolvedDefaultLinkItem {
                 name: item.name.clone(),
@@ -633,10 +633,8 @@ impl DependencyGraph {
                 // an all-hosted module this way). With no explicit choice,
                 // architecture filtering is mandatory even for a unique pool:
                 // uniqueness does not make a foreign module applicable.
-                let explicit: Vec<&str> = self
-                    .meta_targets
-                    .get(&decl.mmake)
-                    .map(|deps| {
+                let explicit: Vec<&str> =
+                    self.meta_targets.get(&decl.mmake).map_or_default(|deps| {
                         pool.iter()
                             .copied()
                             .filter(|id| {
@@ -647,8 +645,7 @@ impl DependencyGraph {
                                     || deps.contains(&format!("{id}-kobj"))
                             })
                             .collect()
-                    })
-                    .unwrap_or_default();
+                    });
                 let (candidates, allow_single_foreign) = if explicit.is_empty() {
                     (pool.clone(), false)
                 } else {

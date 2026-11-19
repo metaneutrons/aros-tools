@@ -65,8 +65,7 @@ static CONTINUATION_RE: LazyLock<Regex> =
 pub(crate) fn shared_program_id(mmake_raw: &str, rel_dir: &std::path::Path) -> String {
     let base = rel_dir
         .file_name()
-        .map(|name| name.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+        .map_or_default(|name| name.to_string_lossy().to_lowercase());
     format!("{}-{}", sanitize_ident(mmake_raw), sanitize_ident(&base))
 }
 

@@ -494,8 +494,7 @@ pub(super) fn collect_modules(inputs: DeclarationInputs<'_>, outputs: Declaratio
         }
         let config_relative_libraries = config_facts
             .as_ref()
-            .map(|facts| facts.relative_libraries.clone())
-            .unwrap_or_default();
+            .map_or_default(|facts| facts.relative_libraries.clone());
         let genmodule_abi = inv.name != "build_module_library" && config_facts.is_some();
         if !supports_genmodule_client_archives(&module_type)
             && module_type != ModuleType::ModuleHeaders
@@ -686,8 +685,8 @@ pub(super) fn collect_modules(inputs: DeclarationInputs<'_>, outputs: Declaratio
             compile_options: declaration_flags.compile_options,
             link_options: declaration_flags.link_options,
             spec_switches: declaration_flags.spec_switches.clone(),
-            driver_link_options: driver_link_options.clone(),
-            isa_link_options: isa_link_options.clone(),
+            driver_link_options,
+            isa_link_options,
             arch_sources: Vec::new(),
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),

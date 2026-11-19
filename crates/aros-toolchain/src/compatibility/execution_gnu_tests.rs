@@ -1881,14 +1881,12 @@ fn source_preset_toml(
     float_abi: Option<&str>,
     native_build_contract: Option<&str>,
 ) -> String {
-    let compiler_profile = compiler_profile
-        .map(|profile| format!("toolchain_profile = \"{profile}\"\n"))
-        .unwrap_or_default();
+    let compiler_profile =
+        compiler_profile.map_or_default(|profile| format!("toolchain_profile = \"{profile}\"\n"));
     let width = if arch == "riscv32" { 32 } else { 64 };
     let float_abi = float_abi.unwrap_or(if width == 32 { "ilp32f" } else { "lp64d" });
     let native_build_contract = native_build_contract
-        .map(|path| format!("native_build_contract = \"{path}\"\n"))
-        .unwrap_or_default();
+        .map_or_default(|path| format!("native_build_contract = \"{path}\"\n"));
     format!(
         "[[targets]]\nname = \"{name}\"\n{compiler_profile}arch = \"{arch}\"\nplatform = \"{platform}\"\nbsp = \"fixture\"\nfloat_abi = \"{float_abi}\"\nbootloader = \"fixture-bootloader\"\n{native_build_contract}\n[targets.transpiler]\nfamily = \"fixture-family-rv{width}\"\nvariant = \"fixture-variant-rv{width}\"\ntoolchain = \"{toolchain}\"\ncpu32 = \"fixture-cpu32\"\nuse_mmu = false\nmesa_version = \"fixture-mesa\"\n\n[targets.bootstrap_abi]\nflavour = \"standalone\"\nplatform_smp = false\n"
     )

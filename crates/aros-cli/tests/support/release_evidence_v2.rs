@@ -187,8 +187,8 @@ impl Fixture {
             let right_measurement_sha256 = right.measurement_sha256.clone();
             let left_contract = left.contract_sha256.clone();
             let right_contract = right.contract_sha256.clone();
-            let left_binary = left.binary_sha256.clone();
-            let right_binary = right.binary_sha256.clone();
+            let left_binary = left.binary_sha256;
+            let right_binary = right.binary_sha256;
             let asset_sides = [
                 SideSelection {
                     package_dir: left_download,
@@ -1254,7 +1254,7 @@ pub fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             let relative = path.strip_prefix(root).unwrap().to_path_buf();
             let kind = entry.file_type().unwrap();
             if kind.is_dir() {
-                result.insert(relative.clone(), b"<directory>".to_vec());
+                result.insert(relative, b"<directory>".to_vec());
                 visit(root, &path, result);
             } else if kind.is_symlink() {
                 result.insert(

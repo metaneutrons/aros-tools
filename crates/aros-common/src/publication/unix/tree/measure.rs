@@ -234,8 +234,7 @@ pub(super) fn measure_source_tree_pass(
     let mut budget = TreeMeasurementBudget::bounded(limits);
     let mut nodes = BTreeMap::new();
     let mut excluded_roots = generated_subtree
-        .map(|components| BTreeSet::from([source_tree_path_key(components)]))
-        .unwrap_or_default();
+        .map_or_default(|components| BTreeSet::from([source_tree_path_key(components)]));
     measure_source_tree_contents_at(
         directory,
         display_path,

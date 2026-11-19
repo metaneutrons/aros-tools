@@ -702,12 +702,12 @@ fn build_sdk_fixture_packages(
         };
         let output = sdk_package::package(&package_request).unwrap();
         let standalone_request = SdkVerificationRequest {
-            package_dir: package_dir.clone(),
+            package_dir,
             identity: identity.clone(),
             expected_tree_sha256: tree_sha256.clone(),
             expected_archive_sha256: output.archive_sha256.clone(),
             expected_archive_size: output.archive_size,
-            forbidden_prefixes: package_request.forbidden_prefixes.clone(),
+            forbidden_prefixes: package_request.forbidden_prefixes,
         };
         let asset = identity.asset_name().unwrap();
         let archive_bytes = fs::read(&output.archive).unwrap();

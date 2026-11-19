@@ -98,14 +98,12 @@ pub(crate) fn literal_define_fragment_has_capability(
     }
 
     let assigned: HashSet<&str> = assigned_variables.iter().map(String::as_str).collect();
-    let source_roots = make_expression_dependencies(provider_files)
-        .map(|names| {
-            names
-                .into_iter()
-                .filter(|name| assigned.contains(name.as_str()))
-                .collect::<HashSet<_>>()
-        })
-        .unwrap_or_default();
+    let source_roots = make_expression_dependencies(provider_files).map_or_default(|names| {
+        names
+            .into_iter()
+            .filter(|name| assigned.contains(name.as_str()))
+            .collect::<HashSet<_>>()
+    });
     let output_roots = make_expression_dependencies(raw_output)
         .and_then(|mut names| {
             names.extend(make_expression_dependencies(owner_prerequisite)?);

@@ -191,9 +191,7 @@ fn logger_script(log: &Path, output_fixture: Option<&Path>) -> String {
 }
 
 fn manifest(invocation: &str, linker: &str, strip: &str, emulation: Option<&str>) -> String {
-    let emulation_field = emulation
-        .map(|value| format!(",\"emulation\":\"{value}\""))
-        .unwrap_or_default();
+    let emulation_field = emulation.map_or_default(|value| format!(",\"emulation\":\"{value}\""));
     format!(
         "{{\"schema\":\"aros-collector-tools-v1\",\"family\":\"gnu\",\"invocation\":\"{invocation}\",\"linker\":\"{linker}\",\"strip\":\"{strip}\"{emulation_field}}}"
     )

@@ -125,7 +125,7 @@ where
             miette::bail!("Duplicate ISO file role.");
         }
         let relative = validate_iso_path(&file.destination)?;
-        if !destinations.insert(relative.clone()) || file.destination == *catalog_path {
+        if !destinations.insert(relative) || file.destination == *catalog_path {
             miette::bail!("Duplicate or reserved ISO destination.");
         }
         let source_name = format!("f{index:05}");

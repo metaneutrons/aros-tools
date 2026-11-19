@@ -538,7 +538,7 @@ fn scan_owner(
                 format!("{relative_directory}/{header}")
             };
             copies.push(LayeredHeaderCopy {
-                source_relative: source_relative.clone(),
+                source_relative,
                 output_alias: format!("${{AROS_SDK_INCLUDE_DIR}}/{header}"),
             });
         }
