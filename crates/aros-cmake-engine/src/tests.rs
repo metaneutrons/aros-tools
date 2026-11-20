@@ -1348,15 +1348,21 @@ fn native_kobj_rejects_changed_inputs_and_failed_publication() {
 /// `PATH` with the workspace's built executables first.
 ///
 /// An engine configure that finds `ld.lld` also requires `aros-collect`. The
-/// test executable sits in `target/<profile>/deps`; the tools the workspace
-/// test run built sit one level up. Without this, such a host fails these
-/// fixtures only because the suite is not installed.
+/// workspace test run builds it into `target/<profile>`, but the test
+/// executable's own location depends on Cargo's layout: `target/<profile>/deps`
+/// up to Cargo 1.99, `target/<profile>/build/<package>/<hash>/out` from 1.100.
+/// The nearest ancestor that holds the tool is the profile directory in both.
+/// Without this, such a host fails these fixtures only because the suite is not
+/// installed.
 fn path_with_workspace_tools() -> std::ffi::OsString {
+    let tool = format!("aros-collect{}", std::env::consts::EXE_SUFFIX);
     let mut directories = Vec::new();
-    if let Some(tools) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent()?.parent().map(std::path::Path::to_path_buf))
-    {
+    if let Some(tools) = std::env::current_exe().ok().and_then(|exe| {
+        exe.ancestors()
+            .skip(1)
+            .find(|directory| directory.join(&tool).is_file())
+            .map(std::path::Path::to_path_buf)
+    }) {
         directories.push(tools);
     }
     directories.extend(std::env::split_paths(

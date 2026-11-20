@@ -17,6 +17,24 @@ if(EXISTS "${root}" OR IS_SYMLINK "${root}")
 endif()
 file(MAKE_DIRECTORY "${root}")
 file(REAL_PATH "${root}" root)
+# Record how the runner invokes ar. Debian, Ubuntu and Arch build binutils with
+# deterministic archives by default, so the bytes alone cannot show whether the
+# runner asked for it; the toolchain this producer builds does not.
+if(DEFINED ARCHIVE_TEST_AR AND DEFINED ARCHIVE_TEST_RANLIB)
+    set(real_ar "${ARCHIVE_TEST_AR}")
+    set(real_ranlib "${ARCHIVE_TEST_RANLIB}")
+else()
+    find_program(real_ar NAMES gar ar REQUIRED)
+    find_program(real_ranlib NAMES granlib ranlib REQUIRED)
+endif()
+set(ar_log "${root}/ar-calls.log")
+file(MAKE_DIRECTORY "${root}/tools")
+file(WRITE "${root}/tools/ar"
+    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '${ar_log}'\nexec '${real_ar}' \"$@\"\n")
+file(CHMOD "${root}/tools/ar" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+    GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+set(ARCHIVE_TEST_AR "${root}/tools/ar")
+set(ARCHIVE_TEST_RANLIB "${real_ranlib}")
 function(configure build probe)
     set(tool_arguments)
     if(DEFINED ARCHIVE_TEST_AR AND DEFINED ARCHIVE_TEST_RANLIB)
@@ -49,16 +67,27 @@ string(REPLACE "__.SYMDEF SORTED\n" "" members "${members}")
 if(NOT result STREQUAL "0" OR NOT members STREQUAL "two.o\none.o\n")
     message(FATAL_ERROR "source archive lost source member order: ${members}")
 endif()
-set(reference "${root}/reference.a")
-# The runner adds D for GNU and LLVM archivers, so the independent reference
-# must too; Apple's ar rejects it and keeps plain cr.
-set(reference_operation cr)
+# The runner asks GNU and LLVM tools for deterministic members (D) and leaves
+# Apple's ar alone; the independent reference makes the same choice.
+set(reference_flags cr)
+set(deterministic FALSE)
 execute_process(COMMAND "${AR}" --version RESULT_VARIABLE version_result
     OUTPUT_VARIABLE version_text ERROR_QUIET)
 if(version_result EQUAL 0 AND version_text MATCHES "GNU|LLVM")
-    set(reference_operation crD)
+    set(deterministic TRUE)
+    set(reference_flags crD)
 endif()
-execute_process(COMMAND "${AR}" "${reference_operation}" "${reference}" "${build}/gen/objects/two.o"
+if(deterministic)
+    # The runner itself must ask for deterministic members, whatever the host
+    # ar does by default. Read before the reference invocation below logs too.
+    file(READ "${ar_log}" ar_calls)
+    if(NOT ar_calls MATCHES "(^|\n)crD ")
+        message(FATAL_ERROR
+            "source archive runner did not request deterministic members; ar was called with:\n${ar_calls}")
+    endif()
+endif()
+set(reference "${root}/reference.a")
+execute_process(COMMAND "${AR}" "${reference_flags}" "${reference}" "${build}/gen/objects/two.o"
     "${build}/gen/objects/one.o" RESULT_VARIABLE result)
 if(NOT result STREQUAL "0")
     message(FATAL_ERROR "reference AR failed")
@@ -68,6 +97,36 @@ execute_process(COMMAND "${CMAKE_COMMAND}" -E compare_files "${archive}" "${refe
     RESULT_VARIABLE comparison)
 if(NOT result STREQUAL "0" OR NOT comparison STREQUAL "0")
     message(FATAL_ERROR "source archive differs from independent AR/RANLIB invocation")
+endif()
+if(deterministic)
+    # No member may record who ran ar (qualify-v2-full 43611118879 differed on
+    # exactly this between the Linux runners and macOS).
+    execute_process(COMMAND "${AR}" tv "${archive}" RESULT_VARIABLE result
+        OUTPUT_VARIABLE listing)
+    string(STRIP "${listing}" listing)
+    string(REPLACE "\n" ";" listing_lines "${listing}")
+    if(NOT result STREQUAL "0" OR NOT listing_lines)
+        message(FATAL_ERROR "cannot list source archive members")
+    endif()
+    foreach(line IN LISTS listing_lines)
+        if(NOT line MATCHES " 0/0 ")
+            message(FATAL_ERROR "source archive member records its owner: ${line}")
+        endif()
+    endforeach()
+    # Control: the same objects through the non-deterministic modifier carry the
+    # real owner, so the check above could tell the modes apart. Skipped for
+    # root, whose uid is already 0.
+    execute_process(COMMAND id -u OUTPUT_VARIABLE uid OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT uid STREQUAL "0")
+        set(control "${root}/control.a")
+        execute_process(COMMAND "${AR}" crU "${control}" "${build}/gen/objects/two.o"
+            RESULT_VARIABLE result)
+        execute_process(COMMAND "${AR}" tv "${control}" OUTPUT_VARIABLE control_listing)
+        if(NOT result STREQUAL "0" OR control_listing MATCHES " 0/0 ")
+            message(FATAL_ERROR
+                "control archive shows no owner, so this test cannot tell the modes apart: ${control_listing}")
+        endif()
+    endif()
 endif()
 file(SHA256 "${archive}" first_digest)
 build_archive("${build}")

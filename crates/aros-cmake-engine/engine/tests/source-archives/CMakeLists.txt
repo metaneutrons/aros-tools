@@ -13,6 +13,16 @@ foreach(tool CMAKE_C_COMPILER CMAKE_AR CMAKE_RANLIB)
     file(REAL_PATH "${${tool}}" selected)
     set(${tool} "${selected}")
 endforeach()
+# Canonical paths lose the alias name. A ranlib that resolves to a file without
+# "ranlib" in its name (Homebrew's llvm-ranlib -> llvm-ar) would then run in ar
+# mode, because LLVM picks the role from argv[0]. The engine itself never
+# invokes the resolved path; only this fixture canonicalizes.
+cmake_path(GET CMAKE_RANLIB FILENAME _ranlib_name)
+if(NOT _ranlib_name MATCHES "ranlib")
+    message(FATAL_ERROR
+        "ranlib resolves to ${CMAKE_RANLIB}, which would run in ar mode; "
+        "pass a ranlib that is not an alias of ar (for LLVM, a real-named copy)")
+endif()
 set(AROS_BUILD_DIR "${CMAKE_BINARY_DIR}")
 set(AROS_SOURCE_DIR "${CMAKE_BINARY_DIR}/source tree")
 set(AROS_DEVELOPER_LIB_DIR "${CMAKE_BINARY_DIR}/SYS/Developer/lib")
