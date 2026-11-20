@@ -4,6 +4,17 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.6.17](https://github.com/metaneutrons/aros-tools/compare/v0.6.16...v0.6.17) (2026-11-19)
+
+
+### Bug Fixes
+
+* **cmake-engine:** archive source archives in deterministic mode ([#560](https://github.com/metaneutrons/aros-tools/issues/560)) ([b9acfa7](https://github.com/metaneutrons/aros-tools/commit/b9acfa76b893d580b1b36fd5a303f7cb4c478743))
+* **cmake-engine:** name port source proxies independently of the work directory ([#558](https://github.com/metaneutrons/aros-tools/issues/558)) ([093f1f9](https://github.com/metaneutrons/aros-tools/commit/093f1f9d9d3362dcb6a2e549924af227d9305fb2))
+* **deps:** update minimatch for GHSA-g3hv-75wg-m249 ([#563](https://github.com/metaneutrons/aros-tools/issues/563)) ([1e7fdc9](https://github.com/metaneutrons/aros-tools/commit/1e7fdc91b5c0491b0a85458493029bc6a2515f8a))
+* **docs:** approve a bounded exception for the unfixable picomatch advisory ([#561](https://github.com/metaneutrons/aros-tools/issues/561)) ([ec8e185](https://github.com/metaneutrons/aros-tools/commit/ec8e185a6a90e4ca1feafa8b520d3971b35aad36))
+* **toolchain:** name why the Cargo vendor processes could not start ([#564](https://github.com/metaneutrons/aros-tools/issues/564)) ([ce7865c](https://github.com/metaneutrons/aros-tools/commit/ce7865c1d1df9836e4643e4ebe580a9c85f64e20))
+
 ## [0.6.16](https://github.com/metaneutrons/aros-tools/compare/v0.6.15...v0.6.16) (2026-11-14)
 
 
