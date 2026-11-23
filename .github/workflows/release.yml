@@ -1209,7 +1209,7 @@ jobs:
           name: qualified-release-staging
           path: candidate
       - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@63a2d4d8d4193eab3e62b1b782ff3ab8408f5b29
+        uses: Homebrew/actions/setup-homebrew@ceec4e8419bb3c97ce96e9dda7738499ed5f869d
         with:
           core: false
           cask: false
@@ -1516,7 +1516,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3
         id: archive-token
         with:
           client-id: ${{ vars.ARCHIVE_DISPATCH_CLIENT_ID }}
